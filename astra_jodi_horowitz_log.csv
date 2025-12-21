@@ -1,0 +1,5 @@
+TimestampUTC,Email,Status,Info
+2025-12-20T18:00:21.355127+00:00,tommycseaysr@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-20T18:00:24.437868+00:00,tommycseaysr@gmail.com,SENT,reconnect_ok
+2025-12-20T18:09:02.186797+00:00,mary_himaia@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-20T18:09:05.495221+00:00,mary_himaia@yahoo.com,SENT,reconnect_ok
