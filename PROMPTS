@@ -1,0 +1,24 @@
+WINDOWS
+cd /mnt/d/VS/email\ automation
+
+OK & LIMIT(GMAIL)
+python3 check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_messages_24h 90 --max_unique_external_24h 90
+PRIVATE EMAIL
+python3 check_1hr.py --domain_log private_domain_log.csv --max_messages_1h 50
+
+DRY RUN:
+python3 send_shard.py --provider private --csv recipients_1.csv --log private_marketing_log.csv --pitch pitch1 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 1 --dry_run
+
+MAC:
+# go to folder (edit path if yours is different)
+cd "$HOME/Documents/email automation"
+
+# precheck leads
+python precheck_leads.py --in leads.csv --out leads_prechecked.csv --suppressed suppressed.csv
+
+# check 24h (default caps)
+python check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com
+
+# check 24h (caps = 90)
+python check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_messages_24h 90 --max_unique_external_24h 90
+
