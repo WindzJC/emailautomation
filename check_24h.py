@@ -41,6 +41,10 @@ def remaining_str(resume_dt: Optional[datetime]) -> str:
     return f"{h}h {m}m"
 
 
+def single_line(s: str) -> str:
+    return " ".join((s or "").split())
+
+
 def looks_hard_limited(last_error: str) -> bool:
     le = (last_error or "").lower()
     return (
@@ -135,6 +139,10 @@ def main():
     ap.add_argument("--pattern", default="*_log.csv", help="glob pattern for logs (default: *_log.csv)")
     ap.add_argument("--max_messages_24h", type=int, default=450)
     ap.add_argument("--max_unique_external_24h", type=int, default=450)
+    ap.add_argument("--compact", action="store_true", help="Force compact output")
+    ap.add_argument("--verbose", action="store_true", help="Show detailed output")
+    ap.add_argument("--short", action="store_true", help="One-line table output")
+    ap.add_argument("--show_ok", action="store_true", help="Include OK rows in --short output")
     args = ap.parse_args()
 
     my_domains = {d.strip().lower() for d in args.my_domains.split(",") if d.strip()}
@@ -154,9 +162,53 @@ def main():
 
     now = datetime.now(timezone.utc)
 
-    print("GMAIL LAST 24H (per sender log):")
-    print(f"limits: messages_24h={args.max_messages_24h} | unique_external_24h={args.max_unique_external_24h}")
-    print()
+    if args.short:
+        results = []
+        for lp in logs:
+            r = rolling_24h_stats(Path(lp), my_domains, now)
+            status = "OK"
+            if looks_auth_failed(r["last_error"]):
+                status = "AUTH FAILED"
+            elif looks_hard_limited(r["last_error"]):
+                status = "HARD LIMITED (GMAIL)"
+            elif r["messages"] >= args.max_messages_24h:
+                status = "NEAR/AT MSG LIMIT"
+            elif r["unique_external"] >= args.max_unique_external_24h:
+                status = "NEAR/AT UNIQUE-EXT LIMIT"
+            results.append((Path(r["log"]).name, r, status))
+
+        issues = [(n, r, s) for (n, r, s) in results if s != "OK"]
+        rows = results if args.show_ok else issues
+
+        name_w = max((len(n) for n, _, __ in rows), default=8)
+        header = f"{'LOG':<{name_w}}  {'SENT':>6}  {'UNIQUE':>6}  {'STATUS':<22}  {'RESUME_IN':<10}"
+        print(header)
+        print("-" * len(header))
+
+        for name, r, status in rows:
+            resume = None
+            if status == "HARD LIMITED (GMAIL)":
+                resume = r["resume_messages"] or r["resume_unique_external"]
+            elif status == "NEAR/AT MSG LIMIT":
+                resume = r["resume_messages"]
+            elif status == "NEAR/AT UNIQUE-EXT LIMIT":
+                resume = r["resume_unique_external"]
+            resume_in = remaining_str(resume) if resume else "n/a"
+            print(
+                f"{name:<{name_w}}  {r['messages']:>6}  {r['unique_external']:>6}  "
+                f"{status:<22}  {resume_in:<10}"
+            )
+
+        summary = f"SUMMARY: ok={len(results) - len(issues)} | issues={len(issues)} | total={len(results)}"
+        print(summary)
+        return
+
+    compact = args.compact or not args.verbose
+
+    if not compact:
+        print("GMAIL LAST 24H (per sender log):")
+        print(f"limits: messages_24h={args.max_messages_24h} | unique_external_24h={args.max_unique_external_24h}")
+        print()
 
     results = []
     for lp in logs:
@@ -184,27 +236,29 @@ def main():
         for name, r, status in issues:
             print(f"- {name}: sent={r['messages']} | unique_ext={r['unique_external']} | {status}")
 
-            if status == "HARD LIMITED (GMAIL)":
+            if not compact and status == "HARD LIMITED (GMAIL)":
                 print(f"  resume(messages): {fmt(r['resume_messages'])} | remaining: {remaining_str(r['resume_messages'])}")
                 print(f"  resume(unique-ext): {fmt(r['resume_unique_external'])} | remaining: {remaining_str(r['resume_unique_external'])}")
 
-            if status == "NEAR/AT MSG LIMIT":
+            if not compact and status == "NEAR/AT MSG LIMIT":
                 print(f"  resume(messages): {fmt(r['resume_messages'])} | remaining: {remaining_str(r['resume_messages'])}")
 
-            if status == "NEAR/AT UNIQUE-EXT LIMIT":
+            if not compact and status == "NEAR/AT UNIQUE-EXT LIMIT":
                 print(f"  resume(unique-ext): {fmt(r['resume_unique_external'])} | remaining: {remaining_str(r['resume_unique_external'])}")
 
-            if r["last_error"]:
-                print(f"  last_error: {r['last_error'][:180]}")
+            if not compact and r["last_error"]:
+                print(f"  last_error: {single_line(r['last_error'][:180])}")
 
-    print("\nOK:")
-    if not oks:
-        print("- none")
-    else:
-        for name, r, _ in oks:
-            print(f"- {name}: sent={r['messages']} | unique_ext={r['unique_external']} | OK")
+    if not compact:
+        print("\nOK:")
+        if not oks:
+            print("- none")
+        else:
+            for name, r, _ in oks:
+                print(f"- {name}: sent={r['messages']} | unique_ext={r['unique_external']} | OK")
 
-    print(f"\nSUMMARY: ok={len(oks)} | issues={len(issues)} | total={len(results)}")
+    summary = f"SUMMARY: ok={len(oks)} | issues={len(issues)} | total={len(results)}"
+    print(summary if compact else f"\n{summary}")
 
 
 if __name__ == "__main__":

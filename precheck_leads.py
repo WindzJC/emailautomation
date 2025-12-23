@@ -1,13 +1,23 @@
 import csv, argparse
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
-from email_validator import validate_email, EmailNotValidError
-import dns.resolver
+try:
+    from email_validator import validate_email, EmailNotValidError
+except Exception:
+    validate_email = None
+    EmailNotValidError = Exception
+
+try:
+    import dns.resolver
+except Exception:
+    dns = None
 
 ROLE_PREFIXES = {"admin","support","info","sales","billing","contact","help","abuse","postmaster","noreply","no-reply"}
 # optional: put disposable domains (one per line) in disposable_domains.txt
 DISPOSABLE_FILE = Path("disposable_domains.txt")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat()
@@ -27,17 +37,23 @@ def has_null_mx(mx_answers):
             pass
     return False
 
-def precheck(addr: str, disposable_domains: set, mx_cache: dict) -> tuple[bool, str]:
+def precheck(addr: str, disposable_domains: set, mx_cache: dict, skip_mx: bool) -> tuple[bool, str]:
     addr = (addr or "").strip()
     if not addr:
         return False, "empty"
 
-    try:
-        v = validate_email(addr, check_deliverability=False)
-        email = v.email
-        domain = v.domain.lower()
-    except EmailNotValidError as e:
-        return False, f"bad_syntax: {e}"
+    if validate_email:
+        try:
+            v = validate_email(addr, check_deliverability=False)
+            email = v.email
+            domain = v.domain.lower()
+        except EmailNotValidError as e:
+            return False, f"bad_syntax: {e}"
+    else:
+        email = addr.strip().lower()
+        if not EMAIL_RE.match(email):
+            return False, "bad_syntax"
+        domain = email.split("@", 1)[1].lower()
 
     local = email.split("@", 1)[0].lower()
     if local in ROLE_PREFIXES:
@@ -45,6 +61,9 @@ def precheck(addr: str, disposable_domains: set, mx_cache: dict) -> tuple[bool, 
 
     if domain in disposable_domains:
         return False, "disposable_domain"
+
+    if skip_mx or dns is None:
+        return True, "ok"
 
     if domain in mx_cache:
         mx_ok, reason = mx_cache[domain]
@@ -57,9 +76,9 @@ def precheck(addr: str, disposable_domains: set, mx_cache: dict) -> tuple[bool, 
             return False, "null_mx"
         mx_cache[domain] = (True, "ok")
         return True, "ok"
-    except Exception as e:
-        mx_cache[domain] = (False, f"no_mx_or_dns_fail")
-        return False, f"no_mx_or_dns_fail"
+    except Exception:
+        mx_cache[domain] = (False, "no_mx_or_dns_fail")
+        return False, "no_mx_or_dns_fail"
 
 def main():
     ap = argparse.ArgumentParser()
@@ -67,6 +86,7 @@ def main():
     ap.add_argument("--out", dest="out", required=True)
     ap.add_argument("--suppressed", default="suppressed.csv")
     ap.add_argument("--email_col", default="Email")
+    ap.add_argument("--no_mx", action="store_true")
     args = ap.parse_args()
 
     inp = Path(args.inp)
@@ -76,6 +96,11 @@ def main():
     disposable = load_disposable()
     mx_cache = {}
     seen = set()
+
+    if validate_email is None:
+        print("WARN: email_validator not installed; using basic syntax check.")
+    if dns is None and not args.no_mx:
+        print("WARN: dnspython not installed; skipping MX check.")
 
     with inp.open(newline="", encoding="utf-8-sig") as f,\
          outp.open("w", newline="", encoding="utf-8") as fo,\
@@ -97,7 +122,7 @@ def main():
                 continue
             seen.add(email)
 
-            ok, reason = precheck(email, disposable, mx_cache)
+            ok, reason = precheck(email, disposable, mx_cache, args.no_mx)
             if ok:
                 w_ok.writerow(row)
             else:

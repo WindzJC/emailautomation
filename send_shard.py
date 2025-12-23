@@ -11,6 +11,7 @@ import smtplib
 import time
 import os
 import fcntl
+import sys
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import parseaddr
@@ -376,23 +377,29 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     "subject": "Cinematic first impression for your book",
     "body": """Hi {AuthorName}, 
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+Readers decide fast: Do I feel anything?
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+{BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
 
-If you’re open to it, send 3 quick details you’d want included:
+My name is Josefina Stenstrom, Email Marketing Specialist of Barnes & Noble. We help authors place their books on consignment in B&N physical bookstores across the United States.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
+I’m reaching out because we partner with Astra Productions, a team we trust to create cinematic book trailers and clean author/book pages that convert interest into clicks.
 
-1–2 must-include lines (tagline / review / award)
+What we’d build for {BookTitle}:
+• a short cinematic trailer that makes the tone and stakes felt immediately
+• a focused book page with your cover, best review lines, and clear buy buttons
 
-anything to avoid (spoilers)
+This also sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
+
+If you’re open to it, send 3 quick details:
+• what you want readers to feel (e.g., eerie, hopeful, heart-racing)
+• 1–2 must-include lines (tagline / review / award)
+• anything to avoid (spoilers)
 
 I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
+
 Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+(Comparable cinematic trailers are often $3,000+.)
 
 Best regards,
 Josefina Stenstrom, Email Marketing Specialist
@@ -668,6 +675,10 @@ def parse_ts(ts: str) -> Optional[datetime]:
         return None
 
 
+def single_line(text: str) -> str:
+    return " ".join((text or "").split())
+
+
 def is_external(addr: str, my_domains: Set[str]) -> bool:
     if "@" not in addr:
         return False
@@ -720,6 +731,97 @@ def load_already_done(sent_log: Path) -> Set[str]:
             if e:
                 out.add(e)
     return out
+
+
+def resolve_map_path(base: Path, value: str) -> Path:
+    p = Path((value or "").strip())
+    if not p:
+        return p
+    if not p.is_absolute():
+        p = base / p
+    return p
+
+
+def load_account_map(map_path: Path) -> List[Tuple[Path, Path]]:
+    if not map_path.exists():
+        return []
+    out: List[Tuple[Path, Path]] = []
+    with map_path.open(newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            row = {(k or "").strip().lower(): (v or "").strip() for k, v in r.items() if k}
+            rec = row.get("recipientscsv") or row.get("recipients") or row.get("recipients_csv")
+            log = row.get("logcsv") or row.get("log") or row.get("log_csv")
+            if not rec or not log:
+                continue
+            out.append((resolve_map_path(map_path.parent, rec), resolve_map_path(map_path.parent, log)))
+    return out
+
+
+def load_done_from_logs(paths: List[Path]) -> Set[str]:
+    out: Set[str] = set()
+    for p in paths:
+        out |= load_already_done(p)
+    return out
+
+
+def fmt_ts(dt: Optional[datetime]) -> str:
+    if not dt:
+        return "n/a"
+    manila = dt + timedelta(hours=8)
+    return f"{dt.isoformat()}Z | Manila: {manila.strftime('%Y-%m-%d %H:%M:%S')}"
+
+
+def remaining_str(resume_dt: Optional[datetime]) -> str:
+    if not resume_dt:
+        return "n/a"
+    now = datetime.now(timezone.utc)
+    sec = int((resume_dt - now).total_seconds())
+    if sec <= 0:
+        return "now"
+    h, rem = divmod(sec, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{h}h {m}m"
+
+
+def rolling_24h_stats(log_path: Path, my_domains: Set[str], now: datetime) -> Dict[str, object]:
+    cutoff = now - timedelta(hours=24)
+    sent_times: List[datetime] = []
+    ext_last: Dict[str, datetime] = {}
+
+    if not log_path.exists():
+        return {
+            "messages": 0,
+            "unique_external": 0,
+            "unique_external_set": set(),
+            "resume_messages": None,
+            "resume_unique_external": None,
+        }
+
+    with log_path.open(newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            if (r.get("Status") or "").strip().upper() != "SENT":
+                continue
+            t = parse_ts(r.get("TimestampUTC") or "")
+            if not t or t < cutoff:
+                continue
+            sent_times.append(t)
+            email_addr = norm_email(r.get("Email") or "")
+            if is_external(email_addr, my_domains):
+                prev = ext_last.get(email_addr)
+                if prev is None or t > prev:
+                    ext_last[email_addr] = t
+
+    sent_times.sort()
+    resume_messages = (sent_times[0] + timedelta(hours=24)) if sent_times else None
+    resume_unique_external = (min(ext_last.values()) + timedelta(hours=24)) if ext_last else None
+
+    return {
+        "messages": len(sent_times),
+        "unique_external": len(ext_last),
+        "unique_external_set": set(ext_last.keys()),
+        "resume_messages": resume_messages,
+        "resume_unique_external": resume_unique_external,
+    }
 
 
 def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
@@ -982,6 +1084,13 @@ def main():
     ap.add_argument("--max_messages_1h", type=int, default=0)
     ap.add_argument("--domain_log", default="")
     ap.add_argument("--suppress_invalid", action="store_true")
+    ap.add_argument("--from_email", "--from", dest="from_email", default="")
+    ap.add_argument("--password", default="")
+    ap.add_argument("--password_env", default="")
+    ap.add_argument("--account_map", default="account_map.csv")
+    ap.add_argument("--global_dedupe", action="store_true")
+    ap.add_argument("--global_dedupe_logs_pattern", default="*_log.csv")
+    ap.add_argument("--global_dedupe_recipients_pattern", default="recipients_*.csv")
 
     args = ap.parse_args()
 
@@ -1008,17 +1117,59 @@ def main():
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
 
+    global_done: Set[str] = set()
+    other_recipients: Set[str] = set()
+    if args.global_dedupe:
+        map_entries = load_account_map(Path(args.account_map))
+        if map_entries:
+            log_paths = [log_p for _, log_p in map_entries]
+            recipient_paths = [rec_p for rec_p, _ in map_entries]
+        else:
+            base_dir = csv_path.parent
+            log_paths = sorted(base_dir.glob(args.global_dedupe_logs_pattern))
+            recipient_paths = sorted(base_dir.glob(args.global_dedupe_recipients_pattern))
+
+        global_done = load_done_from_logs(log_paths)
+
+        current_csv = csv_path.resolve()
+        for p in recipient_paths:
+            if p.resolve() == current_csv:
+                continue
+            other_recipients |= load_emails_from_csv(p)
+
     pending: List[Dict[str, str]] = []
+    seen_in_input: Set[str] = set()
+    skipped_dupes = 0
+    skipped_global_logs = 0
+    skipped_global_recipients = 0
     for r in rows:
         email_addr = norm_email(r.get("Email") or "")
         if not email_addr:
             continue
+        if email_addr in seen_in_input:
+            skipped_dupes += 1
+            continue
+        seen_in_input.add(email_addr)
         if email_addr in already_done or email_addr in unsubbed or email_addr in suppressed:
+            continue
+        if args.global_dedupe and email_addr in global_done:
+            skipped_global_logs += 1
+            continue
+        if args.global_dedupe and email_addr in other_recipients:
+            skipped_global_recipients += 1
             continue
         pending.append(r)
 
-    print(f"PROVIDER: {args.provider} | HOST: {host}:{port}")
-    print(f"PITCH: {args.pitch} | CSV: {csv_path.name} | Pending: {len(pending)} | Interval: {args.interval}s")
+    print(f"RUN: provider={args.provider} host={host}:{port} pitch={args.pitch}")
+    print(f"FILES: csv={csv_path.name} log={log_path.name} pending={len(pending)} interval={args.interval}s")
+    if args.global_dedupe:
+        print(
+            "GLOBAL DEDUPE:"
+            f" logs={len(global_done)} | other_recipients={len(other_recipients)} |"
+            f" skipped_logs={skipped_global_logs} | skipped_recipients={skipped_global_recipients}"
+        )
+    if skipped_dupes:
+        print(f"CSV DUPES: skipped={skipped_dupes}")
     if args.dry_run:
         print("DRY RUN: no emails will be sent.")
     if not pending:
@@ -1027,15 +1178,50 @@ def main():
 
     domain_log_path = Path(args.domain_log) if args.domain_log else log_path
 
+    gmail_messages_24h = 0
+    gmail_unique_ext: Set[str] = set()
+    gmail_resume_messages: Optional[datetime] = None
+    gmail_resume_unique: Optional[datetime] = None
+    if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
+        now = datetime.now(timezone.utc)
+        stats = rolling_24h_stats(log_path, my_domains, now)
+        gmail_messages_24h = int(stats["messages"])
+        gmail_unique_ext = set(stats["unique_external_set"])
+        gmail_resume_messages = stats["resume_messages"]
+        gmail_resume_unique = stats["resume_unique_external"]
+        print(f"GMAIL 24H: messages={gmail_messages_24h} unique_external={len(gmail_unique_ext)}")
+
+        if args.max_messages_24h and gmail_messages_24h >= args.max_messages_24h:
+            print(
+                "STOP: max_messages_24h reached. "
+                f"Resume: {fmt_ts(gmail_resume_messages)} | remaining: {remaining_str(gmail_resume_messages)}"
+            )
+            return
+        if args.max_unique_external_24h and len(gmail_unique_ext) >= args.max_unique_external_24h:
+            print(
+                "STOP: max_unique_external_24h reached. "
+                f"Resume: {fmt_ts(gmail_resume_unique)} | remaining: {remaining_str(gmail_resume_unique)}"
+            )
+            return
+
     if args.preflight:
         if args.provider == "private" and args.max_messages_1h:
             print(f"DOMAIN LOG: {domain_log_path.name} | cap_1h={args.max_messages_1h}")
         print("PREFLIGHT: ok (no sending).")
         return
 
-    from_user = norm_email(input("From (email address you are logging in as): "))
-    pw = "" if args.dry_run else getpass("Password (Gmail uses App Password): ").strip()
+    from_user = norm_email(args.from_email) or norm_email(input("From (email address you are logging in as): "))
+    pw = ""
+    if not args.dry_run:
+        if args.password_env:
+            pw = os.environ.get(args.password_env, "").strip()
+        if not pw and args.password:
+            pw = args.password.strip()
+        if not pw:
+            pw = getpass("Password (Gmail uses App Password): ").strip()
     unsub_email = from_user
+    if any(arg == "--unsub" or arg.startswith("--unsub=") for arg in sys.argv[1:]):
+        unsub_email = norm_email(args.unsub) or from_user
 
     # Choose signature file:
     # - only applies if the pitch body contains {SIGIMG}
@@ -1046,6 +1232,8 @@ def main():
 
     smtp: Optional[smtplib.SMTP] = None
     sent_this_run = 0
+    invalid_count = 0
+    error_count = 0
 
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
@@ -1082,6 +1270,25 @@ def main():
             if not to_email:
                 continue
 
+            if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
+                if args.max_messages_24h and gmail_messages_24h >= args.max_messages_24h:
+                    print(
+                        "STOP: max_messages_24h reached. "
+                        f"Resume: {fmt_ts(gmail_resume_messages)} | remaining: {remaining_str(gmail_resume_messages)}"
+                    )
+                    break
+                if (
+                    args.max_unique_external_24h
+                    and is_external(to_email, my_domains)
+                    and to_email not in gmail_unique_ext
+                    and len(gmail_unique_ext) >= args.max_unique_external_24h
+                ):
+                    print(
+                        "STOP: max_unique_external_24h reached. "
+                        f"Resume: {fmt_ts(gmail_resume_unique)} | remaining: {remaining_str(gmail_resume_unique)}"
+                    )
+                    break
+
             if args.max_per_run and sent_this_run >= args.max_per_run:
                 print(f"STOP: reached --max_per_run={args.max_per_run}")
                 break
@@ -1098,7 +1305,7 @@ def main():
             try:
                 if args.dry_run:
                     log_row(log_path, to_email, "DRYRUN", "not_sent")
-                    print(f"[{i}/{len(pending)}] DRYRUN -> {to_email}")
+                    print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                 else:
                     if args.provider == "private" and args.max_messages_1h:
                         domain_wait_for_slot(domain_log_path, args.max_messages_1h)
@@ -1106,8 +1313,12 @@ def main():
                     send_one(msg)
 
                     log_row(log_path, to_email, "SENT")
-                    print(f"[{i}/{len(pending)}] SENT -> {to_email}")
+                    print(f"[{i}/{len(pending)}] SENT {to_email}")
                     sent_this_run += 1
+                    if args.provider == "gmail":
+                        gmail_messages_24h += 1
+                        if is_external(to_email, my_domains):
+                            gmail_unique_ext.add(to_email)
 
                     if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
                         log_row(domain_log_path, to_email, "SENT")
@@ -1121,27 +1332,32 @@ def main():
 
                     if cls == "BAD_RECIPIENT":
                         log_row(log_path, to_email, "INVALID", f"{code} {text}")
-                        print(f"[{i}/{len(pending)}] INVALID -> {to_email} :: {code} {text}")
+                        invalid_count += 1
+                        print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
                         if args.suppress_invalid:
                             append_suppressed_email(suppress_csv_path, to_email)
                         continue
 
                     log_row(log_path, to_email, "ERROR", f"{code} {text}")
-                    print(f"[{i}/{len(pending)}] RECIPIENT ERROR -> {to_email} :: {code} {text}")
+                    error_count += 1
+                    print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
                     continue
 
                 log_row(log_path, to_email, "ERROR", str(e))
-                print(f"[{i}/{len(pending)}] RECIPIENT ERROR -> {to_email} :: {e}")
+                error_count += 1
+                print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
                 continue
 
             except smtplib.SMTPAuthenticationError as e:
                 log_row(log_path, to_email, "ERROR", f"auth_failed: {e}")
-                print(f"[{i}/{len(pending)}] AUTH ERROR (stop) -> {to_email} :: {e}")
+                error_count += 1
+                print(f"[{i}/{len(pending)}] AUTH ERROR (stop) {to_email} :: {single_line(str(e))}")
                 break
 
             except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
                 log_row(log_path, to_email, "ERROR", f"disconnected: {e}")
-                print(f"[{i}/{len(pending)}] DISCONNECTED -> reconnecting and retrying once...")
+                error_count += 1
+                print(f"[{i}/{len(pending)}] DISCONNECTED {to_email} :: reconnecting and retrying once")
 
                 smtp_close(smtp)
                 smtp = None
@@ -1154,8 +1370,12 @@ def main():
                     send_one(msg)
 
                     log_row(log_path, to_email, "SENT", "reconnect_ok")
-                    print(f"[{i}/{len(pending)}] SENT (reconnect) -> {to_email}")
+                    print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                     sent_this_run += 1
+                    if args.provider == "gmail":
+                        gmail_messages_24h += 1
+                        if is_external(to_email, my_domains):
+                            gmail_unique_ext.add(to_email)
 
                     if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
                         log_row(domain_log_path, to_email, "SENT")
@@ -1163,7 +1383,8 @@ def main():
                 except Exception as e2:
                     code2, text2 = extract_code_text_from_exception(e2)
                     log_row(log_path, to_email, "ERROR", f"reconnect_failed: {code2} {text2}")
-                    print(f"[{i}/{len(pending)}] ERROR (stop) -> {to_email} :: {code2} {text2}")
+                    error_count += 1
+                    print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
                     break
 
             except (smtplib.SMTPDataError, smtplib.SMTPResponseException) as e:
@@ -1172,7 +1393,8 @@ def main():
 
                 if cls == "BAD_RECIPIENT":
                     log_row(log_path, to_email, "INVALID", f"{code} {text}")
-                    print(f"[{i}/{len(pending)}] INVALID -> {to_email} :: {code} {text}")
+                    invalid_count += 1
+                    print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
                     if args.suppress_invalid:
                         append_suppressed_email(suppress_csv_path, to_email)
                     continue
@@ -1180,7 +1402,8 @@ def main():
                 if cls == "TEMP_THROTTLE":
                     log_row(log_path, to_email, "ERROR", f"{code} {text}")
                     wait_s = backoff_seconds()
-                    print(f"[{i}/{len(pending)}] THROTTLED -> backing off {wait_s}s and retrying once...")
+                    error_count += 1
+                    print(f"[{i}/{len(pending)}] THROTTLED {to_email} :: backoff {wait_s}s then retry")
 
                     time.sleep(wait_s)
                     smtp_close(smtp)
@@ -1194,8 +1417,12 @@ def main():
                         send_one(msg)
 
                         log_row(log_path, to_email, "SENT", "throttle_retry_ok")
-                        print(f"[{i}/{len(pending)}] SENT (retry) -> {to_email}")
+                        print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                         sent_this_run += 1
+                        if args.provider == "gmail":
+                            gmail_messages_24h += 1
+                            if is_external(to_email, my_domains):
+                                gmail_unique_ext.add(to_email)
 
                         if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
                             log_row(domain_log_path, to_email, "SENT")
@@ -1204,20 +1431,23 @@ def main():
                     except Exception as e2:
                         code2, text2 = extract_code_text_from_exception(e2)
                         log_row(log_path, to_email, "ERROR", f"retry_failed: {code2} {text2}")
-                        print(f"[{i}/{len(pending)}] ERROR (stop) -> {to_email} :: {code2} {text2}")
+                        error_count += 1
+                        print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
                         break
 
                 log_row(log_path, to_email, "ERROR", f"{code} {text}")
-                print(f"[{i}/{len(pending)}] ERROR -> {to_email} :: {code} {text}")
+                error_count += 1
+                print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
 
             except Exception as e:
                 log_row(log_path, to_email, "ERROR", str(e))
-                print(f"[{i}/{len(pending)}] ERROR -> {to_email} :: {e}")
+                error_count += 1
+                print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(str(e))}")
 
             if i < len(pending):
                 sleep_with_jitter(args.interval, jitter=10)
 
-        print("Done.")
+        print(f"DONE: sent={sent_this_run} invalid={invalid_count} errors={error_count}")
 
     finally:
         smtp_close(smtp)

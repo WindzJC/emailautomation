@@ -35,6 +35,10 @@ def remaining_str(resume_dt: Optional[datetime]) -> str:
     return f"{h}h {m}m"
 
 
+def single_line(s: str) -> str:
+    return " ".join((s or "").split())
+
+
 def last_1h_times(log_path: Path, now: datetime) -> List[datetime]:
     cutoff = now - timedelta(hours=1)
     times: List[datetime] = []
@@ -77,13 +81,63 @@ def main():
     ap.add_argument("--domain_log", help="Shared domain log (recommended for PrivateEmail domain-wide cap).")
     ap.add_argument("--log", help="Single sender log (optional).")
     ap.add_argument("--pattern", default="private_*_log.csv", help="Glob for PRIVATE sender logs (default: private_*_log.csv)")
+    ap.add_argument("--compact", action="store_true", help="Force compact output")
+    ap.add_argument("--verbose", action="store_true", help="Show detailed output")
+    ap.add_argument("--short", action="store_true", help="One-line table output")
+    ap.add_argument("--show_ok", action="store_true", help="Include OK rows in --short output")
 
     args = ap.parse_args()
     now = datetime.now(timezone.utc)
 
-    print("PRIVATEEMAIL LAST 1H:")
-    print(f"limit: messages_1h={args.max_messages_1h}")
-    print()
+    if args.short:
+        rows: List[tuple[str, int, str, Optional[datetime]]] = []
+        if args.domain_log:
+            dlog = Path(args.domain_log)
+            times = last_1h_times(dlog, now)
+            used = len(times)
+            st = status_for(used, args.max_messages_1h)
+            resume = (times[0] + timedelta(hours=1)) if times else None
+            rows.append((dlog.name, used, st, resume))
+
+        logs: List[str]
+        if args.log:
+            logs = [args.log]
+        else:
+            logs = sorted(glob.glob(args.pattern))
+
+        if args.domain_log:
+            dpath = Path(args.domain_log).resolve()
+            logs = [p for p in logs if Path(p).resolve() != dpath]
+
+        for lp in logs:
+            p = Path(lp)
+            times = last_1h_times(p, now)
+            used = len(times)
+            st = status_for(used, args.max_messages_1h)
+            resume = (times[0] + timedelta(hours=1)) if times else None
+            rows.append((p.name, used, st, resume))
+
+        issues = [r for r in rows if r[2] != "OK"]
+        show_rows = rows if args.show_ok else issues
+
+        name_w = max((len(r[0]) for r in show_rows), default=8)
+        header = f"{'LOG':<{name_w}}  {'SENT':>6}  {'STATUS':<22}  {'RESUME_IN':<10}"
+        print(header)
+        print("-" * len(header))
+        for name, used, st, resume in show_rows:
+            resume_in = remaining_str(resume) if resume else "n/a"
+            print(f"{name:<{name_w}}  {used:>6}  {st:<22}  {resume_in:<10}")
+
+        summary = f"SUMMARY: ok={len(rows) - len(issues)} | issues={len(issues)} | total={len(rows)}"
+        print(summary)
+        return
+
+    compact = args.compact or not args.verbose
+
+    if not compact:
+        print("PRIVATEEMAIL LAST 1H:")
+        print(f"limit: messages_1h={args.max_messages_1h}")
+        print()
 
     # DOMAIN
     if args.domain_log:
@@ -93,14 +147,22 @@ def main():
         st = status_for(used, args.max_messages_1h)
         resume = (times[0] + timedelta(hours=1)) if times else None
 
-        print("DOMAIN:")
-        print(f"- {dlog.name}: sent={used} / {args.max_messages_1h} | {st}")
-        if st != "OK" and resume:
-            print(f"  resume: {fmt_utc_and_manila(resume)} | remaining: {remaining_str(resume)}")
-        le = last_error(dlog)
-        if le:
-            print(f"  last_error: {le}")
-        print()
+        if compact:
+            print(f"DOMAIN: {dlog.name}: sent={used} / {args.max_messages_1h} | {st}")
+            if st != "OK" and resume:
+                print(f"  resume: {fmt_utc_and_manila(resume)} | remaining: {remaining_str(resume)}")
+            le = last_error(dlog)
+            if st != "OK" and le:
+                print(f"  last_error: {single_line(le)}")
+        else:
+            print("DOMAIN:")
+            print(f"- {dlog.name}: sent={used} / {args.max_messages_1h} | {st}")
+            if st != "OK" and resume:
+                print(f"  resume: {fmt_utc_and_manila(resume)} | remaining: {remaining_str(resume)}")
+            le = last_error(dlog)
+            if le:
+                print(f"  last_error: {single_line(le)}")
+            print()
 
     # SENDER LOGS (private_* only by default)
     logs: List[str]
@@ -134,22 +196,24 @@ def main():
     else:
         for name, used, st, resume, le in issues:
             print(f"- {name}: sent={used} / {args.max_messages_1h} | {st}")
-            if resume:
+            if resume and not compact:
                 print(f"  resume: {fmt_utc_and_manila(resume)} | remaining: {remaining_str(resume)}")
-            if le:
-                print(f"  last_error: {le}")
+            if le and not compact:
+                print(f"  last_error: {single_line(le)}")
 
-    print("\nOK:")
-    if not oks:
-        print("- none")
-    else:
-        for name, used, _, __, ___ in oks:
-            print(f"- {name}: sent={used} / {args.max_messages_1h} | OK")
+    if not compact:
+        print("\nOK:")
+        if not oks:
+            print("- none")
+        else:
+            for name, used, _, __, ___ in oks:
+                print(f"- {name}: sent={used} / {args.max_messages_1h} | OK")
 
     total = len(results) + (1 if args.domain_log else 0)
     ok_count = len(oks) + (1 if args.domain_log and status_for(len(last_1h_times(Path(args.domain_log), now)), args.max_messages_1h) == "OK" else 0)
     issue_count = total - ok_count
-    print(f"\nSUMMARY: ok={ok_count} | issues={issue_count} | total={total}")
+    summary = f"SUMMARY: ok={ok_count} | issues={issue_count} | total={total}"
+    print(summary if compact else f"\n{summary}")
 
 
 if __name__ == "__main__":
