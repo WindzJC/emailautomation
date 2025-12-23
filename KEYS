@@ -1,42 +1,28 @@
 TL;DR
 Inside tmux:
 Split into left/right panes: Ctrl-b %
-
-
 Split into top/bottom panes: Ctrl-b "
-
 
 Other useful:
 Switch panes: Ctrl-b + arrow keys
-
-
 Close pane: exit (or Ctrl-d)
-
-
 Make a new window (tab): Ctrl-b c
 
 Check sessions
 tmux ls
-
 
 Return to panes
 tmux attach -t sends
 
 Restore a resurrect snapshot
 Start a new tmux server/session:
-
-
 tmux new -A -s sends
 
 Inside tmux, run restore:
-
-
 Prefix + Ctrl-r (default resurrect restore)
-
 
 Safe exit
 Ctrl+b d
-
 
 Save layout
 Ctrl+b Ctrl+s
@@ -46,6 +32,7 @@ cd "D:\VS\MY WEBSITE"
 git add .
 git commit -m "Update"
 git push
+
 
 
 
