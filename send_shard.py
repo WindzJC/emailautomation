@@ -1008,6 +1008,10 @@ def main():
     ap.add_argument("--max_messages_24h", type=int, default=1900)
 
     ap.add_argument("--max_per_run", type=int, default=0)
+    ap.add_argument("--repeat", action="store_true")
+    ap.add_argument("--batch_size", type=int, default=10)
+    ap.add_argument("--cooldown_seconds", type=int, default=0)
+    ap.add_argument("--max_total", type=int, default=0)
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--preflight", action="store_true")
 
@@ -1164,6 +1168,12 @@ def main():
     sent_this_run = 0
     invalid_count = 0
     error_count = 0
+    repeat_mode = args.repeat
+    cooldown_seconds = max(0, int(args.cooldown_seconds))
+    batch_size = max(0, int(args.batch_size))
+    if repeat_mode and batch_size <= 0:
+        print("ERROR: --batch_size must be > 0 when --repeat is set.")
+        return
 
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
@@ -1195,147 +1205,142 @@ def main():
         if not args.dry_run and args.provider == "gmail":
             ensure_smtp()
 
-        for i, r in enumerate(pending, start=1):
-            to_email = norm_email(r.get("Email") or "")
-            if not to_email:
-                continue
-
-            if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
-                if args.max_messages_24h and gmail_messages_24h >= args.max_messages_24h:
-                    print(
-                        "STOP: max_messages_24h reached. "
-                        f"Resume: {fmt_ts(gmail_resume_messages)} | remaining: {remaining_str(gmail_resume_messages)}"
-                    )
+        pending_index = 0
+        while True:
+            if repeat_mode:
+                if args.max_total and sent_this_run >= args.max_total:
+                    print(f"STOP: reached --max_total={args.max_total}")
                     break
-                if (
-                    args.max_unique_external_24h
-                    and is_external(to_email, my_domains)
-                    and to_email not in gmail_unique_ext
-                    and len(gmail_unique_ext) >= args.max_unique_external_24h
-                ):
-                    print(
-                        "STOP: max_unique_external_24h reached. "
-                        f"Resume: {fmt_ts(gmail_resume_unique)} | remaining: {remaining_str(gmail_resume_unique)}"
-                    )
+                if args.max_per_run and sent_this_run >= args.max_per_run:
+                    print(f"STOP: reached --max_per_run={args.max_per_run}")
                     break
 
-            if args.max_per_run and sent_this_run >= args.max_per_run:
-                print(f"STOP: reached --max_per_run={args.max_per_run}")
-                break
+                batch_limit = batch_size
+                if args.max_per_run:
+                    batch_limit = min(batch_limit, args.max_per_run)
+                if args.max_total:
+                    batch_limit = min(batch_limit, max(0, args.max_total - sent_this_run))
+                if batch_limit <= 0:
+                    break
+            else:
+                batch_limit = len(pending)
 
-            author = (r.get("AuthorName") or "there").strip()
-            book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
+            batch_sent = 0
+            stop_reason = None
+            next_index = pending_index
 
-            msg = build_message(
-                from_user, to_email, author, book_title,
-                subject, body_template, unsub_email,
-                signature_file=sig_path
-            )
+            for idx in range(pending_index, len(pending)):
+                i = idx + 1
+                r = pending[idx]
+                to_email = norm_email(r.get("Email") or "")
+                if not to_email:
+                    next_index = idx + 1
+                    continue
 
-            try:
-                if args.dry_run:
-                    log_row(log_path, to_email, "DRYRUN", "not_sent")
-                    print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
-                else:
-                    if args.provider == "private" and args.max_messages_1h:
-                        domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+                if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
+                    if args.max_messages_24h and gmail_messages_24h >= args.max_messages_24h:
+                        print(
+                            "STOP: max_messages_24h reached. "
+                            f"Resume: {fmt_ts(gmail_resume_messages)} | remaining: {remaining_str(gmail_resume_messages)}"
+                        )
+                        stop_reason = "max_messages_24h"
+                        break
+                    if (
+                        args.max_unique_external_24h
+                        and is_external(to_email, my_domains)
+                        and to_email not in gmail_unique_ext
+                        and len(gmail_unique_ext) >= args.max_unique_external_24h
+                    ):
+                        print(
+                            "STOP: max_unique_external_24h reached. "
+                            f"Resume: {fmt_ts(gmail_resume_unique)} | remaining: {remaining_str(gmail_resume_unique)}"
+                        )
+                        stop_reason = "max_unique_external_24h"
+                        break
 
-                    send_one(msg)
+                if args.max_per_run and sent_this_run >= args.max_per_run:
+                    print(f"STOP: reached --max_per_run={args.max_per_run}")
+                    stop_reason = "max_per_run"
+                    break
 
-                    log_row(log_path, to_email, "SENT")
-                    print(f"[{i}/{len(pending)}] SENT {to_email}")
-                    sent_this_run += 1
-                    if args.provider == "gmail":
-                        gmail_messages_24h += 1
-                        if is_external(to_email, my_domains):
-                            gmail_unique_ext.add(to_email)
+                if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+                    print(f"STOP: reached --max_total={args.max_total}")
+                    stop_reason = "max_total"
+                    break
 
-                    if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
-                        log_row(domain_log_path, to_email, "SENT")
+                author = (r.get("AuthorName") or "there").strip()
+                book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
-            except smtplib.SMTPRecipientsRefused as e:
-                rec = e.recipients.get(to_email) or next(iter(e.recipients.values()), None)
-                if rec:
-                    code = rec[0]
-                    text = _decode_smtp_err(rec[1])
-                    cls = classify_smtp(int(code) if code is not None else None, text)
+                msg = build_message(
+                    from_user, to_email, author, book_title,
+                    subject, body_template, unsub_email,
+                    signature_file=sig_path
+                )
 
-                    if cls == "BAD_RECIPIENT":
-                        log_row(log_path, to_email, "INVALID", f"{code} {text}")
-                        invalid_count += 1
-                        print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
-                        if args.suppress_invalid:
-                            append_suppressed_email(suppress_csv_path, to_email)
+                next_index = idx + 1
+                try:
+                    if args.dry_run:
+                        log_row(log_path, to_email, "DRYRUN", "not_sent")
+                        print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
+                    else:
+                        if args.provider == "private" and args.max_messages_1h:
+                            domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+
+                        send_one(msg)
+
+                        log_row(log_path, to_email, "SENT")
+                        print(f"[{i}/{len(pending)}] SENT {to_email}")
+                        sent_this_run += 1
+                        batch_sent += 1
+                        if args.provider == "gmail":
+                            gmail_messages_24h += 1
+                            if is_external(to_email, my_domains):
+                                gmail_unique_ext.add(to_email)
+
+                        if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
+                            log_row(domain_log_path, to_email, "SENT")
+
+                        if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+                            print(f"STOP: reached --max_total={args.max_total}")
+                            stop_reason = "max_total"
+
+                except smtplib.SMTPRecipientsRefused as e:
+                    rec = e.recipients.get(to_email) or next(iter(e.recipients.values()), None)
+                    if rec:
+                        code = rec[0]
+                        text = _decode_smtp_err(rec[1])
+                        cls = classify_smtp(int(code) if code is not None else None, text)
+
+                        if cls == "BAD_RECIPIENT":
+                            log_row(log_path, to_email, "INVALID", f"{code} {text}")
+                            invalid_count += 1
+                            print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
+                            if args.suppress_invalid:
+                                append_suppressed_email(suppress_csv_path, to_email)
+                            continue
+
+                        log_row(log_path, to_email, "ERROR", f"{code} {text}")
+                        error_count += 1
+                        print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
                         continue
 
-                    log_row(log_path, to_email, "ERROR", f"{code} {text}")
+                    log_row(log_path, to_email, "ERROR", str(e))
                     error_count += 1
-                    print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
+                    print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
                     continue
 
-                log_row(log_path, to_email, "ERROR", str(e))
-                error_count += 1
-                print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
-                continue
-
-            except smtplib.SMTPAuthenticationError as e:
-                log_row(log_path, to_email, "ERROR", f"auth_failed: {e}")
-                error_count += 1
-                print(f"[{i}/{len(pending)}] AUTH ERROR (stop) {to_email} :: {single_line(str(e))}")
-                break
-
-            except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
-                log_row(log_path, to_email, "ERROR", f"disconnected: {e}")
-                error_count += 1
-                print(f"[{i}/{len(pending)}] DISCONNECTED {to_email} :: reconnecting and retrying once")
-
-                smtp_close(smtp)
-                smtp = None
-                sleep_with_jitter(max(args.interval, 60), jitter=10)
-
-                try:
-                    if args.provider == "private" and args.max_messages_1h:
-                        domain_wait_for_slot(domain_log_path, args.max_messages_1h)
-
-                    send_one(msg)
-
-                    log_row(log_path, to_email, "SENT", "reconnect_ok")
-                    print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
-                    sent_this_run += 1
-                    if args.provider == "gmail":
-                        gmail_messages_24h += 1
-                        if is_external(to_email, my_domains):
-                            gmail_unique_ext.add(to_email)
-
-                    if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
-                        log_row(domain_log_path, to_email, "SENT")
-
-                except Exception as e2:
-                    code2, text2 = extract_code_text_from_exception(e2)
-                    log_row(log_path, to_email, "ERROR", f"reconnect_failed: {code2} {text2}")
+                except smtplib.SMTPAuthenticationError as e:
+                    log_row(log_path, to_email, "ERROR", f"auth_failed: {e}")
                     error_count += 1
-                    print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
+                    print(f"[{i}/{len(pending)}] AUTH ERROR (stop) {to_email} :: {single_line(str(e))}")
+                    stop_reason = "auth_error"
                     break
 
-            except (smtplib.SMTPDataError, smtplib.SMTPResponseException) as e:
-                code, text = extract_code_text_from_exception(e)
-                cls = classify_smtp(code, text)
-
-                if cls == "BAD_RECIPIENT":
-                    log_row(log_path, to_email, "INVALID", f"{code} {text}")
-                    invalid_count += 1
-                    print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
-                    if args.suppress_invalid:
-                        append_suppressed_email(suppress_csv_path, to_email)
-                    continue
-
-                if cls == "TEMP_THROTTLE":
-                    log_row(log_path, to_email, "ERROR", f"{code} {text}")
-                    wait_s = backoff_seconds()
+                except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
+                    log_row(log_path, to_email, "ERROR", f"disconnected: {e}")
                     error_count += 1
-                    print(f"[{i}/{len(pending)}] THROTTLED {to_email} :: backoff {wait_s}s then retry")
+                    print(f"[{i}/{len(pending)}] DISCONNECTED {to_email} :: reconnecting and retrying once")
 
-                    time.sleep(wait_s)
                     smtp_close(smtp)
                     smtp = None
                     sleep_with_jitter(max(args.interval, 60), jitter=10)
@@ -1346,9 +1351,10 @@ def main():
 
                         send_one(msg)
 
-                        log_row(log_path, to_email, "SENT", "throttle_retry_ok")
-                        print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
+                        log_row(log_path, to_email, "SENT", "reconnect_ok")
+                        print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
+                        batch_sent += 1
                         if args.provider == "gmail":
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
@@ -1357,25 +1363,126 @@ def main():
                         if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
                             log_row(domain_log_path, to_email, "SENT")
 
-                        continue
+                        if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+                            print(f"STOP: reached --max_total={args.max_total}")
+                            stop_reason = "max_total"
+
                     except Exception as e2:
                         code2, text2 = extract_code_text_from_exception(e2)
-                        log_row(log_path, to_email, "ERROR", f"retry_failed: {code2} {text2}")
+                        log_row(log_path, to_email, "ERROR", f"reconnect_failed: {code2} {text2}")
                         error_count += 1
                         print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
+                        stop_reason = "reconnect_failed"
                         break
 
-                log_row(log_path, to_email, "ERROR", f"{code} {text}")
-                error_count += 1
-                print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
+                except (smtplib.SMTPDataError, smtplib.SMTPResponseException) as e:
+                    code, text = extract_code_text_from_exception(e)
+                    cls = classify_smtp(code, text)
 
-            except Exception as e:
-                log_row(log_path, to_email, "ERROR", str(e))
-                error_count += 1
-                print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(str(e))}")
+                    if cls == "BAD_RECIPIENT":
+                        log_row(log_path, to_email, "INVALID", f"{code} {text}")
+                        invalid_count += 1
+                        print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
+                        if args.suppress_invalid:
+                            append_suppressed_email(suppress_csv_path, to_email)
+                        continue
 
-            if i < len(pending):
-                sleep_with_jitter(args.interval, jitter=10)
+                    if cls == "TEMP_THROTTLE":
+                        log_row(log_path, to_email, "ERROR", f"{code} {text}")
+                        wait_s = backoff_seconds()
+                        error_count += 1
+                        print(f"[{i}/{len(pending)}] THROTTLED {to_email} :: backoff {wait_s}s then retry")
+
+                        time.sleep(wait_s)
+                        smtp_close(smtp)
+                        smtp = None
+                        sleep_with_jitter(max(args.interval, 60), jitter=10)
+
+                        try:
+                            if args.provider == "private" and args.max_messages_1h:
+                                domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+
+                            send_one(msg)
+
+                            log_row(log_path, to_email, "SENT", "throttle_retry_ok")
+                            print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
+                            sent_this_run += 1
+                            batch_sent += 1
+                            if args.provider == "gmail":
+                                gmail_messages_24h += 1
+                                if is_external(to_email, my_domains):
+                                    gmail_unique_ext.add(to_email)
+
+                            if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
+                                log_row(domain_log_path, to_email, "SENT")
+
+                            if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+                                print(f"STOP: reached --max_total={args.max_total}")
+                                stop_reason = "max_total"
+                                break
+                            if repeat_mode and batch_sent >= batch_limit:
+                                break
+                            continue
+                        except Exception as e2:
+                            code2, text2 = extract_code_text_from_exception(e2)
+                            log_row(log_path, to_email, "ERROR", f"retry_failed: {code2} {text2}")
+                            error_count += 1
+                            print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
+                            stop_reason = "retry_failed"
+                            break
+
+                    log_row(log_path, to_email, "ERROR", f"{code} {text}")
+                    error_count += 1
+                    print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
+
+                except Exception as e:
+                    log_row(log_path, to_email, "ERROR", str(e))
+                    error_count += 1
+                    print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(str(e))}")
+
+                if stop_reason:
+                    break
+                if repeat_mode and batch_sent >= batch_limit:
+                    break
+                if idx < len(pending) - 1:
+                    sleep_with_jitter(args.interval, jitter=10)
+
+            pending_index = next_index
+
+            if repeat_mode:
+                remaining_pending = max(0, len(pending) - pending_index)
+                if args.max_total > 0:
+                    remaining_allowed = max(0, args.max_total - sent_this_run)
+                    remaining_estimate = min(remaining_pending, remaining_allowed)
+                else:
+                    remaining_estimate = remaining_pending
+
+                next_sleep_seconds = 0
+                if (
+                    not stop_reason
+                    and pending_index < len(pending)
+                    and not (args.max_total and sent_this_run >= args.max_total)
+                    and not (args.max_per_run and sent_this_run >= args.max_per_run)
+                ):
+                    next_sleep_seconds = cooldown_seconds
+
+                print(
+                    f"BATCH: sent={batch_sent} total={sent_this_run} "
+                    f"remaining_estimate={remaining_estimate} next_sleep_seconds={next_sleep_seconds}"
+                )
+
+                if (
+                    stop_reason
+                    or pending_index >= len(pending)
+                    or (args.max_total and sent_this_run >= args.max_total)
+                    or (args.max_per_run and sent_this_run >= args.max_per_run)
+                ):
+                    break
+
+                if cooldown_seconds > 0:
+                    time.sleep(cooldown_seconds)
+            else:
+                break
 
         print(f"DONE: sent={sent_this_run} invalid={invalid_count} errors={error_count}")
 
