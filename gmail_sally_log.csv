@@ -115,3 +115,24 @@ TimestampUTC,Email,Status,Info
 2025-12-23T02:02:12.957607+00:00,melmoid@aol.com,SENT,
 2025-12-23T02:05:14.200309+00:00,myita7@icloud.com,SENT,
 2025-12-23T02:08:16.384709+00:00,cberrios128@gmail.com,SENT,
+2025-12-23T17:24:46.672450+00:00,eazpeitia96@gmail.com,SENT,
+2025-12-23T17:28:45.806017+00:00,efdouglas@leadingresources.com,SENT,
+2025-12-23T17:33:21.451112+00:00,emcmahel@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T17:37:20.919198+00:00,emcmahel@yahoo.com,SENT,reconnect_ok
+2025-12-23T17:41:18.268988+00:00,luxor_nv@yahoo.com,SENT,
+2025-12-23T17:45:19.279087+00:00,eford4scsu.edu@gmail.com,SENT,
+2025-12-23T17:49:21.666361+00:00,hjanar@yahoo.com,SENT,
+2025-12-23T17:53:22.386970+00:00,kelleyerin63@yahoo.com,SENT,
+2025-12-23T17:57:53.357759+00:00,hpclark@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:02:00.722890+00:00,hpclark@comcast.net,SENT,reconnect_ok
+2025-12-23T18:06:35.741162+00:00,ejyates10@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:10:45.601827+00:00,ejyates10@gmail.com,SENT,reconnect_ok
+2025-12-23T18:14:45.829407+00:00,eparent987@aol.com,SENT,
+2025-12-23T18:19:17.386081+00:00,estelle.gross@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:23:15.921453+00:00,estelle.gross@hotmail.com,SENT,reconnect_ok
+2025-12-23T18:27:50.424936+00:00,etelfort2010@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:31:52.042150+00:00,etelfort2010@hotmail.com,SENT,reconnect_ok
+2025-12-23T18:36:25.537883+00:00,eealexander23@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:40:27.852176+00:00,eealexander23@yahoo.com,SENT,reconnect_ok
+2025-12-23T18:44:57.797366+00:00,eulice.james@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-23T18:49:03.942939+00:00,eulice.james@comcast.net,SENT,reconnect_ok

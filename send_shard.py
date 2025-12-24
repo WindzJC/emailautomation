@@ -434,31 +434,21 @@ Opt out: {UnsubMailto}
     "subject": "Cinematic first impression for your book",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Sofia Margaret, Creative Producer of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
- Sofia Margaret, Creative Producer
- Astra Productions
- United States
+Sofia Margaret
+Creative Producer
+United States
 
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
   },
 
@@ -466,31 +456,21 @@ If you’d prefer I don’t follow up, click: {UnsubMailto}
     "subject": "Cinematic first impression for your book",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Windelle JC, CEO of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
- Windelle JC, CEO
- Astra Productions
- United States
+Windelle JC
+CEO
+United States
 
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
   },
 
@@ -498,31 +478,21 @@ If you’d prefer I don’t follow up, click: {UnsubMailto}
         "subject": "Quick Idea to make your Book stand out online",
         "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Jordan Miller, Author Outreach Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
-Jordan Miller, Author Outreach Specialist
-Astra Productions
-United States          
+Jordan Miller
+Author Outreach Specialist
+United States
 
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
   },
 
@@ -530,31 +500,21 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Kent Rivera, Client Success Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
-Kent Rivera, Client Success Coordinator
-Astra Productions
+Kent Rivera
+Client Success Coordinator
 United States
 
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
   },
 
@@ -562,31 +522,21 @@ If you’d prefer I don’t follow up, click: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Zach King, Web & Trailer Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
-Zach King, Web & Trailer Specialist
-Astra Productions
+Zach King
+Web & Trailer Specialist
 United States
 
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
     },
 
@@ -594,31 +544,21 @@ If you’d prefer I don’t follow up, click: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Alex Carter, Marketing Team Lead of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
-Alex Carter, Marketing Team Lead
-Astra Productions
+Alex Carter
+Marketing Team Lead
 United States
 
-Opt out: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
     },
 
@@ -626,31 +566,21 @@ Opt out: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
-Most readers don’t decide in a paragraph. They decide in a split-second: Do I feel anything?
-That’s why I’m reaching out—{BookTitle} has “I can see this” energy. It reads like scenes, not just sentences.
+I'm Megan, Production Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
-At Astra Productions, we turn that first split-second into a movie-preview moment:
- • a short cinematic trailer that makes the tone and stakes felt fast
- • a clean book page where the trailer lives with your cover, strongest review lines, and clear buy buttons (so when someone feels it, they can click immediately)
+The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
 
-If you’re open to it, send 3 quick details you’d want included:
+Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
 
-what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-
-1–2 must-include lines (tagline / review / award)
-
-anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
 
 Best regards,
 Megan
 Production Coordinator
-Astra Productions
+United States
 
-Opt out: {UnsubMailto}
-(or just reply “unsubscribe”).
+If you'd prefer I don't follow up, click: {UnsubMailto}
+(or just reply "unsubscribe").
 """
     },  
 }
