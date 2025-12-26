@@ -74,7 +74,6 @@ TimestampUTC,Email,Status,Info
 2025-12-19T23:55:04.143510+00:00,robert@profabsigns.com,ERROR,disconnected: Connection unexpectedly closed: [WinError 10054] An existing connection was forcibly closed by the remote host
 2025-12-19T23:55:06.596199+00:00,robert@profabsigns.com,SENT,reconnect_ok
 2025-12-20T14:03:11.404862+00:00,swaiziellis@gmail.com,SENT,
-2025-12-20T14:06:57.758240+00:00,windellejcr@gmail.com,SENT,
 2025-12-20T14:15:34.109755+00:00,brnlbb@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-20T14:15:36.261817+00:00,brnlbb@gmail.com,SENT,reconnect_ok
 2025-12-20T14:24:08.137172+00:00,bars_32@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
@@ -373,3 +372,22 @@ TimestampUTC,Email,Status,Info
 2025-12-23T23:25:40.322899+00:00,songteacher@wi.rr.com,SENT,
 2025-12-23T23:33:09.427798+00:00,meganturk@ymail.com,SENT,
 2025-12-23T23:40:35.834759+00:00,agmoonwolf@gmail.com,SENT,
+2025-12-25T21:35:16.543356+00:00,windellejcr@gmail.com,ERROR,"auth_failed: (535, b'5.7.8 Error: authentication failed: (reason unavailable)')"
+2025-12-25T21:53:59.706422+00:00,carpenkw357@yahoo.com,SENT,
+2025-12-25T22:29:49.675222+00:00,windellejcr@gmail.com,SENT,
+2025-12-25T22:45:03.174849+00:00,cbateman33@gmail.com,SENT,
+2025-12-25T23:06:19.019176+00:00,zaher_al_ajlani@hotmail.com,SENT,
+2025-12-25T23:21:25.635287+00:00,geofgilbert59@gmail.com,SENT,
+2025-12-25T23:36:31.293751+00:00,jmfields1906@gmail.com,SENT,
+2025-12-26T00:06:34.937113+00:00,merchant@lobo.net,SENT,
+2025-12-26T00:21:48.668746+00:00,phyllish50@gmail.com,SENT,
+2025-12-26T00:36:57.252243+00:00,lsrinivasan@comcast.net,SENT,
+2025-12-26T00:52:10.981362+00:00,amensolomon@yahoo.com,SENT,
+2025-12-26T01:07:21.393287+00:00,jfischer43@tampabay.rr.com,SENT,
+2025-12-26T01:37:25.065923+00:00,sha29_1999@yahoo.com,SENT,
+2025-12-26T01:52:28.850065+00:00,sherelllewis@hotmail.com,SENT,
+2025-12-26T02:07:36.503196+00:00,km.wheeler@icloud.com,SENT,
+2025-12-26T02:40:25.829735+00:00,drjerome56@yahoo.com,SENT,
+2025-12-26T04:14:33.072744+00:00,prashobh.karunakaran@gmail.com,SENT,
+2025-12-26T04:44:38.466393+00:00,ldlawson36@outlook.com,SENT,
+2025-12-26T06:18:02.334262+00:00,ostadbeth@gmail.com,SENT,

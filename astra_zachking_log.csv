@@ -161,3 +161,117 @@ TimestampUTC,Email,Status,Info
 2025-12-23T18:57:43.349430+00:00,jane.hunter@rocketmail.com,SENT,
 2025-12-23T19:00:48.167063+00:00,jjsctt246s@comcast.net,SENT,
 2025-12-23T19:03:54.354758+00:00,boltonjanet76@gmail.com,SENT,
+2025-12-24T14:48:19.538132+00:00,morrison1960@windstream.net,SENT,
+2025-12-24T14:52:25.184733+00:00,porterwolf@cox.net,SENT,
+2025-12-24T15:14:16.422605+00:00,huttererj@mpsd.k12.wi.us,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-24T15:18:23.480558+00:00,huttererj@mpsd.k12.wi.us,SENT,reconnect_ok
+2025-12-24T15:22:35.684531+00:00,janvanver@surfglobal.net,SENT,
+2025-12-24T15:26:40.406962+00:00,bushjannette402@gmail.com,SENT,
+2025-12-24T15:30:43.949158+00:00,jasmine.bonner@att.net,SENT,
+2025-12-24T15:54:20.142412+00:00,jpbunting@comcast.net,ERROR,disconnected: Connection unexpectedly closed: [Errno 60] Operation timed out
+2025-12-24T15:58:31.690424+00:00,jpbunting@comcast.net,SENT,reconnect_ok
+2025-12-24T16:02:39.913716+00:00,jtmiller@joink.net,SENT,
+2025-12-24T16:06:49.635977+00:00,jgomez450@aol.com,SENT,
+2025-12-24T16:11:01.499326+00:00,gerald.colangelo@msn.com,SENT,
+2025-12-24T16:27:41.567632+00:00,sun_devil.5@hotmail.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 98e67ed59e1d1-34e7725df2bsm9635400a91.4 - gsmtp"
+2025-12-24T16:48:00.811881+00:00,sun_devil.5@hotmail.com,SENT,throttle_retry_ok
+2025-12-24T16:48:02.633320+00:00,invalid_jbjcookies@aol.com,SENT,
+2025-12-24T16:52:04.706154+00:00,jmsorrell@windstream.net,SENT,
+2025-12-24T16:56:09.379062+00:00,jeanettegillmore@hotmail.com,SENT,
+2025-12-24T17:00:13.425370+00:00,jarkraus@bellsouth.net,SENT,
+2025-12-24T17:04:16.213472+00:00,jeanniepalmero@hotmail.com,SENT,
+2025-12-24T17:08:25.058687+00:00,jeffrey.hauswirth@yahoo.com,SENT,
+2025-12-24T17:12:37.298434+00:00,jeffrey.masterson1@yahoo.com,SENT,
+2025-12-24T17:16:49.089793+00:00,jfleming@carolina.rr.com,SENT,
+2025-12-24T17:20:52.819900+00:00,jeffreycrowther2@gmail.com,SENT,
+2025-12-24T17:37:32.837540+00:00,jeffbourdon4@gmail.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 41be03b00d2f7-c1e7c147943sm15104557a12.26 - gsmtp"
+2025-12-24T17:57:47.191388+00:00,jeffbourdon4@gmail.com,SENT,throttle_retry_ok
+2025-12-24T17:57:48.881932+00:00,ibnphilip26@comcast.net,SENT,
+2025-12-24T18:02:00.160241+00:00,jenleigh27@msn.com,SENT,
+2025-12-24T18:06:05.046059+00:00,j_giuliano@hotmail.ca,SENT,
+2025-12-24T18:10:13.018703+00:00,marketpower2004@yahoo.ca,SENT,
+2025-12-24T18:14:19.055530+00:00,brokenwingsministry@yahoo.com,SENT,
+2025-12-24T18:18:25.918798+00:00,jenzuke@att.net,SENT,
+2025-12-24T18:22:32.988626+00:00,jerald.finney@sbcglobal.net,SENT,
+2025-12-24T18:26:40.936297+00:00,jeremyshorter21@yahoo.com,SENT,
+2025-12-24T18:30:43.284137+00:00,jeromea_gaines@sbcglobal.net,SENT,
+2025-12-24T18:47:23.274607+00:00,blacknupe3@yahoo.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 d9443c01a7336-2a2f3c9c0acsm161267165ad.44 - gsmtp"
+2025-12-24T19:08:10.841783+00:00,blacknupe3@yahoo.com,SENT,throttle_retry_ok
+2025-12-24T19:08:12.459860+00:00,jones@kwu.edu,SENT,
+2025-12-24T19:12:21.180661+00:00,jerry.l.rhoads@gmail.com,SENT,
+2025-12-24T19:16:26.287976+00:00,authorjessporter@aol.com,SENT,
+2025-12-24T19:20:30.706692+00:00,jgentileeverett@yahoo.com,SENT,
+2025-12-24T19:24:39.712518+00:00,jclewsmass@aol.com,SENT,
+2025-12-24T19:28:45.584574+00:00,j.lashawn@gmail.com,SENT,
+2025-12-24T19:32:53.308510+00:00,jessjanet@yahoo.com,SENT,
+2025-12-24T19:37:00.241363+00:00,clarosa60@hotmail.com,SENT,
+2025-12-24T19:41:11.947886+00:00,jill.colasuonno@yahoo.com,SENT,
+2025-12-25T21:52:23.688641+00:00,windellejcr@gmail.com,SENT,
+2025-12-25T21:56:32.277796+00:00,jillmrigby1@gmail.com,SENT,
+2025-12-25T22:00:36.888188+00:00,jimcarterconsulting@gmail.com,SENT,
+2025-12-25T22:04:49.979628+00:00,strybx542@gmail.com,SENT,
+2025-12-25T22:08:59.623483+00:00,jimmiotke@hotmail.com,SENT,
+2025-12-25T22:13:12.549920+00:00,jlwaite@gmail.com,SENT,
+2025-12-25T22:17:23.548190+00:00,joaddeo@yahoo.com,SENT,
+2025-12-25T22:21:31.443161+00:00,lifeisdiversity@yahoo.com,SENT,
+2025-12-25T22:25:34.012918+00:00,joan05hubbard@cox.net,SENT,
+2025-12-25T22:29:45.680870+00:00,chanellesauvee@gmail.com,SENT,
+2025-12-25T22:46:25.698893+00:00,joannebowers@dadeschools.net,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 d2e1a72fcca58-7ff7e88c8f0sm20432315b3a.62 - gsmtp"
+2025-12-25T23:12:53.034916+00:00,joannebowers@dadeschools.net,SENT,throttle_retry_ok
+2025-12-25T23:12:54.597731+00:00,joclyn_gipson@hotmail.com,SENT,
+2025-12-25T23:16:58.181148+00:00,jwboyd1972@yahoo.com,SENT,
+2025-12-25T23:21:09.856444+00:00,josephjesseph@yahoo.com,SENT,
+2025-12-25T23:25:17.375826+00:00,lindasardo@outlook.com,SENT,
+2025-12-25T23:29:25.963913+00:00,joel@joelgross.com,SENT,
+2025-12-25T23:33:31.151623+00:00,rouleauje@hotmail.com,SENT,
+2025-12-25T23:37:35.851705+00:00,johnofthegentiles@yahoo.com,SENT,
+2025-12-25T23:41:39.967645+00:00,jwboggs51@gmail.com,SENT,
+2025-12-25T23:45:44.882839+00:00,jburke@aaahc.org,SENT,
+2025-12-26T00:02:24.924815+00:00,oozshe@gmail.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 d9443c01a7336-2a2f3d776b2sm189072685ad.98 - gsmtp"
+2025-12-26T00:22:35.777960+00:00,oozshe@gmail.com,SENT,throttle_retry_ok
+2025-12-26T00:22:37.449551+00:00,jhdial@mindspring.com,SENT,
+2025-12-26T00:26:42.484358+00:00,idleatlast@yahoo.com,SENT,
+2025-12-26T00:30:52.541206+00:00,jgvh@aol.com,SENT,
+2025-12-26T00:35:00.117060+00:00,hartman287@msn.com,SENT,
+2025-12-26T00:39:09.718450+00:00,jaystl@sbcglobal.net,SENT,
+2025-12-26T00:43:18.346987+00:00,jpjones@syr.edu,SENT,
+2025-12-26T00:47:23.995164+00:00,nemonemini@aol.com,SENT,
+2025-12-26T00:51:33.853419+00:00,pan2015z@yahoo.com,SENT,
+2025-12-26T00:55:41.432885+00:00,gmilmore@yahoo.com,SENT,
+2025-12-26T01:12:21.316012+00:00,junwankwo@yahoo.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 d2e1a72fcca58-7ff7e682870sm20286299b3a.57 - gsmtp"
+2025-12-26T01:32:38.839145+00:00,junwankwo@yahoo.com,SENT,throttle_retry_ok
+2025-12-26T01:32:40.369502+00:00,jdospassos@aol.com,SENT,
+2025-12-26T01:36:47.014980+00:00,jwesrice@hotmail.com,SENT,
+2025-12-26T01:40:52.609734+00:00,jscarinci@yahoo.com,SENT,
+2025-12-26T01:45:02.372437+00:00,scalylady@excite.com,SENT,
+2025-12-26T01:49:05.847376+00:00,dicksny@bak.rr.com,SENT,
+2025-12-26T01:53:11.695457+00:00,aedea1@verizon.net,SENT,
+2025-12-26T01:57:14.355556+00:00,johnathandavis02@yahoo.com,SENT,
+2025-12-26T02:01:20.043591+00:00,divainspirations@comcast.net,SENT,
+2025-12-26T02:05:28.855749+00:00,jbraam@mindspring.com,SENT,
+2025-12-26T02:39:49.185406+00:00,ransomej@aol.com,ERROR,"451 4.4.2 Timeout - closing connection.
+4.4.2  For more information, go to
+4.4.2  https://support.google.com/a/answer/3221692 d2e1a72fcca58-7ff7e88cdaesm20150584b3a.63 - gsmtp"
+2025-12-26T04:19:29.580448+00:00,ransomej@aol.com,SENT,throttle_retry_ok
+2025-12-26T04:19:31.099895+00:00,jonnyxas@gmail.com,SENT,
+2025-12-26T04:23:37.638150+00:00,jonathansarver@gmail.com,SENT,
+2025-12-26T04:27:40.602672+00:00,jjolley17@yahoo.com,SENT,
+2025-12-26T04:31:48.959834+00:00,jrcr2000@optonline.net,SENT,
+2025-12-26T04:35:59.783149+00:00,jorom@satx.rr.com,SENT,
+2025-12-26T04:40:05.315011+00:00,frag446482@aol.com,SENT,
+2025-12-26T04:44:17.214478+00:00,jac60vd@optonline.net,SENT,
+2025-12-26T06:07:12.452185+00:00,jmfoxiii@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T06:11:21.624244+00:00,jmfoxiii@comcast.net,SENT,reconnect_ok
+2025-12-26T06:15:30.528320+00:00,jkerick@prodigy.net,SENT,
