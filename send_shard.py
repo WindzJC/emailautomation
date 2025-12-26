@@ -31,6 +31,283 @@ DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
 DEFAULT_UNSUB_CSV = Path("unsubscribed.csv")     # optional, header: Email
 DEFAULT_SUPPRESS_CSV = Path("suppressed.csv")    # optional, header: Email
 
+PROVIDER_LIMIT_DEFAULTS = {
+    "private": {"max_messages_1h": 50},
+    "gmail": {"max_messages_24h": 100, "max_unique_external_24h": 100},
+}
+
+PROFILES: Dict[str, Dict[str, object]] = {
+    # Gmail example (kept for reference)
+    "gmail_megan": {
+        "provider": "gmail",
+        "csv": "recipients_astra7.csv",
+        "log": "astra_megan_log.csv",
+        "pitch": "astra7",
+        "from_email": "megan@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_MEGAN_APP_PW",
+    },
+    "gmail_astra": {
+        "provider": "gmail",
+        "csv": "recipients_astra1.csv",
+        "log": "astra_jc_log.csv",
+        "pitch": "astra1",
+        "from_email": "astra@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_ASTRA_APP_PW",
+    },
+    "gmail_jc": {
+        "provider": "gmail",
+        "csv": "recipients_astra2.csv",
+        "log": "astra_jc_log.csv",
+        "pitch": "astra2",
+        "from_email": "jc@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_JC_APP_PW",
+    },
+    "gmail_jordanA": {
+        "provider": "gmail",
+        "csv": "recipients_astra3.csv",
+        "log": "astra_jordanA_log.csv",
+        "pitch": "astra3",
+        "from_email": "jordan@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_JORDAN_A_APP_PW",
+    },
+    "gmail_kent": {
+        "provider": "gmail",
+        "csv": "recipients_astra4.csv",
+        "log": "astra_kentc_log.csv",
+        "pitch": "astra4",
+        "from_email": "kent.c@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_KENT_APP_PW",
+    },
+    "gmail_zachking": {
+        "provider": "gmail",
+        "csv": "recipients_astra5.csv",
+        "log": "astra_zachking_log.csv",
+        "pitch": "astra5",
+        "from_email": "zachking@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_ZACHKING_APP_PW",
+    },
+    "gmail_alex": {
+        "provider": "gmail",
+        "csv": "recipients_astra6.csv",
+        "log": "astra_alex_log.csv",
+        "pitch": "astra6",
+        "from_email": "alex.c@astraproductionsbyjc.com",
+        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
+        "interval": 240,
+        "batch_size": 10,
+        "cooldown_seconds": 1000,
+        "repeat": True,
+        "max_total": 120,
+        "max_messages_24h": 150,
+        "max_unique_external_24h": 150,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_ALEX_APP_PW",
+    },
+    # Private mailboxes (trial plan: ~4/hour each, 20/day each, shared domain 50/hour)
+    "private_annet": {
+        "provider": "private",
+        "csv": "recipients_1.csv",
+        "log": "private_annet_log.csv",
+        "pitch": "pitch1",
+        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "password_env": "PRIVATE_ANNET_APP_PW",
+    },
+    "private_jordan": {
+        "provider": "private",
+        "csv": "recipients_2.csv",
+        "log": "private_jordan_kendrick_log.csv",
+        "pitch": "pitch2",
+        "from_email": "jordankendrick@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "password_env": "PRIVATE_JORDAN_APP_PW",
+    },
+    "private_jodi": {
+        "provider": "private",
+        "csv": "recipients_3.csv",
+        "log": "private_jodi_horowitz_log.csv",
+        "pitch": "pitch3",
+        "from_email": "jodihorowitz@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "password_env": "PRIVATE_JODI_APP_PW",
+    },
+    "private_alison": {
+        "provider": "private",
+        "csv": "recipients_4.csv",
+        "log": "private_alison_log.csv",
+        "pitch": "pitch4",
+        "from_email": "alisonaguair@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "password_env": "PRIVATE_ALISON_APP_PW",
+    },
+    "private_fiorela": {
+        "provider": "private",
+        "csv": "recipients_5.csv",
+        "log": "private_fiorela_log.csv",
+        "pitch": "pitch5",
+        "from_email": "fiorelladelima@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "password_env": "PRIVATE_FIORELA_APP_PW",
+    },
+    "gmail_corporate": {
+        "provider": "gmail",
+        "csv": "recipients_g1.csv",
+        "log": "gmail_corporate_log.csv",
+        "pitch": "gmail1",
+        "from_email": "corporate@barnesnobleinfo.com",
+        "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
+        "interval": 300,
+        "batch_size": 10,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 40,
+        "max_messages_24h": 120,
+        "max_unique_external_24h": 120,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_CORPORATE_APP_PW",
+    },
+    "gmail_sally": {
+        "provider": "gmail",
+        "csv": "recipients_g2.csv",
+        "log": "gmail_sally_log.csv",
+        "pitch": "gmail2",
+        "from_email": "sally.kim@littlebrowncoinfo.com",
+        "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
+        "interval": 300,
+        "batch_size": 10,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 40,
+        "max_messages_24h": 120,
+        "max_unique_external_24h": 120,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_SALLY_APP_PW",
+    },
+    "gmail_jordan": {
+        "provider": "gmail",
+        "csv": "recipients_g3.csv",
+        "log": "gmail_jordan_log.csv",
+        "pitch": "gmail3",
+        "from_email": "jordan.kendrick@barnesnobleinfo.com",
+        "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
+        "interval": 300,
+        "batch_size": 10,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 40,
+        "max_messages_24h": 120,
+        "max_unique_external_24h": 120,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_JORDAN_APP_PW",
+    },
+    "gmail_josefina": {
+        "provider": "gmail",
+        "csv": "recipients_g4.csv",
+        "log": "gmail_josefina_log.csv",
+        "pitch": "gmail4",
+        "from_email": "josefina.stenstrom@barnesnobleinfo.com",
+        "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
+        "interval": 300,
+        "batch_size": 10,
+        "cooldown_seconds": 1800,
+        "repeat": True,
+        "max_total": 40,
+        "max_messages_24h": 120,
+        "max_unique_external_24h": 120,
+        "suppress_invalid": True,
+        "password_env": "GMAIL_JOSEFINA_APP_PW",
+    },
+}
+
 # ===== SIGNATURES (inline image via CID) =====
 SIGNATURE_CID = "sigimg"
 
@@ -226,7 +503,7 @@ anything to avoid (spoilers, tropes)
 I’ll send back:
 • two trailer opening hook concepts for {BookTitle}
 • a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
+• 2–3 recent examples so you can judge the fit before deciding
 
 Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
 
@@ -1036,11 +1313,23 @@ def append_suppressed_email(suppress_csv_path: Path, email_addr: str) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=True)
-    ap.add_argument("--log", required=True)
-    ap.add_argument("--pitch", required=True, choices=sorted(PITCHES.keys()))
-    ap.add_argument("--provider", choices=["private", "gmail"], required=True)
+    profile_parser = argparse.ArgumentParser(add_help=False)
+    profile_parser.add_argument("--profile", choices=sorted(PROFILES.keys()), help="Load a preset configuration.")
+    profile_parser.add_argument("--list_profiles", action="store_true", help="List available profiles.")
+
+    pre_args, _ = profile_parser.parse_known_args()
+    if pre_args.list_profiles and not pre_args.profile:
+        print("Profiles available:")
+        for name in sorted(PROFILES.keys()):
+            print(f" - {name}")
+        return
+    profile_defaults = PROFILES.get(pre_args.profile or "", {})
+
+    ap = argparse.ArgumentParser(parents=[profile_parser])
+    ap.add_argument("--csv")
+    ap.add_argument("--log")
+    ap.add_argument("--pitch", choices=sorted(PITCHES.keys()))
+    ap.add_argument("--provider", choices=["private", "gmail"])
 
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--unsub", default=DEFAULT_UNSUB_EMAIL)
@@ -1048,8 +1337,8 @@ def main():
     ap.add_argument("--suppress_csv", default=str(DEFAULT_SUPPRESS_CSV))
     ap.add_argument("--my_domains", default=DEFAULT_DOMAIN)
 
-    ap.add_argument("--max_unique_external_24h", type=int, default=1900)
-    ap.add_argument("--max_messages_24h", type=int, default=1900)
+    ap.add_argument("--max_unique_external_24h", type=int, default=None)
+    ap.add_argument("--max_messages_24h", type=int, default=None)
 
     ap.add_argument("--max_per_run", type=int, default=0)
     ap.add_argument("--repeat", action="store_true")
@@ -1059,7 +1348,7 @@ def main():
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--preflight", action="store_true")
 
-    ap.add_argument("--max_messages_1h", type=int, default=0)
+    ap.add_argument("--max_messages_1h", type=int, default=None)
     ap.add_argument("--domain_log", default="")
     ap.add_argument("--suppress_invalid", action="store_true")
     ap.add_argument("--from_email", "--from", dest="from_email", default="")
@@ -1070,7 +1359,39 @@ def main():
     ap.add_argument("--global_dedupe_logs_pattern", default="*_log.csv")
     ap.add_argument("--global_dedupe_recipients_pattern", default="recipients_*.csv")
 
+    if profile_defaults:
+        ap.set_defaults(**profile_defaults)
+
     args = ap.parse_args()
+    if args.list_profiles:
+        print("Profiles available:")
+        for name, cfg in sorted(PROFILES.items()):
+            print(f" - {name}")
+            for k, v in sorted(cfg.items()):
+                print(f"    {k}: {v}")
+        return
+    if args.profile:
+        print(f"PROFILE: {args.profile}")
+
+    required_missing = [name for name, val in [
+        ("provider", args.provider),
+        ("csv", args.csv),
+        ("log", args.log),
+        ("pitch", args.pitch),
+    ] if not val]
+    if required_missing:
+        print("ERROR missing required args:", ", ".join(required_missing))
+        print("Provide them via flags or set a --profile that includes them.")
+        return
+
+    provider_defaults = PROVIDER_LIMIT_DEFAULTS.get(args.provider, {})
+    if args.provider == "private" and args.max_messages_1h is None:
+        args.max_messages_1h = int(provider_defaults.get("max_messages_1h", 0))
+    if args.provider == "gmail":
+        if args.max_messages_24h is None:
+            args.max_messages_24h = int(provider_defaults.get("max_messages_24h", 0))
+        if args.max_unique_external_24h is None:
+            args.max_unique_external_24h = int(provider_defaults.get("max_unique_external_24h", 0))
 
     host, port = SMTP_PRESETS[args.provider]
     pitch = PITCHES[args.pitch]
@@ -1155,6 +1476,14 @@ def main():
         return
 
     domain_log_path = Path(args.domain_log) if args.domain_log else log_path
+    if args.provider == "private" and args.max_messages_1h:
+        print(f"PRIVATE 1H CAP: {args.max_messages_1h} (domain_log={domain_log_path.name})")
+    if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
+        print(
+            "GMAIL LIMITS:"
+            f" max_messages_24h={args.max_messages_24h or 'off'}"
+            f" max_unique_external_24h={args.max_unique_external_24h or 'off'}"
+        )
 
     gmail_messages_24h = 0
     gmail_unique_ext: Set[str] = set()
@@ -1197,9 +1526,7 @@ def main():
             pw = args.password.strip()
         if not pw:
             pw = getpass("Password (Gmail uses App Password): ").strip()
-    unsub_email = from_user
-    if any(arg == "--unsub" or arg.startswith("--unsub=") for arg in sys.argv[1:]):
-        unsub_email = norm_email(args.unsub) or from_user
+    unsub_email = norm_email(args.unsub) or from_user
 
     # Choose signature file:
     # - only applies if the pitch body contains {SIGIMG}
