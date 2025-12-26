@@ -26,7 +26,7 @@ SMTP_PRESETS = {
     "gmail": ("smtp.gmail.com", 587),           # Google Workspace / Gmail SMTP
 }
 
-DEFAULT_DOMAIN = "barnesnobleinfo.com"
+DEFAULT_DOMAIN = "barnesnoblemarketing.com"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
 DEFAULT_UNSUB_CSV = Path("unsubscribed.csv")     # optional, header: Email
 DEFAULT_SUPPRESS_CSV = Path("suppressed.csv")    # optional, header: Email
@@ -51,46 +51,77 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
     "astra@astraproductionsbyjc.com":   "sig_astra.png",
 
     # --- PrivateEmail 5 accounts (each different) ---
-    "marketing@barnesnobleinfo.com":      "sig_private_marketing.png",
-    "jordan_kendrick@barnesnobleinfo.com":"sig_private_jordan.png",
-    "jodi_horowitz@barnesnobleinfo.com":  "sig_private_jodi.png",
-    "alison@barnesnobleinfo.com":         "sig_private_alison.png",
-    "fiorela@barnesnobleinfo.com":        "sig_private_fiorela.png",
+    "jordankendrick@barnesnoblemarketing.com":"sig_private_jordan.png",
+    "jodihorowitz@barnesnoblemarketing.com":  "sig_private_jodi.png",
+    "alisonaguair@barnesnoblemarketing.com": "sig_private_alison.png",
+    "fiorelladelima@barnesnoblemarketing.com": "sig_private_fiorela.png",
+    "annettedanek-akey@barnesnoblemarketing.com": "sig_private_annette.png",
 }
-
-# OPTIONAL: per-pitch override (wins over SIGNATURE_BY_FROM)
 SIGNATURE_BY_PITCH = {
-    # "pitch2": "sig_special.png",
-}
+    }
+PITCH1_BODY = """Dear {AuthorName}, 
+
+Your book, "{BookTitle}" reads like scenes, not just sentences.
+
+Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. 
+We help authors place their books on consignment in B&N physical bookstores across the United States.
+
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
+
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
+
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
+
+If you’re open to it, reply with:
+
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
+
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
+
+Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+
+Best regards,
+{SIGIMG}
+
+P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
+(or just reply “unsubscribe”).
+"""
 
 PITCHES = {
     "pitch1": {
-        "subject": "Cinematic first impression for your book",
+        "subject": "Quick idea for {BookTitle}",
         "body": """Dear {AuthorName}, 
 
-Readers decide fast: Do I feel anything?
+Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-{BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
+Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. 
+We help authors place their books on consignment in B&N physical bookstores across the United States.
 
-My name is Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. We help authors place their books on consignment in B&N physical bookstores across the United States.
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
-I’m reaching out because we partner with Astra Productions, a team we trust to create cinematic book trailers and clean author/book pages that convert interest into clicks.
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-What we’d build for {BookTitle}:
-• a short cinematic trailer that makes the tone and stakes felt immediately
-• a focused book page with your cover, best review lines, and clear buy buttons
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
 
-This also sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
+If you’re open to it, reply with:
 
-If you’re open to it, send 3 quick details:
-• what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-• 1–2 must-include lines (tagline / review / award)
-• anything to avoid (spoilers)
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
 
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
 
 Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-(Comparable cinematic trailers are often $3,000+.)
 
 Best regards,
 {SIGIMG}
@@ -101,37 +132,35 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
             },
 
     "pitch2": {
-        "subject": "Barnes & Noble Physical Placement",
+        "subject": "B&N Physical Placement",
         "body": """Hi {AuthorName},
 
-My name is Jordan Kendrick, and I manage marketing and distribution programs that help authors place their books on consignment in B&N physical bookstores across the United States.
+Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
+Jordan Kendrick, Marketing director and I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
-How the program works:
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
 
-Your total investment for initial physical stocking is:
+If you’re open to it, reply with:
 
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
 
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
 
-Have a wonderful day!
+Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
 
-Sincerely,
-Jordan Kendrick
-Marketing director
+Best regards,
+{SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”).
@@ -139,37 +168,35 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch3": {
-        "subject": "Barnes & Noble Physical Placement",
+        "subject": "B&N Physical Placement",
         "body": """Hi {AuthorName},
 
-My name is Jodi Horowitz, and I manage marketing and distribution programs that help authors place their books on consignment in B&N physical bookstores across the United States.
+Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
+Jodi Horowitz, Customer Marketing Director and I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
-How the program works:
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
 
-Your total investment for initial physical stocking is:
+If you’re open to it, reply with:
 
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
 
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
 
-Have a wonderful day!
+Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
 
-Sincerely,
-Jodi Horowitz
-Customer Marketing Director
+Best regards,
+{SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”).
@@ -177,38 +204,34 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch4": {
-        "subject": "Barnes & Noble Physical Placement",
+        "subject": "B&N Physical Placement",
         "body": """Hi {AuthorName},
 
-My name is Alison Aguair, and I manage marketing and distribution programs that help authors place their books on consignment in B&N physical bookstores across the United States.
+Your book, "{BookTitle}" reads like scenes, not just sentences.
+Alison, Senior Manager, Marketing Operations and I manage distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-How the program works:
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
 
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
+If you’re open to it, reply with:
 
-Your total investment for initial physical stocking is:
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
 
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
 
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
+Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
 
-Have a wonderful day!
-
-Sincerely,
-Alison Aguiar 
-Senior Manager, Marketing Operations
-Barnesnoble Inc.
+Best regards,
+{SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”).
@@ -216,38 +239,36 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch5": {
-        "subject": "Barnes & Noble Physical Placement",
+        "subject": "B&N Physical Placement",
         "body": """Hi {AuthorName},
 
-My name is Fiorella DeLima, and I manage marketing and distribution programs that help authors place their books on consignment in B&N physical bookstores across the United States.
+Readers decide fast: Do I feel anything?
+We are reaching out because your book, {BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
 
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
+Fiorella DeLima, Production Manager and I manage marketing distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
+We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
-How the program works:
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
+This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
 
-Your total investment for initial physical stocking is:
+If you’re open to it, reply with:
 
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
+what you want readers to feel (e.g., eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline, review, award)
+anything to avoid (spoilers, tropes)
 
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
+I’ll send back:
+• two trailer opening hook concepts for {BookTitle}
+• a simple one-page layout
+• 2–3 recent examples (so you can judge the fit before deciding)
 
-Have a wonderful day!
+Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
 
-Sincerely,
-Fiorella deLima
-Barnes & Noble
-Production Manager 
+Best regards,
+{SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”)."""
@@ -434,6 +455,8 @@ Opt out: {UnsubMailto}
     "subject": "Cinematic first impression for your book",
     "body": """Hi {AuthorName},
 
+Happy Holidays!
+
 I'm Sofia Margaret, Creative Producer of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
 The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
@@ -455,6 +478,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
   "astra2": {
     "subject": "Cinematic first impression for your book",
     "body": """Hi {AuthorName},
+
+Happy Holidays!
 
 I'm Windelle JC, CEO of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
@@ -478,6 +503,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
         "subject": "Quick Idea to make your Book stand out online",
         "body": """Hi {AuthorName},
 
+Happy Holidays!
+
 I'm Jordan Miller, Author Outreach Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
 The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
@@ -499,6 +526,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
   "astra4": {
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
+
+Happy Holidays!
 
 I'm Kent Rivera, Client Success Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
@@ -522,6 +551,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
+Happy Holidays!
+
 I'm Zach King, Web & Trailer Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
 The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
@@ -544,6 +575,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
 
+Happy Holidays!
+
 I'm Alex Carter, Marketing Team Lead of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
 The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
@@ -565,6 +598,8 @@ If you'd prefer I don't follow up, click: {UnsubMailto}
        "astra7": {
     "subject": "Quick Idea to make your Book stand out online",
     "body": """Hi {AuthorName},
+
+Happy Holidays!
 
 I'm Megan, Production Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
 
@@ -812,18 +847,27 @@ def build_message(
     author = (author or "there").strip()
     book_title = (book_title or "").strip() or "your book"
 
-    body_text = body_template.format(
+    format_args = {
+        "AuthorName": author,
+        "BookTitle": book_title,
+        "UnsubEmail": unsub_email,
+        "UnsubMailto": unsub_mailto,
+        "SIGIMG": "{SIGIMG}",   # keep marker for HTML rendering
+    }
+
+    body_text = body_template.format(**format_args)
+    subject_text = subject.format(
         AuthorName=author,
         BookTitle=book_title,
         UnsubEmail=unsub_email,
         UnsubMailto=unsub_mailto,
-        SIGIMG="{SIGIMG}",   # <-- prevents KeyError and keeps the marker for HTML
+        SIGIMG="",
     )
 
     msg = EmailMessage()
     msg["From"] = from_email
     msg["To"] = to_email
-    msg["Subject"] = subject
+    msg["Subject"] = subject_text
     msg["Reply-To"] = from_email
     msg["List-Unsubscribe"] = f"<mailto:{unsub_email}?subject=unsubscribe>"
 
