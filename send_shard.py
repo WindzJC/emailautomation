@@ -248,11 +248,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 500,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 18,
+        "max_total": 15,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -265,11 +265,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 920,
+        "interval": 500,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 18,
+        "max_total": 15,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -282,11 +282,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 930,
+        "interval": 500,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 18,
+        "max_total": 15,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -299,11 +299,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 940,
+        "interval": 500,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 18,
+        "max_total": 15,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -316,18 +316,18 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 950,
+        "interval": 500,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 18,
+        "max_total": 15,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
 
-
+####################################
     "gmail_corporate": {
         "provider": "gmail",
         "csv": "recipients_g1.csv",
@@ -427,34 +427,38 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCHES = {
-    "pitch1": {
-        "subject": "Quick idea for {BookTitle}",
-        "body": """Dear {AuthorName}, 
+PITCH_1_5_BODY = """Hi {AuthorName},
 
-Your book, "{BookTitle}" reads like scenes, not just sentences.
+Your book, “{BookTitle}” has “I can see this” energy. It reads like scenes, not just sentences.
+We are reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
+We partner with Astra Productions—a vetted, repeat-hire team we trust for on-time delivery and conversion-focused creative—to build two launch assets that make readers feel the book fast:
+30–60s cinematic trailer (tone + stakes in the opening beats)
+clean, focused book page (cover, hook, proof lines, clear buy buttons)
 
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
+These two assets are what set you up for physical-store placement later—they let decision-makers preview the book fast. 
 
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
+If you already have a buyer-ready trailer + book page/website, you can skip Investment A and proceed directly to Investment B (assuming your current assets meet the program standards).
 
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
+Before you archive this: if a reader (or bookseller) gave your book 10 seconds, would they instantly understand the tone and stakes? That’s what we build.
 
-If you’re open to it, reply with:
+If you want us to draft concepts, reply with:
+what you want readers to feel (eerie / hopeful / heart-racing)
+1–2 must-include lines (tagline / review / award)
+anything to avoid (spoilers / tropes)
 
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
+I’ll send back two trailer opening hook concepts, a one-page layout, and 2–3 examples so you can judge fit before deciding.
 
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
+Investment A (Launch Assets): Trailer $999 | Book page $499 | Bundle $1,299
 
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
+Investment B ( Book Placement Program — print quantity):
+
+$1,000 for 3,500 copies
+$750 for 2,500 copies
+$500 for 1,500 copies
+$250 for 750 copies
+
+You can select the quantity that fits your goals and budget. Your only additional cost is shipping.
 
 Best regards,
 {SIGIMG}
@@ -462,148 +466,31 @@ Best regards,
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”).
 """
+
+PITCHES = {
+    "pitch1": {
+        "subject": "Quick idea for {BookTitle}",
+        "body": PITCH_1_5_BODY,
             },
 
     "pitch2": {
         "subject": "Quick idea for {BookTitle}",
-        "body": """Hi {AuthorName},
-
-Your book, "{BookTitle}" reads like scenes, not just sentences.
-
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
-
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
-
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
-
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, reply with:
-
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
-
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-
-Best regards,
-{SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
+        "body": PITCH_1_5_BODY,
     },
 
     "pitch3": {
         "subject": "Quick idea for {BookTitle}",
-        "body": """Hi {AuthorName},
-
-Your book, "{BookTitle}" reads like scenes, not just sentences.
-
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
-
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
-
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
-
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, reply with:
-
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
-
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-
-Best regards,
-{SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
+        "body": PITCH_1_5_BODY,
     },
 
     "pitch4": {
         "subject": "Quick idea for {BookTitle}",
-        "body": """Hi {AuthorName},
-
-Your book, "{BookTitle}" reads like scenes, not just sentences.
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
-
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
-
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
-
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, reply with:
-
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
-
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples so you can judge the fit before deciding
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-
-Best regards,
-{SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
+        "body": PITCH_1_5_BODY,
     },
 
     "pitch5": {
         "subject": "Quick idea for {BookTitle}",
-        "body": """Hi {AuthorName},
-
-your book, {BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
-
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
-
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
-
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
-
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, reply with:
-
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
-
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-
-Best regards,
-{SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”)."""
+        "body": PITCH_1_5_BODY,
 
   },
 
