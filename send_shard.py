@@ -3,6 +3,7 @@
 # =========================
 
 import argparse
+import base64
 import csv
 import html
 import random
@@ -167,7 +168,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 900,
         "batch_size": 5,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
@@ -181,9 +182,9 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 920,
         "batch_size": 5,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
@@ -197,9 +198,9 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 930,
         "batch_size": 5,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
@@ -213,9 +214,9 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 940,
         "batch_size": 5,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
@@ -229,14 +230,89 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 950,
         "batch_size": 5,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "password_env": "PRIVATE_FIORELA_APP_PW",
+    },
+    "sendgrid_annet": {
+        "provider": "sendgrid",
+        "csv": "recipients_1.csv",
+        "log": "private_annet_log.csv",
+        "pitch": "pitch1",
+        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 900,
+        "batch_size": 5,
+        "cooldown_seconds": 1200,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+    },
+    "sendgrid_jordan": {
+        "provider": "sendgrid",
+        "csv": "recipients_2.csv",
+        "log": "private_jordan_kendrick_log.csv",
+        "pitch": "pitch2",
+        "from_email": "jordankendrick@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 920,
+        "batch_size": 5,
+        "cooldown_seconds": 1200,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+    },
+    "sendgrid_jodi": {
+        "provider": "sendgrid",
+        "csv": "recipients_3.csv",
+        "log": "private_jodi_horowitz_log.csv",
+        "pitch": "pitch3",
+        "from_email": "jodihorowitz@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 930,
+        "batch_size": 5,
+        "cooldown_seconds": 1200,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+    },
+    "sendgrid_alison": {
+        "provider": "sendgrid",
+        "csv": "recipients_4.csv",
+        "log": "private_alison_log.csv",
+        "pitch": "pitch4",
+        "from_email": "alisonaguair@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 940,
+        "batch_size": 5,
+        "cooldown_seconds": 1200,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+    },
+    "sendgrid_fiorela": {
+        "provider": "sendgrid",
+        "csv": "recipients_5.csv",
+        "log": "private_fiorela_log.csv",
+        "pitch": "pitch5",
+        "from_email": "fiorelladelima@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 950,
+        "batch_size": 5,
+        "cooldown_seconds": 1200,
+        "repeat": True,
+        "max_total": 20,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
     },
     "gmail_corporate": {
         "provider": "gmail",
@@ -247,7 +323,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
         "interval": 300,
         "batch_size": 10,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 40,
         "max_messages_24h": 120,
@@ -264,7 +340,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
         "interval": 300,
         "batch_size": 10,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 40,
         "max_messages_24h": 120,
@@ -281,7 +357,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
         "interval": 300,
         "batch_size": 10,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 40,
         "max_messages_24h": 120,
@@ -298,7 +374,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com",
         "interval": 300,
         "batch_size": 10,
-        "cooldown_seconds": 1800,
+        "cooldown_seconds": 1200,
         "repeat": True,
         "max_total": 40,
         "max_messages_24h": 120,
@@ -340,8 +416,7 @@ PITCH1_BODY = """Dear {AuthorName},
 
 Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. 
-We help authors place their books on consignment in B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -377,8 +452,7 @@ PITCHES = {
 
 Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. 
-We help authors place their books on consignment in B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -409,12 +483,12 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
             },
 
     "pitch2": {
-        "subject": "B&N Physical Placement",
+        "subject": "Quick idea for {BookTitle}",
         "body": """Hi {AuthorName},
 
 Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-Jordan Kendrick, Marketing director and I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -445,12 +519,12 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch3": {
-        "subject": "B&N Physical Placement",
+        "subject": "Quick idea for {BookTitle}",
         "body": """Hi {AuthorName},
 
 Your book, "{BookTitle}" reads like scenes, not just sentences.
 
-Jodi Horowitz, Customer Marketing Director and I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -481,11 +555,11 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch4": {
-        "subject": "B&N Physical Placement",
+        "subject": "Quick idea for {BookTitle}",
         "body": """Hi {AuthorName},
 
 Your book, "{BookTitle}" reads like scenes, not just sentences.
-Alison, Senior Manager, Marketing Operations and I manage distribution programs that help authors place their books on B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -516,13 +590,12 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
     },
 
     "pitch5": {
-        "subject": "B&N Physical Placement",
+        "subject": "Quick idea for {BookTitle}",
         "body": """Hi {AuthorName},
 
-Readers decide fast: Do I feel anything?
-We are reaching out because your book, {BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
+your book, {BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
 
-Fiorella DeLima, Production Manager and I manage marketing distribution programs that help authors place their books on B&N physical bookstores across the United States.
+I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
 
 We partner with Astra Productions to create two launch assets that make readers feel the book fast:
 
@@ -1109,16 +1182,14 @@ def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
     return f"<html><body><p>{safe}</p></body></html>"
 
 
-def build_message(
-    from_email: str,
-    to_email: str,
+def render_message_parts(
     author: str,
     book_title: str,
     subject: str,
     body_template: str,
     unsub_email: str,
-    signature_file: Optional[Path] = None,
-) -> EmailMessage:
+    signature_file: Optional[Path],
+) -> Tuple[str, str, str, Optional[str]]:
     unsub_mailto = make_unsub_mailto(unsub_email)
 
     author = (author or "there").strip()
@@ -1141,6 +1212,30 @@ def build_message(
         SIGIMG="",
     )
 
+    cid = SIGNATURE_CID if (signature_file and signature_file.exists()) else None
+    html_body = text_to_html(body_text, unsub_mailto, cid=cid)
+    return subject_text, body_text, html_body, cid
+
+
+def build_message(
+    from_email: str,
+    to_email: str,
+    author: str,
+    book_title: str,
+    subject: str,
+    body_template: str,
+    unsub_email: str,
+    signature_file: Optional[Path] = None,
+) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
+    subject_text, body_text, html_body, cid = render_message_parts(
+        author,
+        book_title,
+        subject,
+        body_template,
+        unsub_email,
+        signature_file,
+    )
+
     msg = EmailMessage()
     msg["From"] = from_email
     msg["To"] = to_email
@@ -1151,8 +1246,6 @@ def build_message(
     # Plain text: remove marker so recipients don't see "{SIGIMG}"
     msg.set_content(body_text.replace("{SIGIMG}", "").strip())
 
-    cid = SIGNATURE_CID if (signature_file and signature_file.exists()) else None
-    html_body = text_to_html(body_text, unsub_mailto, cid=cid)
     msg.add_alternative(html_body, subtype="html")
 
     # Attach inline signature only if pitch contains {SIGIMG} AND signature_file exists
@@ -1167,8 +1260,65 @@ def build_message(
             disposition="inline",
         )
 
-    return msg
+    return msg, subject_text, body_text, html_body, cid
 
+
+def send_via_sendgrid(
+    api_key: str,
+    from_email: str,
+    to_email: str,
+    reply_to: str,
+    subject_text: str,
+    body_text: str,
+    html_body: str,
+    unsub_email: str,
+    signature_file: Optional[Path],
+    cid: Optional[str],
+) -> None:
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import (
+            Mail,
+            Content,
+            ReplyTo,
+            Attachment,
+            FileContent,
+            FileName,
+            FileType,
+            Disposition,
+            ContentId,
+            Header,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "sendgrid library not installed; add 'sendgrid' to requirements and install it"
+        ) from exc
+
+    mail = Mail(from_email=from_email, to_emails=to_email, subject=subject_text)
+    mail.add_content(Content("text/plain", body_text.replace("{SIGIMG}", "").strip()))
+    mail.add_content(Content("text/html", html_body))
+    mail.reply_to = ReplyTo(reply_to)
+    mail.add_header(Header("List-Unsubscribe", f"<mailto:{unsub_email}?subject=unsubscribe>"))
+
+    if cid and signature_file and signature_file.exists() and "{SIGIMG}" in body_text:
+        img_bytes = signature_file.read_bytes()
+        encoded = base64.b64encode(img_bytes).decode("ascii")
+        mail.add_attachment(
+            Attachment(
+                FileContent(encoded),
+                FileName(signature_file.name),
+                FileType("image/png"),
+                Disposition("inline"),
+                ContentId(cid),
+            )
+        )
+
+    response = SendGridAPIClient(api_key).send(mail)
+    if response.status_code != 202:
+        body = response.body
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        raise RuntimeError(f"sendgrid_error: status={response.status_code} body={body}")
 
 # ===== SMTP session =====
 def smtp_login(host: str, port: int, user: str, pw: str) -> smtplib.SMTP:
@@ -1329,7 +1479,8 @@ def main():
     ap.add_argument("--csv")
     ap.add_argument("--log")
     ap.add_argument("--pitch", choices=sorted(PITCHES.keys()))
-    ap.add_argument("--provider", choices=["private", "gmail"])
+    ap.add_argument("--provider", choices=["private", "gmail", "sendgrid"], default="")
+    ap.add_argument("--sendgrid", action="store_true", help="Use SendGrid Email API backend.")
 
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--unsub", default=DEFAULT_UNSUB_EMAIL)
@@ -1373,6 +1524,15 @@ def main():
     if args.profile:
         print(f"PROFILE: {args.profile}")
 
+    sendgrid_api_key = os.environ.get("SENDGRID_API_KEY", "").strip()
+    if args.sendgrid:
+        if args.provider and args.provider != "sendgrid":
+            print("ERROR: --sendgrid cannot be combined with --provider that is not sendgrid.")
+            return
+        args.provider = "sendgrid"
+    if not args.provider and sendgrid_api_key:
+        args.provider = "sendgrid"
+
     required_missing = [name for name, val in [
         ("provider", args.provider),
         ("csv", args.csv),
@@ -1384,6 +1544,10 @@ def main():
         print("Provide them via flags or set a --profile that includes them.")
         return
 
+    if args.provider == "sendgrid" and not args.dry_run and not sendgrid_api_key:
+        print("ERROR: SENDGRID_API_KEY is required for --provider sendgrid.")
+        return
+
     provider_defaults = PROVIDER_LIMIT_DEFAULTS.get(args.provider, {})
     if args.provider == "private" and args.max_messages_1h is None:
         args.max_messages_1h = int(provider_defaults.get("max_messages_1h", 0))
@@ -1393,7 +1557,7 @@ def main():
         if args.max_unique_external_24h is None:
             args.max_unique_external_24h = int(provider_defaults.get("max_unique_external_24h", 0))
 
-    host, port = SMTP_PRESETS[args.provider]
+    host, port = SMTP_PRESETS.get(args.provider, ("sendgrid", "api"))
     pitch = PITCHES[args.pitch]
     subject = (pitch.get("subject") or "").strip()
     body_template = (pitch.get("body") or "").strip()
@@ -1519,7 +1683,7 @@ def main():
 
     from_user = norm_email(args.from_email) or norm_email(input("From (email address you are logging in as): "))
     pw = ""
-    if not args.dry_run:
+    if not args.dry_run and args.provider != "sendgrid":
         if args.password_env:
             pw = os.environ.get(args.password_env, "").strip()
         if not pw and args.password:
@@ -1552,12 +1716,33 @@ def main():
             smtp = smtp_login(host, port, from_user, pw)
         return smtp
 
-    def send_one(msg: EmailMessage) -> None:
+    def send_one(
+        msg: EmailMessage,
+        to_email: str,
+        subject_text: str,
+        body_text: str,
+        html_body: str,
+        cid: Optional[str],
+    ) -> None:
         """
         PrivateEmail: connect per message (reduces DISCONNECTED loops)
         Gmail: keep connection open
         """
         nonlocal smtp
+        if args.provider == "sendgrid":
+            send_via_sendgrid(
+                sendgrid_api_key,
+                from_user,
+                to_email,
+                from_user,
+                subject_text,
+                body_text,
+                html_body,
+                unsub_email,
+                sig_path,
+                cid,
+            )
+            return
         if args.provider == "private":
             smtp_close(smtp)
             smtp = None
@@ -1642,7 +1827,7 @@ def main():
                 author = (r.get("AuthorName") or "there").strip()
                 book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
-                msg = build_message(
+                msg, subject_text, body_text, html_body, cid = build_message(
                     from_user, to_email, author, book_title,
                     subject, body_template, unsub_email,
                     signature_file=sig_path
@@ -1657,7 +1842,7 @@ def main():
                         if args.provider == "private" and args.max_messages_1h:
                             domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                        send_one(msg)
+                        send_one(msg, to_email, subject_text, body_text, html_body, cid)
 
                         log_row(log_path, to_email, "SENT")
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
@@ -1720,7 +1905,7 @@ def main():
                         if args.provider == "private" and args.max_messages_1h:
                             domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                        send_one(msg)
+                        send_one(msg, to_email, subject_text, body_text, html_body, cid)
 
                         log_row(log_path, to_email, "SENT", "reconnect_ok")
                         print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
@@ -1773,7 +1958,7 @@ def main():
                             if args.provider == "private" and args.max_messages_1h:
                                 domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                            send_one(msg)
+                            send_one(msg, to_email, subject_text, body_text, html_body, cid)
 
                             log_row(log_path, to_email, "SENT", "throttle_retry_ok")
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
