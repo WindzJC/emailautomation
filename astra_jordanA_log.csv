@@ -288,7 +288,6 @@ TimestampUTC,Email,Status,Info
 2025-12-24T19:32:11.320274+00:00,judymerrill@msn.com,SENT,
 2025-12-24T19:36:18.017152+00:00,ameurasstory@gmail.com,SENT,
 2025-12-24T19:40:28.304949+00:00,judyrainbow1313@yahoo.com,SENT,
-2025-12-25T21:51:52.389464+00:00,windellejcr@gmail.com,SENT,
 2025-12-25T21:55:57.181081+00:00,juhi.yajnik@gmail.com,SENT,
 2025-12-25T21:59:59.424616+00:00,juliajew2@yahoo.com,SENT,
 2025-12-25T22:04:05.643392+00:00,julianorur@yahoo.com,SENT,
@@ -351,3 +350,421 @@ TimestampUTC,Email,Status,Info
 2025-12-26T06:06:03.197829+00:00,harriskijana@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-26T06:10:10.276711+00:00,harriskijana@yahoo.com,SENT,reconnect_ok
 2025-12-26T06:14:11.957521+00:00,waitasec@verizon.net,SENT,
+2025-12-26T20:30:43.838416+00:00,pastorkimwenzel@gmail.com,SENT,
+2025-12-26T20:34:45.006262+00:00,itspuzzletimebahamas@gmail.com,SENT,
+2025-12-26T20:39:20.041250+00:00,kimm9806@excite.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T20:43:29.481144+00:00,kimm9806@excite.com,SENT,reconnect_ok
+2025-12-26T20:48:08.489172+00:00,kimberlymock65@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T20:52:15.845454+00:00,kimberlymock65@yahoo.com,SENT,reconnect_ok
+2025-12-26T20:56:49.879723+00:00,fkblackard@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:01:03.341105+00:00,fkblackard@aol.com,SENT,reconnect_ok
+2025-12-26T21:05:41.379295+00:00,dreamer@expandingminds.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:09:52.332943+00:00,dreamer@expandingminds.net,SENT,reconnect_ok
+2025-12-26T21:14:24.345480+00:00,slskrc@cs.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:18:32.579628+00:00,slskrc@cs.com,SENT,reconnect_ok
+2025-12-26T21:23:04.616237+00:00,kristencrusoe@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:27:14.466946+00:00,kristencrusoe@aol.com,SENT,reconnect_ok
+2025-12-26T21:40:32.013629+00:00,jalilalove123@gmail.com,SENT,
+2025-12-26T21:45:06.048520+00:00,teenyotto@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:49:15.926094+00:00,teenyotto@gmail.com,SENT,reconnect_ok
+2025-12-26T21:53:47.960710+00:00,kbrasor0531@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T21:57:51.777135+00:00,kbrasor0531@gmail.com,SENT,reconnect_ok
+2025-12-26T22:02:31.814288+00:00,kyanbucknor2@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:06:34.984879+00:00,kyanbucknor2@gmail.com,SENT,reconnect_ok
+2025-12-26T22:11:13.050115+00:00,yadloskykyle@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:15:25.801777+00:00,yadloskykyle@yahoo.com,SENT,reconnect_ok
+2025-12-26T22:20:02.842883+00:00,aglbkelley@netzero.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:24:14.617666+00:00,aglbkelley@netzero.net,SENT,reconnect_ok
+2025-12-26T22:28:54.628276+00:00,crowelrc93@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:32:59.506088+00:00,crowelrc93@aol.com,SENT,reconnect_ok
+2025-12-26T22:37:34.540902+00:00,alveru@teleline.es,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:41:38.868421+00:00,alveru@teleline.es,SENT,reconnect_ok
+2025-12-26T22:46:17.903611+00:00,lancedauzat@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:50:29.700602+00:00,lancedauzat@yahoo.com,SENT,reconnect_ok
+2025-12-26T22:55:06.736478+00:00,larecea@nctc.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T22:59:13.019589+00:00,larecea@nctc.com,SENT,reconnect_ok
+2025-12-26T23:16:23.054635+00:00,denabentley@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T23:20:25.835060+00:00,denabentley@hotmail.com,SENT,reconnect_ok
+2025-12-26T23:24:58.870062+00:00,leford1956@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T23:29:11.179458+00:00,leford1956@gmail.com,SENT,reconnect_ok
+2025-12-26T23:33:49.214404+00:00,larrymalcolm3329@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T23:38:00.529269+00:00,larrymalcolm3329@gmail.com,SENT,reconnect_ok
+2025-12-26T23:42:37.563907+00:00,laurenceromanelli@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T23:46:47.144568+00:00,laurenceromanelli@yahoo.com,SENT,reconnect_ok
+2025-12-26T23:51:22.167998+00:00,lashandanbaker@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-26T23:55:33.044370+00:00,lashandanbaker@gmail.com,SENT,reconnect_ok
+2025-12-27T00:00:05.079312+00:00,facey_101@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T00:04:10.901883+00:00,facey_101@yahoo.com,SENT,reconnect_ok
+2025-12-27T00:08:47.936820+00:00,laura_antonelli@sbcglobal.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T00:12:51.756189+00:00,laura_antonelli@sbcglobal.net,SENT,reconnect_ok
+2025-12-27T00:16:52.889912+00:00,baby_girl_7621@yahoo.com,SENT,
+2025-12-27T00:20:54.130141+00:00,laura.lang@att.net,SENT,
+2025-12-27T00:25:32.164614+00:00,laurahwest@att.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T00:29:38.416937+00:00,laurahwest@att.net,SENT,reconnect_ok
+2025-12-27T00:46:48.452347+00:00,lduchesne@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T00:50:52.347415+00:00,lduchesne@gmail.com,SENT,reconnect_ok
+2025-12-27T00:54:54.530580+00:00,laurissiajohnson@att.net,SENT,
+2025-12-27T00:59:29.564790+00:00,lalfordlawrence@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:03:34.946032+00:00,lalfordlawrence@aol.com,SENT,reconnect_ok
+2025-12-27T01:08:13.981207+00:00,lawrencehussman@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:12:19.591596+00:00,lawrencehussman@aol.com,SENT,reconnect_ok
+2025-12-27T01:16:51.627202+00:00,stinsonlawrence@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:20:59.884919+00:00,stinsonlawrence@yahoo.com,SENT,reconnect_ok
+2025-12-27T01:27:11.602986+00:00,leah_mcnair@yahoo.com,SENT,
+2025-12-27T01:31:43.639279+00:00,foreverwingnut@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:35:50.521955+00:00,foreverwingnut@yahoo.com,SENT,reconnect_ok
+2025-12-27T01:40:24.556404+00:00,lee@leemckenzie.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:44:27.303432+00:00,lee@leemckenzie.com,SENT,reconnect_ok
+2025-12-27T01:49:00.347087+00:00,leigh200614@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T01:53:04.120351+00:00,leigh200614@yahoo.com,SENT,reconnect_ok
+2025-12-27T01:57:36.164612+00:00,lendrayton@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:01:40.992585+00:00,lendrayton@yahoo.com,SENT,reconnect_ok
+2025-12-27T02:06:17.027633+00:00,lccombs@mindspring.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:10:23.238758+00:00,lccombs@mindspring.com,SENT,reconnect_ok
+2025-12-27T02:14:59.274069+00:00,leonardberman18@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:19:07.642846+00:00,leonardberman18@gmail.com,SENT,reconnect_ok
+2025-12-27T02:23:39.678135+00:00,gigiloveslee@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:27:42.100659+00:00,gigiloveslee@gmail.com,SENT,reconnect_ok
+2025-12-27T02:32:21.125854+00:00,braunstein.les@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:36:31.691745+00:00,braunstein.les@gmail.com,SENT,reconnect_ok
+2025-12-27T02:41:11.705554+00:00,caudel54@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T02:45:20.109733+00:00,caudel54@yahoo.com,SENT,reconnect_ok
+2025-12-27T03:02:30.144693+00:00,leslie.terrell@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:06:34.968283+00:00,leslie.terrell@yahoo.com,SENT,reconnect_ok
+2025-12-27T03:10:36.108343+00:00,lewnor@bellsouth.net,SENT,
+2025-12-27T03:15:12.142343+00:00,mercedesvasquez12@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:19:16.014044+00:00,mercedesvasquez12@yahoo.com,SENT,reconnect_ok
+2025-12-27T03:23:17.179639+00:00,lilipod2@gmail.com,SENT,
+2025-12-27T03:27:53.188919+00:00,linda.amato@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:32:06.489137+00:00,linda.amato@hotmail.com,SENT,reconnect_ok
+2025-12-27T03:36:45.523839+00:00,collin.linda@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:40:55.037738+00:00,collin.linda@yahoo.com,SENT,reconnect_ok
+2025-12-27T03:45:33.072337+00:00,ldelaney@concentric.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:49:37.851860+00:00,ldelaney@concentric.net,SENT,reconnect_ok
+2025-12-27T03:54:12.890582+00:00,lindehornsby@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T03:58:20.677662+00:00,lindehornsby@aol.com,SENT,reconnect_ok
+2025-12-27T04:02:22.812391+00:00,leggsoffla@embarqmail.com,SENT,
+2025-12-27T04:06:56.849323+00:00,richardcalonge@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T04:11:07.740367+00:00,richardcalonge@aol.com,SENT,reconnect_ok
+2025-12-27T04:28:17.775685+00:00,llscribner@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T04:32:25.713924+00:00,llscribner@gmail.com,SENT,reconnect_ok
+2025-12-27T04:37:02.750043+00:00,lydialipshire@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T04:41:06.008832+00:00,lydialipshire@yahoo.com,SENT,reconnect_ok
+2025-12-27T04:45:38.044426+00:00,weculmg@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T04:49:47.730744+00:00,weculmg@aol.com,SENT,reconnect_ok
+2025-12-27T04:53:49.833395+00:00,delabyli@butte.edu,SENT,
+2025-12-27T04:58:24.867595+00:00,lrktangostales@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T05:02:32.293180+00:00,lrktangostales@gmail.com,SENT,reconnect_ok
+2025-12-27T05:07:09.329198+00:00,lisaokochi@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:07:30.049390+00:00,lisaokochi@hotmail.com,SENT,
+2025-12-27T13:12:02.057729+00:00,lvogel@panix.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:16:10.984749+00:00,lvogel@panix.com,SENT,reconnect_ok
+2025-12-27T13:20:48.020408+00:00,bslupik1@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:24:58.867917+00:00,bslupik1@gmail.com,SENT,reconnect_ok
+2025-12-27T13:29:37.902440+00:00,harrads@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:33:48.858826+00:00,harrads@aol.com,SENT,reconnect_ok
+2025-12-27T13:37:50.601634+00:00,loislund13@gmail.com,SENT,
+2025-12-27T13:42:29.635663+00:00,lolalove@mac.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:46:34.673514+00:00,lolalove@mac.com,SENT,reconnect_ok
+2025-12-27T13:51:12.708058+00:00,lrhubbard2911@verizon.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T13:55:19.303803+00:00,lrhubbard2911@verizon.net,SENT,reconnect_ok
+2025-12-27T13:59:58.339348+00:00,geno12@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T14:04:05.411508+00:00,geno12@hotmail.com,SENT,reconnect_ok
+2025-12-27T14:08:38.447201+00:00,lbogedin@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T14:12:44.976763+00:00,lbogedin@yahoo.com,SENT,reconnect_ok
+2025-12-27T14:16:47.202133+00:00,lndavis@burgoyne.com,SENT,
+2025-12-27T14:33:57.237636+00:00,lorraineoudkerk@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T14:38:09.288245+00:00,lorraineoudkerk@gmail.com,SENT,reconnect_ok
+2025-12-27T14:42:48.325160+00:00,louisbir@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T14:46:55.771518+00:00,louisbir@gmail.com,SENT,reconnect_ok
+2025-12-27T14:51:30.807384+00:00,louis@louismandrack.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T14:55:38.702235+00:00,louis@louismandrack.com,SENT,reconnect_ok
+2025-12-27T15:00:12.737165+00:00,withoutprovidence@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:04:15.631304+00:00,withoutprovidence@gmail.com,SENT,reconnect_ok
+2025-12-27T15:08:49.666159+00:00,lovellweldaldrich@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:13:09.458434+00:00,lovellweldaldrich@aol.com,SENT,reconnect_ok
+2025-12-27T15:17:49.494245+00:00,lucenasario55@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:21:57.715979+00:00,lucenasario55@yahoo.com,SENT,reconnect_ok
+2025-12-27T15:25:59.820826+00:00,sportsmom37@yahoo.com,SENT,
+2025-12-27T15:30:35.855726+00:00,lcdaniels334@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:34:46.302397+00:00,lcdaniels334@gmail.com,SENT,reconnect_ok
+2025-12-27T15:39:24.338010+00:00,lquesada07@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:43:29.134976+00:00,lquesada07@yahoo.com,SENT,reconnect_ok
+2025-12-27T15:48:09.169899+00:00,yochevedavraham@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T15:52:19.510741+00:00,yochevedavraham@yahoo.com,SENT,reconnect_ok
+2025-12-27T16:09:29.546763+00:00,lyndadrews@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:13:35.504283+00:00,lyndadrews@gmail.com,SENT,reconnect_ok
+2025-12-27T16:18:10.541161+00:00,altman983@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:22:19.525160+00:00,altman983@gmail.com,SENT,reconnect_ok
+2025-12-27T16:26:52.561379+00:00,lynnmathai@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:31:07.163134+00:00,lynnmathai@yahoo.com,SENT,reconnect_ok
+2025-12-27T16:35:40.198001+00:00,llevy95@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:39:44.853123+00:00,llevy95@yahoo.com,SENT,reconnect_ok
+2025-12-27T16:44:20.889352+00:00,madalynmyers98@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:48:29.717402+00:00,madalynmyers98@gmail.com,SENT,reconnect_ok
+2025-12-27T16:53:00.751940+00:00,iowagirl1@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T16:57:04.634694+00:00,iowagirl1@aol.com,SENT,reconnect_ok
+2025-12-27T17:01:06.944495+00:00,gretahock@yahoo.com,SENT,
+2025-12-27T17:05:45.956708+00:00,makonnen_abebe@hc-sc.gc.ca,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T17:09:58.022664+00:00,makonnen_abebe@hc-sc.gc.ca,SENT,reconnect_ok
+2025-12-27T17:14:31.057856+00:00,slackmandi@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T17:18:33.692503+00:00,slackmandi@yahoo.com,SENT,reconnect_ok
+2025-12-27T17:23:13.727433+00:00,l.marc@azlawyers.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T17:27:25.929603+00:00,l.marc@azlawyers.com,SENT,reconnect_ok
+2025-12-27T17:44:35.964976+00:00,marcellusmoylan@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T17:48:45.943783+00:00,marcellusmoylan@gmail.com,SENT,reconnect_ok
+2025-12-27T17:53:25.980439+00:00,pennturner@ymail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T17:57:36.243173+00:00,pennturner@ymail.com,SENT,reconnect_ok
+2025-12-27T18:01:37.559161+00:00,mhurst@emypeople.net,SENT,
+2025-12-27T18:06:10.594329+00:00,mbelew1@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T18:10:23.683935+00:00,mbelew1@yahoo.com,SENT,reconnect_ok
+2025-12-27T18:14:24.955951+00:00,meggoss@rocketmail.com,SENT,
+2025-12-27T18:19:03.990518+00:00,margarettthomas@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T18:23:11.582664+00:00,margarettthomas@gmail.com,SENT,reconnect_ok
+2025-12-27T18:27:49.618442+00:00,krpurvis@juno.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T18:31:55.428597+00:00,krpurvis@juno.com,SENT,reconnect_ok
+2025-12-27T18:36:32.464409+00:00,keiffer@onlinemac.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T18:40:41.688678+00:00,keiffer@onlinemac.com,SENT,reconnect_ok
+2025-12-27T18:44:43.897684+00:00,kristine4761@hotmail.com,SENT,
+2025-12-27T18:49:19.931853+00:00,mromano@lvcoxmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T18:53:27.018323+00:00,mromano@lvcoxmail.com,SENT,reconnect_ok
+2025-12-27T19:10:37.053504+00:00,wildbirdy1@neo.rr.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T19:14:40.852921+00:00,wildbirdy1@neo.rr.com,SENT,reconnect_ok
+2025-12-27T19:19:12.888839+00:00,mhaddad65@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T19:23:27.240668+00:00,mhaddad65@yahoo.com,SENT,reconnect_ok
+2025-12-27T19:28:00.263742+00:00,kowosol@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T19:32:05.118004+00:00,kowosol@yahoo.com,SENT,reconnect_ok
+2025-12-27T19:36:41.153860+00:00,marilyn.kmay@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T19:40:50.233625+00:00,marilyn.kmay@yahoo.com,SENT,reconnect_ok
+2025-12-27T19:44:52.446892+00:00,mseguin@kent.edu,SENT,
+2025-12-27T19:49:27.481216+00:00,jrhispanic@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T19:53:40.820051+00:00,jrhispanic@yahoo.com,SENT,reconnect_ok
+2025-12-27T19:58:13.855153+00:00,marisadeeg@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T20:02:18.945971+00:00,marisadeeg@yahoo.com,SENT,reconnect_ok
+2025-12-27T20:06:51.981007+00:00,ldmjo@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T20:11:00.077974+00:00,ldmjo@yahoo.com,SENT,reconnect_ok
+2025-12-27T20:15:01.312372+00:00,markbruhwiller@gmail.com,SENT,
+2025-12-27T20:19:40.348331+00:00,mc@dovetailpr.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T20:23:46.586075+00:00,mc@dovetailpr.com,SENT,reconnect_ok
+2025-12-27T20:40:56.621483+00:00,mark.gunther@att.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T20:45:04.857873+00:00,mark.gunther@att.net,SENT,reconnect_ok
+2025-12-27T20:49:06.593914+00:00,kkevesdy@yahoo.com,SENT,
+2025-12-27T20:53:39.628599+00:00,amcdevitt13@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T20:57:50.634558+00:00,amcdevitt13@hotmail.com,SENT,reconnect_ok
+2025-12-27T21:02:23.670215+00:00,moverton4lplus@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:06:29.726271+00:00,moverton4lplus@yahoo.com,SENT,reconnect_ok
+2025-12-27T21:11:08.760978+00:00,mark.ryski@headcount.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:15:20.600242+00:00,mark.ryski@headcount.com,SENT,reconnect_ok
+2025-12-27T21:19:56.610328+00:00,mwhitake@ssc.wisc.edu,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:24:09.331434+00:00,mwhitake@ssc.wisc.edu,SENT,reconnect_ok
+2025-12-27T21:28:45.367312+00:00,marbe5105543@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:32:49.428792+00:00,marbe5105543@yahoo.com,SENT,reconnect_ok
+2025-12-27T21:37:29.460798+00:00,marcie913@msn.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:41:35.108349+00:00,marcie913@msn.com,SENT,reconnect_ok
+2025-12-27T21:46:15.149867+00:00,martha@heppard.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:50:27.427451+00:00,martha@heppard.com,SENT,reconnect_ok
+2025-12-27T21:55:05.439589+00:00,mspennato@geocities.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T21:59:19.441009+00:00,mspennato@geocities.com,SENT,reconnect_ok
+2025-12-27T22:16:29.477224+00:00,drexxx34@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T22:20:43.094566+00:00,drexxx34@yahoo.com,SENT,reconnect_ok
+2025-12-27T22:25:20.129639+00:00,bobcousy1934@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T22:29:29.222493+00:00,bobcousy1934@gmail.com,SENT,reconnect_ok
+2025-12-27T22:34:09.249204+00:00,wamaha@sbcglobal.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T22:38:14.894175+00:00,wamaha@sbcglobal.net,SENT,reconnect_ok
+2025-12-27T22:42:49.929999+00:00,we-win@att.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T22:47:01.246811+00:00,we-win@att.net,SENT,reconnect_ok
+2025-12-27T22:51:37.260546+00:00,marystearz@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T22:55:50.564717+00:00,marystearz@gmail.com,SENT,reconnect_ok
+2025-12-27T23:00:30.599700+00:00,mjclayton2003@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T23:04:34.271258+00:00,mjclayton2003@aol.com,SENT,reconnect_ok
+2025-12-27T23:09:11.306387+00:00,mmprairiedogs.850@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T23:13:19.374115+00:00,mmprairiedogs.850@hotmail.com,SENT,reconnect_ok
+2025-12-27T23:17:55.410149+00:00,maheff43@icloud.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T23:22:04.498816+00:00,maheff43@icloud.com,SENT,reconnect_ok
+2025-12-27T23:26:07.319687+00:00,fkinard@earthlink.net,SENT,
+2025-12-27T23:30:45.353680+00:00,mlott@everestkc.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T23:34:57.777699+00:00,mlott@everestkc.net,SENT,reconnect_ok
+2025-12-27T23:52:07.813396+00:00,mm44@cumc.columbia.edu,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-27T23:56:11.213309+00:00,mm44@cumc.columbia.edu,SENT,reconnect_ok
+2025-12-28T00:00:44.248843+00:00,pollard29@msn.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:04:50.602831+00:00,pollard29@msn.com,SENT,reconnect_ok
+2025-12-28T00:09:26.639061+00:00,dogma39@pacbell.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:13:31.949104+00:00,dogma39@pacbell.net,SENT,reconnect_ok
+2025-12-28T00:18:08.984846+00:00,maerae6@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:22:22.587969+00:00,maerae6@yahoo.com,SENT,reconnect_ok
+2025-12-28T00:26:53.623188+00:00,mary@nrvgateway.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:31:02.418227+00:00,mary@nrvgateway.com,SENT,reconnect_ok
+2025-12-28T00:35:37.453317+00:00,masejoiner@suddenlink.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:39:45.623872+00:00,masejoiner@suddenlink.net,SENT,reconnect_ok
+2025-12-28T00:44:17.658839+00:00,matthew.e.holgate@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:48:30.374066+00:00,matthew.e.holgate@gmail.com,SENT,reconnect_ok
+2025-12-28T00:53:01.410052+00:00,cookematthew500@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T00:57:12.960237+00:00,cookematthew500@gmail.com,SENT,reconnect_ok
+2025-12-28T01:01:50.996299+00:00,mmallico@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T01:06:00.117574+00:00,mmallico@gmail.com,SENT,reconnect_ok
+2025-12-28T01:10:39.152232+00:00,maddmatthias247@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T01:14:44.488921+00:00,maddmatthias247@yahoo.com,SENT,reconnect_ok
+2025-12-28T01:31:54.524119+00:00,mdorsey10@verizon.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T01:36:03.370696+00:00,mdorsey10@verizon.net,SENT,reconnect_ok
+2025-12-28T01:40:05.147927+00:00,p0das001@gmail.com,SENT,
+2025-12-28T01:44:40.182034+00:00,mxcurtis@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T01:48:50.429059+00:00,mxcurtis@gmail.com,SENT,reconnect_ok
+2025-12-28T01:53:27.466121+00:00,hsalihu@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T01:57:32.678248+00:00,hsalihu@yahoo.com,SENT,reconnect_ok
+2025-12-28T02:02:08.713785+00:00,megs.robertson@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T02:06:21.310233+00:00,megs.robertson@gmail.com,SENT,reconnect_ok
+2025-12-28T02:10:53.334124+00:00,authormelaniecalhoun@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T02:15:04.964570+00:00,authormelaniecalhoun@yahoo.com,SENT,reconnect_ok
+2025-12-28T02:19:06.192814+00:00,irene.tagama@gmail.com,SENT,
+2025-12-28T02:23:08.408488+00:00,melisa.arnold@aol.com,SENT,
+2025-12-28T02:27:39.415195+00:00,mwisenerfarr@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T02:31:47.484213+00:00,mwisenerfarr@hotmail.com,SENT,reconnect_ok
+2025-12-28T02:36:27.523427+00:00,melissa.ross08@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T02:40:34.102922+00:00,melissa.ross08@yahoo.com,SENT,reconnect_ok
+2025-12-28T02:57:44.139421+00:00,mlhighline1@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T03:01:53.641813+00:00,mlhighline1@comcast.net,SENT,reconnect_ok
+2025-12-28T03:06:26.678278+00:00,bullocksbonding@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T03:10:39.103274+00:00,bullocksbonding@yahoo.com,SENT,reconnect_ok
+2025-12-28T13:44:08.250605+00:00,ladymerneen@aol.com,SENT,
+2025-12-28T13:48:45.284817+00:00,mgyorgey99@verizon.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T13:52:54.680833+00:00,mgyorgey99@verizon.net,SENT,reconnect_ok
+2025-12-28T13:57:27.715385+00:00,faziomicah@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:01:34.252724+00:00,faziomicah@yahoo.com,SENT,reconnect_ok
+2025-12-28T14:06:06.288927+00:00,luvaction44@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:10:09.330689+00:00,luvaction44@gmail.com,SENT,reconnect_ok
+2025-12-28T14:14:41.365472+00:00,pillowmountain@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:18:45.606191+00:00,pillowmountain@gmail.com,SENT,reconnect_ok
+2025-12-28T14:23:17.642674+00:00,mj_conaway@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:27:20.707836+00:00,mj_conaway@yahoo.com,SENT,reconnect_ok
+2025-12-28T14:31:58.744464+00:00,matthew.digby@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:36:13.317278+00:00,matthew.digby@hotmail.com,SENT,reconnect_ok
+2025-12-28T14:40:46.353665+00:00,mikefries@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:44:51.967060+00:00,mikefries@aol.com,SENT,reconnect_ok
+2025-12-28T14:49:25.003344+00:00,michael.green133@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T14:53:33.675244+00:00,michael.green133@gmail.com,SENT,reconnect_ok
+2025-12-28T14:58:07.711240+00:00,michael_horton72@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T15:02:14.337551+00:00,michael_horton72@yahoo.com,SENT,reconnect_ok
+2025-12-28T15:19:24.377864+00:00,mb71k@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T15:23:35.507963+00:00,mb71k@yahoo.com,SENT,reconnect_ok
+2025-12-28T15:28:13.544276+00:00,mhslevin25@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T15:32:16.842151+00:00,mhslevin25@aol.com,SENT,reconnect_ok
+2025-12-28T15:36:53.879006+00:00,michael@1to1network.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T15:41:06.136265+00:00,michael@1to1network.com,SENT,reconnect_ok
+2025-12-28T15:45:44.175140+00:00,mob10@sbcglobal.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T15:49:57.814428+00:00,mob10@sbcglobal.net,SENT,reconnect_ok
+2025-12-28T15:53:59.140899+00:00,poole1968@hotmail.com,SENT,
+2025-12-28T15:58:36.176227+00:00,1957mjs@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:02:49.417316+00:00,1957mjs@gmail.com,SENT,reconnect_ok
+2025-12-28T16:07:23.453789+00:00,michaeltrisho@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:11:36.112772+00:00,michaeltrisho@gmail.com,SENT,reconnect_ok
+2025-12-28T16:16:09.153318+00:00,womackpoetry@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:20:21.371579+00:00,womackpoetry@gmail.com,SENT,reconnect_ok
+2025-12-28T16:24:58.408405+00:00,michelebollinger@juno.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:29:03.468985+00:00,michelebollinger@juno.com,SENT,reconnect_ok
+2025-12-28T16:33:43.502240+00:00,mtowers71@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:37:50.915416+00:00,mtowers71@gmail.com,SENT,reconnect_ok
+2025-12-28T16:55:00.952531+00:00,lionofjudahrev10@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T16:59:10.095030+00:00,lionofjudahrev10@gmail.com,SENT,reconnect_ok
+2025-12-28T17:03:47.130703+00:00,michellegibert@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:07:56.953197+00:00,michellegibert@yahoo.com,SENT,reconnect_ok
+2025-12-28T17:12:35.999667+00:00,mzodrow@netscape.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:16:49.162076+00:00,mzodrow@netscape.net,SENT,reconnect_ok
+2025-12-28T17:20:51.435347+00:00,mstojic@embarqmail.com,SENT,
+2025-12-28T17:25:26.470443+00:00,vdojnky@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:29:29.174218+00:00,vdojnky@yahoo.com,SENT,reconnect_ok
+2025-12-28T17:34:08.209649+00:00,bethcotton@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:38:12.989582+00:00,bethcotton@comcast.net,SENT,reconnect_ok
+2025-12-28T17:42:53.024476+00:00,m.myatt@n2growth.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:47:06.080756+00:00,m.myatt@n2growth.com,SENT,reconnect_ok
+2025-12-28T17:51:08.361730+00:00,suecoffeelover2@yahoo.com,SENT,
+2025-12-28T17:55:47.396291+00:00,mmbeck39@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T17:59:59.570271+00:00,mmbeck39@gmail.com,SENT,reconnect_ok
+2025-12-28T18:04:01.808217+00:00,mindy@mindylittmanholland.com,SENT,
+2025-12-28T18:21:11.843651+00:00,miriam.fields@ameritech.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T18:25:16.516308+00:00,miriam.fields@ameritech.net,SENT,reconnect_ok
+2025-12-28T18:29:49.552675+00:00,ssilverm@bellsouth.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T18:33:56.644455+00:00,ssilverm@bellsouth.net,SENT,reconnect_ok
+2025-12-28T18:38:30.681661+00:00,mark7us2022@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T18:42:41.952300+00:00,mark7us2022@hotmail.com,SENT,reconnect_ok
+2025-12-28T18:47:20.990226+00:00,nonnamona1@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T18:51:23.699241+00:00,nonnamona1@gmail.com,SENT,reconnect_ok
+2025-12-28T18:55:59.734235+00:00,monicamoore.hitme@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T19:00:06.785919+00:00,monicamoore.hitme@gmail.com,SENT,reconnect_ok
+2025-12-28T19:04:45.821281+00:00,moragmorrison@ns.sympatico.ca,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T19:08:51.402735+00:00,moragmorrison@ns.sympatico.ca,SENT,reconnect_ok
+2025-12-28T19:13:31.438009+00:00,moses_chung@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T19:17:35.412771+00:00,moses_chung@yahoo.com,SENT,reconnect_ok
+2025-12-28T19:22:08.448163+00:00,lala1508@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T19:26:15.727330+00:00,lala1508@hotmail.com,SENT,reconnect_ok
+2025-12-28T19:30:18.013171+00:00,mensansufi14@yahoo.com,SENT,
+2025-12-28T19:34:58.047436+00:00,rjayla@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T19:39:06.722164+00:00,rjayla@yahoo.com,SENT,reconnect_ok
+2025-12-28T19:56:16.757868+00:00,nader.mir@sjsu.edu,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:00:28.592795+00:00,nader.mir@sjsu.edu,SENT,reconnect_ok
+2025-12-28T20:05:00.628055+00:00,nalani.hao@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:09:05.510758+00:00,nalani.hao@gmail.com,SENT,reconnect_ok
+2025-12-28T20:13:45.546174+00:00,narbuthnot@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:17:51.849142+00:00,narbuthnot@yahoo.com,SENT,reconnect_ok
+2025-12-28T20:22:24.885114+00:00,griffinalbert443@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:26:29.223923+00:00,griffinalbert443@yahoo.com,SENT,reconnect_ok
+2025-12-28T20:31:00.261053+00:00,nanmccart10@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:35:13.815605+00:00,nanmccart10@yahoo.com,SENT,reconnect_ok
+2025-12-28T20:39:46.851221+00:00,nancy8838@charter.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:43:54.605543+00:00,nancy8838@charter.net,SENT,reconnect_ok
+2025-12-28T20:48:25.641156+00:00,naomithomas45@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T20:52:36.328078+00:00,naomithomas45@yahoo.com,SENT,reconnect_ok
+2025-12-28T20:57:10.363702+00:00,nataliejt@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T21:01:22.019364+00:00,nataliejt@aol.com,SENT,reconnect_ok
+2025-12-28T21:05:54.056404+00:00,njutson1@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T21:10:04.174259+00:00,njutson1@hotmail.com,SENT,reconnect_ok
+2025-12-28T21:14:39.210429+00:00,nateblackwell96@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T21:18:49.914773+00:00,nateblackwell96@gmail.com,SENT,reconnect_ok
+2025-12-28T21:35:59.949924+00:00,nefetoriam@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T21:40:08.066003+00:00,nefetoriam@yahoo.com,SENT,reconnect_ok
+2025-12-28T21:44:09.376829+00:00,nelsdahl@gmail.com,SENT,
+2025-12-28T21:48:46.411392+00:00,kmorris@demarsassociates.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T21:52:56.538102+00:00,kmorris@demarsassociates.com,SENT,reconnect_ok
+2025-12-28T21:57:29.582649+00:00,currinicksie@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:01:43.398398+00:00,currinicksie@aol.com,SENT,reconnect_ok
+2025-12-28T22:06:20.441942+00:00,nckftzgrld@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:10:27.873823+00:00,nckftzgrld@yahoo.com,SENT,reconnect_ok
+2025-12-28T22:15:03.909278+00:00,nickysprouse@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:19:09.297912+00:00,nickysprouse@yahoo.com,SENT,reconnect_ok
+2025-12-28T22:23:47.332753+00:00,dormannikki32@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:27:54.849694+00:00,dormannikki32@yahoo.com,SENT,reconnect_ok
+2025-12-28T22:32:31.901924+00:00,nickhole@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:36:36.020354+00:00,nickhole@yahoo.com,SENT,reconnect_ok
+2025-12-28T22:41:08.055225+00:00,nicolechaplin@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T22:45:18.212792+00:00,nicolechaplin@hotmail.com,SENT,reconnect_ok
+2025-12-28T22:49:20.549445+00:00,nina@ninastime.com,SENT,
+2025-12-28T23:06:30.584182+00:00,noah@secularbuddhism.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T23:10:44.264984+00:00,noah@secularbuddhism.com,SENT,reconnect_ok
+2025-12-28T23:14:45.954139+00:00,norahenry@icloud.com,SENT,
+2025-12-28T23:19:16.989038+00:00,normahp@iglide.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-28T23:23:24.217387+00:00,normahp@iglide.net,SENT,reconnect_ok
+2025-12-30T20:06:12.629273+00:00,axander999@comcast.net,SENT,
+2025-12-30T20:10:50.662769+00:00,oakpan@juno.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T20:14:56.817716+00:00,oakpan@juno.com,SENT,reconnect_ok
+2025-12-30T20:19:34.827752+00:00,janinecervantes@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T20:23:44.881867+00:00,janinecervantes@gmail.com,SENT,reconnect_ok
+2025-12-30T20:28:16.945234+00:00,oluajoke16@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T20:32:21.743099+00:00,oluajoke16@gmail.com,SENT,reconnect_ok
+2025-12-30T20:36:57.778912+00:00,odc2d@mtmail.mtsu.edu,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T20:41:03.004956+00:00,odc2d@mtmail.mtsu.edu,SENT,reconnect_ok
+2025-12-30T20:45:41.040002+00:00,andhill80@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T20:49:49.084026+00:00,andhill80@gmail.com,SENT,reconnect_ok
+2025-12-30T20:53:51.292475+00:00,cooloumso@hotmail.com,SENT,
+2025-12-30T20:58:27.327502+00:00,dennishoge@msn.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:02:40.509539+00:00,dennishoge@msn.com,SENT,reconnect_ok
+2025-12-30T21:07:20.549262+00:00,judbrodie@aol.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:11:25.308594+00:00,judbrodie@aol.com,SENT,reconnect_ok
+2025-12-30T21:16:02.344865+00:00,dixonpam1847@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:20:11.649896+00:00,dixonpam1847@yahoo.com,SENT,reconnect_ok
+2025-12-30T21:37:21.676773+00:00,pamela_chiquita@hotmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:41:28.112068+00:00,pamela_chiquita@hotmail.com,SENT,reconnect_ok
+2025-12-30T21:46:04.147404+00:00,pamela.stowe1@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:50:13.722654+00:00,pamela.stowe1@comcast.net,SENT,reconnect_ok
+2025-12-30T21:54:47.757940+00:00,ppaolay@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T21:58:58.265433+00:00,ppaolay@gmail.com,SENT,reconnect_ok
+2025-12-30T22:03:29.274206+00:00,pastorpelaez@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
+2025-12-30T22:07:41.336778+00:00,pastorpelaez@gmail.com,SENT,reconnect_ok
