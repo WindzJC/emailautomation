@@ -159,10 +159,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "password_env": "GMAIL_ALEX_APP_PW",
     },
     # Private mailboxes (trial plan: ~4/hour each, 20/day each, shared domain 50/hour)
-    "private_annet": {
+    "private_annette": {
         "provider": "private",
         "csv": "recipients_1.csv",
-        "log": "private_annet_log.csv",
+        "log": "private_annette_log.csv",
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -173,7 +173,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
-        "password_env": "PRIVATE_ANNET_APP_PW",
+        "password_env": "PRIVATE_ANNETTE_APP_PW",
     },
     "private_jordan": {
         "provider": "private",
@@ -239,10 +239,12 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "suppress_invalid": True,
         "password_env": "PRIVATE_FIORELA_APP_PW",
     },
-    "sendgrid_annet": {
+
+        #SEND GRID
+    "sendgrid_annette": {
         "provider": "sendgrid",
         "csv": "recipients_1.csv",
-        "log": "private_annet_log.csv",
+        "log": "private_annette_log.csv",
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -250,9 +252,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 18,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "unsubscribe_group_id": 29658,
+        "groups_to_display": [29658],
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
@@ -265,9 +269,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 18,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "unsubscribe_group_id": 29658,
+        "groups_to_display": [29658],
     },
     "sendgrid_jodi": {
         "provider": "sendgrid",
@@ -280,9 +286,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 18,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "unsubscribe_group_id": 29658,
+        "groups_to_display": [29658],
     },
     "sendgrid_alison": {
         "provider": "sendgrid",
@@ -295,9 +303,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 18,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "unsubscribe_group_id": 29658,
+        "groups_to_display": [29658],
     },
     "sendgrid_fiorela": {
         "provider": "sendgrid",
@@ -310,12 +320,14 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 18,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "unsubscribe_group_id": 29658,
+        "groups_to_display": [29658],
     },
 
-    #SEND GRID
+
     "gmail_corporate": {
         "provider": "gmail",
         "csv": "recipients_g1.csv",
@@ -414,38 +426,6 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 }
 SIGNATURE_BY_PITCH = {
     }
-PITCH1_BODY = """Dear {AuthorName}, 
-
-Your book, "{BookTitle}" reads like scenes, not just sentences.
-
-I'm reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
-
-We partner with Astra Productions to create two launch assets that make readers feel the book fast:
-
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean, focused book page (cover, hook, proof lines, clear buy buttons)
-
-This sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, reply with:
-
-what you want readers to feel (e.g., eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline, review, award)
-anything to avoid (spoilers, tropes)
-
-I’ll send back:
-• two trailer opening hook concepts for {BookTitle}
-• a simple one-page layout
-• 2–3 recent examples (so you can judge the fit before deciding)
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-
-Best regards,
-{SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
 
 PITCHES = {
     "pitch1": {
@@ -1165,10 +1145,15 @@ def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
     safe = html.escape(body_text)
 
     # clickable unsubscribe
-    safe = safe.replace(
-        html.escape(unsub_mailto),
-        f"<a href='{html.escape(unsub_mailto)}'>unsubscribe</a>"
-    )
+    if "<%asm_group_unsubscribe_url%" in unsub_mailto:
+        unsub_href = unsub_mailto
+        unsub_text = unsub_mailto
+    else:
+        unsub_href = html.escape(unsub_mailto)
+        unsub_text = "unsubscribe"
+    safe = safe.replace(html.escape(unsub_mailto), f"<a href='{unsub_href}'>{unsub_text}</a>")
+    # keep ASM token unescaped if present
+    safe = safe.replace("&lt;%asm_group_unsubscribe_url%&gt;", "<%asm_group_unsubscribe_url%>")
 
     # signature marker replacement
     if cid:
@@ -1191,8 +1176,9 @@ def render_message_parts(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path],
+    unsub_mailto_override: Optional[str] = None,
 ) -> Tuple[str, str, str, Optional[str]]:
-    unsub_mailto = make_unsub_mailto(unsub_email)
+    unsub_mailto = unsub_mailto_override or make_unsub_mailto(unsub_email)
 
     author = (author or "there").strip()
     book_title = (book_title or "").strip() or "your book"
@@ -1228,6 +1214,7 @@ def build_message(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path] = None,
+    unsub_mailto_override: Optional[str] = None,
 ) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
     subject_text, body_text, html_body, cid = render_message_parts(
         author,
@@ -1236,6 +1223,7 @@ def build_message(
         body_template,
         unsub_email,
         signature_file,
+        unsub_mailto_override,
     )
 
     msg = EmailMessage()
@@ -1276,6 +1264,8 @@ def send_via_sendgrid(
     unsub_email: str,
     signature_file: Optional[Path],
     cid: Optional[str],
+    unsubscribe_group_id: int,
+    groups_to_display: List[int],
 ) -> None:
     try:
         from sendgrid import SendGridAPIClient
@@ -1290,17 +1280,36 @@ def send_via_sendgrid(
             Disposition,
             ContentId,
             Header,
+            Asm,
         )
     except Exception as exc:
         raise RuntimeError(
             "sendgrid library not installed; add 'sendgrid' to requirements and install it"
         ) from exc
 
+    unsub_token = "<%asm_group_unsubscribe_url%>"
+
+    text_content = body_text.replace("{SIGIMG}", "").strip()
+    if unsub_token not in text_content:
+        text_content = (text_content + "\n\nP.S. Unsubscribe: <%asm_group_unsubscribe_url%>").strip()
+
+    html_content = html_body
+    if unsub_token not in html_content:
+        unsub_html = f'<br><br><a href="{unsub_token}">Unsubscribe</a>'
+        if "</body>" in html_content:
+            html_content = html_content.replace("</body>", f"{unsub_html}</body>", 1)
+        elif "</html>" in html_content:
+            html_content = html_content.replace("</html>", f"{unsub_html}</html>", 1)
+        else:
+            html_content = f"{html_content}{unsub_html}"
+
     mail = Mail(from_email=from_email, to_emails=to_email, subject=subject_text)
-    mail.add_content(Content("text/plain", body_text.replace("{SIGIMG}", "").strip()))
-    mail.add_content(Content("text/html", html_body))
+    mail.add_content(Content("text/plain", text_content))
+    mail.add_content(Content("text/html", html_content))
     mail.reply_to = ReplyTo(reply_to)
     mail.add_header(Header("List-Unsubscribe", f"<mailto:{unsub_email}?subject=unsubscribe>"))
+    groups_list = [int(x) for x in (groups_to_display or [unsubscribe_group_id])]
+    mail.asm = Asm(group_id=int(unsubscribe_group_id), groups_to_display=groups_list)
 
     if cid and signature_file and signature_file.exists() and "{SIGIMG}" in body_text:
         img_bytes = signature_file.read_bytes()
@@ -1693,6 +1702,9 @@ def main():
         if not pw:
             pw = getpass("Password (Gmail uses App Password): ").strip()
     unsub_email = norm_email(args.unsub) or from_user
+    sendgrid_unsub_group_id = int(getattr(args, "unsubscribe_group_id", 29658) or 29658)
+    sendgrid_groups_to_display = getattr(args, "groups_to_display", None) or [sendgrid_unsub_group_id]
+    unsub_mailto_override = "<%asm_group_unsubscribe_url%>" if args.provider == "sendgrid" else None
 
     # Choose signature file:
     # - only applies if the pitch body contains {SIGIMG}
@@ -1743,6 +1755,8 @@ def main():
                 unsub_email,
                 sig_path,
                 cid,
+                sendgrid_unsub_group_id,
+                sendgrid_groups_to_display,
             )
             return
         if args.provider == "private":
@@ -1832,7 +1846,8 @@ def main():
                 msg, subject_text, body_text, html_body, cid = build_message(
                     from_user, to_email, author, book_title,
                     subject, body_template, unsub_email,
-                    signature_file=sig_path
+                    signature_file=sig_path,
+                    unsub_mailto_override=unsub_mailto_override,
                 )
 
                 next_index = idx + 1
