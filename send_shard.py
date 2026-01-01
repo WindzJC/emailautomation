@@ -248,7 +248,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 510,
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
@@ -265,7 +265,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 520,
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
@@ -282,7 +282,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 530,
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
@@ -299,7 +299,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 540,
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
@@ -316,7 +316,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 550,
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
@@ -427,9 +427,7 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """Dear {AuthorName},
-
-Your book “{BookTitle}” doesn’t just tell a story—it feels like watching one. We partner with Astra Productions to help authors share their stories. We don’t just market; we craft experiences.
+PITCH_1_5_BODY = """Your book “{BookTitle}” doesn’t just tell a story—it feels like watching one. We partner with Astra Productions to help authors share their stories. We don’t just market; we craft experiences.
 
 I am reaching out because I manage marketing and distribution programs and help authors place their books on B&N physical bookstores across the United States.
 
@@ -445,9 +443,7 @@ Otherwise, launch asset pricing is $999 for the trailer, $499 for the book page,
 
 If you’d like us to draft concepts, just reply with:
 What you want readers to feel (e.g., eerie, hopeful, heart-racing).
-
 One or two must-include lines (tagline, review, award, & book link).
-
 Anything to avoid (spoilers/tropes).
 
 We’ll send two opening-hook concepts, a sample page layout, and a few examples. We read every response and treat every book like it’s our own.
