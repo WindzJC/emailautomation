@@ -252,7 +252,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 15,
+        "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -269,7 +269,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 15,
+        "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -286,7 +286,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 15,
+        "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -303,7 +303,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 15,
+        "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -320,7 +320,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 900,
         "repeat": True,
-        "max_total": 15,
+        "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "unsubscribe_group_id": 29658,
@@ -427,40 +427,32 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """Hi {AuthorName},
+PITCH_1_5_BODY = """Dear {AuthorName},
 
-Your book, “{BookTitle}” has “I can see this” energy. It reads like scenes, not just sentences.
-We are reaching out because I manage marketing and distribution programs that help authors place their books on B&N physical bookstores across the United States.
+Your book “{BookTitle}” doesn’t just tell a story—it feels like watching one. We partner with Astra Productions to help authors share their stories. We don’t just market; we craft experiences.
 
-We partner with Astra Productions—a vetted, repeat-hire team we trust for on-time delivery and conversion-focused creative—to build two launch assets that make readers feel the book fast:
-30–60s cinematic trailer (tone + stakes in the opening beats)
-clean, focused book page (cover, hook, proof lines, clear buy buttons)
+I am reaching out because I manage marketing and distribution programs and help authors place their books on B&N physical bookstores across the United States.
 
-These two assets are what set you up for physical-store placement later—they let decision-makers preview the book fast. 
+We partner with Astra Productions to create two launch assets that let readers (and store buyers) feel your book in seconds:
+• 30–60s cinematic trailer (tone + stakes in the opening beats)
+• clean book page (cover, hook, proof lines, clear buy buttons)
 
-If you already have a buyer-ready trailer + book page/website, you can skip Investment A and proceed directly to Investment B (assuming your current assets meet the program standards).
+What’s in it for you? We’ll work with you one-on-one to ensure the trailer evokes the right mood and the book page reflects your voice. Together we’ll turn curiosity into connection and connection into sales.
 
-Before you archive this: if a reader (or bookseller) gave your book 10 seconds, would they instantly understand the tone and stakes? That’s what we build.
+If you already have buyer-ready assets, you can move straight to our consignment program and choose the print quantity that fits your goals (750 to 3,500 copies, from $250–$1,000 plus shipping).
 
-If you want us to draft concepts, reply with:
-what you want readers to feel (eerie / hopeful / heart-racing)
-1–2 must-include lines (tagline / review / award)
-anything to avoid (spoilers / tropes)
+Otherwise, launch asset pricing is $999 for the trailer, $499 for the book page, or $1,299 for both.
 
-I’ll send back two trailer opening hook concepts, a one-page layout, and 2–3 examples so you can judge fit before deciding.
+If you’d like us to draft concepts, just reply with:
+What you want readers to feel (e.g., eerie, hopeful, heart-racing).
 
-Investment A (Launch Assets): Trailer $999 | Book page $499 | Bundle $1,299
+One or two must-include lines (tagline, review, award, & book link).
 
-Investment B ( Book Placement Program — print quantity):
+Anything to avoid (spoilers/tropes).
 
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
+We’ll send two opening-hook concepts, a sample page layout, and a few examples. We read every response and treat every book like it’s our own.
 
-You can select the quantity that fits your goals and budget. Your only additional cost is shipping.
-
-Best regards,
+Warmly,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
