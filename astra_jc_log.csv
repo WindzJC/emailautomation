@@ -1102,8 +1102,6 @@ TimestampUTC,Email,Status,Info
 2025-12-30T22:06:34.655083+00:00,jamesmadison225@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:07:06.135880+00:00,mcrouch@verizon.net,SENT,
 2025-12-30T22:10:41.885349+00:00,jamesmadison225@yahoo.com,SENT,reconnect_ok
-2025-12-30T22:29:17.827894+00:00,windellejcr@gmail.com,SENT,
-2025-12-30T22:29:21.147822+00:00,windellejcr@gmail.com,SENT,
 2025-12-30T22:33:53.862951+00:00,careerstep@comcast.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:33:56.181211+00:00,mpickett.purelife@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:37:57.974678+00:00,careerstep@comcast.net,SENT,reconnect_ok

@@ -166,10 +166,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 900,
+        "interval": 500,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -182,10 +182,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 920,
+        "interval": 520,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -198,10 +198,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 930,
+        "interval": 530,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -214,10 +214,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 940,
+        "interval": 540,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -230,7 +230,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 950,
+        "interval": 550,
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
@@ -251,7 +251,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 510,
         "batch_size": 5,
         "cooldown_seconds": 900,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -268,7 +268,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 520,
         "batch_size": 5,
         "cooldown_seconds": 900,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -285,7 +285,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 530,
         "batch_size": 5,
         "cooldown_seconds": 900,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -302,7 +302,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 540,
         "batch_size": 5,
         "cooldown_seconds": 900,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -319,7 +319,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 550,
         "batch_size": 5,
         "cooldown_seconds": 900,
-        "repeat": True,
+        "repeat": False,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
@@ -427,28 +427,18 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """Your book “{BookTitle}” doesn’t just tell a story—it feels like watching one. We partner with Astra Productions to help authors share their stories. We don’t just market; we craft experiences.
+PITCH_1_5_BODY = """ Hi {AuthorName}, 
 
-I am reaching out because I manage marketing and distribution programs and help authors place their books on B&N physical bookstores across the United States.
+{BookTitle} reads like a movie, so we’ll make readers feel it in seconds.
 
-We partner with Astra Productions to create two launch assets that let readers (and store buyers) feel your book in seconds:
-• 30–60s cinematic trailer (tone + stakes in the opening beats)
-• clean book page (cover, hook, proof lines, clear buy buttons)
+I manage marketing and distribution programs that help authors place their books in Barnes & Noble stores across United States, and we partner with Astra Productions to build a 30–60‑second cinematic trailer and a clean book page—matching the tone and voice you want.
 
-What’s in it for you? We’ll work with you one-on-one to ensure the trailer evokes the right mood and the book page reflects your voice. Together we’ll turn curiosity into connection and connection into sales.
+If you already have buyer-ready assets, you can go straight to our consignment program (750–3,500 copies, $250–$1,000 + shipping). 
+If you don’t, Astra Productions creates the launch assets that prepare your book for placement—so buyers can grasp the hook, tone, and stakes in seconds: $999 (trailer), $499 (page), or $1,299 (bundle).
 
-If you already have buyer-ready assets, you can move straight to our consignment program and choose the print quantity that fits your goals (750 to 3,500 copies, from $250–$1,000 plus shipping).
+Reply with the emotion you want to evoke, 1–2 must-include lines (tagline/review/award) plus a link to your book, and anything to avoid (spoilers/tropes), and we’ll send you two opening-hook concepts and a page layout.  
 
-Otherwise, launch asset pricing is $999 for the trailer, $499 for the book page, or $1,299 for both.
-
-If you’d like us to draft concepts, just reply with:
-What you want readers to feel (e.g., eerie, hopeful, heart-racing).
-One or two must-include lines (tagline, review, award, & book link).
-Anything to avoid (spoilers/tropes).
-
-We’ll send two opening-hook concepts, a sample page layout, and a few examples. We read every response and treat every book like it’s our own.
-
-Warmly,
+Warm regards,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}

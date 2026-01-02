@@ -772,7 +772,6 @@ TimestampUTC,Email,Status,Info
 2025-12-30T21:59:11.493713+00:00,pamelajpmartin@uniquebooksbypam.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:03:21.886210+00:00,pamelajpmartin@uniquebooksbypam.com,SENT,reconnect_ok
 2025-12-30T22:07:55.921858+00:00,pjs.maine@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
-2025-12-30T22:29:26.997635+00:00,windellejcr@gmail.com,SENT,
 2025-12-30T22:34:03.032879+00:00,pjs.maine@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:38:07.926466+00:00,pjs.maine@gmail.com,SENT,reconnect_ok
 2025-12-30T22:42:41.961756+00:00,pwhite2007@bellsouth.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out

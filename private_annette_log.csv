@@ -461,8 +461,6 @@ TimestampUTC,Email,Status,Info
 2025-12-31T00:23:22.497490+00:00,mikeike@hotmail.co.uk,SENT,
 2025-12-31T00:31:49.986122+00:00,workmoney87@icloud.com,SENT,
 2025-12-31T00:40:13.026553+00:00,lisa.gardner@omsstrategicadvisors.com,SENT,
-2025-12-31T18:40:03.547167+00:00,windellejcr@gmail.com,ERROR,sendgrid library not installed; add 'sendgrid' to requirements and install it
-2025-12-31T18:43:03.193313+00:00,windellejcr@gmail.com,SENT,
 2025-12-31T18:51:42.060858+00:00,javilaugh@yahoo.com,SENT,
 2025-12-31T19:00:21.179262+00:00,dhpark@rogers.com,SENT,
 2025-12-31T19:08:58.174972+00:00,winston_m@live.ca,SENT,
@@ -477,3 +475,38 @@ TimestampUTC,Email,Status,Info
 2025-12-31T20:39:10.527562+00:00,jhart@testra.com,SENT,
 2025-12-31T20:47:47.582108+00:00,yojoytotheworld@gmail.com,SENT,
 2025-12-31T20:56:21.481241+00:00,frank.stephenson@cox.net,SENT,
+2026-01-01T21:13:57.061820+00:00,author.vstephens@gmail.com,ERROR,sendgrid library not installed; add 'sendgrid' to requirements and install it
+2026-01-01T21:14:24.218626+00:00,author.vstephens@gmail.com,ERROR,sendgrid library not installed; add 'sendgrid' to requirements and install it
+2026-01-01T21:15:15.498871+00:00,author.vstephens@gmail.com,SENT,
+2026-01-01T21:16:46.034735+00:00,windellejcr@gmail.com,SENT,
+2026-01-01T21:24:46.123270+00:00,christinenorris02@gmail.com,SENT,
+2026-01-01T21:33:17.250920+00:00,gjerwin@gmail.com,SENT,
+2026-01-01T21:41:49.312483+00:00,richardclementmd1@gmail.com,SENT,
+2026-01-01T21:50:20.702934+00:00,svbrosiusauthor@gmail.com,SENT,
+2026-01-01T21:58:58.571580+00:00,co.lauramartin@gmail.com,SENT,
+2026-01-01T22:13:59.671566+00:00,chemicalsandchristians@gmail.com,SENT,
+2026-01-01T22:22:31.497976+00:00,valeriejfrey@gmail.com,SENT,
+2026-01-01T22:31:06.536764+00:00,tanginaann@gmail.com,SENT,
+2026-01-01T22:39:41.208107+00:00,london.millerauthor@gmail.com,SENT,
+2026-01-01T22:48:17.000086+00:00,xcandelaria@gmail.com,SENT,
+2026-01-01T23:03:17.999579+00:00,gailgramling@gmail.com,SENT,
+2026-01-01T23:11:50.879789+00:00,marlowe.maryann@gmail.com,SENT,
+2026-01-01T23:20:27.726294+00:00,annpsingh56@gmail.com,SENT,
+2026-01-01T23:29:05.368101+00:00,jsfurlongauthor@gmail.com,SENT,
+2026-01-01T23:37:35.841550+00:00,craigacombs@me.com,SENT,
+2026-01-01T23:52:36.959911+00:00,cosmicfriends@outlook.com,SENT,
+2026-01-02T00:01:17.730358+00:00,rod.ballard@yahoo.com,SENT,
+2026-01-02T00:09:53.846876+00:00,penumbramine@gmail.com,SENT,
+2026-01-02T00:18:31.946965+00:00,michael.ansara@gmail.com,SENT,
+2026-01-02T00:27:05.777426+00:00,eboliverwolf@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T00:35:37.586051+00:00,kalelink.author@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T00:44:09.662051+00:00,courageandtruthbooks@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T00:52:47.672282+00:00,nancy@njmastro.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:01:25.139514+00:00,agimgbook@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:09:58.947440+00:00,siennakaye143@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:18:35.856170+00:00,themarlamonroe@yahoo.com,ERROR,HTTP Error 403: Forbidden
+2026-01-02T01:27:10.617925+00:00,amyefriedman@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:35:45.070333+00:00,authormayafisher@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:44:16.067423+00:00,soullaauthor@gmail.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T01:52:46.517724+00:00,lisa@lisaebetz.com,ERROR,HTTP Error 401: Unauthorized
+2026-01-02T02:01:17.970584+00:00,glorifiedwriting@gmail.com,ERROR,HTTP Error 401: Unauthorized
