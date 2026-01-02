@@ -798,7 +798,6 @@ TimestampUTC,Email,Status,Info
 2025-12-30T22:02:47.794212+00:00,nancylbriggs@charter.net,SENT,reconnect_ok
 2025-12-30T22:07:22.826849+00:00,rjohanson@gmail.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:11:31.472354+00:00,rjohanson@gmail.com,SENT,reconnect_ok
-2025-12-30T22:29:36.407601+00:00,windellejcr@gmail.com,SENT,
 2025-12-30T22:34:10.468986+00:00,nppreis@bellsouth.net,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
 2025-12-30T22:38:17.915380+00:00,nppreis@bellsouth.net,SENT,reconnect_ok
 2025-12-30T22:42:52.951380+00:00,nhwashburne@yahoo.com,ERROR,disconnected: Connection unexpectedly closed: The read operation timed out
