@@ -457,18 +457,18 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """ Hi {AuthorName}, 
+PITCH_1_5_BODY = """Hi {AuthorName},
 
-{BookTitle} reads like a movie, so we’ll make readers feel it in seconds.
+Your writing reads like scenes. {BookTitle} feels made for a cinematic tease.
+We are reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
+We partner with Astra Productions, a studio we work closely with to create:
+• a 30–60s cinematic trailer (tone + stakes, fast)
+• a clean book page (cover, strongest lines, buy links)
+Already have strong assets? Great—next step is our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping).
+If you still need assets, reply with the emotion you want to evoke, 1–2 must-include lines (tagline/review/award) plus a link to your book, and anything to avoid (spoilers/tropes), and we’ll send you two opening-hook concepts and a page layout.
 
-I manage marketing and distribution programs that help authors place their books in Barnes & Noble stores across United States, and we partner with Astra Productions to build a 30–60‑second cinematic trailer and a clean book page—matching the tone and voice you want.
-
-If you already have buyer-ready assets, you can go straight to our consignment program (750–3,500 copies, $250–$1,000 + shipping). 
-If you don’t, Astra Productions creates the launch assets that prepare your book for placement—so buyers can grasp the hook, tone, and stakes in seconds: $999 (trailer), $499 (page), or $1,299 (bundle).
-
-Reply with the emotion you want to evoke, 1–2 must-include lines (tagline/review/award) plus a link to your book, and anything to avoid (spoilers/tropes), and we’ll send you two opening-hook concepts and a page layout.  
-
-Warm regards,
+Looking forward to working with you!
+Warmly,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
