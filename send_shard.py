@@ -6,6 +6,7 @@ import argparse
 import base64
 import csv
 import html
+import json
 import random
 import ssl
 import smtplib
@@ -31,6 +32,8 @@ DEFAULT_DOMAIN = "barnesnoblemarketing.com"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
 DEFAULT_UNSUB_CSV = Path("unsubscribed.csv")     # optional, header: Email
 DEFAULT_SUPPRESS_CSV = Path("suppressed.csv")    # optional, header: Email
+SENDGRID_DAILY_CAP = 100
+SENDGRID_COUNTERS_PATH = Path("sendgrid_daily_counters.json")
 
 PROVIDER_LIMIT_DEFAULTS = {
     "private": {"max_messages_1h": 50},
@@ -910,6 +913,105 @@ def load_emails_from_csv(path: Path) -> Set[str]:
     return out
 
 
+def local_today_str() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def load_sendgrid_counters(path: Path) -> Dict[str, Dict[str, object]]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_sendgrid_counters(path: Path, counters: Dict[str, Dict[str, object]]) -> None:
+    tmp_path = path.with_suffix(".tmp")
+    payload = json.dumps(counters, indent=2, sort_keys=True, ensure_ascii=True)
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def get_sendgrid_sent_today(
+    counters: Dict[str, Dict[str, object]],
+    key: str,
+) -> Tuple[int, str]:
+    entry = counters.get(key, {})
+    if not isinstance(entry, dict):
+        return 0, ""
+    today = local_today_str()
+    if entry.get("date") != today:
+        return 0, entry.get("last_success") or ""
+    return _safe_int(entry.get("sent")), entry.get("last_success") or ""
+
+
+def increment_sendgrid_counter(
+    counters: Dict[str, Dict[str, object]],
+    key: str,
+    path: Path,
+) -> int:
+    today = local_today_str()
+    entry = counters.get(key, {})
+    if not isinstance(entry, dict):
+        entry = {}
+    if entry.get("date") != today:
+        entry = {"date": today, "sent": 0, "last_success": entry.get("last_success") or ""}
+    entry["sent"] = _safe_int(entry.get("sent")) + 1
+    entry["last_success"] = datetime.now().astimezone().isoformat()
+    counters[key] = entry
+    save_sendgrid_counters(path, counters)
+    return _safe_int(entry.get("sent"))
+
+
+def load_log_statuses(log_path: Path) -> Tuple[Set[str], Set[str], Optional[datetime]]:
+    sent: Set[str] = set()
+    failed: Set[str] = set()
+    last_success: Optional[datetime] = None
+    if not log_path.exists():
+        return sent, failed, last_success
+    with log_path.open(newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            status = (r.get("Status") or "").strip().upper()
+            email_addr = norm_email(r.get("Email") or "")
+            if status == "SENT":
+                if email_addr:
+                    sent.add(email_addr)
+                ts = parse_ts(r.get("TimestampUTC") or "")
+                if ts and (last_success is None or ts > last_success):
+                    last_success = ts
+            elif status in ("ERROR", "INVALID"):
+                if email_addr:
+                    failed.add(email_addr)
+    return sent, failed, last_success
+
+
+def count_sent_today_from_log(log_path: Path) -> int:
+    if not log_path.exists():
+        return 0
+    today = datetime.now().astimezone().date()
+    count = 0
+    with log_path.open(newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            status = (r.get("Status") or "").strip().upper()
+            if status != "SENT":
+                continue
+            ts = parse_ts(r.get("TimestampUTC") or "")
+            if ts and ts.astimezone().date() == today:
+                count += 1
+    return count
+
+
 def parse_email_list(value: str) -> Set[str]:
     out: Set[str] = set()
     for raw in (value or "").split(","):
@@ -1479,6 +1581,7 @@ def main():
     ap.add_argument("--global_dedupe", action="store_true")
     ap.add_argument("--global_dedupe_logs_pattern", default="*_log.csv")
     ap.add_argument("--global_dedupe_recipients_pattern", default="recipients_*.csv")
+    ap.add_argument("--status", action="store_true", help="Show status for private/sendgrid profiles.")
 
     if profile_defaults:
         ap.set_defaults(**profile_defaults)
@@ -1493,6 +1596,70 @@ def main():
         return
     if args.profile:
         print(f"PROFILE: {args.profile}")
+
+    if args.status:
+        candidates: Dict[str, Dict[str, object]] = {}
+        if args.profile:
+            cfg = PROFILES.get(args.profile)
+            if not cfg:
+                print(f"ERROR: unknown profile {args.profile}")
+                return
+            provider = str(cfg.get("provider") or "")
+            if provider not in ("private", "sendgrid"):
+                print("STATUS: only available for providers private/sendgrid.")
+                return
+            candidates[args.profile] = cfg
+        else:
+            for name, cfg in sorted(PROFILES.items()):
+                provider = str(cfg.get("provider") or "")
+                if provider in ("private", "sendgrid"):
+                    candidates[name] = cfg
+
+        counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
+        for name, cfg in candidates.items():
+            provider = str(cfg.get("provider") or "")
+            csv_path = Path(str(cfg.get("csv") or ""))
+            log_path = Path(str(cfg.get("log") or ""))
+
+            recipients = load_emails_from_csv(csv_path) if csv_path.exists() else set()
+            sent_set, failed_set, last_success = load_log_statuses(log_path)
+            failed_only = failed_set - sent_set
+
+            total_recipients = len(recipients)
+            sent_total = len(sent_set)
+            failed_total = len(failed_only)
+            pending_total = max(0, total_recipients - sent_total)
+
+            last_success_str = "n/a"
+            if last_success:
+                last_success_str = last_success.astimezone().isoformat()
+
+            sent_today = 0
+            daily_cap = "n/a"
+            remaining_today = "n/a"
+            if provider == "sendgrid":
+                counter_key = name
+                from_email = str(cfg.get("from_email") or "").strip()
+                if counter_key not in counters and from_email in counters:
+                    counter_key = from_email
+                sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
+                daily_cap = str(SENDGRID_DAILY_CAP)
+                remaining_today = str(max(0, SENDGRID_DAILY_CAP - sent_today))
+            elif provider == "private":
+                sent_today = count_sent_today_from_log(log_path)
+
+            print(f"PROFILE: {name}")
+            print(f"  provider={provider} csv={csv_path.name} log={log_path.name}")
+            print(
+                "  total_recipients={total} sent_success_total={sent} failed_total={failed} pending_total={pending}"
+                .format(total=total_recipients, sent=sent_total, failed=failed_total, pending=pending_total)
+            )
+            print(
+                "  sent_success_today={sent_today} daily_cap={daily_cap} remaining_today={remaining_today}"
+                .format(sent_today=sent_today, daily_cap=daily_cap, remaining_today=remaining_today)
+            )
+            print(f"  last_success_timestamp={last_success_str}")
+        return
 
     sendgrid_api_key = os.environ.get("SENDGRID_API_KEY", "").strip()
     if args.sendgrid:
@@ -1670,6 +1837,23 @@ def main():
     sendgrid_groups_to_display = getattr(args, "groups_to_display", None) or [sendgrid_unsub_group_id]
     unsub_mailto_override = "<%asm_group_unsubscribe_url%>" if args.provider == "sendgrid" else None
 
+    sendgrid_counters: Dict[str, Dict[str, object]] = {}
+    sendgrid_counter_key = ""
+    sendgrid_sent_today = 0
+    if args.provider == "sendgrid":
+        sendgrid_counter_key = args.profile or from_user
+        sendgrid_counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
+        sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
+        if not args.dry_run and sendgrid_sent_today >= SENDGRID_DAILY_CAP:
+            log_row(
+                log_path,
+                "",
+                "DAILY_CAP_REACHED",
+                f"sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}",
+            )
+            print(f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}")
+            return
+
     # Choose signature file:
     # - only applies if the pitch body contains {SIGIMG}
     pitch_key = args.pitch
@@ -1688,6 +1872,14 @@ def main():
     if repeat_mode and batch_size <= 0:
         print("ERROR: --batch_size must be > 0 when --repeat is set.")
         return
+
+    def record_sendgrid_success() -> None:
+        nonlocal sendgrid_sent_today
+        if args.provider != "sendgrid" or args.dry_run:
+            return
+        sendgrid_sent_today = increment_sendgrid_counter(
+            sendgrid_counters, sendgrid_counter_key, SENDGRID_COUNTERS_PATH
+        )
 
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
@@ -1805,6 +1997,22 @@ def main():
                     stop_reason = "max_total"
                     break
 
+                if args.provider == "sendgrid":
+                    sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
+                    if sendgrid_sent_today >= SENDGRID_DAILY_CAP:
+                        if not args.dry_run:
+                            log_row(
+                                log_path,
+                                "",
+                                "DAILY_CAP_REACHED",
+                                f"sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}",
+                            )
+                        print(
+                            f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}"
+                        )
+                        stop_reason = "daily_cap"
+                        break
+
                 author = (r.get("AuthorName") or "there").strip()
                 book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
@@ -1830,6 +2038,7 @@ def main():
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
+                        record_sendgrid_success()
                         if args.provider in ("sendgrid", "private"):
                             if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
@@ -1897,6 +2106,7 @@ def main():
                         print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
+                        record_sendgrid_success()
                         if args.provider in ("sendgrid", "private"):
                             if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
@@ -1954,6 +2164,7 @@ def main():
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
+                            record_sendgrid_success()
                             if args.provider in ("sendgrid", "private"):
                                 if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                     print(f"CSV: removed {to_email} from {csv_path.name}")
