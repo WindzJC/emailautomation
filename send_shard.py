@@ -169,10 +169,13 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 500,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": False,
+        "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "windellejcr@gmail.com",
         "password_env": "PRIVATE_ANNETTE_APP_PW",
     },
     "private_jordan": {
@@ -185,10 +188,13 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 520,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": False,
+        "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "windellejcr@gmail.com",
         "password_env": "PRIVATE_JORDAN_APP_PW",
     },
     "private_jodi": {
@@ -201,10 +207,13 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 530,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": False,
+        "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "windellejcr@gmail.com",
         "password_env": "PRIVATE_JODI_APP_PW",
     },
     "private_alison": {
@@ -217,10 +226,13 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "interval": 540,
         "batch_size": 5,
         "cooldown_seconds": 1200,
-        "repeat": False,
+        "repeat": True,
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "windellejcr@gmail.com",
         "password_env": "PRIVATE_ALISON_APP_PW",
     },
     "private_fiorela": {
@@ -237,14 +249,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "windellejcr@gmail.com",
         "password_env": "PRIVATE_FIORELA_APP_PW",
     },
 
         #SEND GRID
     "sendgrid_annette": {
         "provider": "sendgrid",
-        "csv": "recipients_1.csv",
-        "log": "private_annette_log.csv",
+        "csv": "recipients_sendgrid_1.csv",
+        "log": "sendgrid_annette_log.csv",
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -255,13 +270,15 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
-        "csv": "recipients_2.csv",
-        "log": "private_jordan_kendrick_log.csv",
+        "csv": "recipients_sendgrid_2.csv",
+        "log": "sendgrid_jordan_log.csv",
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -272,13 +289,15 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
     "sendgrid_jodi": {
         "provider": "sendgrid",
-        "csv": "recipients_3.csv",
-        "log": "private_jodi_horowitz_log.csv",
+        "csv": "recipients_sendgrid_3.csv",
+        "log": "sendgrid_jodi_log.csv",
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -289,13 +308,15 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
     "sendgrid_alison": {
         "provider": "sendgrid",
-        "csv": "recipients_4.csv",
-        "log": "private_alison_log.csv",
+        "csv": "recipients_sendgrid_4.csv",
+        "log": "sendgrid_alison_log.csv",
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -306,13 +327,15 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
     "sendgrid_fiorela": {
         "provider": "sendgrid",
-        "csv": "recipients_5.csv",
-        "log": "private_fiorela_log.csv",
+        "csv": "recipients_sendgrid_5.csv",
+        "log": "sendgrid_fiorela_log.csv",
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
@@ -323,6 +346,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "max_total": 20,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -880,6 +905,15 @@ def load_emails_from_csv(path: Path) -> Set[str]:
     return out
 
 
+def parse_email_list(value: str) -> Set[str]:
+    out: Set[str] = set()
+    for raw in (value or "").split(","):
+        email_addr = norm_email(raw)
+        if email_addr:
+            out.add(email_addr)
+    return out
+
+
 def load_already_done(sent_log: Path) -> Set[str]:
     if not sent_log.exists():
         return set()
@@ -998,6 +1032,60 @@ def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
             "Status": status,
             "Info": (info or "")[:300],
         })
+
+
+def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
+    if not sent_emails or not csv_path.exists():
+        return 0
+    removed = 0
+    with csv_path.open("r+", newline="", encoding="utf-8-sig") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+        kept_rows = []
+        for row in reader:
+            email_addr = norm_email(row.get("Email") or "")
+            if email_addr and email_addr in sent_emails:
+                removed += 1
+                continue
+            kept_rows.append(row)
+        f.seek(0)
+        f.truncate()
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept_rows)
+        f.flush()
+        os.fsync(f.fileno())
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    return removed
+
+
+def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
+    if not email_addr or not csv_path.exists():
+        return False
+    removed = 0
+    with csv_path.open("r+", newline="", encoding="utf-8-sig") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+        kept_rows = []
+        target = norm_email(email_addr)
+        for row in reader:
+            email_val = norm_email(row.get("Email") or "")
+            if email_val and email_val == target:
+                removed += 1
+                continue
+            kept_rows.append(row)
+        if removed:
+            f.seek(0)
+            f.truncate()
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(kept_rows)
+            f.flush()
+            os.fsync(f.fileno())
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    return removed > 0
 
 
 def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
@@ -1363,6 +1451,7 @@ def main():
     ap.add_argument("--unsub_csv", default=str(DEFAULT_UNSUB_CSV))
     ap.add_argument("--suppress_csv", default=str(DEFAULT_SUPPRESS_CSV))
     ap.add_argument("--my_domains", default=DEFAULT_DOMAIN)
+    ap.add_argument("--always_send", default="")
 
     ap.add_argument("--max_unique_external_24h", type=int, default=None)
     ap.add_argument("--max_messages_24h", type=int, default=None)
@@ -1455,6 +1544,7 @@ def main():
     already_done = load_already_done(log_path)
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
+    always_send_set = parse_email_list(getattr(args, "always_send", ""))
 
     global_done: Set[str] = set()
     other_recipients: Set[str] = set()
@@ -1489,14 +1579,18 @@ def main():
             skipped_dupes += 1
             continue
         seen_in_input.add(email_addr)
-        if email_addr in already_done or email_addr in unsubbed or email_addr in suppressed:
+        if email_addr in unsubbed or email_addr in suppressed:
             continue
-        if args.global_dedupe and email_addr in global_done:
-            skipped_global_logs += 1
-            continue
-        if args.global_dedupe and email_addr in other_recipients:
-            skipped_global_recipients += 1
-            continue
+        is_always_send = email_addr in always_send_set
+        if not is_always_send:
+            if email_addr in already_done:
+                continue
+            if args.global_dedupe and email_addr in global_done:
+                skipped_global_logs += 1
+                continue
+            if args.global_dedupe and email_addr in other_recipients:
+                skipped_global_recipients += 1
+                continue
         pending.append(r)
 
     print(f"RUN: provider={args.provider} host={host}:{port} pitch={args.pitch}")
@@ -1580,6 +1674,7 @@ def main():
 
     smtp: Optional[smtplib.SMTP] = None
     sent_this_run = 0
+    sent_this_run_emails: Set[str] = set()
     invalid_count = 0
     error_count = 0
     repeat_mode = args.repeat
@@ -1729,6 +1824,10 @@ def main():
                         log_row(log_path, to_email, "SENT")
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
+                        sent_this_run_emails.add(to_email)
+                        if args.provider in ("sendgrid", "private"):
+                            if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                print(f"CSV: removed {to_email} from {csv_path.name}")
                         batch_sent += 1
                         if args.provider == "gmail":
                             gmail_messages_24h += 1
@@ -1792,6 +1891,10 @@ def main():
                         log_row(log_path, to_email, "SENT", "reconnect_ok")
                         print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
+                        sent_this_run_emails.add(to_email)
+                        if args.provider in ("sendgrid", "private"):
+                            if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                print(f"CSV: removed {to_email} from {csv_path.name}")
                         batch_sent += 1
                         if args.provider == "gmail":
                             gmail_messages_24h += 1
@@ -1845,6 +1948,10 @@ def main():
                             log_row(log_path, to_email, "SENT", "throttle_retry_ok")
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
+                            sent_this_run_emails.add(to_email)
+                            if args.provider in ("sendgrid", "private"):
+                                if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                    print(f"CSV: removed {to_email} from {csv_path.name}")
                             batch_sent += 1
                             if args.provider == "gmail":
                                 gmail_messages_24h += 1
@@ -1923,6 +2030,11 @@ def main():
                 break
 
         print(f"DONE: sent={sent_this_run} invalid={invalid_count} errors={error_count}")
+        if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+            prunable = sent_this_run_emails - always_send_set
+            removed = prune_sent_from_csv(csv_path, prunable)
+            if removed:
+                print(f"PRUNE: removed {removed} from {csv_path.name}")
 
     finally:
         smtp_close(smtp)
