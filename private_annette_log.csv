@@ -478,7 +478,6 @@ TimestampUTC,Email,Status,Info
 2026-01-01T21:13:57.061820+00:00,author.vstephens@gmail.com,ERROR,sendgrid library not installed; add 'sendgrid' to requirements and install it
 2026-01-01T21:14:24.218626+00:00,author.vstephens@gmail.com,ERROR,sendgrid library not installed; add 'sendgrid' to requirements and install it
 2026-01-01T21:15:15.498871+00:00,author.vstephens@gmail.com,SENT,
-2026-01-01T21:16:46.034735+00:00,windellejcr@gmail.com,SENT,
 2026-01-01T21:24:46.123270+00:00,christinenorris02@gmail.com,SENT,
 2026-01-01T21:33:17.250920+00:00,gjerwin@gmail.com,SENT,
 2026-01-01T21:41:49.312483+00:00,richardclementmd1@gmail.com,SENT,
@@ -510,6 +509,16 @@ TimestampUTC,Email,Status,Info
 2026-01-02T01:44:16.067423+00:00,soullaauthor@gmail.com,ERROR,HTTP Error 401: Unauthorized
 2026-01-02T01:52:46.517724+00:00,lisa@lisaebetz.com,ERROR,HTTP Error 401: Unauthorized
 2026-01-02T02:01:17.970584+00:00,glorifiedwriting@gmail.com,ERROR,HTTP Error 401: Unauthorized
-2026-01-03T10:50:14.302205+00:00,susangrosseyauthor@gmail.com,SENT,
-2026-01-03T11:26:37.098322+00:00,mel@melsherratt.co.uk,SENT,
-2026-01-03T11:27:24.365950+00:00,windellejcr@gmail.com,SENT,
+2026-01-02T13:53:00.034839+00:00,eboliverwolf@gmail.com,SENT,
+2026-01-02T14:01:27.941897+00:00,kalelink.author@gmail.com,SENT,
+2026-01-02T14:10:01.899542+00:00,courageandtruthbooks@gmail.com,SENT,
+2026-01-02T14:18:30.858070+00:00,nancy@njmastro.com,SENT,
+2026-01-02T14:27:03.132661+00:00,agimgbook@gmail.com,SENT,
+2026-01-02T14:56:17.639211+00:00,siennakaye143@gmail.com,SENT,
+2026-01-02T15:04:47.742451+00:00,themarlamonroe@yahoo.com,SENT,
+2026-01-02T15:13:17.097789+00:00,amyefriedman@gmail.com,SENT,
+2026-01-02T15:21:45.798007+00:00,authormayafisher@gmail.com,SENT,
+2026-01-02T15:30:16.565930+00:00,soullaauthor@gmail.com,SENT,
+2026-01-02T15:53:06.571095+00:00,lisa@lisaebetz.com,SENT,
+2026-01-02T16:01:51.439915+00:00,glorifiedwriting@gmail.com,SENT,
+2026-01-03T03:58:24.557412+00:00,windellejcr@gmail.com,SENT,

@@ -414,7 +414,6 @@ TimestampUTC,Email,Status,Info
 2025-12-31T20:42:33.674077+00:00,valdezfj@charter.net,SENT,
 2025-12-31T20:51:29.651795+00:00,reenpr@aol.com,SENT,
 2025-12-31T21:00:29.713271+00:00,dicmal1@verizon.net,SENT,
-2026-01-01T21:16:45.996105+00:00,windellejcr@gmail.com,SENT,
 2026-01-01T21:24:46.179365+00:00,reeseknightleyauthor@gmail.com,SENT,
 2026-01-01T21:33:42.382923+00:00,logan.lee2011@gmail.com,SENT,
 2026-01-01T21:42:42.834734+00:00,authorsanyu@gmail.com,SENT,
@@ -449,5 +448,18 @@ TimestampUTC,Email,Status,Info
 2026-01-02T02:19:48.308928+00:00,wgcilowrites@gmail.com,ERROR,HTTP Error 401: Unauthorized
 2026-01-02T02:28:43.062662+00:00,onesong@melodymonroe.org,ERROR,HTTP Error 401: Unauthorized
 2026-01-02T02:37:34.922565+00:00,norafgermain@gmail.com,ERROR,HTTP Error 401: Unauthorized
-2026-01-03T11:26:41.736697+00:00,windellejcr@gmail.com,ERROR,"auth_failed: (454, b'4.7.0 Temporary authentication failure: Connection lost to authentication server')"
-2026-01-03T11:27:30.069669+00:00,windellejcr@gmail.com,SENT,
+2026-01-02T13:56:09.528402+00:00,donnellem@gmail.com,SENT,
+2026-01-02T14:05:03.308014+00:00,rebekahsantoro@gmail.com,SENT,
+2026-01-02T14:14:05.273673+00:00,author.jacquelyncole@gmail.com,SENT,
+2026-01-02T14:23:08.922692+00:00,meredithraelyons@gmail.com,SENT,
+2026-01-02T14:32:07.824760+00:00,uncommon.lit.415@gmail.com,SENT,
+2026-01-02T14:56:17.655565+00:00,vickyzzzz@yahoo.com,SENT,
+2026-01-02T15:05:15.287144+00:00,warriors@teresagabelman.com,SENT,
+2026-01-02T15:14:09.689118+00:00,nicoleaisling.author@gmail.com,SENT,
+2026-01-02T15:23:29.561515+00:00,tneyer.writer@gmail.com,SENT,
+2026-01-02T15:32:29.370441+00:00,wardabooks@gmail.com,SENT,
+2026-01-02T15:53:03.258661+00:00,readamypendino@gmail.com,SENT,
+2026-01-02T16:05:02.112630+00:00,wgcilowrites@gmail.com,SENT,
+2026-01-02T16:13:59.796837+00:00,onesong@melodymonroe.org,SENT,
+2026-01-02T16:22:58.640558+00:00,norafgermain@gmail.com,SENT,
+2026-01-03T03:58:30.833483+00:00,windellejcr@gmail.com,SENT,
