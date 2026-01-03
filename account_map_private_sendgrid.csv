@@ -1,0 +1,11 @@
+recipients_csv,log_csv
+recipients_1.csv,private_annette_log.csv
+recipients_2.csv,private_jordan_kendrick_log.csv
+recipients_3.csv,private_jodi_horowitz_log.csv
+recipients_4.csv,private_alison_log.csv
+recipients_5.csv,private_fiorela_log.csv
+recipients_sendgrid_1.csv,sendgrid_annette_log.csv
+recipients_sendgrid_2.csv,sendgrid_jordan_log.csv
+recipients_sendgrid_3.csv,sendgrid_jodi_log.csv
+recipients_sendgrid_4.csv,sendgrid_alison_log.csv
+recipients_sendgrid_5.csv,sendgrid_fiorela_log.csv
