@@ -169,16 +169,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 500,
+        "interval": 300,
         "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "cooldown_seconds": 500,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 22,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "prune_sent": True,
         "password_env": "PRIVATE_ANNETTE_APP_PW",
     },
     "private_jordan": {
@@ -198,6 +199,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "prune_sent": True,
         "password_env": "PRIVATE_JORDAN_APP_PW",
     },
     "private_jodi": {
@@ -217,6 +219,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "prune_sent": True,
         "password_env": "PRIVATE_JODI_APP_PW",
     },
     "private_alison": {
@@ -236,6 +239,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "prune_sent": True,
         "password_env": "PRIVATE_ALISON_APP_PW",
     },
     "private_fiorela": {
@@ -255,6 +259,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "prune_sent": True,
         "password_env": "PRIVATE_FIORELA_APP_PW",
     },
 
@@ -276,6 +281,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "daily_target": 20,
+        "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -296,6 +303,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "daily_target": 20,
+        "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -316,6 +325,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "daily_target": 20,
+        "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -336,6 +347,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "daily_target": 20,
+        "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -356,6 +369,8 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
+        "daily_target": 20,
+        "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
     },
@@ -462,15 +477,29 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-Your writing reads like scenes. {BookTitle} feels made for a cinematic tease.
-We are reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
-We partner with Astra Productions, a studio we work closely with to create:
-• a 30–60s cinematic trailer (tone + stakes, fast)
-• a clean book page (cover, strongest lines, buy links)
-Already have strong assets? Great—next step is our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping).
-If you still need assets, reply with the emotion you want to evoke, 1–2 must-include lines (tagline/review/award) plus a link to your book, and anything to avoid (spoilers/tropes), and we’ll send you two opening-hook concepts and a page layout.
+Your writing reads like scenes—{BookTitle} feels made for a cinematic tease.
 
-Looking forward to working with you!
+We are reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
+
+We partner with Astra Productions to create:
+30–60s cinematic trailer — $999
+Clean book page (cover, strongest lines, buy links) — $499
+Cover + promo graphics bundle (cover + 3 social graphics) — $399
+
+Market note: some studios quote $3,000+ for a trailer alone. Astra starts at $999.
+
+These assets can lift clicks/conversions and position your book more strongly for retail review. If you’d like, I can share a short portfolio of recent trailers and book pages.
+
+If you already have assets, send what you’re using and we’ll suggest what to keep and what to improve. When your presentation looks strong for a retail marketing/review team, we can move you into our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping).
+
+If you want concepts from us, reply with:
+the emotion you want to evoke
+1–2 must-include lines (tagline / review / award)
+the link to the book you want to promote (if it’s not {BookTitle}, send the title/link you prefer)
+anything to avoid (spoilers / tropes)
+
+We’ll send two opening-hook concepts and a page layout.
+
 Warmly,
 {SIGIMG}
 
@@ -1151,11 +1180,12 @@ def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
         fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
         kept_rows = []
         for row in reader:
-            email_addr = norm_email(row.get("Email") or "")
+            clean_row = {k: v for k, v in row.items() if k is not None}
+            email_addr = norm_email(clean_row.get("Email") or "")
             if email_addr and email_addr in sent_emails:
                 removed += 1
                 continue
-            kept_rows.append(row)
+            kept_rows.append(clean_row)
         f.seek(0)
         f.truncate()
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1178,11 +1208,12 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
         kept_rows = []
         target = norm_email(email_addr)
         for row in reader:
-            email_val = norm_email(row.get("Email") or "")
+            clean_row = {k: v for k, v in row.items() if k is not None}
+            email_val = norm_email(clean_row.get("Email") or "")
             if email_val and email_val == target:
                 removed += 1
                 continue
-            kept_rows.append(row)
+            kept_rows.append(clean_row)
         if removed:
             f.seek(0)
             f.truncate()
@@ -1577,11 +1608,20 @@ def main():
     ap.add_argument("--from_email", "--from", dest="from_email", default="")
     ap.add_argument("--password", default="")
     ap.add_argument("--password_env", default="")
+    ap.add_argument("--daily_target", type=int, default=0)
+    ap.add_argument("--prune_sent", action="store_true", help="Remove already-sent emails from CSV before sending.")
+    ap.add_argument("--no-prune_sent", dest="prune_sent", action="store_false", help="Disable prune of sent emails.")
     ap.add_argument("--account_map", default="account_map.csv")
     ap.add_argument("--global_dedupe", action="store_true")
     ap.add_argument("--global_dedupe_logs_pattern", default="*_log.csv")
     ap.add_argument("--global_dedupe_recipients_pattern", default="recipients_*.csv")
     ap.add_argument("--status", action="store_true", help="Show status for private/sendgrid profiles.")
+    ap.add_argument("--status-sendgrid", action="store_true", help="Show status for sendgrid profiles only.")
+    ap.add_argument(
+        "--resync-sendgrid",
+        action="store_true",
+        help="Rebuild sendgrid_daily_counters.json from sendgrid logs for today.",
+    )
 
     if profile_defaults:
         ap.set_defaults(**profile_defaults)
@@ -1594,10 +1634,50 @@ def main():
             for k, v in sorted(cfg.items()):
                 print(f"    {k}: {v}")
         return
-    if args.profile:
+    if args.profile and not args.status:
         print(f"PROFILE: {args.profile}")
 
-    if args.status:
+    if args.resync_sendgrid:
+        candidates: Dict[str, Dict[str, object]] = {}
+        if args.profile:
+            cfg = PROFILES.get(args.profile)
+            if not cfg:
+                print(f"ERROR: unknown profile {args.profile}")
+                return
+            provider = str(cfg.get("provider") or "")
+            if provider != "sendgrid":
+                print("RESYNC: only available for sendgrid profiles.")
+                return
+            candidates[args.profile] = cfg
+        else:
+            for name, cfg in sorted(PROFILES.items()):
+                provider = str(cfg.get("provider") or "")
+                if provider == "sendgrid":
+                    candidates[name] = cfg
+
+        counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        updated = 0
+        for name, cfg in candidates.items():
+            log_path = Path(str(cfg.get("log") or ""))
+            sent_today = count_sent_today_from_log(log_path)
+            _, _, last_success = load_log_statuses(log_path)
+            from_email = norm_email(str(cfg.get("from_email") or ""))
+            counter_key = from_email or name
+            entry = counters.get(counter_key, {})
+            if not entry and name in counters:
+                entry = counters.get(name, {})
+            entry["date"] = today
+            entry["sent"] = int(sent_today)
+            entry["last_success"] = last_success.astimezone().isoformat() if last_success else ""
+            counters[counter_key] = entry
+            updated += 1
+        save_sendgrid_counters(SENDGRID_COUNTERS_PATH, counters)
+        print(f"RESYNC: updated {updated} sendgrid account(s).")
+        if not (args.status or args.status_sendgrid):
+            return
+
+    if args.status or args.status_sendgrid:
         candidates: Dict[str, Dict[str, object]] = {}
         if args.profile:
             cfg = PROFILES.get(args.profile)
@@ -1608,16 +1688,42 @@ def main():
             if provider not in ("private", "sendgrid"):
                 print("STATUS: only available for providers private/sendgrid.")
                 return
+            if args.status_sendgrid and provider != "sendgrid":
+                print("STATUS: --status-sendgrid requires a sendgrid profile.")
+                return
             candidates[args.profile] = cfg
         else:
             for name, cfg in sorted(PROFILES.items()):
                 provider = str(cfg.get("provider") or "")
-                if provider in ("private", "sendgrid"):
+                if args.status_sendgrid:
+                    if provider == "sendgrid":
+                        candidates[name] = cfg
+                elif provider in ("private", "sendgrid"):
                     candidates[name] = cfg
 
         counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
+        total_sendgrid_sent = 0
+        total_sendgrid_remaining = 0
+        total_sendgrid_accounts = 0
         for name, cfg in candidates.items():
             provider = str(cfg.get("provider") or "")
+            if args.status_sendgrid and provider == "sendgrid":
+                from_email = norm_email(str(cfg.get("from_email") or ""))
+                counter_key = from_email or name
+                if counter_key not in counters and name in counters:
+                    counter_key = name
+                sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
+                daily_target = int(cfg.get("daily_target") or 0)
+                cap_value = daily_target if daily_target > 0 else SENDGRID_DAILY_CAP
+                remaining_today = max(0, cap_value - sent_today)
+                status_label = "OK" if sent_today < cap_value else "NOT"
+                total_sendgrid_sent += sent_today
+                total_sendgrid_remaining += remaining_today
+                total_sendgrid_accounts += 1
+                print(
+                    f"{name}: sent_today={sent_today} remaining_today={remaining_today} cap={cap_value} status={status_label}"
+                )
+                continue
             csv_path = Path(str(cfg.get("csv") or ""))
             log_path = Path(str(cfg.get("log") or ""))
 
@@ -1638,13 +1744,15 @@ def main():
             daily_cap = "n/a"
             remaining_today = "n/a"
             if provider == "sendgrid":
-                counter_key = name
-                from_email = str(cfg.get("from_email") or "").strip()
-                if counter_key not in counters and from_email in counters:
-                    counter_key = from_email
+                from_email = norm_email(str(cfg.get("from_email") or ""))
+                counter_key = from_email or name
+                if counter_key not in counters and name in counters:
+                    counter_key = name
                 sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
-                daily_cap = str(SENDGRID_DAILY_CAP)
-                remaining_today = str(max(0, SENDGRID_DAILY_CAP - sent_today))
+                daily_target = int(cfg.get("daily_target") or 0)
+                cap_value = daily_target if daily_target > 0 else SENDGRID_DAILY_CAP
+                daily_cap = str(cap_value)
+                remaining_today = str(max(0, cap_value - sent_today))
             elif provider == "private":
                 sent_today = count_sent_today_from_log(log_path)
 
@@ -1659,6 +1767,17 @@ def main():
                 .format(sent_today=sent_today, daily_cap=daily_cap, remaining_today=remaining_today)
             )
             print(f"  last_success_timestamp={last_success_str}")
+        if args.status_sendgrid and not args.profile and total_sendgrid_accounts:
+            total_cap = SENDGRID_DAILY_CAP
+            if total_sendgrid_accounts:
+                total_cap = total_sendgrid_accounts * 20
+            print(
+                "TOTAL: sent_today={sent} remaining_today={remaining} cap={cap}".format(
+                    sent=total_sendgrid_sent,
+                    remaining=total_sendgrid_remaining,
+                    cap=total_cap,
+                )
+            )
         return
 
     sendgrid_api_key = os.environ.get("SENDGRID_API_KEY", "").strip()
@@ -1737,6 +1856,16 @@ def main():
             if p.resolve() == current_csv:
                 continue
             other_recipients |= load_emails_from_csv(p)
+
+    if args.prune_sent:
+        sent_for_prune = set(already_done)
+        if args.global_dedupe:
+            sent_for_prune |= global_done
+        sent_for_prune -= always_send_set
+        removed = prune_sent_from_csv(csv_path, sent_for_prune)
+        if removed:
+            print(f"PRUNE: removed {removed} from {csv_path.name}")
+            rows = read_rows(csv_path)
 
     pending: List[Dict[str, str]] = []
     seen_in_input: Set[str] = set()
@@ -1840,18 +1969,25 @@ def main():
     sendgrid_counters: Dict[str, Dict[str, object]] = {}
     sendgrid_counter_key = ""
     sendgrid_sent_today = 0
+    sendgrid_daily_target = max(0, int(getattr(args, "daily_target", 0) or 0))
+    sendgrid_effective_cap = SENDGRID_DAILY_CAP
+    if sendgrid_daily_target > 0:
+        sendgrid_effective_cap = min(SENDGRID_DAILY_CAP, sendgrid_daily_target)
     if args.provider == "sendgrid":
-        sendgrid_counter_key = args.profile or from_user
+        sendgrid_counter_key = norm_email(from_user) or (args.profile or "")
         sendgrid_counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
+        if args.profile and sendgrid_counter_key not in sendgrid_counters and args.profile in sendgrid_counters:
+            sendgrid_counters[sendgrid_counter_key] = sendgrid_counters[args.profile]
+            save_sendgrid_counters(SENDGRID_COUNTERS_PATH, sendgrid_counters)
         sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
-        if not args.dry_run and sendgrid_sent_today >= SENDGRID_DAILY_CAP:
+        if not args.dry_run and sendgrid_sent_today >= sendgrid_effective_cap:
             log_row(
                 log_path,
                 "",
                 "DAILY_CAP_REACHED",
-                f"sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}",
+                f"sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
             )
-            print(f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}")
+            print(f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}")
             return
 
     # Choose signature file:
@@ -1999,16 +2135,16 @@ def main():
 
                 if args.provider == "sendgrid":
                     sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
-                    if sendgrid_sent_today >= SENDGRID_DAILY_CAP:
+                    if sendgrid_sent_today >= sendgrid_effective_cap:
                         if not args.dry_run:
                             log_row(
                                 log_path,
                                 "",
                                 "DAILY_CAP_REACHED",
-                                f"sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}",
+                                f"sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
                             )
                         print(
-                            f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={SENDGRID_DAILY_CAP}"
+                            f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}"
                         )
                         stop_reason = "daily_cap"
                         break
