@@ -1,0 +1,13 @@
+PROFILE: sendgrid_jodi
+RUN: provider=sendgrid host=sendgrid:api pitch=pitch3
+FILES: csv=recipients_sendgrid_3.csv log=sendgrid_jodi_log.csv pending=8 interval=530s
+GLOBAL DEDUPE: logs=2145 | other_recipients=40 | skipped_logs=0 | skipped_recipients=0
+[1/8] ERROR windellejcr@gmail.com :: HTTP Error 401: Unauthorized
+[2/8] ERROR cp@cpjames.com :: HTTP Error 401: Unauthorized
+[3/8] ERROR jeff@restorethefamily.com :: HTTP Error 401: Unauthorized
+[4/8] ERROR bard@bardconstantine.com :: HTTP Error 401: Unauthorized
+[5/8] ERROR mei.lin@fnova.com :: HTTP Error 401: Unauthorized
+[6/8] ERROR thealstoncollab@gmail.com :: HTTP Error 401: Unauthorized
+[7/8] ERROR tigersong1114@live.com :: HTTP Error 401: Unauthorized
+[8/8] ERROR xsanders@barbaracaresforyou.org :: HTTP Error 401: Unauthorized
+DONE: sent=0 invalid=0 errors=8

@@ -1,0 +1,18 @@
+PROFILE: sendgrid_jordan
+RUN: provider=sendgrid host=sendgrid:api pitch=pitch2
+FILES: csv=recipients_sendgrid_2.csv log=sendgrid_jordan_log.csv pending=13 interval=520s
+GLOBAL DEDUPE: logs=2145 | other_recipients=35 | skipped_logs=0 | skipped_recipients=0
+[1/13] ERROR windellejcr@gmail.com :: HTTP Error 401: Unauthorized
+[2/13] ERROR dwtubman@comcast.net :: HTTP Error 401: Unauthorized
+[3/13] ERROR jimmelvin57@gmail.com :: HTTP Error 401: Unauthorized
+[4/13] ERROR arp02300@gmail.com :: HTTP Error 401: Unauthorized
+[5/13] ERROR anita@phoenixpublishinghouse.com :: HTTP Error 401: Unauthorized
+[6/13] ERROR danielleloriauthor@gmail.com :: HTTP Error 401: Unauthorized
+[7/13] ERROR cuss1800@yahoo.com :: HTTP Error 401: Unauthorized
+[8/13] ERROR gcohen_author@msn.com :: HTTP Error 401: Unauthorized
+[9/13] ERROR lilham@gmail.com :: HTTP Error 401: Unauthorized
+[10/13] ERROR chardietzpen@gmail.com :: HTTP Error 401: Unauthorized
+[11/13] ERROR elehner@frontier.net :: HTTP Error 401: Unauthorized
+[12/13] ERROR byvictoriapizzirusso@gmail.com :: HTTP Error 401: Unauthorized
+[13/13] ERROR jayperior@gmail.com :: HTTP Error 401: Unauthorized
+DONE: sent=0 invalid=0 errors=13

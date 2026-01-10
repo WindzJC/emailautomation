@@ -1,0 +1,18 @@
+PROFILE: sendgrid_annette
+RUN: provider=sendgrid host=sendgrid:api pitch=pitch1
+FILES: csv=recipients_sendgrid_1.csv log=sendgrid_annette_log.csv pending=13 interval=510s
+GLOBAL DEDUPE: logs=2145 | other_recipients=35 | skipped_logs=0 | skipped_recipients=0
+[1/13] ERROR windellejcr@gmail.com :: HTTP Error 401: Unauthorized
+[2/13] ERROR carly@carly-stevens.com :: HTTP Error 401: Unauthorized
+[3/13] ERROR elainewellsauthor@gmail.com :: HTTP Error 401: Unauthorized
+[4/13] ERROR echoesofthenightwalker@gmail.com :: HTTP Error 401: Unauthorized
+[5/13] ERROR coldfeverbooks@gmail.com :: HTTP Error 401: Unauthorized
+[6/13] ERROR team@wilmingtonlocalmagazine.com :: HTTP Error 401: Unauthorized
+[7/13] ERROR contactadrianmarquez@gmail.com :: HTTP Error 401: Unauthorized
+[8/13] ERROR douglascarnold@gmail.com :: HTTP Error 401: Unauthorized
+[9/13] ERROR travisjpetersen81@gmail.com :: HTTP Error 401: Unauthorized
+[10/13] ERROR keurllenferreira@gmail.com :: HTTP Error 401: Unauthorized
+[11/13] ERROR jmellissa109@gmail.com :: HTTP Error 401: Unauthorized
+[12/13] ERROR carlin.hertz@gmail.com :: HTTP Error 401: Unauthorized
+[13/13] ERROR info@angelawadley.com :: HTTP Error 401: Unauthorized
+DONE: sent=0 invalid=0 errors=13

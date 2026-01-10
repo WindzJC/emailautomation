@@ -1,54 +1,16 @@
 PRIVATE EMAIL
 
-python3 send_shard.py --provider private --csv recipients_1.csv --log private_marketing_log.csv        --pitch pitch1 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 40 --max_messages_1h 40 --domain_log private_domain_log.csv --suppress_invalid
-marketing@barnesnobleinfo.com
-Gerwen2022
-python3 send_shard.py --provider private --csv recipients_2.csv --log private_jordan_kendrick_log.csv --pitch pitch2 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 40 --max_messages_1h 40 --domain_log private_domain_log.csv --suppress_invalid
-jordankendrick@barnesnobleinfo.com
-Gerwen2022
-python3 send_shard.py --provider private --csv recipients_3.csv --log private_jodi_horowitz_log.csv   --pitch pitch3 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 40 --max_messages_1h 40 --domain_log private_domain_log.csv --suppress_invalid
-jodihorowitz@barnesnobleinfo.com
-Gerwen2022
-python3 send_shard.py --provider private --csv recipients_4.csv --log private_alison_log.csv          --pitch pitch4 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 40 --max_messages_1h 40 --domain_log private_domain_log.csv --suppress_invalid
-alisonaguair@barnesnobleinfo.com
-Gerwen2022
-python3 send_shard.py --provider private --csv recipients_5.csv --log private_fiorela_log.csv         --pitch pitch5 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 40 --max_messages_1h 40 --domain_log private_domain_log.csv --suppress_invalid
-fiorelladelima@barnesnobleinfo.com
-Gerwen2022
+PRIVATE_ANNETTE_APP_PW='Teray07jc' python3 send_shard.py --profile private_annette
+PRIVATE_JORDAN_APP_PW='Teray07jc' python3 send_shard.py --profile private_jordan
+PRIVATE_JODI_APP_PW='Teray07jc' python3 send_shard.py --profile private_jodi
+PRIVATE_ALISON_APP_PW='Teray07jc' python3 send_shard.py --profile private_alison
+PRIVATE_FIORELA_APP_PW='Teray07jc' python3 send_shard.py --profile private_fiorela
 
-GMAIL:
-python3 send_shard.py --provider gmail --csv recipients_g1.csv --log gmail_corporate_log.csv  --pitch gmail1 --interval 180 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 90 --max_unique_external_24h 90 --max_messages_24h 90 --suppress_invalid
-corporate@barnesnobleinfo.com
-htvl osgg imsz drsf
-python3 send_shard.py --provider gmail --csv recipients_g2.csv --log gmail_sally_log.csv      --pitch gmail2 --interval 180 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 90 --max_unique_external_24h 90 --max_messages_24h 90 --suppress_invalid
-sally.kim@littlebrowncoinfo.com
-amgw enfb gjcy trbo
-python3 send_shard.py --provider gmail --csv recipients_g3.csv --log gmail_jordan_log.csv     --pitch gmail3 --interval 180 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 90 --max_unique_external_24h 90 --max_messages_24h 90 --suppress_invalid
-jordan.kendrick@barnesnobleinfo.com 
-dizg orhp evtn mbkk
-python3 send_shard.py --provider gmail --csv recipients_g4.csv --log gmail_josefina_log.csv   --pitch gmail4 --interval 180 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 90 --max_unique_external_24h 90 --max_messages_24h 90 --suppress_invalid
-josefina.stenstrom@barnesnobleinfo.com
-eyvc hrqd jyur zzji
+SEND GRID
+python3 send_shard.py --profile sendgrid_annette
+python3 send_shard.py --profile sendgrid_jordan
+python3 send_shard.py --profile sendgrid_jodi
+python3 send_shard.py --profile sendgrid_alison
+python3 send_shard.py --profile sendgrid_fiorela
 
-ASTRA:
-python3 send_shard.py --provider gmail --csv recipients_astra1.csv --log astra_astra_log.csv           --pitch astra1 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-astra@astraproductionsbyjc.com
-jhto codx aeos kmha
-python3 send_shard.py --provider gmail --csv recipients_astra2.csv --log astra_jc_log.csv              --pitch astra2 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-jc@astraproductionsbyjc.com
-idmd rfvk ezyt ferz
-python3 send_shard.py --provider gmail --csv recipients_astra3.csv --log astra_jordanA_log.csv   --pitch astra3 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-jordan@astraproductionsbyjc.com
-jjre mdmg tgef rfne
-python3 send_shard.py --provider gmail --csv recipients_astra4.csv --log  astra_kentc_log.csv           --pitch astra4 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-kent.c@astraproductionsbyjc.com
-sujo mfnl puga sphj
-python3 send_shard.py --provider gmail --csv recipients_astra5.csv --log astra_zachking_log.csv        --pitch astra5 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-zachking@astraproductionsbyjc.com
-kvoy bebd wpll wryc
-python3 send_shard.py --provider gmail --csv recipients_astra6.csv --log astra_alex_log.csv            --pitch astra6 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-alex.c@astraproductionsbyjc.com
-ebds ntdh pimf btps
-python3 send_shard.py --provider gmail --csv recipients_astra7.csv --log astra_megan_log.csv           --pitch astra7 --interval 120 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 110 --max_unique_external_24h 110 --max_messages_24h 110 --suppress_invalid
-megan@astraproductionsbyjc.com
-kdbh vyxs hdaf zbky
+
