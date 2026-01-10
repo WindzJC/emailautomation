@@ -1,0 +1,9 @@
+PROFILE: sendgrid_fiorela
+RUN: provider=sendgrid host=sendgrid:api pitch=pitch5
+FILES: csv=recipients_sendgrid_5.csv log=sendgrid_fiorela_log.csv pending=4 interval=550s
+GLOBAL DEDUPE: logs=2145 | other_recipients=44 | skipped_logs=0 | skipped_recipients=0
+[1/4] ERROR windellejcr@gmail.com :: HTTP Error 401: Unauthorized
+[2/4] ERROR doesbuck@msn.com :: HTTP Error 401: Unauthorized
+[3/4] ERROR jeff@jmarsink.com :: HTTP Error 401: Unauthorized
+[4/4] ERROR reggiebrickbooks@gmail.com :: HTTP Error 401: Unauthorized
+DONE: sent=0 invalid=0 errors=4

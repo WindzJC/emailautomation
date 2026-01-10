@@ -1,0 +1,11 @@
+PROFILE: sendgrid_alison
+RUN: provider=sendgrid host=sendgrid:api pitch=pitch4
+FILES: csv=recipients_sendgrid_4.csv log=sendgrid_alison_log.csv pending=6 interval=540s
+GLOBAL DEDUPE: logs=2145 | other_recipients=42 | skipped_logs=0 | skipped_recipients=2
+[1/6] ERROR windellejcr@gmail.com :: HTTP Error 401: Unauthorized
+[2/6] ERROR d.rossjournal@gmail.com :: HTTP Error 401: Unauthorized
+[3/6] ERROR yvonnezepedastudio@gmail.com :: HTTP Error 401: Unauthorized
+[4/6] ERROR daryl@darylbanner.com :: HTTP Error 401: Unauthorized
+[5/6] ERROR wltrcoffey@gmail.com :: HTTP Error 401: Unauthorized
+[6/6] ERROR garyw@peoplepc.com :: HTTP Error 401: Unauthorized
+DONE: sent=0 invalid=0 errors=6
