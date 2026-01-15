@@ -477,30 +477,25 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-Your writing reads like scenes—{BookTitle} feels made for a cinematic tease.
+{BookTitle} reads like scenes. It feels made for a cinematic tease.
 
-We are reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
+I am reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
 
-We partner with Astra Productions to create:
-30–60s cinematic trailer — $999
-Clean book page (cover, strongest lines, buy links) — $499
-Cover + promo graphics bundle (cover + 3 social graphics) — $399
-
-Market note: some studios quote $3,000+ for a trailer alone. Astra starts at $999.
+We partner with Astra Productions, a studio we’ve been working closely with to create:
+30–60s cinematic trailer  
+Clean book page (cover, strongest lines, buy links)  
+Cover + promo graphics bundle (cover + 3 social graphics) 
 
 These assets can lift clicks/conversions and position your book more strongly for retail review. If you’d like, I can share a short portfolio of recent trailers and book pages.
 
-If you already have assets, send what you’re using and we’ll suggest what to keep and what to improve. When your presentation looks strong for a retail marketing/review team, we can move you into our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping).
+If you already have assets, send what you’re using and we’ll suggest what to keep and what to improve. 
+When your presentation looks strong for a retail marketing/review team, we can move you into our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping)
 
-If you want concepts from us, reply with:
-the emotion you want to evoke
-1–2 must-include lines (tagline / review / award)
-the link to the book you want to promote (if it’s not {BookTitle}, send the title/link you prefer)
-anything to avoid (spoilers / tropes)
+Reply PORTFOLIO and (if you’d like) include: the emotion to evoke, 1–2 must-include lines, your book link, and anything to avoid (spoilers). I’ll send two opening-hook concepts + a page layout, plus a few recent examples.
 
-We’ll send two opening-hook concepts and a page layout.
+We are looking forward to working with you!
 
-Warmly,
+All the best,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
@@ -509,27 +504,27 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 
 PITCHES = {
     "pitch1": {
-        "subject": "Quick idea for {BookTitle}",
+        "subject": "Quick question for {BookTitle}",
         "body": PITCH_1_5_BODY,
             },
 
     "pitch2": {
-        "subject": "Quick idea for {BookTitle}",
+        "subject": "Quick question for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch3": {
-        "subject": "Quick idea for {BookTitle}",
+        "subject": "Quick question for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch4": {
-        "subject": "Quick idea for {BookTitle}",
+        "subject": "Quick question for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch5": {
-        "subject": "Quick idea for {BookTitle}",
+        "subject": "Quick question for {BookTitle}",
         "body": PITCH_1_5_BODY,
 
   },
@@ -966,10 +961,20 @@ def load_sendgrid_counters(path: Path) -> Dict[str, Dict[str, object]]:
 
 
 def save_sendgrid_counters(path: Path, counters: Dict[str, Dict[str, object]]) -> None:
-    tmp_path = path.with_suffix(".tmp")
+    tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
+    lock_path = path.with_suffix(".lock")
     payload = json.dumps(counters, indent=2, sort_keys=True, ensure_ascii=True)
-    tmp_path.write_text(payload, encoding="utf-8")
-    tmp_path.replace(path)
+    with lock_path.open("a", encoding="utf-8") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
 def get_sendgrid_sent_today(
@@ -1272,10 +1277,12 @@ def render_message_parts(
     unsub_mailto = unsub_mailto_override or make_unsub_mailto(unsub_email)
 
     author = (author or "there").strip()
+    first_name = author.split()[0] if author else "there"
     book_title = (book_title or "").strip() or "your book"
 
     format_args = {
         "AuthorName": author,
+        "FirstName": first_name,
         "BookTitle": book_title,
         "UnsubEmail": unsub_email,
         "UnsubMailto": unsub_mailto,
@@ -1285,6 +1292,7 @@ def render_message_parts(
     body_text = body_template.format(**format_args)
     subject_text = subject.format(
         AuthorName=author,
+        FirstName=first_name,
         BookTitle=book_title,
         UnsubEmail=unsub_email,
         UnsubMailto=unsub_mailto,
