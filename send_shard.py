@@ -173,7 +173,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 500,
         "repeat": True,
-        "max_total": 22,
+        "max_total": 0,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
@@ -193,7 +193,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 0,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
@@ -213,7 +213,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 0,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
@@ -233,7 +233,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 0,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
@@ -253,7 +253,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "batch_size": 5,
         "cooldown_seconds": 1200,
         "repeat": True,
-        "max_total": 20,
+        "max_total": 0,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
@@ -281,7 +281,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "windellejcr@gmail.com",
-        "daily_target": 20,
+        "daily_target": 0,
         "prune_sent": True,
         "unsubscribe_group_id": 29658,
         "groups_to_display": [29658],
@@ -477,25 +477,23 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-{BookTitle} reads like scenes. It feels made for a cinematic tease.
+My team found {BookTitle} while scouting titles for our consignment program and reviewed how it’s currently presented online. Based on what we saw, we’re personally inviting you to be considered for our consignment program.
 
-I am reaching out because I run marketing + distribution programs that help authors place their books in Barnes & Noble stores across the U.S. What buyers respond to fastest is simple: buyer-ready assets that communicate the hook in seconds.
+To move a title forward, we make it retail-ready with two pieces:
 
-We partner with Astra Productions, a studio we’ve been working closely with to create:
-30–60s cinematic trailer  
-Clean book page (cover, strongest lines, buy links)  
-Cover + promo graphics bundle (cover + 3 social graphics) 
+A cinematic trailer (strong first 3 seconds) + shor t promo clips
 
-These assets can lift clicks/conversions and position your book more strongly for retail review. If you’d like, I can share a short portfolio of recent trailers and book pages.
+A focused author page that captures emails and routes readers to your retailer links
 
-If you already have assets, send what you’re using and we’ll suggest what to keep and what to improve. 
-When your presentation looks strong for a retail marketing/review team, we can move you into our B&N consignment program (750–3,500 copies, $250–$1,000 + shipping)
+We also handle promotion across social media by cutting the trailer into short-form content and posting consistently to keep the book in front of new readers.
 
-Reply PORTFOLIO and (if you’d like) include: the emotion to evoke, 1–2 must-include lines, your book link, and anything to avoid (spoilers). I’ll send two opening-hook concepts + a page layout, plus a few recent examples.
+Once these are in place, we can begin the consignment review process for your book.
 
-We are looking forward to working with you!
+First step: if you already have a website or trailer, send what you’re using. We’ll tell you what to keep, what to tighten, and the exact order we’d roll this out. If you don’t have them yet, we’ll build both from scratch.
 
-All the best,
+If you’d rather submit a different title than {BookTitle}, that’s completely fine—just send the link to the book you want us to consider.
+
+Best regards,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
@@ -528,181 +526,6 @@ PITCHES = {
         "body": PITCH_1_5_BODY,
 
   },
-
-  # ===== GMAIL / WORKSPACE PITCHES (1–5) =====
-  "gmail1": {
-    "subject": "Cinematic first impression for your book",
-    "body": """Dear {AuthorName},
-
-Readers decide fast: Do I feel anything?
-
-{BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
-
-My name is Annette Danek-Akey, Chief Supply Chain Officer, and I oversee all operations for the Barnes & Noble Distribution Centers. We help authors place their books on consignment in B&N physical bookstores across the United States.
-
-I’m reaching out because we partner with Astra Productions, a team we trust to create cinematic book trailers and clean author/book pages that convert interest into clicks.
-
-What we’d build for {BookTitle}:
-• a short cinematic trailer that makes the tone and stakes felt immediately
-• a focused book page with your cover, best review lines, and clear buy buttons
-
-This also sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, send 3 quick details:
-• what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-• 1–2 must-include lines (tagline / review / award)
-• anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-(Comparable cinematic trailers are often $3,000+.)
-
-Best regards,
-Annette Danek-Akey
-Chief Supply Chain Officer
-Barnes & Noble 
-
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
-  },
-
-  "gmail2": {
-    "subject": "Little, Brown - Hachette Book Group Traditional Publishing Proposal",
-    "body": """Hi {AuthorName},
-
-My name is Sally Kim, and I am the Acquisition Director and Publisher at Little, Brown - Hachette Book Group. I help authors place their books on consignment in B&N physical bookstores across the United States.
-
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
-
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
-
-How the program works:
-
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
-
-Your total investment for initial physical stocking is:
-
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
-
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
-
-Have a wonderful day!
-
-Sincerely,
-Sally Kim
-Pres and Publisher of Little, Brown and Company
-New York City
-United States
-
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
-  },
-
-  "gmail3": {
-        "subject": "Barnes & Noble Physical Placement",
-        "body": """Hi {AuthorName},
-
-My name is Jordan Kendrick, and I manage marketing and distribution programs that help authors place their books on consignment in B&N physical bookstores across the United States.
-
-I am reaching out to invite you to participate in our bookstore consignment program, which is designed to get qualified titles onto physical shelves and in front of in-store readers.
-
-Because we receive many requests, we only invite books that we believe are professionally produced, marketable, and a good fit for general readers. In evaluating a title, we consider the book’s subject, production and print quality, retail price and terms, and the clarity and professionalism of the writing.
-
-How the program works:
-
-We handle the printing and production of your books based on the quantity you choose.
-You cover the shipping and handling costs to deliver the books to participating stores; this is standard practice for consignment arrangements.
-You receive 85% of the total sales from this consignment program, equal to $1.50 for every copy sold. Royalties and a detailed sales report will be sent every quarter (within three months after the close of each quarter).
-As an added benefit, we also prepare and submit proposals to traditional publishers on your behalf. Having your book available in physical bookstores strengthens your position by demonstrating real-world demand and commercial potential.
-
-Your total investment for initial physical stocking is:
-
-$1,000 for 3,500 copies
-$750 for 2,500 copies
-$500 for 1,500 copies
-$250 for 750 copies
-You may select the print quantity that best fits your goals and budget. Your only cost is shipping.
-
-If you are interested in moving forward, please let me know, and I will send the next steps along with a simple agreement for your review.
-
-Have a wonderful day!
-
-Sincerely,
-Jordan Kendrick
-Barnes & Noble Inc.
-Marketing director
-United States
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
-  },
-
-  "gmail4": {
-    "subject": "Cinematic first impression for your book",
-    "body": """Hi {AuthorName}, 
-
-Readers decide fast: Do I feel anything?
-
-{BookTitle} has “I can see this” energy—it reads like scenes, not just sentences.
-
-My name is Josefina Stenstrom, Email Marketing Specialist of Barnes & Noble. We help authors place their books on consignment in B&N physical bookstores across the United States.
-
-I’m reaching out because we partner with Astra Productions, a team we trust to create cinematic book trailers and clean author/book pages that convert interest into clicks.
-
-What we’d build for {BookTitle}:
-• a short cinematic trailer that makes the tone and stakes felt immediately
-• a focused book page with your cover, best review lines, and clear buy buttons
-
-This also sets you up for the next step later: if you ever want physical-store placement, these assets make it easier for decision-makers to preview the book fast.
-
-If you’re open to it, send 3 quick details:
-• what you want readers to feel (e.g., eerie, hopeful, heart-racing)
-• 1–2 must-include lines (tagline / review / award)
-• anything to avoid (spoilers)
-
-I’ll reply with two trailer opening concepts for {BookTitle}, a simple page layout, and 2–3 examples—so you can judge the fit before deciding.
-
-Investment: Trailer $999 | Book page/website $499 | Bundle $1,299.
-(Comparable cinematic trailers are often $3,000+.)
-
-Best regards,
-Josefina Stenstrom, Email Marketing Specialist
-Barnes & Noble Inc.
-United States
-
-If you’d prefer I don’t follow up, click: {UnsubMailto}
-(or just reply “unsubscribe”).
-""" 
-
-    },
-
-  "gmail5": {
-    "subject": "Should I close this out?",
-    "body": """Hi {AuthorName},
-
-Just checking—should I close this out?
-
-If you want your book to stand out more online, reply with your book link (or title + synopsis) and I’ll send a quick concept + examples.
-If not, no worries—I won’t follow up again.
-
-Best regards,
-B&N Marketing Team
-
-Opt out: {UnsubMailto}
-(or just reply “unsubscribe”).
-"""
-    },
     
   # ===== GMAIL / WORKSPACE PITCHES (1–5) =====
   "astra1": {
@@ -1488,6 +1311,19 @@ def extract_code_text_from_exception(e: Exception) -> Tuple[Optional[int], str]:
     return code, text
 
 
+def is_sendgrid_forbidden(code: Optional[int], text: str) -> bool:
+    if code == 403:
+        return True
+    t = (text or "").lower()
+    if "status=403" in t:
+        return True
+    if "http error 403" in t:
+        return True
+    if "403" in t and "forbidden" in t:
+        return True
+    return False
+
+
 # ===== Rolling 1h guard (PrivateEmail shared bucket) =====
 def _parse_ts_safe(ts: str) -> Optional[datetime]:
     try:
@@ -2217,11 +2053,23 @@ def main():
                         log_row(log_path, to_email, "ERROR", f"{code} {text}")
                         error_count += 1
                         print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
+                        if args.provider == "private":
+                            t = (f"{code} {text}").lower()
+                            if "4.7.1" in t and "sending limit" in t:
+                                wait_seconds = random.randint(60 * 60, 75 * 60)
+                                print(f"PAUSE: private throttle detected; sleeping {wait_seconds}s (~{wait_seconds//60}m)")
+                                sleep_with_jitter(wait_seconds, jitter=0)
                         continue
 
                     log_row(log_path, to_email, "ERROR", str(e))
                     error_count += 1
                     print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
+                    if args.provider == "private":
+                        t = str(e).lower()
+                        if "4.7.1" in t and "sending limit" in t:
+                            wait_seconds = random.randint(60 * 60, 75 * 60)
+                            print(f"PAUSE: private throttle detected; sleeping {wait_seconds}s (~{wait_seconds//60}m)")
+                            sleep_with_jitter(wait_seconds, jitter=0)
                     continue
 
                 except smtplib.SMTPAuthenticationError as e:
@@ -2341,9 +2189,18 @@ def main():
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
 
                 except Exception as e:
-                    log_row(log_path, to_email, "ERROR", str(e))
+                    err_text = str(e)
+                    code, text = extract_code_text_from_exception(e)
+                    if not text:
+                        text = err_text
+                    log_row(log_path, to_email, "ERROR", err_text)
                     error_count += 1
-                    print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(str(e))}")
+                    print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(err_text)}")
+                    if args.provider == "sendgrid" and args.suppress_invalid and is_sendgrid_forbidden(code, text):
+                        append_suppressed_email(suppress_csv_path, to_email)
+                        if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                            print(f"CSV: removed {to_email} from {csv_path.name}")
+                        print(f"SUPPRESS: {to_email} (sendgrid_403)")
 
                 if stop_reason:
                     break
