@@ -41,126 +41,7 @@ PROVIDER_LIMIT_DEFAULTS = {
 }
 
 PROFILES: Dict[str, Dict[str, object]] = {
-    # Gmail example (kept for reference)
-    "gmail_megan": {
-        "provider": "gmail",
-        "csv": "recipients_astra7.csv",
-        "log": "astra_megan_log.csv",
-        "pitch": "astra7",
-        "from_email": "megan@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_MEGAN_APP_PW",
-    },
-    "gmail_astra": {
-        "provider": "gmail",
-        "csv": "recipients_astra1.csv",
-        "log": "astra_jc_log.csv",
-        "pitch": "astra1",
-        "from_email": "astra@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_ASTRA_APP_PW",
-    },
-    "gmail_jc": {
-        "provider": "gmail",
-        "csv": "recipients_astra2.csv",
-        "log": "astra_jc_log.csv",
-        "pitch": "astra2",
-        "from_email": "jc@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_JC_APP_PW",
-    },
-    "gmail_jordanA": {
-        "provider": "gmail",
-        "csv": "recipients_astra3.csv",
-        "log": "astra_jordanA_log.csv",
-        "pitch": "astra3",
-        "from_email": "jordan@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_JORDAN_A_APP_PW",
-    },
-    "gmail_kent": {
-        "provider": "gmail",
-        "csv": "recipients_astra4.csv",
-        "log": "astra_kentc_log.csv",
-        "pitch": "astra4",
-        "from_email": "kent.c@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_KENT_APP_PW",
-    },
-    "gmail_zachking": {
-        "provider": "gmail",
-        "csv": "recipients_astra5.csv",
-        "log": "astra_zachking_log.csv",
-        "pitch": "astra5",
-        "from_email": "zachking@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_ZACHKING_APP_PW",
-    },
-    "gmail_alex": {
-        "provider": "gmail",
-        "csv": "recipients_astra6.csv",
-        "log": "astra_alex_log.csv",
-        "pitch": "astra6",
-        "from_email": "alex.c@astraproductionsbyjc.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 240,
-        "batch_size": 10,
-        "cooldown_seconds": 1000,
-        "repeat": True,
-        "max_total": 120,
-        "max_messages_24h": 150,
-        "max_unique_external_24h": 150,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_ALEX_APP_PW",
-    },
+
     # Private mailboxes (trial plan: ~4/hour each, 20/day each, shared domain 50/hour)
     "private_annette": {
         "provider": "private",
@@ -375,75 +256,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "groups_to_display": [29658],
     },
 
-####################################
-    "gmail_corporate": {
-        "provider": "gmail",
-        "csv": "recipients_g1.csv",
-        "log": "gmail_corporate_log.csv",
-        "pitch": "gmail1",
-        "from_email": "corporate@barnesnobleinfo.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 300,
-        "batch_size": 10,
-        "cooldown_seconds": 1200,
-        "repeat": True,
-        "max_total": 40,
-        "max_messages_24h": 120,
-        "max_unique_external_24h": 120,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_CORPORATE_APP_PW",
-    },
-    "gmail_sally": {
-        "provider": "gmail",
-        "csv": "recipients_g2.csv",
-        "log": "gmail_sally_log.csv",
-        "pitch": "gmail2",
-        "from_email": "sally.kim@littlebrowncoinfo.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 300,
-        "batch_size": 10,
-        "cooldown_seconds": 1200,
-        "repeat": True,
-        "max_total": 40,
-        "max_messages_24h": 120,
-        "max_unique_external_24h": 120,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_SALLY_APP_PW",
-    },
-    "gmail_jordan": {
-        "provider": "gmail",
-        "csv": "recipients_g3.csv",
-        "log": "gmail_jordan_log.csv",
-        "pitch": "gmail3",
-        "from_email": "jordan.kendrick@barnesnobleinfo.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 300,
-        "batch_size": 10,
-        "cooldown_seconds": 1200,
-        "repeat": True,
-        "max_total": 40,
-        "max_messages_24h": 120,
-        "max_unique_external_24h": 120,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_JORDAN_APP_PW",
-    },
-    "gmail_josefina": {
-        "provider": "gmail",
-        "csv": "recipients_g4.csv",
-        "log": "gmail_josefina_log.csv",
-        "pitch": "gmail4",
-        "from_email": "josefina.stenstrom@barnesnobleinfo.com",
-        "my_domains": "barnesnobleinfo.com,astraproductionsbyjc.com",
-        "interval": 300,
-        "batch_size": 10,
-        "cooldown_seconds": 1200,
-        "repeat": True,
-        "max_total": 40,
-        "max_messages_24h": 120,
-        "max_unique_external_24h": 120,
-        "suppress_invalid": True,
-        "password_env": "GMAIL_JOSEFINA_APP_PW",
-    },
+
 }
 
 # ===== SIGNATURES (inline image via CID) =====
@@ -477,23 +290,33 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-My team found {BookTitle} while scouting titles for our consignment program and reviewed how it’s currently presented online. Based on what we saw, we’re personally inviting you to be considered for our consignment program.
+I’m reaching out to personally invite you to place "{BookTitle}" in our bookstore consignment program. We’re selective with what we stock, and I believe your title has strong shelf potential with the right readers.
 
-To move a title forward, we make it retail-ready with two pieces:
+We’re opening a few consignment spots. In a store, people buy differently: they notice the cover, pick it up, flip through a few pages, and decide.
 
-A cinematic trailer (strong first 3 seconds) + shor t promo clips
+Because we receive a high volume of submissions, we accept a limited number of titles and review each one for **content fit**, **print/production quality**, and **retail-ready pricing**.
 
-A focused author page that captures emails and routes readers to your retailer links
+Consignment terms
+- You earn **85% of the sale price** (example: $8.50 on a $10.00 book)
+- You cover **shipping** to our store(s)
+- Sales reporting + payouts quarterly (within 90 days after quarter-end)
+- You choose the stocking option that fits your budget—no additional consignment fees beyond shipping
 
-We also handle promotion across social media by cutting the trailer into short-form content and posting consistently to keep the book in front of new readers.
+Stocking options (choose one)
+- $250 — 750 copies
+- $500 — 1,500 copies
+- $750 — 2,500 copies
+- $1,000 — 3,500 copies
 
-Once these are in place, we can begin the consignment review process for your book.
+Optional add-ons (only if you want them)
+- Book teaser + promo clips ($999) — professionally edited to grab attention in the first 3 seconds and give you ready-to-post content for ongoing promotion
+- Author/book page ($499) — a clean, conversion-focused page I build (web + design) with a reader magnet, email capture, and direct retailer links- **Bundle (teaser + website)** — **$1,299 USD**
+- Bundle (teaser + website) — ($1,299) — save $199 when you get both!
 
-First step: if you already have a website or trailer, send what you’re using. We’ll tell you what to keep, what to tighten, and the exact order we’d roll this out. If you don’t have them yet, we’ll build both from scratch.
 
-If you’d rather submit a different title than {BookTitle}, that’s completely fine—just send the link to the book you want us to consider.
+Reply with your *book link (or ISBN)* and *retail price*. I’ll confirm fit and send the agreement + next steps.
 
-Best regards,
+Regards,
 {SIGIMG}
 
 P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
@@ -502,199 +325,31 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 
 PITCHES = {
     "pitch1": {
-        "subject": "Quick question for {BookTitle}",
+        "subject": "Invitation: Consignment Consideration for {BookTitle}",
         "body": PITCH_1_5_BODY,
             },
 
     "pitch2": {
-        "subject": "Quick question for {BookTitle}",
+        "subject": "Invitation: Consignment Consideration for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch3": {
-        "subject": "Quick question for {BookTitle}",
+        "subject": "Invitation: Consignment Consideration for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch4": {
-        "subject": "Quick question for {BookTitle}",
+        "subject": "Invitation: Consignment Consideration for {BookTitle}",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch5": {
-        "subject": "Quick question for {BookTitle}",
+        "subject": "Invitation: Consignment Consideration for {BookTitle}",
         "body": PITCH_1_5_BODY,
 
   },
-    
-  # ===== GMAIL / WORKSPACE PITCHES (1–5) =====
-  "astra1": {
-    "subject": "Cinematic first impression for your book",
-    "body": """Hi {AuthorName},
 
-Happy Holidays!
-
-I'm Sofia Margaret, Creative Producer of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Sofia Margaret
-Creative Producer
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-  },
-
-  "astra2": {
-    "subject": "Cinematic first impression for your book",
-    "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Windelle JC, CEO of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Windelle JC
-CEO
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-  },
-
-  "astra3": {
-        "subject": "Quick Idea to make your Book stand out online",
-        "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Jordan Miller, Author Outreach Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Jordan Miller
-Author Outreach Specialist
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-  },
-
-  "astra4": {
-    "subject": "Quick Idea to make your Book stand out online",
-    "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Kent Rivera, Client Success Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Kent Rivera
-Client Success Coordinator
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-  },
-
-  "astra5": {
-    "subject": "Quick Idea to make your Book stand out online",
-    "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Zach King, Web & Trailer Specialist of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Zach King
-Web & Trailer Specialist
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-    },
-
-     "astra6": {
-    "subject": "Quick Idea to make your Book stand out online",
-    "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Alex Carter, Marketing Team Lead of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Alex Carter
-Marketing Team Lead
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-    },
-
-       "astra7": {
-    "subject": "Quick Idea to make your Book stand out online",
-    "body": """Hi {AuthorName},
-
-Happy Holidays!
-
-I'm Megan, Production Coordinator of Astra Productions. We create 30-60 second cinematic book trailers and focused author websites that move readers from "interesting" to "click buy."
-
-The website complements the trailer: it gives the trailer a clean, distraction-free home with your cover, hook, best reviews, and direct purchase links (one link you can share anywhere). If you already have a website, we can add the trailer and layout to it. If you don't, we can build the site for you.
-
-Pricing: Trailer US$999 | Website US$499 | Bundle US$1,299.
-
-If you're open to it, reply with your book link (or title + synopsis), and I'll send back trailer hook concepts + a one-page site outline. If you'd like, I can also include 2-3 recent trailers and a sample author page so you can see the quality and style before deciding.
-
-Best regards,
-Megan
-Production Coordinator
-United States
-
-If you'd prefer I don't follow up, click: {UnsubMailto}
-(or just reply "unsubscribe").
-"""
-    },  
 }
 
 
