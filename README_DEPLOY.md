@@ -79,6 +79,34 @@ docker compose build
 docker compose up -d
 ```
 
+## Mac handoff
+
+If you want to continue the same live campaign on a Mac, GitHub alone is not enough.
+You also need the managed runtime payload:
+
+- `.env`
+- `data/`
+
+From the source machine:
+
+```bash
+./sync_to_mac.sh user@host /Users/user/emailautomation
+```
+
+Then on the Mac:
+
+```bash
+cd /Users/user/emailautomation
+./setup_mac_runtime.sh
+```
+
+After setup:
+
+- dashboard: `./run_live_dashboard.sh`
+- senders: `TMUX_SENDGRID_ATTACH=0 ./run_sendgrid_tmux.sh`
+
+Do not run the Windows and Mac senders at the same time against the same campaign data.
+
 ## Logs
 
 Dashboard logs:
