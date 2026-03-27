@@ -21,13 +21,17 @@ mkdir -p "$TMUX_SOCKET_ROOT"
 chmod 700 "$TMUX_SOCKET_ROOT"
 export TMUX_TMPDIR="$TMUX_SOCKET_ROOT"
 
-PY="./.venv/bin/python"
+PY="${PYTHON_BIN:-./.venv/bin/python}"
 HOST="${LIVE_DASHBOARD_HOST:-${APP_HOST:-0.0.0.0}}"
 PORT="${LIVE_DASHBOARD_PORT:-${APP_PORT:-8000}}"
 
 if [[ ! -x "$PY" ]]; then
-  echo "Missing Python venv at $PY"
-  exit 1
+  if command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  else
+    echo "Missing Python runtime. Expected $PY or python3 in PATH."
+    exit 1
+  fi
 fi
 
 exec "$PY" -m uvicorn live_dashboard:app --host "$HOST" --port "$PORT"

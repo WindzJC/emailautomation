@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-PY="./.venv/bin/python"
+PY="${PYTHON_BIN:-./.venv/bin/python}"
 SESSION_NAME="${TMUX_SENDGRID_SESSION:-sendgrid}"
 BACKUP_DIR="${SENDGRID_BACKUP_DIR:-backups}"
 REPORT_PATH="${SENDGRID_NORMALIZE_REPORT:-sendgrid_shard_normalize_report.json}"
@@ -20,8 +20,12 @@ PROFILES=(
 )
 
 if [[ ! -x "$PY" ]]; then
-  echo "Missing Python venv at $PY"
-  exit 1
+  if command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  else
+    echo "Missing Python runtime. Expected $PY or python3 in PATH."
+    exit 1
+  fi
 fi
 
 if [[ -z "${SENDGRID_API_KEY:-}" ]]; then

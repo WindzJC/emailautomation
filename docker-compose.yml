@@ -1,0 +1,50 @@
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "./run_runtime_worker.sh"]
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      TMUX_TMPDIR: /tmux
+      TMUX_WORKER_BOOTSTRAP_SESSION: runtime_worker
+      TMUX_SENDGRID_SESSION: sendgrid
+      DASHBOARD_PROFILE_GUARD_ENABLED: "${DASHBOARD_PROFILE_GUARD_ENABLED:-0}"
+    volumes:
+      - ./data:/app/data
+      - tmux_socket:/tmux
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "./run_live_dashboard.sh"]
+    env_file:
+      - .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8001
+      DATA_DIR: /app/data
+      TMUX_TMPDIR: /tmux
+      TMUX_SENDGRID_SESSION: sendgrid
+      DASHBOARD_PROFILE_GUARD_ENABLED: "${DASHBOARD_PROFILE_GUARD_ENABLED:-0}"
+    volumes:
+      - ./data:/app/data
+      - tmux_socket:/tmux
+    ports:
+      - "${HOST_DASHBOARD_PORT:-8001}:8001"
+    depends_on:
+      - worker
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  tmux_socket:

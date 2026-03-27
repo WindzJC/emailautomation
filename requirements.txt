@@ -1,1 +1,7 @@
 sendgrid>=6.0.0
+streamlit>=1.40.0
+fastapi>=0.135.0
+uvicorn[standard]>=0.41.0
+python-multipart>=0.0.9
+cryptography>=44.0.0
+email-validator>=2.2.0
