@@ -8,19 +8,26 @@ import csv
 import html
 import json
 import random
+import re
 import ssl
 import smtplib
+import tempfile
 import time
 import os
 import fcntl
 import sys
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import parseaddr
 from getpass import getpass
 from pathlib import Path
-from typing import Optional, Tuple, Set, Dict, List
+from typing import Optional, Tuple, Set, Dict, List, Deque
 from urllib.parse import quote
+
+import settings
+from recipient_file_lock import lock_files
+from sendgrid_hygiene import load_active_suppressed_emails
 
 # ===== SMTP PRESETS =====
 SMTP_PRESETS = {
@@ -30,19 +37,111 @@ SMTP_PRESETS = {
 
 DEFAULT_DOMAIN = "barnesnoblemarketing.com"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
-DEFAULT_UNSUB_CSV = Path("unsubscribed.csv")     # optional, header: Email
-DEFAULT_SUPPRESS_CSV = Path("suppressed.csv")    # optional, header: Email
-SENDGRID_DAILY_CAP = 100
-SENDGRID_COUNTERS_PATH = Path("sendgrid_daily_counters.json")
+ROOT = settings.APP_ROOT
+SHARDS_DIR = settings.SHARDS_DIR
+LOGS_DIR = settings.LOGS_DIR
+STATE_DIR = settings.STATE_DIR
+TMP_DIR = settings.TMP_DIR
+DEFAULT_UNSUB_CSV = settings.UNSUBSCRIBED_PATH     # optional, header: Email
+DEFAULT_SUPPRESS_CSV = settings.SUPPRESSED_PATH    # optional, header: Email
+DEFAULT_SENDGRID_SUPPRESSION_CSV = settings.state_path(
+    os.environ.get("SENDGRID_SUPPRESSION_CSV", settings.SENDGRID_SUPPRESSIONS_PATH.name)
+)
+SENDGRID_DAILY_CAP = 0  # 0 = disabled (no global daily cap)
+SENDGRID_COUNTERS_PATH = settings.SENDGRID_COUNTERS_PATH
+SENDGRID_GLOBAL_COUNTER_KEY = "__global__"
+DOMAIN_SLOT_TTL_SECONDS = max(30, int(os.environ.get("DOMAIN_SLOT_TTL_SECONDS", "300")))
 
 PROVIDER_LIMIT_DEFAULTS = {
-    "private": {"max_messages_1h": 50},
+    "private": {"max_messages_1h": 80},
     "gmail": {"max_messages_24h": 100, "max_unique_external_24h": 100},
+    "sendgrid": {"max_messages_1h": 180},
+}
+
+ROLE_LOCALPART_BLOCKLIST = {
+    "abuse",
+    "admin",
+    "billing",
+    "compliance",
+    "contact",
+    "devnull",
+    "finance",
+    "help",
+    "hello",
+    "hr",
+    "info",
+    "inquiries",
+    "legal",
+    "mailer-daemon",
+    "marketing",
+    "noreply",
+    "no-reply",
+    "office",
+    "postmaster",
+    "privacy",
+    "sales",
+    "security",
+    "support",
+    "team",
+    "webmaster",
+}
+
+GENERIC_SALUTATION = "there"
+
+NONPERSON_NAME_TOKENS = {
+    "admin",
+    "author",
+    "books",
+    "contact",
+    "corporate",
+    "hello",
+    "info",
+    "marketing",
+    "media",
+    "office",
+    "press",
+    "read",
+    "sales",
+    "service",
+    "services",
+    "shop",
+    "staff",
+    "store",
+    "studio",
+    "support",
+    "team",
+    "webmaster",
+    "works",
+}
+
+BUSINESS_LOCALPART_HINTS = {
+    "agency",
+    "arts",
+    "author",
+    "books",
+    "coaching",
+    "consult",
+    "design",
+    "designs",
+    "digital",
+    "fitness",
+    "herbs",
+    "lounge",
+    "media",
+    "ministries",
+    "nwcc",
+    "press",
+    "pressco",
+    "publishing",
+    "services",
+    "solutions",
+    "studio",
+    "works",
 }
 
 PROFILES: Dict[str, Dict[str, object]] = {
 
-    # Private mailboxes (trial plan: ~4/hour each, 20/day each, shared domain 50/hour)
+    # Private mailboxes (staggered pacing, domain-wide hourly cap controlled by PROVIDER_LIMIT_DEFAULTS)
     "private_annette": {
         "provider": "private",
         "csv": "recipients_1.csv",
@@ -50,16 +149,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 300,
-        "batch_size": 5,
-        "cooldown_seconds": 500,
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
         "repeat": True,
-        "max_total": 0,
+        "human_mode": True,
+        "max_total": 100,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
+        "always_send": "astraproductionsbyjc@gmail.com",
         "prune_sent": True,
         "password_env": "PRIVATE_ANNETTE_APP_PW",
     },
@@ -70,16 +170,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 520,
-        "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
         "repeat": True,
-        "max_total": 0,
+        "human_mode": True,
+        "max_total": 100,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
+        "always_send": "astraproductionsbyjc@gmail.com",
         "prune_sent": True,
         "password_env": "PRIVATE_JORDAN_APP_PW",
     },
@@ -90,16 +191,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 530,
-        "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
         "repeat": True,
-        "max_total": 0,
+        "human_mode": True,
+        "max_total": 100,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
+        "always_send": "astraproductionsbyjc@gmail.com",
         "prune_sent": True,
         "password_env": "PRIVATE_JODI_APP_PW",
     },
@@ -110,16 +212,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 540,
-        "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
         "repeat": True,
-        "max_total": 0,
+        "human_mode": True,
+        "max_total": 100,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
+        "always_send": "astraproductionsbyjc@gmail.com",
         "prune_sent": True,
         "password_env": "PRIVATE_ALISON_APP_PW",
     },
@@ -130,16 +233,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 550,
-        "batch_size": 5,
-        "cooldown_seconds": 1200,
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
         "repeat": True,
-        "max_total": 0,
+        "human_mode": True,
+        "max_total": 100,
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
+        "always_send": "astraproductionsbyjc@gmail.com",
         "prune_sent": True,
         "password_env": "PRIVATE_FIORELA_APP_PW",
     },
@@ -152,20 +256,21 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 510,
-        "batch_size": 5,
-        "cooldown_seconds": 900,
-        "repeat": False,
-        "max_total": 20,
-        "domain_log": "private_domain_log.csv",
+        "interval": 120,
+        "batch_size": 1,
+        "cooldown_seconds": 120,
+        "repeat": True,
+        "stop_at_local": "13:00",
+        "max_total": 201,
+        "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
-        "daily_target": 0,
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "daily_target": 200,
         "prune_sent": True,
-        "unsubscribe_group_id": 29658,
-        "groups_to_display": [29658],
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
@@ -174,20 +279,21 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 520,
-        "batch_size": 5,
-        "cooldown_seconds": 900,
-        "repeat": False,
-        "max_total": 20,
-        "domain_log": "private_domain_log.csv",
+        "interval": 120,
+        "batch_size": 1,
+        "cooldown_seconds": 120,
+        "repeat": True,
+        "stop_at_local": "13:00",
+        "max_total": 201,
+        "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
-        "daily_target": 20,
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "daily_target": 200,
         "prune_sent": True,
-        "unsubscribe_group_id": 29658,
-        "groups_to_display": [29658],
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
     },
     "sendgrid_jodi": {
         "provider": "sendgrid",
@@ -196,20 +302,21 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 530,
-        "batch_size": 5,
-        "cooldown_seconds": 900,
-        "repeat": False,
-        "max_total": 20,
-        "domain_log": "private_domain_log.csv",
+        "interval": 120,
+        "batch_size": 1,
+        "cooldown_seconds": 120,
+        "repeat": True,
+        "stop_at_local": "13:00",
+        "max_total": 201,
+        "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
-        "daily_target": 20,
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "daily_target": 200,
         "prune_sent": True,
-        "unsubscribe_group_id": 29658,
-        "groups_to_display": [29658],
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
     },
     "sendgrid_alison": {
         "provider": "sendgrid",
@@ -218,20 +325,21 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 540,
-        "batch_size": 5,
-        "cooldown_seconds": 900,
-        "repeat": False,
-        "max_total": 20,
-        "domain_log": "private_domain_log.csv",
+        "interval": 120,
+        "batch_size": 1,
+        "cooldown_seconds": 120,
+        "repeat": True,
+        "stop_at_local": "13:00",
+        "max_total": 201,
+        "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
-        "daily_target": 20,
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "daily_target": 200,
         "prune_sent": True,
-        "unsubscribe_group_id": 29658,
-        "groups_to_display": [29658],
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
     },
     "sendgrid_fiorela": {
         "provider": "sendgrid",
@@ -240,24 +348,57 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 550,
-        "batch_size": 5,
-        "cooldown_seconds": 900,
-        "repeat": False,
-        "max_total": 20,
-        "domain_log": "private_domain_log.csv",
+        "interval": 120,
+        "batch_size": 1,
+        "cooldown_seconds": 120,
+        "repeat": True,
+        "stop_at_local": "13:00",
+        "max_total": 201,
+        "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": True,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "windellejcr@gmail.com",
-        "daily_target": 20,
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "daily_target": 200,
         "prune_sent": True,
-        "unsubscribe_group_id": 29658,
-        "groups_to_display": [29658],
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
     },
 
 
 }
+
+
+def _managed_path(base_dir: Path, value: object) -> Path:
+    text = str(value or "").strip()
+    if not text:
+        return base_dir
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    return base_dir / path.name
+
+
+def _resolve_shard_path(value: object) -> Path:
+    path = _managed_path(SHARDS_DIR, value)
+    settings.maybe_seed_file(path, Path(str(value or "")).name)
+    return path
+
+
+def _resolve_log_path(value: object) -> Path:
+    path = _managed_path(LOGS_DIR, value)
+    settings.maybe_seed_file(path, Path(str(value or "")).name)
+    return path
+
+
+def _resolve_state_path(value: object) -> Path:
+    path = _managed_path(STATE_DIR, value)
+    settings.maybe_seed_file(path, Path(str(value or "")).name)
+    return path
+
+
+def _resolve_app_path(value: object) -> Path:
+    return settings.app_path(str(value or "").strip())
 
 # ===== SIGNATURES (inline image via CID) =====
 SIGNATURE_CID = "sigimg"
@@ -284,21 +425,28 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
     "alisonaguair@barnesnoblemarketing.com": "sig_private_alison.png",
     "fiorelladelima@barnesnoblemarketing.com": "sig_private_fiorela.png",
     "annettedanek-akey@barnesnoblemarketing.com": "sig_private_annette.png",
+    "astraproductionsbyjc@gmail.com": "LOGO ASTRA bg.png",
 }
 SIGNATURE_BY_PITCH = {
     }
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-I’m reaching out to personally invite you to place "{BookTitle}" in our bookstore consignment program. We’re selective with what we stock, and I believe your title has strong shelf potential with the right readers.
+Hope you’re having a great day. I’m reaching out after seeing your work and wanted to personally invite you in our Barnes Noble Consignment Program. We’re selective with what we stock, and we believe your work has strong shelf potential with the right readers.
 
 We’re opening a few consignment spots. In a store, people buy differently: they notice the cover, pick it up, flip through a few pages, and decide.
 
-Because we receive a high volume of submissions, we accept a limited number of titles and review each one for **content fit**, **print/production quality**, and **retail-ready pricing**.
+We accept a limited number of titles and review each one for content fit, print/production quality, and retail-ready pricing.
+
+Before we move forward, we require two things to be in place for placement and promotion once your book is stocked:
+1) a book teaser/trailer for promotion, and
+2) a clean author/book page so readers can find the book online, join your list, and go straight to your retailer links.
+
+If you already have a teaser and author/book page, send them over (links are fine). I’ll review them and let you know what’s ready to use and what needs adjusting before placement.
 
 Consignment terms
-- You earn **85% of the sale price** (example: $8.50 on a $10.00 book)
-- You cover **shipping** to our store(s)
+- You earn 85% of the sale price (example: $8.50 on a $10.00 book)
+- You cover shipping to our store(s)
 - Sales reporting + payouts quarterly (within 90 days after quarter-end)
 - You choose the stocking option that fits your budget—no additional consignment fees beyond shipping
 
@@ -308,13 +456,14 @@ Stocking options (choose one)
 - $750 — 2,500 copies
 - $1,000 — 3,500 copies
 
-Optional add-ons (only if you want them)
-- Book teaser + promo clips ($999) — professionally edited to grab attention in the first 3 seconds and give you ready-to-post content for ongoing promotion
-- Author/book page ($499) — a clean, conversion-focused page I build (web + design) with a reader magnet, email capture, and direct retailer links- **Bundle (teaser + website)** — **$1,299 USD**
-- Bundle (teaser + website) — ($1,299) — save $199 when you get both!
+If you need us to build the required assets:
+- Book teaser + promo clips — $999
+- Author/book page — $499
+- Bundle (teaser + website) — $1,299 (save $199)
 
+If you’d like to move forward, reply “Interested” and send the link for the title you want us to review (or the ISBN) and your retail price. I’ll confirm fit and send the next steps along with a straightforward agreement for your review.
 
-Reply with your *book link (or ISBN)* and *retail price*. I’ll confirm fit and send the agreement + next steps.
+We’d be glad to work with you.
 
 Regards,
 {SIGIMG}
@@ -325,27 +474,27 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 
 PITCHES = {
     "pitch1": {
-        "subject": "Invitation: Consignment Consideration for {BookTitle}",
+        "subject": "Final Call: Consignment Consideration",
         "body": PITCH_1_5_BODY,
             },
 
     "pitch2": {
-        "subject": "Invitation: Consignment Consideration for {BookTitle}",
+        "subject": "Final Call: Consignment Consideration",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch3": {
-        "subject": "Invitation: Consignment Consideration for {BookTitle}",
+        "subject": "Final Call: Consignment Consideration",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch4": {
-        "subject": "Invitation: Consignment Consideration for {BookTitle}",
+        "subject": "Final Call: Consignment Consideration",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch5": {
-        "subject": "Invitation: Consignment Consideration for {BookTitle}",
+        "subject": "Final Call: Consignment Consideration",
         "body": PITCH_1_5_BODY,
 
   },
@@ -374,6 +523,35 @@ def parse_ts(ts: str) -> Optional[datetime]:
 
 def single_line(text: str) -> str:
     return " ".join((text or "").split())
+
+
+def clean_name_token(value: str) -> str:
+    token = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", (value or "").strip())
+    return token
+
+
+def choose_salutation_name(author_name: str, email_addr: str) -> str:
+    raw_name = (author_name or "").strip()
+    if not raw_name:
+        return GENERIC_SALUTATION
+    first_token = clean_name_token(raw_name.split()[0])
+    if not first_token or len(first_token) <= 1:
+        return GENERIC_SALUTATION
+    if not first_token[0].isupper():
+        return GENERIC_SALUTATION
+
+    token_low = first_token.lower()
+    if token_low in NONPERSON_NAME_TOKENS:
+        return GENERIC_SALUTATION
+
+    localpart = ""
+    if "@" in (email_addr or ""):
+        localpart = email_addr.split("@", 1)[0].strip().lower()
+    business_hit = any(hint in localpart for hint in BUSINESS_LOCALPART_HINTS)
+    if business_hit and (localpart.startswith(token_low) or token_low in localpart):
+        return GENERIC_SALUTATION
+
+    return first_token
 
 
 def is_external(addr: str, my_domains: Set[str]) -> bool:
@@ -419,6 +597,26 @@ def local_today_str() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
+def parse_stop_at_local(stop_at_local: str) -> Optional[datetime]:
+    raw = (stop_at_local or "").strip()
+    if not raw:
+        return None
+    try:
+        hh, mm = raw.split(":", 1)
+        hour = int(hh)
+        minute = int(mm)
+    except Exception:
+        raise ValueError("stop_at_local must be HH:MM (24-hour format).")
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("stop_at_local hour/minute out of range.")
+
+    now_local = datetime.now().astimezone()
+    target = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now_local:
+        target = target + timedelta(days=1)
+    return target
+
+
 def _safe_int(value: object) -> int:
     try:
         return int(value)
@@ -427,6 +625,18 @@ def _safe_int(value: object) -> int:
 
 
 def load_sendgrid_counters(path: Path) -> Dict[str, Dict[str, object]]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _load_sendgrid_counters_unlocked(path: Path) -> Dict[str, Dict[str, object]]:
     if not path.exists():
         return {}
     try:
@@ -486,6 +696,62 @@ def increment_sendgrid_counter(
     return _safe_int(entry.get("sent"))
 
 
+def get_sendgrid_sent_today_live(path: Path, key: str) -> Tuple[int, str]:
+    if not key:
+        return 0, ""
+    lock_path = path.with_suffix(".lock")
+    with lock_path.open("a", encoding="utf-8") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            counters = _load_sendgrid_counters_unlocked(path)
+            return get_sendgrid_sent_today(counters, key)
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
+def increment_sendgrid_counters_live(path: Path, keys: List[str]) -> Dict[str, int]:
+    clean_keys: List[str] = []
+    seen: Set[str] = set()
+    for raw in keys:
+        key = (raw or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean_keys.append(key)
+    if not clean_keys:
+        return {}
+
+    lock_path = path.with_suffix(".lock")
+    tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
+    today = local_today_str()
+    now_iso = datetime.now().astimezone().isoformat()
+    result: Dict[str, int] = {}
+    with lock_path.open("a", encoding="utf-8") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            counters = _load_sendgrid_counters_unlocked(path)
+            for key in clean_keys:
+                entry = counters.get(key, {})
+                if not isinstance(entry, dict):
+                    entry = {}
+                if entry.get("date") != today:
+                    entry = {"date": today, "sent": 0, "last_success": entry.get("last_success") or ""}
+                entry["sent"] = _safe_int(entry.get("sent")) + 1
+                entry["last_success"] = now_iso
+                counters[key] = entry
+                result[key] = _safe_int(entry.get("sent"))
+            payload = json.dumps(counters, indent=2, sort_keys=True, ensure_ascii=True)
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+    return result
+
+
 def load_log_statuses(log_path: Path) -> Tuple[Set[str], Set[str], Optional[datetime]]:
     sent: Set[str] = set()
     failed: Set[str] = set()
@@ -533,6 +799,92 @@ def parse_email_list(value: str) -> Set[str]:
     return out
 
 
+def prioritize_always_send_rows(rows: List[Dict[str, str]], always_send_set: Set[str]) -> List[Dict[str, str]]:
+    if not always_send_set:
+        return list(rows)
+
+    prioritized: List[Dict[str, str]] = []
+    remaining: List[Dict[str, str]] = []
+    emitted: Set[str] = set()
+
+    for email_addr in sorted(always_send_set):
+        for row in rows:
+            if norm_email(row.get("Email") or "") == email_addr:
+                prioritized.append(row)
+                emitted.add(email_addr)
+                break
+        else:
+            prioritized.append({"Email": email_addr})
+            emitted.add(email_addr)
+
+    for row in rows:
+        email_addr = norm_email(row.get("Email") or "")
+        if email_addr in emitted:
+            continue
+        remaining.append(row)
+
+    return prioritized + remaining
+
+
+def parse_token_list(value: str) -> Set[str]:
+    out: Set[str] = set()
+    for raw in (value or "").split(","):
+        token = (raw or "").strip().lower()
+        if token:
+            out.add(token)
+    return out
+
+
+def parse_name_list(value: str) -> List[str]:
+    return [x.strip().lower() for x in (value or "").split(",") if x.strip()]
+
+
+def canonical_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+
+
+def split_canonical_tokens(value: str) -> Set[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return set()
+    parts = re.split(r"[;,/|]+", raw)
+    out: Set[str] = set()
+    for p in parts:
+        tok = canonical_token(p)
+        if tok:
+            out.add(tok)
+    return out
+
+
+def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
+    if not row or not col_names:
+        return ""
+    lower_row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+    for name in col_names:
+        if name in lower_row:
+            return lower_row[name]
+    return ""
+
+
+def localpart(email_addr: str) -> str:
+    if "@" not in (email_addr or ""):
+        return ""
+    return email_addr.split("@", 1)[0].strip().lower()
+
+
+def domainpart(email_addr: str) -> str:
+    if "@" not in (email_addr or ""):
+        return ""
+    return email_addr.split("@", 1)[1].strip().lower()
+
+
+def is_role_recipient(email_addr: str, role_set: Set[str]) -> bool:
+    lp = localpart(email_addr)
+    if not lp:
+        return False
+    return lp in role_set
+
+
 def load_already_done(sent_log: Path) -> Set[str]:
     if not sent_log.exists():
         return set()
@@ -552,8 +904,14 @@ def resolve_map_path(base: Path, value: str) -> Path:
     p = Path((value or "").strip())
     if not p:
         return p
-    if not p.is_absolute():
-        p = base / p
+    if p.is_absolute():
+        return p
+    name = p.name.lower()
+    if name.startswith("recipients") and name.endswith(".csv"):
+        return _resolve_shard_path(p)
+    if name.endswith("_log.csv") or name.endswith("domain_log.csv"):
+        return _resolve_log_path(p)
+    p = base / p
     return p
 
 
@@ -641,6 +999,7 @@ def rolling_24h_stats(log_path: Path, my_domains: Set[str], now: datetime) -> Di
 
 def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
     new_file = not sent_log.exists()
+    sent_log.parent.mkdir(parents=True, exist_ok=True)
     with sent_log.open("a", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
         if new_file:
@@ -653,30 +1012,44 @@ def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
         })
 
 
+def rewrite_csv_rows(csv_path: Path, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        newline="",
+        encoding="utf-8",
+        dir=csv_path.parent,
+        prefix=f".{csv_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp_path.replace(csv_path)
+
+
 def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
     if not sent_emails or not csv_path.exists():
         return 0
     removed = 0
-    with csv_path.open("r+", newline="", encoding="utf-8-sig") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
-        kept_rows = []
-        for row in reader:
-            clean_row = {k: v for k, v in row.items() if k is not None}
-            email_addr = norm_email(clean_row.get("Email") or "")
-            if email_addr and email_addr in sent_emails:
-                removed += 1
-                continue
-            kept_rows.append(clean_row)
-        f.seek(0)
-        f.truncate()
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(kept_rows)
-        f.flush()
-        os.fsync(f.fileno())
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    with lock_files([csv_path]):
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+            kept_rows = []
+            for row in reader:
+                clean_row = {k: v for k, v in row.items() if k is not None}
+                email_addr = norm_email(clean_row.get("Email") or "")
+                if email_addr and email_addr in sent_emails:
+                    removed += 1
+                    continue
+                kept_rows.append(clean_row)
+        if removed:
+            rewrite_csv_rows(csv_path, fieldnames, kept_rows)
     return removed
 
 
@@ -684,28 +1057,21 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
     if not email_addr or not csv_path.exists():
         return False
     removed = 0
-    with csv_path.open("r+", newline="", encoding="utf-8-sig") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
-        kept_rows = []
-        target = norm_email(email_addr)
-        for row in reader:
-            clean_row = {k: v for k, v in row.items() if k is not None}
-            email_val = norm_email(clean_row.get("Email") or "")
-            if email_val and email_val == target:
-                removed += 1
-                continue
-            kept_rows.append(clean_row)
+    with lock_files([csv_path]):
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+            kept_rows = []
+            target = norm_email(email_addr)
+            for row in reader:
+                clean_row = {k: v for k, v in row.items() if k is not None}
+                email_val = norm_email(clean_row.get("Email") or "")
+                if email_val and email_val == target:
+                    removed += 1
+                    continue
+                kept_rows.append(clean_row)
         if removed:
-            f.seek(0)
-            f.truncate()
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(kept_rows)
-            f.flush()
-            os.fsync(f.fileno())
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            rewrite_csv_rows(csv_path, fieldnames, kept_rows)
     return removed > 0
 
 
@@ -754,8 +1120,8 @@ def render_message_parts(
 ) -> Tuple[str, str, str, Optional[str]]:
     unsub_mailto = unsub_mailto_override or make_unsub_mailto(unsub_email)
 
-    author = (author or "there").strip()
-    first_name = author.split()[0] if author else "there"
+    author = (author or GENERIC_SALUTATION).strip()
+    first_name = author.split()[0] if author else GENERIC_SALUTATION
     book_title = (book_title or "").strip() or "your book"
 
     format_args = {
@@ -843,7 +1209,8 @@ def send_via_sendgrid(
     cid: Optional[str],
     unsubscribe_group_id: int,
     groups_to_display: List[int],
-) -> None:
+    custom_args: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import (
@@ -858,20 +1225,22 @@ def send_via_sendgrid(
             ContentId,
             Header,
             Asm,
+            CustomArg,
         )
     except Exception as exc:
         raise RuntimeError(
             "sendgrid library not installed; add 'sendgrid' to requirements and install it"
         ) from exc
 
-    unsub_token = "<%asm_group_unsubscribe_url%>"
+    asm_enabled = int(unsubscribe_group_id or 0) > 0
+    unsub_token = "<%asm_group_unsubscribe_url%>" if asm_enabled else ""
 
     text_content = body_text.replace("{SIGIMG}", "").strip()
-    if unsub_token not in text_content:
+    if unsub_token and unsub_token not in text_content:
         text_content = (text_content + "\n\nP.S. Unsubscribe: <%asm_group_unsubscribe_url%>").strip()
 
     html_content = html_body
-    if unsub_token not in html_content:
+    if unsub_token and unsub_token not in html_content:
         unsub_html = f'<br><br><a href="{unsub_token}">Unsubscribe</a>'
         if "</body>" in html_content:
             html_content = html_content.replace("</body>", f"{unsub_html}</body>", 1)
@@ -885,8 +1254,16 @@ def send_via_sendgrid(
     mail.add_content(Content("text/html", html_content))
     mail.reply_to = ReplyTo(reply_to)
     mail.add_header(Header("List-Unsubscribe", f"<mailto:{unsub_email}?subject=unsubscribe>"))
-    groups_list = [int(x) for x in (groups_to_display or [unsubscribe_group_id])]
-    mail.asm = Asm(group_id=int(unsubscribe_group_id), groups_to_display=groups_list)
+    if asm_enabled:
+        groups_list = [int(x) for x in (groups_to_display or [unsubscribe_group_id]) if int(x) > 0]
+        if not groups_list:
+            groups_list = [int(unsubscribe_group_id)]
+        mail.asm = Asm(group_id=int(unsubscribe_group_id), groups_to_display=groups_list)
+    for key, value in (custom_args or {}).items():
+        k = str(key or "").strip()
+        v = str(value or "").strip()
+        if k and v:
+            mail.add_custom_arg(CustomArg(k, v))
 
     if cid and signature_file and signature_file.exists() and "{SIGIMG}" in body_text:
         img_bytes = signature_file.read_bytes()
@@ -901,12 +1278,33 @@ def send_via_sendgrid(
             )
         )
 
-    response = SendGridAPIClient(api_key).send(mail)
+    try:
+        response = SendGridAPIClient(api_key).send(mail)
+    except Exception as exc:
+        # Surface SendGrid API error payload (when present) to avoid opaque 401s.
+        body = getattr(exc, "body", None)
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode("utf-8", errors="replace")
+        detail = str(exc)
+        if body:
+            detail = f"{detail} body={body}"
+        raise RuntimeError(f"sendgrid_error: {detail}") from exc
     if response.status_code != 202:
         body = response.body
         if isinstance(body, bytes):
             body = body.decode("utf-8", errors="replace")
         raise RuntimeError(f"sendgrid_error: status={response.status_code} body={body}")
+    headers = getattr(response, "headers", {}) or {}
+    message_id = (
+        headers.get("X-Message-Id")
+        or headers.get("x-message-id")
+        or headers.get("X-Message-id")
+        or ""
+    )
+    return {
+        "status_code": str(response.status_code),
+        "message_id": str(message_id or "").strip(),
+    }
 
 # ===== SMTP session =====
 def smtp_login(host: str, port: int, user: str, pw: str) -> smtplib.SMTP:
@@ -979,6 +1377,25 @@ def is_sendgrid_forbidden(code: Optional[int], text: str) -> bool:
     return False
 
 
+def classify_sendgrid_runtime_error(text: str) -> str:
+    t = (text or "").lower()
+    if (
+        "http error 401" in t
+        or "unauthorized" in t
+        or "maximum credits exceeded" in t
+        or "regional attribute" in t
+        or "api key" in t and "invalid" in t
+        or "from address does not match a verified sender identity" in t
+        or '"field":"from"' in t
+    ):
+        return "ACCOUNT_STOP"
+    if "status=429" in t or "http error 429" in t or "rate limit" in t:
+        return "TEMP_THROTTLE"
+    if "status=403" in t or "http error 403" in t:
+        return "FORBIDDEN"
+    return "OTHER"
+
+
 # ===== Rolling 1h guard (PrivateEmail shared bucket) =====
 def _parse_ts_safe(ts: str) -> Optional[datetime]:
     try:
@@ -990,7 +1407,8 @@ def _parse_ts_safe(ts: str) -> Optional[datetime]:
 def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec: int = 5) -> None:
     """
     Domain-wide rolling 60-min limiter using a file lock.
-    Counts SENT + SLOT in last hour. Writes SLOT reservation to prevent races.
+    Counts SENT in the last hour plus only *active* SLOT reservations.
+    SLOT rows are short-lived reservations used to prevent races across panes.
     """
     if max_messages_1h <= 0:
         return
@@ -1005,6 +1423,7 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
     while True:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=1)
+        slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
 
         with domain_log_path.open("r+", newline="", encoding="utf-8-sig") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -1012,17 +1431,22 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
             f.seek(0)
             rows = list(csv.DictReader(f))
 
-            times: List[datetime] = []
+            expiry_times: List[datetime] = []
             for r in rows:
                 st = (r.get("Status") or "").strip().upper()
                 if st not in ("SENT", "SLOT"):
                     continue
                 t = _parse_ts_safe(r.get("TimestampUTC") or "")
-                if t and t >= cutoff:
-                    times.append(t)
+                if not t:
+                    continue
+                if st == "SENT" and t >= cutoff:
+                    expiry_times.append(t + timedelta(hours=1))
+                    continue
+                if st == "SLOT" and t >= slot_cutoff:
+                    expiry_times.append(t + timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS))
 
-            times.sort()
-            used = len(times)
+            expiry_times.sort()
+            used = len(expiry_times)
 
             if used < max_messages_1h:
                 f.seek(0, os.SEEK_END)
@@ -1038,7 +1462,7 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 return
 
-            earliest = (times[0] + timedelta(hours=1)) if times else (now + timedelta(seconds=30))
+            earliest = expiry_times[0] if expiry_times else (now + timedelta(seconds=30))
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         wait_s = max(1, int((earliest - datetime.now(timezone.utc)).total_seconds())) + random.randint(0, jitter_sec)
@@ -1047,6 +1471,30 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
 
 def sleep_with_jitter(seconds: int, jitter: int = 10) -> None:
     time.sleep(max(1, int(seconds)) + random.randint(0, max(0, int(jitter))))
+
+
+def humanized_cooldown_sleep_seconds(base_seconds: int, sent_total: int, human_state: Dict[str, int], args) -> int:
+    base_seconds = max(1, int(base_seconds))
+    jitter_minus = max(0, int(getattr(args, "human_jitter_minus", 2) or 0))
+    jitter_plus = max(0, int(getattr(args, "human_jitter_plus", 2) or 0))
+    sleep_s = max(1, base_seconds + random.randint(-jitter_minus, jitter_plus))
+
+    next_break_at = int(human_state.get("next_break_at", 0))
+    if sent_total > 0 and next_break_at > 0 and sent_total >= next_break_at:
+        break_min = max(0, int(getattr(args, "human_break_seconds_min", 6) or 0))
+        break_max = max(break_min, int(getattr(args, "human_break_seconds_max", 18) or break_min))
+        extra_break = random.randint(break_min, break_max)
+        sleep_s += extra_break
+
+        every_min = max(1, int(getattr(args, "human_break_every_min", 120) or 120))
+        every_max = max(every_min, int(getattr(args, "human_break_every_max", 240) or every_min))
+        human_state["next_break_at"] = sent_total + random.randint(every_min, every_max)
+        print(
+            f"HUMAN: microbreak +{extra_break}s "
+            f"(next around send #{human_state['next_break_at']})"
+        )
+
+    return sleep_s
 
 
 def append_suppressed_email(suppress_csv_path: Path, email_addr: str) -> None:
@@ -1087,6 +1535,11 @@ def main():
     ap.add_argument("--unsub", default=DEFAULT_UNSUB_EMAIL)
     ap.add_argument("--unsub_csv", default=str(DEFAULT_UNSUB_CSV))
     ap.add_argument("--suppress_csv", default=str(DEFAULT_SUPPRESS_CSV))
+    ap.add_argument(
+        "--sendgrid_suppression_csv",
+        default=str(DEFAULT_SENDGRID_SUPPRESSION_CSV),
+        help="SendGrid activity-driven suppression CSV (provider=sendgrid only).",
+    )
     ap.add_argument("--my_domains", default=DEFAULT_DOMAIN)
     ap.add_argument("--always_send", default="")
 
@@ -1098,8 +1551,68 @@ def main():
     ap.add_argument("--batch_size", type=int, default=10)
     ap.add_argument("--cooldown_seconds", type=int, default=0)
     ap.add_argument("--max_total", type=int, default=0)
+    ap.add_argument("--stop_at_local", default="", help="Stop automatically at local time HH:MM (24h).")
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--preflight", action="store_true")
+    ap.add_argument("--human_mode", action="store_true", help="Add light random pacing and rare microbreaks.")
+    ap.add_argument("--no-human_mode", dest="human_mode", action="store_false", help="Disable human pacing.")
+    ap.add_argument("--human_jitter_minus", type=int, default=2)
+    ap.add_argument("--human_jitter_plus", type=int, default=2)
+    ap.add_argument("--human_break_every_min", type=int, default=120)
+    ap.add_argument("--human_break_every_max", type=int, default=240)
+    ap.add_argument("--human_break_seconds_min", type=int, default=6)
+    ap.add_argument("--human_break_seconds_max", type=int, default=18)
+    ap.add_argument("--block_role_recipients", dest="block_role_recipients", action="store_true")
+    ap.add_argument("--allow_role_recipients", dest="block_role_recipients", action="store_false")
+    ap.add_argument(
+        "--role_localparts",
+        default=",".join(sorted(ROLE_LOCALPART_BLOCKLIST)),
+        help="Comma-separated local parts to block (e.g. info,admin,support).",
+    )
+    ap.add_argument("--max_consecutive_errors", type=int, default=6)
+    ap.add_argument("--max_throttle_errors", type=int, default=3)
+    ap.add_argument(
+        "--max_invalid_rate_1h",
+        type=float,
+        default=0.0,
+        help="Hard-stop if INVALID ratio in rolling 1h exceeds this value (e.g. 0.05). 0 disables.",
+    )
+    ap.add_argument(
+        "--invalid_rate_min_events",
+        type=int,
+        default=20,
+        help="Minimum attempted outcomes in rolling 1h before invalid-rate stop is evaluated.",
+    )
+    ap.add_argument(
+        "--require_valid_status",
+        action="store_true",
+        help="Only send rows whose status column matches --valid_status_values.",
+    )
+    ap.add_argument(
+        "--status_col",
+        default="status",
+        help="CSV column name(s) for verification status (comma-separated).",
+    )
+    ap.add_argument(
+        "--valid_status_values",
+        default="valid,deliverable,ok",
+        help="Allowed status values for --require_valid_status (comma-separated).",
+    )
+    ap.add_argument(
+        "--block_risky_rows",
+        action="store_true",
+        help="Skip rows marked risky/catch-all using --risk_col and --blocked_risk_values.",
+    )
+    ap.add_argument(
+        "--risk_col",
+        default="risk",
+        help="CSV column name(s) for risk flags (comma-separated).",
+    )
+    ap.add_argument(
+        "--blocked_risk_values",
+        default="risky,catch-all,catch_all,accept_all,unknown,invalid",
+        help="Risk values to block when --block_risky_rows is enabled (comma-separated).",
+    )
 
     ap.add_argument("--max_messages_1h", type=int, default=None)
     ap.add_argument("--domain_log", default="")
@@ -1108,6 +1621,8 @@ def main():
     ap.add_argument("--password", default="")
     ap.add_argument("--password_env", default="")
     ap.add_argument("--daily_target", type=int, default=0)
+    ap.add_argument("--unsubscribe_group_id", type=int, default=0)
+    ap.add_argument("--groups_to_display", type=int, nargs="*", default=None)
     ap.add_argument("--prune_sent", action="store_true", help="Remove already-sent emails from CSV before sending.")
     ap.add_argument("--no-prune_sent", dest="prune_sent", action="store_false", help="Disable prune of sent emails.")
     ap.add_argument("--account_map", default="account_map.csv")
@@ -1124,6 +1639,7 @@ def main():
 
     if profile_defaults:
         ap.set_defaults(**profile_defaults)
+    ap.set_defaults(block_role_recipients=True)
 
     args = ap.parse_args()
     if args.list_profiles:
@@ -1157,8 +1673,10 @@ def main():
         counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
         today = datetime.now().astimezone().strftime("%Y-%m-%d")
         updated = 0
+        global_sent_today = 0
+        global_last_success: Optional[datetime] = None
         for name, cfg in candidates.items():
-            log_path = Path(str(cfg.get("log") or ""))
+            log_path = _resolve_log_path(cfg.get("log") or "")
             sent_today = count_sent_today_from_log(log_path)
             _, _, last_success = load_log_statuses(log_path)
             from_email = norm_email(str(cfg.get("from_email") or ""))
@@ -1170,7 +1688,15 @@ def main():
             entry["sent"] = int(sent_today)
             entry["last_success"] = last_success.astimezone().isoformat() if last_success else ""
             counters[counter_key] = entry
+            global_sent_today += int(sent_today)
+            if last_success and (global_last_success is None or last_success > global_last_success):
+                global_last_success = last_success
             updated += 1
+        counters[SENDGRID_GLOBAL_COUNTER_KEY] = {
+            "date": today,
+            "sent": int(global_sent_today),
+            "last_success": global_last_success.astimezone().isoformat() if global_last_success else "",
+        }
         save_sendgrid_counters(SENDGRID_COUNTERS_PATH, counters)
         print(f"RESYNC: updated {updated} sendgrid account(s).")
         if not (args.status or args.status_sendgrid):
@@ -1201,8 +1727,9 @@ def main():
                     candidates[name] = cfg
 
         counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
-        total_sendgrid_sent = 0
-        total_sendgrid_remaining = 0
+        global_sendgrid_sent_today, _ = get_sendgrid_sent_today(counters, SENDGRID_GLOBAL_COUNTER_KEY)
+        cap_enabled = SENDGRID_DAILY_CAP > 0
+        global_sendgrid_remaining = max(0, SENDGRID_DAILY_CAP - global_sendgrid_sent_today) if cap_enabled else -1
         total_sendgrid_accounts = 0
         for name, cfg in candidates.items():
             provider = str(cfg.get("provider") or "")
@@ -1211,20 +1738,18 @@ def main():
                 counter_key = from_email or name
                 if counter_key not in counters and name in counters:
                     counter_key = name
-                sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
-                daily_target = int(cfg.get("daily_target") or 0)
-                cap_value = daily_target if daily_target > 0 else SENDGRID_DAILY_CAP
-                remaining_today = max(0, cap_value - sent_today)
-                status_label = "OK" if sent_today < cap_value else "NOT"
-                total_sendgrid_sent += sent_today
-                total_sendgrid_remaining += remaining_today
+                account_sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
+                status_label = "OK" if (not cap_enabled or global_sendgrid_sent_today < SENDGRID_DAILY_CAP) else "NOT"
+                cap_display = str(SENDGRID_DAILY_CAP) if cap_enabled else "off"
+                remaining_display = str(global_sendgrid_remaining) if cap_enabled else "off"
                 total_sendgrid_accounts += 1
                 print(
-                    f"{name}: sent_today={sent_today} remaining_today={remaining_today} cap={cap_value} status={status_label}"
+                    f"{name}: sent_today={account_sent_today} global_sent_today={global_sendgrid_sent_today} "
+                    f"global_remaining_today={remaining_display} cap={cap_display} status={status_label}"
                 )
                 continue
-            csv_path = Path(str(cfg.get("csv") or ""))
-            log_path = Path(str(cfg.get("log") or ""))
+            csv_path = _resolve_shard_path(cfg.get("csv") or "")
+            log_path = _resolve_log_path(cfg.get("log") or "")
 
             recipients = load_emails_from_csv(csv_path) if csv_path.exists() else set()
             sent_set, failed_set, last_success = load_log_statuses(log_path)
@@ -1248,10 +1773,8 @@ def main():
                 if counter_key not in counters and name in counters:
                     counter_key = name
                 sent_today, _ = get_sendgrid_sent_today(counters, counter_key)
-                daily_target = int(cfg.get("daily_target") or 0)
-                cap_value = daily_target if daily_target > 0 else SENDGRID_DAILY_CAP
-                daily_cap = str(cap_value)
-                remaining_today = str(max(0, cap_value - sent_today))
+                daily_cap = str(SENDGRID_DAILY_CAP) if cap_enabled else "off"
+                remaining_today = str(global_sendgrid_remaining) if cap_enabled else "off"
             elif provider == "private":
                 sent_today = count_sent_today_from_log(log_path)
 
@@ -1267,14 +1790,13 @@ def main():
             )
             print(f"  last_success_timestamp={last_success_str}")
         if args.status_sendgrid and not args.profile and total_sendgrid_accounts:
-            total_cap = SENDGRID_DAILY_CAP
-            if total_sendgrid_accounts:
-                total_cap = total_sendgrid_accounts * 20
+            cap_display = str(SENDGRID_DAILY_CAP) if cap_enabled else "off"
+            remaining_display = str(global_sendgrid_remaining) if cap_enabled else "off"
             print(
                 "TOTAL: sent_today={sent} remaining_today={remaining} cap={cap}".format(
-                    sent=total_sendgrid_sent,
-                    remaining=total_sendgrid_remaining,
-                    cap=total_cap,
+                    sent=global_sendgrid_sent_today,
+                    remaining=remaining_display,
+                    cap=cap_display,
                 )
             )
         return
@@ -1304,7 +1826,7 @@ def main():
         return
 
     provider_defaults = PROVIDER_LIMIT_DEFAULTS.get(args.provider, {})
-    if args.provider == "private" and args.max_messages_1h is None:
+    if args.provider in ("private", "sendgrid") and args.max_messages_1h is None:
         args.max_messages_1h = int(provider_defaults.get("max_messages_1h", 0))
     if args.provider == "gmail":
         if args.max_messages_24h is None:
@@ -1317,10 +1839,11 @@ def main():
     subject = (pitch.get("subject") or "").strip()
     body_template = (pitch.get("body") or "").strip()
 
-    csv_path = Path(args.csv)
-    log_path = Path(args.log)
-    unsub_csv_path = Path(args.unsub_csv)
-    suppress_csv_path = Path(args.suppress_csv)
+    csv_path = _resolve_shard_path(args.csv)
+    log_path = _resolve_log_path(args.log)
+    unsub_csv_path = _resolve_state_path(args.unsub_csv)
+    suppress_csv_path = _resolve_state_path(args.suppress_csv)
+    sendgrid_suppression_csv_path = _resolve_state_path(args.sendgrid_suppression_csv)
 
     if not csv_path.exists():
         print("ERROR missing:", csv_path)
@@ -1335,11 +1858,44 @@ def main():
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
     always_send_set = parse_email_list(getattr(args, "always_send", ""))
+    sendgrid_suppressed_active: Set[str] = set()
+    sendgrid_suppressed_perm = 0
+    sendgrid_suppressed_temp_active = 0
+    if args.provider == "sendgrid":
+        sendgrid_suppressed_active, sendgrid_suppression_summary = load_active_suppressed_emails(
+            sendgrid_suppression_csv_path
+        )
+        sendgrid_suppressed_active -= always_send_set
+        sendgrid_suppressed_perm = int(sendgrid_suppression_summary.get("total_perm", 0) or 0)
+        sendgrid_suppressed_temp_active = int(
+            sendgrid_suppression_summary.get("total_temp_active", 0) or 0
+        )
+    role_block_set = parse_token_list(getattr(args, "role_localparts", ""))
+    status_cols = parse_name_list(getattr(args, "status_col", "status"))
+    risk_cols = parse_name_list(getattr(args, "risk_col", "risk"))
+    valid_status_values = {canonical_token(x) for x in parse_token_list(getattr(args, "valid_status_values", ""))}
+    blocked_risk_values = {canonical_token(x) for x in parse_token_list(getattr(args, "blocked_risk_values", ""))}
+    row_keys: Set[str] = set()
+    for row in rows:
+        for k in row.keys():
+            row_keys.add((k or "").strip().lower())
+    if args.require_valid_status and status_cols and not any(c in row_keys for c in status_cols):
+        print(
+            "ERROR: --require_valid_status enabled but none of --status_col found in CSV header: "
+            + ",".join(status_cols)
+        )
+        return
+    if args.block_risky_rows and risk_cols and not any(c in row_keys for c in risk_cols):
+        print(
+            "ERROR: --block_risky_rows enabled but none of --risk_col found in CSV header: "
+            + ",".join(risk_cols)
+        )
+        return
 
     global_done: Set[str] = set()
     other_recipients: Set[str] = set()
     if args.global_dedupe:
-        map_entries = load_account_map(Path(args.account_map))
+        map_entries = load_account_map(_resolve_app_path(args.account_map))
         if map_entries:
             log_paths = [log_p for _, log_p in map_entries]
             recipient_paths = [rec_p for rec_p, _ in map_entries]
@@ -1371,6 +1927,10 @@ def main():
     skipped_dupes = 0
     skipped_global_logs = 0
     skipped_global_recipients = 0
+    skipped_role_recipients = 0
+    skipped_unverified = 0
+    skipped_risky_rows = 0
+    skipped_sendgrid_suppressed = 0
     for r in rows:
         email_addr = norm_email(r.get("Email") or "")
         if not email_addr:
@@ -1379,9 +1939,29 @@ def main():
             skipped_dupes += 1
             continue
         seen_in_input.add(email_addr)
+        if args.provider == "sendgrid" and email_addr in sendgrid_suppressed_active:
+            skipped_sendgrid_suppressed += 1
+            log_row(log_path, email_addr, "SKIP", "skip_reason=suppressed")
+            continue
         if email_addr in unsubbed or email_addr in suppressed:
             continue
         is_always_send = email_addr in always_send_set
+        if args.block_role_recipients and role_block_set and not is_always_send:
+            if is_role_recipient(email_addr, role_block_set):
+                skipped_role_recipients += 1
+                continue
+        if args.require_valid_status and not is_always_send:
+            status_val = get_row_value_ci(r, status_cols)
+            status_tokens = split_canonical_tokens(status_val)
+            if not status_tokens or not (status_tokens & valid_status_values):
+                skipped_unverified += 1
+                continue
+        if args.block_risky_rows and not is_always_send:
+            risk_val = get_row_value_ci(r, risk_cols)
+            risk_tokens = split_canonical_tokens(risk_val)
+            if risk_tokens & blocked_risk_values:
+                skipped_risky_rows += 1
+                continue
         if not is_always_send:
             if email_addr in already_done:
                 continue
@@ -1392,6 +1972,7 @@ def main():
                 skipped_global_recipients += 1
                 continue
         pending.append(r)
+    pending = prioritize_always_send_rows(pending, always_send_set)
 
     print(f"RUN: provider={args.provider} host={host}:{port} pitch={args.pitch}")
     print(f"FILES: csv={csv_path.name} log={log_path.name} pending={len(pending)} interval={args.interval}s")
@@ -1401,6 +1982,20 @@ def main():
             f" logs={len(global_done)} | other_recipients={len(other_recipients)} |"
             f" skipped_logs={skipped_global_logs} | skipped_recipients={skipped_global_recipients}"
         )
+    if args.block_role_recipients:
+        print(f"ROLE FILTER: blocked={skipped_role_recipients} (list_size={len(role_block_set)})")
+    if args.require_valid_status:
+        print(
+            "VERIFIED FILTER:"
+            f" skipped={skipped_unverified} status_col={','.join(status_cols)}"
+            f" allow={','.join(sorted(valid_status_values))}"
+        )
+    if args.block_risky_rows:
+        print(
+            "RISK FILTER:"
+            f" skipped={skipped_risky_rows} risk_col={','.join(risk_cols)}"
+            f" blocked={','.join(sorted(blocked_risk_values))}"
+        )
     if skipped_dupes:
         print(f"CSV DUPES: skipped={skipped_dupes}")
     if args.dry_run:
@@ -1409,14 +2004,38 @@ def main():
         print("Nothing to send.")
         return
 
-    domain_log_path = Path(args.domain_log) if args.domain_log else log_path
-    if args.provider == "private" and args.max_messages_1h:
-        print(f"PRIVATE 1H CAP: {args.max_messages_1h} (domain_log={domain_log_path.name})")
+    domain_log_path = _resolve_log_path(args.domain_log) if args.domain_log else log_path
+    if args.provider in ("private", "sendgrid") and args.max_messages_1h:
+        print(
+            f"{args.provider.upper()} 1H CAP: {args.max_messages_1h} "
+            f"(domain_log={domain_log_path.name})"
+        )
     if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
         print(
             "GMAIL LIMITS:"
             f" max_messages_24h={args.max_messages_24h or 'off'}"
             f" max_unique_external_24h={args.max_unique_external_24h or 'off'}"
+        )
+    if args.provider in ("private", "sendgrid"):
+        print(
+            "CIRCUIT BREAKER:"
+            f" max_consecutive_errors={max(0, int(args.max_consecutive_errors or 0)) or 'off'}"
+            f" max_throttle_errors={max(0, int(args.max_throttle_errors or 0)) or 'off'}"
+        )
+        invalid_rate_cfg = float(getattr(args, "max_invalid_rate_1h", 0) or 0.0)
+        if invalid_rate_cfg > 0:
+            print(
+                "INVALID RATE GUARD:"
+                f" threshold={invalid_rate_cfg:.2%}"
+                f" min_events={max(1, int(getattr(args, 'invalid_rate_min_events', 20) or 20))}"
+            )
+    if args.provider == "sendgrid":
+        print(
+            "SENDGRID SUPPRESSIONS:"
+            f" file={sendgrid_suppression_csv_path.name}"
+            f" suppressed_loaded: total_perm={sendgrid_suppressed_perm}"
+            f" total_temp_active={sendgrid_suppressed_temp_active}"
+            f" skipped={skipped_sendgrid_suppressed}"
         )
 
     gmail_messages_24h = 0
@@ -1446,7 +2065,7 @@ def main():
             return
 
     if args.preflight:
-        if args.provider == "private" and args.max_messages_1h:
+        if args.provider in ("private", "sendgrid") and args.max_messages_1h:
             print(f"DOMAIN LOG: {domain_log_path.name} | cap_1h={args.max_messages_1h}")
         print("PREFLIGHT: ok (no sending).")
         return
@@ -1461,59 +2080,113 @@ def main():
         if not pw:
             pw = getpass("Password (Gmail uses App Password): ").strip()
     unsub_email = norm_email(args.unsub) or from_user
-    sendgrid_unsub_group_id = int(getattr(args, "unsubscribe_group_id", 29658) or 29658)
-    sendgrid_groups_to_display = getattr(args, "groups_to_display", None) or [sendgrid_unsub_group_id]
-    unsub_mailto_override = "<%asm_group_unsubscribe_url%>" if args.provider == "sendgrid" else None
+    sendgrid_unsub_group_id = int(getattr(args, "unsubscribe_group_id", 0) or 0)
+    raw_groups = getattr(args, "groups_to_display", None) or []
+    sendgrid_groups_to_display = [int(x) for x in raw_groups if int(x) > 0]
+    if sendgrid_unsub_group_id > 0 and not sendgrid_groups_to_display:
+        sendgrid_groups_to_display = [sendgrid_unsub_group_id]
+    sendgrid_custom_args = {
+        "profile": (args.profile or "").strip(),
+        "from_email": from_user,
+        "shard": csv_path.name,
+        "provider": "sendgrid" if args.provider == "sendgrid" else "",
+    }
+    unsub_mailto_override = (
+        "<%asm_group_unsubscribe_url%>"
+        if args.provider == "sendgrid" and sendgrid_unsub_group_id > 0
+        else None
+    )
 
     sendgrid_counters: Dict[str, Dict[str, object]] = {}
     sendgrid_counter_key = ""
     sendgrid_sent_today = 0
-    sendgrid_daily_target = max(0, int(getattr(args, "daily_target", 0) or 0))
+    sendgrid_account_sent_today = 0
     sendgrid_effective_cap = SENDGRID_DAILY_CAP
-    if sendgrid_daily_target > 0:
-        sendgrid_effective_cap = min(SENDGRID_DAILY_CAP, sendgrid_daily_target)
+    sendgrid_cap_enabled = sendgrid_effective_cap > 0
     if args.provider == "sendgrid":
         sendgrid_counter_key = norm_email(from_user) or (args.profile or "")
         sendgrid_counters = load_sendgrid_counters(SENDGRID_COUNTERS_PATH)
         if args.profile and sendgrid_counter_key not in sendgrid_counters and args.profile in sendgrid_counters:
             sendgrid_counters[sendgrid_counter_key] = sendgrid_counters[args.profile]
             save_sendgrid_counters(SENDGRID_COUNTERS_PATH, sendgrid_counters)
-        sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
-        if not args.dry_run and sendgrid_sent_today >= sendgrid_effective_cap:
+        sendgrid_account_sent_today, _ = get_sendgrid_sent_today_live(SENDGRID_COUNTERS_PATH, sendgrid_counter_key)
+        sendgrid_sent_today, _ = get_sendgrid_sent_today_live(
+            SENDGRID_COUNTERS_PATH, SENDGRID_GLOBAL_COUNTER_KEY
+        )
+        if not args.dry_run and sendgrid_cap_enabled and sendgrid_sent_today >= sendgrid_effective_cap:
             log_row(
                 log_path,
                 "",
                 "DAILY_CAP_REACHED",
-                f"sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
+                f"global_sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
             )
-            print(f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}")
+            print(
+                f"STOP: DAILY_CAP_REACHED global_sent_today={sendgrid_sent_today} "
+                f"account_sent_today={sendgrid_account_sent_today} cap={sendgrid_effective_cap}"
+            )
             return
+
+    try:
+        stop_at_dt_local = parse_stop_at_local(args.stop_at_local)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return
+    if stop_at_dt_local:
+        print(
+            "SCHEDULE STOP: "
+            f"{stop_at_dt_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        )
 
     # Choose signature file:
     # - only applies if the pitch body contains {SIGIMG}
     pitch_key = args.pitch
     sig_name = (SIGNATURE_BY_PITCH.get(pitch_key) or SIGNATURE_BY_FROM.get(from_user) or "")
     sig_name = sig_name.strip()
-    sig_path = Path(sig_name) if (sig_name and "{SIGIMG}" in body_template) else None
+    sig_path = _resolve_app_path(sig_name) if (sig_name and "{SIGIMG}" in body_template) else None
 
     smtp: Optional[smtplib.SMTP] = None
     sent_this_run = 0
     sent_this_run_emails: Set[str] = set()
     invalid_count = 0
     error_count = 0
+    total_sent_attempted = 0
+    consecutive_errors = 0
+    consecutive_throttle_errors = 0
+    max_consecutive_errors = max(0, int(getattr(args, "max_consecutive_errors", 0) or 0))
+    max_throttle_errors = max(0, int(getattr(args, "max_throttle_errors", 0) or 0))
+    max_invalid_rate_1h = float(getattr(args, "max_invalid_rate_1h", 0) or 0.0)
+    invalid_rate_min_events = max(1, int(getattr(args, "invalid_rate_min_events", 20) or 20))
+    quality_events_1h: Deque[Tuple[datetime, bool]] = deque()
     repeat_mode = args.repeat
     cooldown_seconds = max(0, int(args.cooldown_seconds))
     batch_size = max(0, int(args.batch_size))
+    human_mode_active = bool(getattr(args, "human_mode", False)) and args.provider == "private" and repeat_mode
+    human_state: Dict[str, int] = {}
+    if human_mode_active:
+        every_min = max(1, int(getattr(args, "human_break_every_min", 120) or 120))
+        every_max = max(every_min, int(getattr(args, "human_break_every_max", 240) or every_min))
+        human_state["next_break_at"] = random.randint(every_min, every_max)
+        print(
+            "HUMAN MODE: on "
+            f"(jitter=-{int(getattr(args, 'human_jitter_minus', 2) or 0)}/+{int(getattr(args, 'human_jitter_plus', 2) or 0)}s, "
+            f"microbreak={int(getattr(args, 'human_break_seconds_min', 6) or 0)}-{int(getattr(args, 'human_break_seconds_max', 18) or 0)}s "
+            f"every {every_min}-{every_max} sends, first≈#{human_state['next_break_at']})"
+        )
     if repeat_mode and batch_size <= 0:
         print("ERROR: --batch_size must be > 0 when --repeat is set.")
         return
 
     def record_sendgrid_success() -> None:
-        nonlocal sendgrid_sent_today
+        nonlocal sendgrid_sent_today, sendgrid_account_sent_today
         if args.provider != "sendgrid" or args.dry_run:
             return
-        sendgrid_sent_today = increment_sendgrid_counter(
-            sendgrid_counters, sendgrid_counter_key, SENDGRID_COUNTERS_PATH
+        keys = [SENDGRID_GLOBAL_COUNTER_KEY]
+        if sendgrid_counter_key:
+            keys.append(sendgrid_counter_key)
+        counts = increment_sendgrid_counters_live(SENDGRID_COUNTERS_PATH, keys)
+        sendgrid_sent_today = _safe_int(counts.get(SENDGRID_GLOBAL_COUNTER_KEY))
+        sendgrid_account_sent_today = _safe_int(
+            counts.get(sendgrid_counter_key, sendgrid_account_sent_today)
         )
 
     def ensure_smtp() -> smtplib.SMTP:
@@ -1529,14 +2202,14 @@ def main():
         body_text: str,
         html_body: str,
         cid: Optional[str],
-    ) -> None:
+    ) -> Dict[str, str]:
         """
         PrivateEmail: connect per message (reduces DISCONNECTED loops)
         Gmail: keep connection open
         """
         nonlocal smtp
         if args.provider == "sendgrid":
-            send_via_sendgrid(
+            return send_via_sendgrid(
                 sendgrid_api_key,
                 from_user,
                 to_email,
@@ -1549,8 +2222,9 @@ def main():
                 cid,
                 sendgrid_unsub_group_id,
                 sendgrid_groups_to_display,
+                sendgrid_custom_args,
             )
-            return
+        result: Dict[str, str] = {}
         if args.provider == "private":
             smtp_close(smtp)
             smtp = None
@@ -1560,10 +2234,52 @@ def main():
             smtp = None
         else:
             ensure_smtp().send_message(msg)
+        return result
 
     def backoff_seconds() -> int:
         base = max(180, int(args.interval) * 4)
         return base + random.randint(0, 45)
+
+    def note_error(is_throttle: bool = False) -> Optional[str]:
+        nonlocal consecutive_errors, consecutive_throttle_errors
+        consecutive_errors += 1
+        if is_throttle:
+            consecutive_throttle_errors += 1
+        else:
+            consecutive_throttle_errors = 0
+
+        if max_throttle_errors > 0 and consecutive_throttle_errors >= max_throttle_errors:
+            return "circuit_throttle"
+        if max_consecutive_errors > 0 and consecutive_errors >= max_consecutive_errors:
+            return "circuit_errors"
+        return None
+
+    def note_quality_event(is_invalid: bool) -> Optional[str]:
+        if max_invalid_rate_1h <= 0:
+            return None
+        now = datetime.now(timezone.utc)
+        quality_events_1h.append((now, bool(is_invalid)))
+        cutoff = now - timedelta(hours=1)
+        while quality_events_1h and quality_events_1h[0][0] < cutoff:
+            quality_events_1h.popleft()
+        attempts = len(quality_events_1h)
+        if attempts < invalid_rate_min_events:
+            return None
+        invalids = sum(1 for _, bad in quality_events_1h if bad)
+        rate = (invalids / attempts) if attempts else 0.0
+        if rate > max_invalid_rate_1h:
+            return (
+                "invalid_rate_1h_exceeded "
+                f"invalid={invalids}/{attempts} "
+                f"rate={rate:.2%} "
+                f"threshold={max_invalid_rate_1h:.2%}"
+            )
+        return None
+
+    def stop_at_reached() -> bool:
+        if not stop_at_dt_local:
+            return False
+        return datetime.now().astimezone() >= stop_at_dt_local
 
     try:
         if not args.dry_run and args.provider == "gmail":
@@ -1571,6 +2287,9 @@ def main():
 
         pending_index = 0
         while True:
+            if stop_at_reached():
+                print("STOP: schedule_end reached (--stop_at_local).")
+                break
             if repeat_mode:
                 if args.max_total and sent_this_run >= args.max_total:
                     print(f"STOP: reached --max_total={args.max_total}")
@@ -1594,6 +2313,10 @@ def main():
             next_index = pending_index
 
             for idx in range(pending_index, len(pending)):
+                if stop_at_reached():
+                    print("STOP: schedule_end reached (--stop_at_local).")
+                    stop_reason = "schedule_end"
+                    break
                 i = idx + 1
                 r = pending[idx]
                 to_email = norm_email(r.get("Email") or "")
@@ -1633,22 +2356,28 @@ def main():
                     break
 
                 if args.provider == "sendgrid":
-                    sendgrid_sent_today, _ = get_sendgrid_sent_today(sendgrid_counters, sendgrid_counter_key)
-                    if sendgrid_sent_today >= sendgrid_effective_cap:
+                    sendgrid_sent_today, _ = get_sendgrid_sent_today_live(
+                        SENDGRID_COUNTERS_PATH, SENDGRID_GLOBAL_COUNTER_KEY
+                    )
+                    sendgrid_account_sent_today, _ = get_sendgrid_sent_today_live(
+                        SENDGRID_COUNTERS_PATH, sendgrid_counter_key
+                    )
+                    if sendgrid_cap_enabled and sendgrid_sent_today >= sendgrid_effective_cap:
                         if not args.dry_run:
                             log_row(
                                 log_path,
                                 "",
                                 "DAILY_CAP_REACHED",
-                                f"sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
+                                f"global_sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}",
                             )
                         print(
-                            f"STOP: DAILY_CAP_REACHED sent_today={sendgrid_sent_today} cap={sendgrid_effective_cap}"
+                            f"STOP: DAILY_CAP_REACHED global_sent_today={sendgrid_sent_today} "
+                            f"account_sent_today={sendgrid_account_sent_today} cap={sendgrid_effective_cap}"
                         )
                         stop_reason = "daily_cap"
                         break
 
-                author = (r.get("AuthorName") or "there").strip()
+                author = choose_salutation_name(r.get("AuthorName") or "", to_email)
                 book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
                 msg, subject_text, body_text, html_body, cid = build_message(
@@ -1660,20 +2389,27 @@ def main():
 
                 next_index = idx + 1
                 try:
+                    total_sent_attempted += 1
                     if args.dry_run:
                         log_row(log_path, to_email, "DRYRUN", "not_sent")
                         print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                     else:
-                        if args.provider == "private" and args.max_messages_1h:
+                        if args.provider in ("private", "sendgrid") and args.max_messages_1h:
                             domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                        send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                        send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                        send_info = ""
+                        if args.provider == "sendgrid" and send_result.get("message_id"):
+                            send_info = f"sg_message_id={send_result['message_id']}"
 
-                        log_row(log_path, to_email, "SENT")
+                        log_row(log_path, to_email, "SENT", send_info)
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
+                        consecutive_errors = 0
+                        consecutive_throttle_errors = 0
                         record_sendgrid_success()
+                        quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
                             if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
@@ -1683,8 +2419,13 @@ def main():
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
 
-                        if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
+                        if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
                             log_row(domain_log_path, to_email, "SENT")
+
+                        if quality_reason:
+                            print(f"STOP: {quality_reason}")
+                            stop_reason = "invalid_rate_1h"
+                            break
 
                         if repeat_mode and args.max_total and sent_this_run >= args.max_total:
                             print(f"STOP: reached --max_total={args.max_total}")
@@ -1703,11 +2444,21 @@ def main():
                             print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
                             if args.suppress_invalid:
                                 append_suppressed_email(suppress_csv_path, to_email)
+                            quality_reason = note_quality_event(is_invalid=True)
+                            if quality_reason:
+                                print(f"STOP: {quality_reason}")
+                                stop_reason = "invalid_rate_1h"
+                                break
                             continue
 
                         log_row(log_path, to_email, "ERROR", f"{code} {text}")
                         error_count += 1
                         print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
+                        circuit_reason = note_error()
+                        if circuit_reason:
+                            print(f"STOP: {circuit_reason} after recipient errors")
+                            stop_reason = circuit_reason
+                            break
                         if args.provider == "private":
                             t = (f"{code} {text}").lower()
                             if "4.7.1" in t and "sending limit" in t:
@@ -1719,6 +2470,11 @@ def main():
                     log_row(log_path, to_email, "ERROR", str(e))
                     error_count += 1
                     print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
+                    circuit_reason = note_error()
+                    if circuit_reason:
+                        print(f"STOP: {circuit_reason} after recipient errors")
+                        stop_reason = circuit_reason
+                        break
                     if args.provider == "private":
                         t = str(e).lower()
                         if "4.7.1" in t and "sending limit" in t:
@@ -1730,6 +2486,7 @@ def main():
                 except smtplib.SMTPAuthenticationError as e:
                     log_row(log_path, to_email, "ERROR", f"auth_failed: {e}")
                     error_count += 1
+                    note_error()
                     print(f"[{i}/{len(pending)}] AUTH ERROR (stop) {to_email} :: {single_line(str(e))}")
                     stop_reason = "auth_error"
                     break
@@ -1737,23 +2494,34 @@ def main():
                 except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
                     log_row(log_path, to_email, "ERROR", f"disconnected: {e}")
                     error_count += 1
+                    circuit_reason = note_error(is_throttle=True)
                     print(f"[{i}/{len(pending)}] DISCONNECTED {to_email} :: reconnecting and retrying once")
+                    if circuit_reason:
+                        print(f"STOP: {circuit_reason} after disconnects")
+                        stop_reason = circuit_reason
+                        break
 
                     smtp_close(smtp)
                     smtp = None
                     sleep_with_jitter(max(args.interval, 60), jitter=10)
 
                     try:
-                        if args.provider == "private" and args.max_messages_1h:
+                        if args.provider in ("private", "sendgrid") and args.max_messages_1h:
                             domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                        send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_info = "reconnect_ok"
+                            if args.provider == "sendgrid" and send_result.get("message_id"):
+                                send_info = f"reconnect_ok sg_message_id={send_result['message_id']}"
 
-                        log_row(log_path, to_email, "SENT", "reconnect_ok")
-                        print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
+                            log_row(log_path, to_email, "SENT", send_info)
+                            print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
+                        consecutive_errors = 0
+                        consecutive_throttle_errors = 0
                         record_sendgrid_success()
+                        quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
                             if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
@@ -1763,8 +2531,13 @@ def main():
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
 
-                        if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
+                        if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
                             log_row(domain_log_path, to_email, "SENT")
+
+                        if quality_reason:
+                            print(f"STOP: {quality_reason}")
+                            stop_reason = "invalid_rate_1h"
+                            break
 
                         if repeat_mode and args.max_total and sent_this_run >= args.max_total:
                             print(f"STOP: reached --max_total={args.max_total}")
@@ -1774,6 +2547,7 @@ def main():
                         code2, text2 = extract_code_text_from_exception(e2)
                         log_row(log_path, to_email, "ERROR", f"reconnect_failed: {code2} {text2}")
                         error_count += 1
+                        note_error(is_throttle=True)
                         print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
                         stop_reason = "reconnect_failed"
                         break
@@ -1788,13 +2562,23 @@ def main():
                         print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
                         if args.suppress_invalid:
                             append_suppressed_email(suppress_csv_path, to_email)
+                        quality_reason = note_quality_event(is_invalid=True)
+                        if quality_reason:
+                            print(f"STOP: {quality_reason}")
+                            stop_reason = "invalid_rate_1h"
+                            break
                         continue
 
                     if cls == "TEMP_THROTTLE":
                         log_row(log_path, to_email, "ERROR", f"{code} {text}")
                         wait_s = backoff_seconds()
                         error_count += 1
+                        circuit_reason = note_error(is_throttle=True)
                         print(f"[{i}/{len(pending)}] THROTTLED {to_email} :: backoff {wait_s}s then retry")
+                        if circuit_reason:
+                            print(f"STOP: {circuit_reason} after throttles")
+                            stop_reason = circuit_reason
+                            break
 
                         time.sleep(wait_s)
                         smtp_close(smtp)
@@ -1802,16 +2586,22 @@ def main():
                         sleep_with_jitter(max(args.interval, 60), jitter=10)
 
                         try:
-                            if args.provider == "private" and args.max_messages_1h:
+                            if args.provider in ("private", "sendgrid") and args.max_messages_1h:
                                 domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-                            send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_info = "throttle_retry_ok"
+                            if args.provider == "sendgrid" and send_result.get("message_id"):
+                                send_info = f"throttle_retry_ok sg_message_id={send_result['message_id']}"
 
-                            log_row(log_path, to_email, "SENT", "throttle_retry_ok")
+                            log_row(log_path, to_email, "SENT", send_info)
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
+                            consecutive_errors = 0
+                            consecutive_throttle_errors = 0
                             record_sendgrid_success()
+                            quality_reason = note_quality_event(is_invalid=False)
                             if args.provider in ("sendgrid", "private"):
                                 if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                                     print(f"CSV: removed {to_email} from {csv_path.name}")
@@ -1821,8 +2611,13 @@ def main():
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
 
-                            if args.provider == "private" and args.max_messages_1h and domain_log_path != log_path:
+                            if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
                                 log_row(domain_log_path, to_email, "SENT")
+
+                            if quality_reason:
+                                print(f"STOP: {quality_reason}")
+                                stop_reason = "invalid_rate_1h"
+                                break
 
                             if repeat_mode and args.max_total and sent_this_run >= args.max_total:
                                 print(f"STOP: reached --max_total={args.max_total}")
@@ -1835,6 +2630,7 @@ def main():
                             code2, text2 = extract_code_text_from_exception(e2)
                             log_row(log_path, to_email, "ERROR", f"retry_failed: {code2} {text2}")
                             error_count += 1
+                            note_error(is_throttle=True)
                             print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
                             stop_reason = "retry_failed"
                             break
@@ -1842,6 +2638,11 @@ def main():
                     log_row(log_path, to_email, "ERROR", f"{code} {text}")
                     error_count += 1
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
+                    circuit_reason = note_error()
+                    if circuit_reason:
+                        print(f"STOP: {circuit_reason} after smtp errors")
+                        stop_reason = circuit_reason
+                        break
 
                 except Exception as e:
                     err_text = str(e)
@@ -1851,17 +2652,57 @@ def main():
                     log_row(log_path, to_email, "ERROR", err_text)
                     error_count += 1
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(err_text)}")
-                    if args.provider == "sendgrid" and args.suppress_invalid and is_sendgrid_forbidden(code, text):
+                    sendgrid_err_cls = "OTHER"
+                    if args.provider == "sendgrid":
+                        sendgrid_err_cls = classify_sendgrid_runtime_error(err_text)
+                        if sendgrid_err_cls == "ACCOUNT_STOP":
+                            if "verified sender identity" in err_text.lower():
+                                print(
+                                    "STOP: sendgrid sender identity error. "
+                                    "Use a verified From address or verify this sender first."
+                                )
+                            else:
+                                print("STOP: sendgrid account-level error (auth/credits/region).")
+                            stop_reason = "sendgrid_account_error"
+                        elif sendgrid_err_cls == "TEMP_THROTTLE":
+                            wait_s = backoff_seconds()
+                            print(f"SENDGRID THROTTLE: sleeping {wait_s}s before next attempt.")
+                            time.sleep(wait_s)
+                    if (
+                        args.provider == "sendgrid"
+                        and args.suppress_invalid
+                        and is_sendgrid_forbidden(code, text)
+                        and sendgrid_err_cls != "ACCOUNT_STOP"
+                    ):
                         append_suppressed_email(suppress_csv_path, to_email)
                         if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
                             print(f"CSV: removed {to_email} from {csv_path.name}")
                         print(f"SUPPRESS: {to_email} (sendgrid_403)")
+                        quality_reason = note_quality_event(is_invalid=True)
+                        if quality_reason:
+                            print(f"STOP: {quality_reason}")
+                            stop_reason = "invalid_rate_1h"
+                    circuit_reason = note_error(is_throttle=(sendgrid_err_cls == "TEMP_THROTTLE"))
+                    if not stop_reason and circuit_reason:
+                        print(f"STOP: {circuit_reason} after errors")
+                        stop_reason = circuit_reason
 
                 if stop_reason:
                     break
                 if repeat_mode and batch_sent >= batch_limit:
                     break
                 if idx < len(pending) - 1:
+                    if stop_at_dt_local:
+                        remaining = int((stop_at_dt_local - datetime.now().astimezone()).total_seconds())
+                        if remaining <= 0:
+                            stop_reason = "schedule_end"
+                            print("STOP: schedule_end reached (--stop_at_local).")
+                            break
+                        if remaining < int(args.interval):
+                            time.sleep(max(1, remaining))
+                            stop_reason = "schedule_end"
+                            print("STOP: schedule_end reached (--stop_at_local).")
+                            break
                     sleep_with_jitter(args.interval, jitter=10)
 
             pending_index = next_index
@@ -1897,11 +2738,31 @@ def main():
                     break
 
                 if cooldown_seconds > 0:
-                    time.sleep(cooldown_seconds)
+                    if stop_at_dt_local:
+                        remaining = int((stop_at_dt_local - datetime.now().astimezone()).total_seconds())
+                        if remaining <= 0:
+                            print("STOP: schedule_end reached (--stop_at_local).")
+                            break
+                        if remaining < cooldown_seconds:
+                            time.sleep(max(1, remaining))
+                            print("STOP: schedule_end reached (--stop_at_local).")
+                            break
+                    if human_mode_active:
+                        sleep_s = humanized_cooldown_sleep_seconds(cooldown_seconds, sent_this_run, human_state, args)
+                        time.sleep(sleep_s)
+                    else:
+                        time.sleep(cooldown_seconds)
             else:
                 break
 
-        print(f"DONE: sent={sent_this_run} invalid={invalid_count} errors={error_count}")
+        print(
+            "DONE:"
+            f" sent={sent_this_run}"
+            f" invalid={invalid_count}"
+            f" errors={error_count}"
+            f" total_skipped_suppressed={skipped_sendgrid_suppressed if args.provider == 'sendgrid' else 0}"
+            f" total_sent_attempted={total_sent_attempted}"
+        )
         if repeat_mode and args.max_total and sent_this_run >= args.max_total:
             prunable = sent_this_run_emails - always_send_set
             removed = prune_sent_from_csv(csv_path, prunable)

@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from itertools import cycle
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from recipient_file_lock import lock_files
 
-DEFAULT_HEADERS = ["Email", "AuthorName", "BookTitle"]
+
+DEFAULT_HEADERS = ["Email", "AuthorName"]
 
 
 def norm_email(s: str) -> str:
@@ -21,15 +25,35 @@ def norm_email(s: str) -> str:
 class Row:
     email: str
     author_name: str
-    book_title: str
 
     def as_dict(self) -> Dict[str, str]:
-        return {"Email": self.email, "AuthorName": self.author_name, "BookTitle": self.book_title}
+        return {"Email": self.email, "AuthorName": self.author_name}
 
 
-def detect_fieldnames(fieldnames: Optional[Sequence[str]]) -> Tuple[str, str, str]:
+@dataclass
+class SelectionSummary:
+    inspected: int = 0
+    appended: int = 0
+    skipped_existing: int = 0
+    skipped_source_dupe: int = 0
+    skipped_keep_top: int = 0
+
+
+def clean_name_token(value: str) -> str:
+    return re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", (value or "").strip())
+
+
+def first_name_only(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    first_token = clean_name_token(raw.split()[0])
+    return first_token or ""
+
+
+def detect_fieldnames(fieldnames: Optional[Sequence[str]]) -> Tuple[str, str]:
     if not fieldnames:
-        return ("Email", "AuthorName", "BookTitle")
+        return ("Email", "AuthorName")
 
     # Handle BOM in first header (common on Windows exports)
     fn = [f.lstrip("\ufeff") for f in fieldnames]
@@ -43,16 +67,14 @@ def detect_fieldnames(fieldnames: Optional[Sequence[str]]) -> Tuple[str, str, st
 
     email_key = pick(["email", "e-mail", "e_mail", "mail", "address"]) or fn[0]
     name_key = pick(["authorname", "author_name", "name", "firstname", "first_name"]) or (fn[1] if len(fn) > 1 else fn[0])
-    title_key = pick(["booktitle", "book_title", "title", "book"]) or (fn[2] if len(fn) > 2 else fn[-1])
-
-    return (email_key, name_key, title_key)
+    return (email_key, name_key)
 
 
 def read_rows_csv(path: Path) -> Tuple[List[str], List[Row]]:
     if not path.exists():
         return (DEFAULT_HEADERS[:], [])
 
-    with path.open("r", newline="", encoding="utf-8", errors="replace") as f:
+    with path.open("r", newline="", encoding="utf-8-sig", errors="replace") as f:
         # Allow completely empty files
         sample = f.read(4096)
         if not sample.strip():
@@ -60,7 +82,7 @@ def read_rows_csv(path: Path) -> Tuple[List[str], List[Row]]:
         f.seek(0)
 
         reader = csv.DictReader(f)
-        email_key, name_key, title_key = detect_fieldnames(reader.fieldnames)
+        email_key, name_key = detect_fieldnames(reader.fieldnames)
         headers = DEFAULT_HEADERS[:]
 
         out: List[Row] = []
@@ -71,19 +93,29 @@ def read_rows_csv(path: Path) -> Tuple[List[str], List[Row]]:
             out.append(
                 Row(
                     email=email,
-                    author_name=(r.get(name_key) or "").strip(),
-                    book_title=(r.get(title_key) or "").strip(),
+                    author_name=first_name_only(r.get(name_key) or ""),
                 )
             )
         return (headers, out)
 
 
 def write_rows_csv(path: Path, rows: Iterable[Row]) -> None:
+    row_list = list(rows)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=DEFAULT_HEADERS, extrasaction="ignore")
+    with tempfile.NamedTemporaryFile(
+        "w",
+        newline="",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+        writer = csv.DictWriter(handle, fieldnames=DEFAULT_HEADERS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows([r.as_dict() for r in rows])
+        writer.writerows([r.as_dict() for r in row_list])
+    temp_path.replace(path)
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -98,7 +130,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         metavar=("DST1", "DST2", "DST3", "DST4", "DST5"),
         help="Exactly 5 destination CSVs",
     )
-    ap.add_argument("--count", type=int, default=100, help="How many rows to pull from --src (0 = all)")
+    ap.add_argument(
+        "--count",
+        type=int,
+        default=100,
+        help="How many unique rows to actually distribute from --src (0 = all).",
+    )
     ap.add_argument(
         "--remove",
         action="store_true",
@@ -116,7 +153,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     ap.add_argument("--keep-top-email", default="", help="Email to force as first row in every destination")
     ap.add_argument("--keep-top-name", default="", help="Name for --keep-top-email (optional)")
-    ap.add_argument("--keep-top-title", default="", help="Title for --keep-top-email (optional)")
     ap.add_argument("--dry-run", action="store_true", help="Compute and print counts but don't write files")
     return ap.parse_args(list(argv))
 
@@ -132,21 +168,53 @@ def load_existing_emails(dst_paths: Sequence[Path]) -> Tuple[List[List[Row]], se
     return existing_lists, all_emails
 
 
+def select_rows_for_distribution(
+    src_rows: Sequence[Row],
+    existing_emails: set,
+    want_count: int,
+    dedupe: bool,
+    keep_top_email: str,
+) -> Tuple[List[Row], int, SelectionSummary]:
+    target = None if want_count == 0 else want_count
+    seen: set = set()
+    selected: List[Row] = []
+    summary = SelectionSummary()
+
+    for row in src_rows:
+        if target is not None and len(selected) >= target:
+            break
+        summary.inspected += 1
+        email = norm_email(row.email)
+        if not email:
+            continue
+        if dedupe and email in seen:
+            summary.skipped_source_dupe += 1
+            continue
+        if dedupe and email in existing_emails:
+            summary.skipped_existing += 1
+            continue
+        if dedupe and keep_top_email and email == keep_top_email:
+            summary.skipped_keep_top += 1
+            continue
+        if dedupe:
+            seen.add(email)
+        selected.append(row)
+
+    summary.appended = len(selected)
+    return selected, summary.inspected, summary
+
+
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     src_path = Path(args.src)
     dst_paths = [Path(p) for p in args.dst]
-
-    _, src_rows = read_rows_csv(src_path)
-    existing_rows_by_file, existing_emails = load_existing_emails(dst_paths)
 
     keep_top_email = norm_email(args.keep_top_email)
     top_row: Optional[Row] = None
     if keep_top_email:
         top_row = Row(
             email=args.keep_top_email.strip(),
-            author_name=(args.keep_top_name or "").strip(),
-            book_title=(args.keep_top_title or "").strip(),
+            author_name=first_name_only(args.keep_top_name or ""),
         )
 
     want_count = args.count
@@ -154,71 +222,69 @@ def main(argv: Sequence[str]) -> int:
         print("ERROR: --count must be >= 0", file=sys.stderr)
         return 2
 
-    max_to_take = len(src_rows) if want_count == 0 else min(want_count, len(src_rows))
-    pulled_candidate_rows = src_rows[:max_to_take]
-
     dedupe = not args.no_dedupe
-    seen: set = set()
-    pulled: List[Row] = []
-    pulled_set: set = set()
+    with lock_files([src_path, *dst_paths]):
+        _, src_rows = read_rows_csv(src_path)
+        existing_rows_by_file, existing_emails = load_existing_emails(dst_paths)
 
-    for r in pulled_candidate_rows:
-        ne = norm_email(r.email)
-        if not ne:
-            continue
-        if dedupe:
-            if ne in seen:
-                continue
-            if ne in existing_emails:
-                continue
-            if keep_top_email and ne == keep_top_email:
-                continue
-        seen.add(ne)
-        pulled.append(r)
-        pulled_set.add(ne)
+        pulled, inspected_count, summary = select_rows_for_distribution(
+            src_rows,
+            existing_emails,
+            want_count,
+            dedupe,
+            keep_top_email,
+        )
 
-    # Distribute pulled rows round-robin across 5 buckets
-    buckets: List[List[Row]] = [[] for _ in range(5)]
-    for bucket_idx, row in zip(cycle(range(5)), pulled):
-        buckets[bucket_idx].append(row)
+        buckets: List[List[Row]] = [[] for _ in range(5)]
+        for bucket_idx, row in zip(cycle(range(5)), pulled):
+            buckets[bucket_idx].append(row)
 
-    # Write destinations
-    if not args.dry_run:
+        remaining = src_rows[inspected_count:] if args.remove else list(src_rows)
+        removed_count = inspected_count if args.remove else 0
+
+        before_counts = [len(rows) for rows in existing_rows_by_file]
+        after_counts: List[int] = []
+        top_deltas: List[int] = []
+
         for i, dst in enumerate(dst_paths):
-            if args.append:
-                existing = existing_rows_by_file[i]
+            existing = existing_rows_by_file[i]
+            existing_without_top = (
+                [r for r in existing if norm_email(r.email) != keep_top_email]
+                if keep_top_email
+                else list(existing)
+            )
+            out_rows = (
+                ([top_row] if top_row else []) + existing_without_top + buckets[i]
+                if keep_top_email
+                else existing_without_top + buckets[i]
+            )
+            top_deltas.append(len(out_rows) - before_counts[i] - len(buckets[i]))
+            if not args.dry_run:
+                write_rows_csv(dst, out_rows)
+                after_counts.append(len(read_rows_csv(dst)[1]))
             else:
-                # Rewrite/normalize file, but keep existing rows too (safer than wiping)
-                existing = existing_rows_by_file[i]
+                after_counts.append(len(out_rows))
 
-            # Remove any existing keep-top row to avoid duplicates, then prepend it
-            if keep_top_email:
-                existing = [r for r in existing if norm_email(r.email) != keep_top_email]
-                out_rows = ([top_row] if top_row else []) + existing + buckets[i]
-            else:
-                out_rows = existing + buckets[i]
-
-            write_rows_csv(dst, out_rows)
-
-        if args.remove:
-            # Remove the first N rows from the source (the "pulled" slice),
-            # regardless of whether individual rows were skipped by dedupe.
-            remaining = src_rows[max_to_take:]
-            removed_count = max_to_take
+        if not args.dry_run and args.remove:
             write_rows_csv(src_path, remaining)
+            remaining_count = len(read_rows_csv(src_path)[1])
         else:
-            remaining = src_rows
-            removed_count = 0
-    else:
-        remaining = src_rows[max_to_take:] if args.remove else src_rows
-        removed_count = max_to_take if args.remove else 0
+            remaining_count = len(remaining)
 
+    requested_display = "all" if want_count == 0 else str(want_count)
     print(
-        f"Pulled={len(pulled)} requested={want_count} "
-        f"from={src_path.name} removed={removed_count if args.remove else 0} remaining={len(remaining)}"
+        f"Source={src_path.name} requested={requested_display} inspected={summary.inspected} "
+        f"appended={summary.appended} skipped_existing={summary.skipped_existing} "
+        f"skipped_source_dupe={summary.skipped_source_dupe} skipped_keep_top={summary.skipped_keep_top} "
+        f"removed={removed_count} remaining={remaining_count}"
     )
-    for i, b in enumerate(buckets, start=1):
-        print(f"{dst_paths[i-1].name}: +{len(b)}")
+    for i, bucket in enumerate(buckets, start=1):
+        message = (
+            f"{dst_paths[i-1].name}: before={before_counts[i-1]} +{len(bucket)} => after={after_counts[i-1]}"
+        )
+        if top_deltas[i - 1]:
+            message += f" top_delta={top_deltas[i - 1]:+d}"
+        print(message)
     return 0
 
 

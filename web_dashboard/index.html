@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Email Automation Live Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page booting">
+      <div class="ambient ambient-a"></div>
+      <div class="ambient ambient-b"></div>
+
+      <header class="hero panel-shell">
+        <div class="hero-copy">
+          <p class="eyebrow">SendGrid Control Surface</p>
+          <h1>Email Automation Dashboard</h1>
+          <p class="subhead">Live orchestration for sender pacing, delivery signals, webhook health, and tmux-run visibility.</p>
+        </div>
+        <div class="hero-side">
+          <div class="connection">
+            <span id="ws-indicator" class="dot dot-off"></span>
+            <span id="ws-label">Disconnected</span>
+          </div>
+          <p class="hero-kicker">Five sender profiles, live snapshots every second, and delivery telemetry designed to surface trouble early.</p>
+        </div>
+      </header>
+
+      <section class="toolbar-wrap panel-shell">
+        <div class="toolbar-intro">
+          <p class="eyebrow">Run Controls</p>
+          <h2>Operate the queue</h2>
+          <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
+        </div>
+        <section class="toolbar">
+          <label>
+            Activity window
+            <select id="hours-select">
+              <option value="6">6h</option>
+              <option value="12">12h</option>
+              <option value="24" selected>24h</option>
+              <option value="72">72h</option>
+              <option value="168">168h</option>
+            </select>
+          </label>
+          <label>
+            Tail lines
+            <select id="tail-select">
+              <option value="8">8</option>
+              <option value="12" selected>12</option>
+              <option value="20">20</option>
+            </select>
+          </label>
+          <label>
+            Emails / sender
+            <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
+            <span id="send-cap-note" class="toolbar-field-note muted">Applies to new dashboard starts.</span>
+          </label>
+          <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save Cap</button>
+          <button id="refresh-btn" class="btn btn-secondary">Refresh</button>
+          <button id="wallboard-btn" class="btn btn-secondary" aria-pressed="false">Wallboard</button>
+          <button id="start-btn" class="btn btn-primary">Start All</button>
+          <button id="stop-btn" class="btn btn-danger">Stop All</button>
+          <button id="archive-btn" class="btn btn-secondary">Archive + Reset Logs</button>
+        </section>
+      </section>
+
+      <section class="view-tabs panel-shell" aria-label="Dashboard views">
+        <div class="view-tabs-copy">
+          <p class="eyebrow">Workspace</p>
+          <h2>Switch Surfaces</h2>
+        </div>
+        <div class="view-tabs-buttons">
+          <button id="ops-tab-btn" class="tab-btn is-active" type="button" aria-pressed="true">Ops</button>
+          <button id="leads-tab-btn" class="tab-btn" type="button" aria-pressed="false">Leads</button>
+        </div>
+      </section>
+
+      <section id="message-bar" class="message-bar hidden"></section>
+      <section id="ops-view" class="dashboard-view">
+        <section id="health-banner" class="health-banner health-yellow">Loading…</section>
+        <nav class="section-nav panel-shell" aria-label="Dashboard sections">
+          <a href="#summary-grid">Summary</a>
+          <a href="#overview-panel">Senders</a>
+          <a href="#trends-panel">Insights</a>
+          <a href="#diagnostics-grid">Diagnostics</a>
+        </nav>
+
+        <section id="summary-grid" class="summary-grid"></section>
+
+        <section id="alerts-panel" class="panel panel-shell">
+          <div class="panel-header">
+            <h2>Threshold Alerts</h2>
+            <span id="alerts-caption" class="muted">Operational thresholds for failures, backlog, webhook intake, and attribution.</span>
+          </div>
+          <div id="alerts-grid" class="alerts-grid"></div>
+        </section>
+
+        <section class="workspace-grid">
+          <section id="overview-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Fleet Overview</h2>
+              <span class="muted">Live status for all five SendGrid profiles. Click a tile to focus one sender.</span>
+            </div>
+            <div id="overview-grid" class="overview-grid"></div>
+          </section>
+
+          <section id="detail-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <div>
+                <h2>Profile Detail</h2>
+                <span id="detail-caption" class="muted">Focused controls, delivery flow, and live diagnostics for one sender.</span>
+              </div>
+              <div class="detail-switcher">
+                <button id="detail-prev-btn" class="btn btn-secondary" type="button" aria-label="Previous profile">Prev</button>
+                <label class="detail-switcher-label">
+                  <span class="sr-only">Selected profile</span>
+                  <select id="detail-profile-select" aria-label="Selected profile"></select>
+                </label>
+                <button id="detail-next-btn" class="btn btn-secondary" type="button" aria-label="Next profile">Next</button>
+              </div>
+            </div>
+            <div id="profile-detail" class="detail-stage"></div>
+          </section>
+        </section>
+
+        <section class="insights-grid">
+          <section id="trends-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Trend View</h2>
+              <span class="muted">Accepted recipients exclude shared canary sends. Delivery trends use event time.</span>
+            </div>
+            <div id="trends-grid" class="trends-grid"></div>
+          </section>
+
+          <section id="webhook-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Webhook Health</h2>
+              <span id="webhook-health-caption" class="muted"></span>
+            </div>
+            <div id="webhook-health" class="webhook-health-grid"></div>
+          </section>
+
+          <section id="awaiting-aging-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Awaiting Aging</h2>
+              <span class="muted">Accepted recipients without final outcomes, bucketed by age.</span>
+            </div>
+            <div id="awaiting-aging" class="awaiting-aging-grid"></div>
+          </section>
+
+          <section id="domain-breakdown-panel" class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Domain Breakdown</h2>
+              <span id="domain-breakdown-caption" class="muted">Top recipient domains in the selected activity window.</span>
+            </div>
+            <div id="domain-breakdown"></div>
+          </section>
+        </section>
+
+        <section id="diagnostics-grid" class="main-grid">
+          <div class="signal-stack">
+            <div class="panel panel-shell">
+              <div class="panel-header">
+                <h2>Run Status</h2>
+                <span id="generated-at" class="muted"></span>
+              </div>
+              <ul id="run-status-list" class="attention-list status-list"></ul>
+            </div>
+            <div class="panel panel-shell">
+              <div class="panel-header">
+                <h2>Telemetry Notes</h2>
+                <span class="muted">Webhook mapping and attribution</span>
+              </div>
+              <ul id="telemetry-notes-list" class="attention-list telemetry-list"></ul>
+            </div>
+          </div>
+          <div class="panel panel-shell">
+            <div class="panel-header">
+              <h2>Latest Failures</h2>
+            </div>
+            <div id="latest-failures"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="leads-view" class="dashboard-view hidden">
+        <section class="leads-grid">
+          <section class="panel panel-shell leads-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Upload Leads</h2>
+                <span class="muted">Upload one combined CSV and preview the detected columns before cleaning.</span>
+              </div>
+            </div>
+            <div class="leads-form-grid">
+              <label>
+                Leads CSV
+                <input id="leads-upload-input" type="file" accept=".csv,text/csv" />
+              </label>
+              <div class="leads-action-slot">
+                <button id="leads-upload-btn" class="btn btn-primary" type="button">Upload CSV</button>
+              </div>
+            </div>
+            <div id="leads-upload-meta" class="leads-meta muted">No upload yet.</div>
+            <div class="leads-mapping-grid">
+              <label>
+                Email Column
+                <select id="leads-email-column"></select>
+              </label>
+              <label>
+                Author Column
+                <select id="leads-author-column"></select>
+              </label>
+              <label>
+                Book Column
+                <select id="leads-book-column"></select>
+              </label>
+            </div>
+            <div id="leads-upload-preview" class="table-shell"></div>
+          </section>
+
+          <section class="panel panel-shell leads-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Clean Leads</h2>
+                <span class="muted">Normalize emails, remove suppressions, and generate a clean canonical file.</span>
+              </div>
+            </div>
+            <div class="leads-check-grid">
+              <label class="checkbox-row"><input id="clean-remove-invalid" type="checkbox" checked /> Remove invalid emails</label>
+              <label class="checkbox-row"><input id="clean-dedupe" type="checkbox" checked /> Dedupe by email</label>
+              <label class="checkbox-row"><input id="clean-remove-suppressed" type="checkbox" checked /> Remove active suppressions</label>
+              <label class="checkbox-row"><input id="clean-drop-role" type="checkbox" /> Drop role emails</label>
+            </div>
+            <label>
+              Exclude Domains
+              <input id="clean-exclude-domains" type="text" placeholder="example: yahoo.com, aol.com" />
+            </label>
+            <div class="leads-action-slot">
+              <button id="leads-clean-btn" class="btn btn-primary" type="button">Run Clean</button>
+            </div>
+            <div id="leads-clean-meta" class="leads-meta muted">No clean report yet.</div>
+            <div id="leads-clean-results" class="leads-results"></div>
+          </section>
+
+          <section class="panel panel-shell leads-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Write Shards</h2>
+                <span class="muted">Rebuild the live SendGrid recipient files with domain-balanced distribution by default.</span>
+              </div>
+            </div>
+            <div class="leads-form-grid">
+              <label>
+                Shard Count
+                <input id="leads-shard-count" type="number" min="1" max="5" step="1" value="5" />
+              </label>
+              <label>
+                Strategy
+                <select id="leads-shard-strategy">
+                  <option value="domain_balanced" selected>Domain Balanced</option>
+                  <option value="simple_round_robin">Simple Round Robin</option>
+                </select>
+              </label>
+            </div>
+            <div class="leads-action-slot">
+              <button id="leads-preview-btn" class="btn btn-secondary" type="button">Preview Shards</button>
+              <button id="leads-shard-btn" class="btn btn-primary" type="button">Write Shards</button>
+            </div>
+            <label>
+              Confirm Overwrite
+              <input id="leads-shard-confirm" type="text" placeholder="Type SHARD after preview" />
+            </label>
+            <div id="leads-shard-guard" class="leads-meta muted">Run Preview first. Write is blocked while any sender is active.</div>
+            <div id="leads-shard-meta" class="leads-meta muted">No shard write yet.</div>
+            <div id="leads-shard-results" class="leads-results"></div>
+          </section>
+        </section>
+
+        <section class="panel panel-shell leads-panel leads-status-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Current Shard Status</h2>
+              <span class="muted">Live counts, domain mix, latest shard source, backups, and clean artifact context.</span>
+            </div>
+            <button id="leads-refresh-btn" class="btn btn-secondary" type="button">Refresh Status</button>
+          </div>
+          <div id="leads-status-meta" class="leads-meta muted">Loading lead workflow state…</div>
+          <div id="leads-status-grid" class="leads-status-grid"></div>
+        </section>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
