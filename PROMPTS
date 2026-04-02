@@ -1,24 +1,207 @@
-WINDOWS
-cd /mnt/d/VS/email\ automation
+EMAIL AUTOMATION PROMPTS (ORGANIZED)
 
-OK & LIMIT(GMAIL)
-python3 check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_messages_24h 90 --max_unique_external_24h 90
-PRIVATE EMAIL
-python3 check_1hr.py --domain_log private_domain_log.csv --max_messages_1h 50
+SECURITY (USE PLACEHOLDERS)
+- Do not save real SendGrid API keys or Private Email app passwords in this file.
+- Export them in your shell, then reference env vars in commands.
+- If a key/password was pasted before, rotate it.
 
-DRY RUN:
-python3 send_shard.py --provider private --csv recipients_1.csv --log private_marketing_log.csv --pitch pitch1 --interval 450 --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_per_run 1 --dry_run
+SETUP ENV VARS (CURRENT SHELL)
+export SENDGRID_API_KEY="REPLACE_WITH_SENDGRID_KEY"
+export PRIVATE_ANNETTE_APP_PW="REPLACE_ME"
+export PRIVATE_JORDAN_APP_PW="REPLACE_ME"
+export PRIVATE_JODI_APP_PW="REPLACE_ME"
+export PRIVATE_ALISON_APP_PW="REPLACE_ME"
+export PRIVATE_FIORELA_APP_PW="REPLACE_ME"
 
-MAC:
-# go to folder (edit path if yours is different)
-cd "$HOME/Documents/email automation"
+------------------------------------------------------------------------------
+1) GIT SYNC
+------------------------------------------------------------------------------
 
-# precheck leads
-python precheck_leads.py --in leads.csv --out leads_prechecked.csv --suppressed suppressed.csv
+PUSH (SYNC SEND STATE)
+git add send_shard.py sendgrid_daily_counters.json account_map_private_sendgrid.csv \
+        recipients_*.csv recipients_sendgrid_*.csv private_*_log.csv sendgrid_*_log.csv private_domain_log.csv
+git commit -m "Sync send state"
+git push origin main
 
-# check 24h (default caps)
-python check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com
+PULL (MAC / OTHER MACHINE)
+git pull origin main
 
-# check 24h (caps = 90)
-python check_24h.py --my_domains barnesnobleinfo.com,littlebrowncoinfo.com,astraproductionsbyjc.com --max_messages_24h 90 --max_unique_external_24h 90
+------------------------------------------------------------------------------
+2) STATUS / LIMIT CHECKS
+------------------------------------------------------------------------------
 
+SENDGRID STATUS
+python3 send_shard.py --status-sendgrid
+
+OK & LIMIT (GMAIL)
+python3 check_24h.py --short --my_domains barnesnoblemarketing.com,astraproductionsbyjc.com --max_messages_24h 90 --max_unique_external_24h 90
+
+PRIVATE EMAIL (1H CAP CHECK - SAFE TARGET)
+python3 check_1hr.py --short --domain_log private_domain_log.csv --max_messages_1h 1000
+
+PENDING
+python3 check_pending.py
+
+CHECK LEADS (PRECHECK)
+./.venv/bin/python precheck_leads.py --in leads.csv --out leads_prechecked.csv --suppressed suppressed.csv --email_col AuthorEmail --author_col AuthorName --mx_timeout 2 --mx_lifetime 6 --require_author --no_drain_in
+
+CHECK + DISTRIBUTE TO SENDGRID SHARDS (ONE COMMAND)
+./.venv/bin/python tools/prepare_sendgrid_leads.py \
+  --in leads.csv \
+  --prechecked-out leads_prechecked.csv \
+  --suppressed suppressed.csv
+
+------------------------------------------------------------------------------
+3) LEAD DISTRIBUTION (AUTOMATED SPLIT)
+------------------------------------------------------------------------------
+
+NOTE
+- Use split_recipients_5.py to pull from source, split evenly into 5 files, and optionally remove from source.
+- Use `--append` to ADD to existing recipient files (recommended for your workflow).
+- Without `--append`, the script REPLACES/rewrites the recipient files.
+
+PULL 100 FROM leads_prechecked.csv -> recipients_sendgrid_1..5 (20 each) AND REMOVE
+python3 split_recipients_5.py \
+  --src leads_prechecked.csv \
+  --dst recipients_sendgrid_1.csv recipients_sendgrid_2.csv recipients_sendgrid_3.csv recipients_sendgrid_4.csv recipients_sendgrid_5.csv \
+  --count 100 \
+  --remove \
+  --append
+
+PULL ALL LEADS FROM leads_prechecked.csv -> recipients_1..5 (EVEN SPLIT) AND REMOVE
+python3 split_recipients_5.py \
+  --src leads_prechecked.csv \
+  --dst recipients_1.csv recipients_2.csv recipients_3.csv recipients_4.csv recipients_5.csv \
+  --count 0 \
+  --remove \
+  --append
+
+
+DISTRIBUTE ALL REMAINING FROM leads_prechecked.csv -> recipients_1..5 (NO REMOVE)
+python3 split_recipients_5.py \
+  --src leads_prechecked.csv \
+  --dst recipients_1.csv recipients_2.csv recipients_3.csv recipients_4.csv recipients_5.csv \
+  --count 0 \
+  --append
+
+OPTIONAL: KEEP windellejcr@gmail.com ON TOP OF EACH recipients_1..5 FILE (ONE-TIME TEST)
+python3 split_recipients_5.py \
+  --src leads_prechecked.csv \
+  --dst recipients_1.csv recipients_2.csv recipients_3.csv recipients_4.csv recipients_5.csv \
+  --count 1000 \
+  --remove \
+  --append \
+  --keep-top-email windellejcr@gmail.com \
+  --keep-top-name Windelle \
+  --keep-top-title Test
+
+------------------------------------------------------------------------------
+4) SEND COMMANDS (DIRECT)
+------------------------------------------------------------------------------
+
+SENDGRID (SINGLE PROFILE)
+./.venv/bin/python send_shard.py --profile sendgrid_annette
+./.venv/bin/python send_shard.py --profile sendgrid_jordan
+./.venv/bin/python send_shard.py --profile sendgrid_jodi
+./.venv/bin/python send_shard.py --profile sendgrid_alison
+./.venv/bin/python send_shard.py --profile sendgrid_fiorela
+
+PRIVATE EMAIL (SINGLE PROFILE)
+python3 send_shard.py --profile private_annette
+python3 send_shard.py --profile private_jordan
+python3 send_shard.py --profile private_jodi
+python3 send_shard.py --profile private_alison
+python3 send_shard.py --profile private_fiorela
+
+PRIVATE EMAIL (INLINE APP PASSWORD EXAMPLES)
+PRIVATE_ANNETTE_APP_PW='REPLACE_ME' python3 send_shard.py --profile private_annette
+PRIVATE_JORDAN_APP_PW='REPLACE_ME' python3 send_shard.py --profile private_jordan
+PRIVATE_JODI_APP_PW='REPLACE_ME' python3 send_shard.py --profile private_jodi
+PRIVATE_ALISON_APP_PW='REPLACE_ME' python3 send_shard.py --profile private_alison
+PRIVATE_FIORELA_APP_PW='REPLACE_ME' python3 send_shard.py --profile private_fiorela
+
+------------------------------------------------------------------------------
+5) TMUX (BOTH PANES: SENDGRID + PRIVATE)
+------------------------------------------------------------------------------
+
+tmux kill-session -t outreach 2>/dev/null || true
+tmux new -d -s outreach -n sendgrid
+
+tmux set-environment -t outreach -g PRIVATE_ANNETTE_APP_PW "$PRIVATE_ANNETTE_APP_PW"
+tmux set-environment -t outreach -g PRIVATE_JORDAN_APP_PW  "$PRIVATE_JORDAN_APP_PW"
+tmux set-environment -t outreach -g PRIVATE_JODI_APP_PW    "$PRIVATE_JODI_APP_PW"
+tmux set-environment -t outreach -g PRIVATE_ALISON_APP_PW  "$PRIVATE_ALISON_APP_PW"
+tmux set-environment -t outreach -g PRIVATE_FIORELA_APP_PW "$PRIVATE_FIORELA_APP_PW"
+
+# window 0: sendgrid
+tmux split-window -h -t outreach:0
+tmux split-window -v -t outreach:0.0
+tmux split-window -v -t outreach:0.1
+tmux split-window -v -t outreach:0.2
+tmux select-layout -t outreach:0 tiled
+
+tmux send-keys -t outreach:0.0 "SENDGRID_API_KEY=\"\$SENDGRID_API_KEY\" ./.venv/bin/python send_shard.py --profile sendgrid_annette" C-m
+tmux send-keys -t outreach:0.1 "SENDGRID_API_KEY=\"\$SENDGRID_API_KEY\" ./.venv/bin/python send_shard.py --profile sendgrid_jordan" C-m
+tmux send-keys -t outreach:0.2 "SENDGRID_API_KEY=\"\$SENDGRID_API_KEY\" ./.venv/bin/python send_shard.py --profile sendgrid_jodi" C-m
+tmux send-keys -t outreach:0.3 "SENDGRID_API_KEY=\"\$SENDGRID_API_KEY\" ./.venv/bin/python send_shard.py --profile sendgrid_alison" C-m
+tmux send-keys -t outreach:0.4 "SENDGRID_API_KEY=\"\$SENDGRID_API_KEY\" ./.venv/bin/python send_shard.py --profile sendgrid_fiorela" C-m
+
+# window 1: private
+tmux new-window -t outreach -n private
+tmux split-window -h -t outreach:1
+tmux split-window -v -t outreach:1.0
+tmux split-window -v -t outreach:1.1
+tmux split-window -v -t outreach:1.2
+tmux select-layout -t outreach:1 tiled
+
+tmux send-keys -t outreach:1.0 "./.venv/bin/python send_shard.py --profile private_annette" C-m
+tmux send-keys -t outreach:1.1 "./.venv/bin/python send_shard.py --profile private_jordan" C-m
+tmux send-keys -t outreach:1.2 "./.venv/bin/python send_shard.py --profile private_jodi" C-m
+tmux send-keys -t outreach:1.3 "./.venv/bin/python send_shard.py --profile private_alison" C-m
+tmux send-keys -t outreach:1.4 "./.venv/bin/python send_shard.py --profile private_fiorela" C-m
+
+tmux attach -t outreach
+
+------------------------------------------------------------------------------
+6) TMUX (PRIVATE ONLY)
+------------------------------------------------------------------------------
+
+tmux kill-session -t private 2>/dev/null || true
+tmux new -d -s private -n private
+
+tmux set-environment -t private -g PRIVATE_ANNETTE_APP_PW "$PRIVATE_ANNETTE_APP_PW"
+tmux set-environment -t private -g PRIVATE_JORDAN_APP_PW  "$PRIVATE_JORDAN_APP_PW"
+tmux set-environment -t private -g PRIVATE_JODI_APP_PW    "$PRIVATE_JODI_APP_PW"
+tmux set-environment -t private -g PRIVATE_ALISON_APP_PW  "$PRIVATE_ALISON_APP_PW"
+tmux set-environment -t private -g PRIVATE_FIORELA_APP_PW "$PRIVATE_FIORELA_APP_PW"
+
+tmux split-window -h -t private:0
+tmux split-window -v -t private:0.0
+tmux split-window -v -t private:0.1
+tmux split-window -v -t private:0.2
+tmux select-layout -t private:0 tiled
+
+tmux send-keys -t private:0.0 "./.venv/bin/python send_shard.py --profile private_annette" C-m
+tmux send-keys -t private:0.1 "./.venv/bin/python send_shard.py --profile private_jordan" C-m
+tmux send-keys -t private:0.2 "./.venv/bin/python send_shard.py --profile private_jodi" C-m
+tmux send-keys -t private:0.3 "./.venv/bin/python send_shard.py --profile private_alison" C-m
+tmux send-keys -t private:0.4 "./.venv/bin/python send_shard.py --profile private_fiorela" C-m
+
+tmux attach -t private
+
+------------------------------------------------------------------------------
+7) TMUX QUICK RETURN
+------------------------------------------------------------------------------
+
+tmux ls
+tmux attach -t outreach
+tmux attach -t private
+
+------------------------------------------------------------------------------
+8) NOTES / GOTCHAS
+------------------------------------------------------------------------------
+
+- Restart tmux senders after editing send_shard.py (running panes keep old code).
+- Use ASCII quotes only in commands (" and ') to avoid syntax errors.
+- The private 1h cap check example above uses 1000/h (safe target with headroom under 1500/h plan ceiling).
+- If you see 450 4.7.1 "Sending limit reached", let the script back off and resume after the wait window.

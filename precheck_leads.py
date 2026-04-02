@@ -1,5 +1,6 @@
 import csv, argparse
 import re
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -41,6 +42,30 @@ def load_disposable():
         return set()
     return {line.strip().lower() for line in DISPOSABLE_FILE.read_text(encoding="utf-8").splitlines() if line.strip()}
 
+
+def load_existing_suppressed(path: Path):
+    emails = set()
+    rows = []
+    if not path.exists():
+        return emails, rows
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                email = extract_email((row.get("Email") or "")).lower()
+                if not email or email in emails:
+                    continue
+                emails.add(email)
+                rows.append({
+                    "TimestampUTC": (row.get("TimestampUTC") or now_utc()).strip() or now_utc(),
+                    "Email": email,
+                    "Reason": (row.get("Reason") or "preexisting_suppressed").strip() or "preexisting_suppressed",
+                })
+    except Exception:
+        # If the file is malformed, treat it as empty rather than failing precheck.
+        return set(), []
+    return emails, rows
+
 def has_null_mx(mx_answers):
     # RFC 7505 “null MX”: preference 0, exchange "."
     for r in mx_answers:
@@ -77,10 +102,10 @@ def precheck(
     skip_mx: bool,
     allow_role: bool,
     resolver,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     addr = (addr or "").strip()
     if not addr:
-        return False, "empty"
+        return False, "empty", ""
 
     if validate_email:
         try:
@@ -88,19 +113,19 @@ def precheck(
             email = v.email
             domain = v.domain.lower()
         except EmailNotValidError as e:
-            return False, f"bad_syntax: {e}"
+            return False, f"bad_syntax: {e}", ""
     else:
         email = addr.strip().lower()
         if not EMAIL_RE.match(email):
-            return False, "bad_syntax"
+            return False, "bad_syntax", ""
         domain = email.split("@", 1)[1].lower()
 
     local = email.split("@", 1)[0].lower()
     if not allow_role and is_role_account(local):
-        return False, "role_account"
+        return False, "role_account", ""
 
     if domain in disposable_domains:
-        return False, "disposable_domain"
+        return False, "disposable_domain", ""
 
     if domain in COMMON_DOMAIN_FIXES:
         fixed_domain = COMMON_DOMAIN_FIXES[domain]
@@ -108,28 +133,28 @@ def precheck(
         domain = fixed_domain
 
     if skip_mx or dns is None or resolver is None:
-        return True, "ok"
+        return True, "ok", email
 
     if domain in mx_cache:
         mx_ok, reason = mx_cache[domain]
-        return mx_ok, reason
+        return mx_ok, reason, (email if mx_ok else "")
 
     try:
         answers = resolver.resolve(domain, "MX")
         if has_null_mx(answers):
             mx_cache[domain] = (False, "null_mx")
-            return False, "null_mx"
+            return False, "null_mx", ""
         mx_cache[domain] = (True, "ok")
-        return True, "ok"
+        return True, "ok", email
     except Exception:
         mx_cache[domain] = (False, "no_mx_or_dns_fail")
-        return False, "no_mx_or_dns_fail"
+        return False, "no_mx_or_dns_fail", ""
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", required=True)
-    ap.add_argument("--suppressed", default="suppressed.csv")
+    ap.add_argument("--suppressed", default="suppressed.csv", help="Suppression list (loaded) and reject report (rewritten/extended).")
     ap.add_argument("--email_col", default="Email")
     ap.add_argument("--author_col", default="AuthorName")
     ap.add_argument("--title_col", default="BookTitle")
@@ -137,6 +162,11 @@ def main():
     ap.add_argument("--allow_role", action="store_true", help="Allow role-based addresses (info@, support@, etc.).")
     ap.add_argument("--mx_timeout", type=float, default=2.0, help="DNS timeout per try (seconds).")
     ap.add_argument("--mx_lifetime", type=float, default=4.0, help="DNS total lifetime (seconds).")
+    ap.add_argument(
+        "--require_author",
+        action="store_true",
+        help="Reject rows missing AuthorName.",
+    )
     ap.add_argument(
         "--require_fields",
         action="store_true",
@@ -177,6 +207,8 @@ def main():
     disposable = load_disposable()
     mx_cache = {}
     seen = set()
+    summary = Counter()
+    existing_suppressed_emails, existing_suppressed_rows = load_existing_suppressed(supp)
 
     if validate_email is None:
         print("WARN: email_validator not installed; using basic syntax check.")
@@ -199,38 +231,83 @@ def main():
         w_bad = csv.DictWriter(fs, fieldnames=["TimestampUTC","Email","Reason"])
         w_ok.writeheader()
         w_bad.writeheader()
+        for row in existing_suppressed_rows:
+            w_bad.writerow(row)
 
         for row in r:
+            summary["input_rows"] += 1
             raw_email = row.get(args.email_col) or ""
             email = extract_email(raw_email).lower()
             if not email:
                 w_bad.writerow({"TimestampUTC": now_utc(), "Email": "", "Reason": "missing_email"})
+                summary["rejected"] += 1
+                summary["reason:missing_email"] += 1
                 continue
             if args.require_fields:
                 author_val = (row.get(args.author_col) or "").strip()
                 title_val = (row.get(args.title_col) or "").strip()
                 if not author_val:
                     w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "missing_author"})
+                    summary["rejected"] += 1
+                    summary["reason:missing_author"] += 1
                     continue
                 if not title_val:
                     w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "missing_title"})
+                    summary["rejected"] += 1
+                    summary["reason:missing_title"] += 1
                     continue
+            elif args.require_author:
+                author_val = (row.get(args.author_col) or "").strip()
+                if not author_val:
+                    w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "missing_author"})
+                    summary["rejected"] += 1
+                    summary["reason:missing_author"] += 1
+                    continue
+            if email in existing_suppressed_emails:
+                # Skip emails that were already suppressed from prior runs.
+                summary["rejected"] += 1
+                summary["reason:already_suppressed"] += 1
+                continue
             if email in seen:
                 w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "duplicate"})
+                summary["rejected"] += 1
+                summary["reason:duplicate"] += 1
                 continue
             seen.add(email)
 
-            ok, reason = precheck(email, disposable, mx_cache, args.no_mx, args.allow_role, resolver)
+            ok, reason, normalized_email = precheck(email, disposable, mx_cache, args.no_mx, args.allow_role, resolver)
             if ok:
-                row[args.email_col] = email
+                row[args.email_col] = normalized_email or email
                 w_ok.writerow(row)
+                summary["kept"] += 1
+                if normalized_email and normalized_email != email:
+                    summary["email_normalized"] += 1
             else:
                 w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": reason})
+                summary["rejected"] += 1
+                summary[f"reason:{reason}"] += 1
 
     if args.drain_in:
         inp.write_text(",".join(input_header or ["Email", "AuthorName", "BookTitle"]) + "\n", encoding="utf-8")
     elif args.overwrite_in:
         inp.write_text(outp.read_text(encoding="utf-8"), encoding="utf-8")
+
+    print(
+        "SUMMARY: "
+        f"in={summary.get('input_rows', 0)} "
+        f"kept={summary.get('kept', 0)} "
+        f"rejected={summary.get('rejected', 0)} "
+        f"preexisting_suppressed={len(existing_suppressed_emails)} "
+        f"normalized={summary.get('email_normalized', 0)}"
+    )
+    reason_items = sorted(
+        ((k.split(':', 1)[1], v) for k, v in summary.items() if k.startswith("reason:")),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    if reason_items:
+        print("REASONS:")
+        for reason, count in reason_items:
+            print(f"  {count:6}  {reason}")
 
 if __name__ == "__main__":
     main()
