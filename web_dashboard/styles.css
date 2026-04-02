@@ -1812,6 +1812,10 @@ h3 {
   align-content: start;
 }
 
+.detail-guard-slot:empty {
+  display: none;
+}
+
 .detail-metrics {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -1872,6 +1876,108 @@ h3 {
 
 .detail-meta-row:first-child {
   padding-top: 0;
+}
+
+.detail-guard-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.detail-guard-panel-good {
+  border-color: rgba(94, 214, 158, 0.24);
+  box-shadow: 0 0 0 1px rgba(94, 214, 158, 0.08), 0 0 24px rgba(94, 214, 158, 0.1);
+}
+
+.detail-guard-panel-warn {
+  border-color: rgba(216, 179, 106, 0.24);
+  box-shadow: 0 0 0 1px rgba(216, 179, 106, 0.08), 0 0 24px rgba(216, 179, 106, 0.1);
+}
+
+.detail-guard-panel-bad {
+  border-color: rgba(248, 120, 140, 0.24);
+  box-shadow: 0 0 0 1px rgba(248, 120, 140, 0.08), 0 0 24px rgba(248, 120, 140, 0.1);
+}
+
+.detail-guard-note {
+  margin: 0;
+  color: #d7e1f0;
+  line-height: 1.5;
+}
+
+.detail-guard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.detail-guard-stat {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.detail-guard-label,
+.detail-guard-subhead {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.detail-guard-value {
+  color: #fbfdff;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.detail-guard-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.detail-guard-events {
+  display: grid;
+  gap: 10px;
+}
+
+.detail-guard-event {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.detail-guard-event-info {
+  border-color: rgba(116, 170, 255, 0.18);
+}
+
+.detail-guard-event-warn {
+  border-color: rgba(216, 179, 106, 0.22);
+}
+
+.detail-guard-event-error {
+  border-color: rgba(248, 120, 140, 0.22);
+}
+
+.detail-guard-event-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.detail-guard-event p {
+  margin: 0;
+  color: #dce7f6;
+  line-height: 1.5;
 }
 
 .detail-meta-row:last-child {

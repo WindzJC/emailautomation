@@ -1134,6 +1134,75 @@ function renderPrivateBounceGuard(snapshot) {
   );
 }
 
+function renderDetailPrivateBounceGuard(profile, guard = {}) {
+  if (!profile || profile.name !== "private_jc") return "";
+  const tone = privateBounceTone(guard);
+  const lastSyncText = guard?.last_sync_utc ? formatGeneratedAt(guard.last_sync_utc) : "Never";
+  const cooldownText = guard?.cooldown_until_utc
+    ? formatGeneratedAt(guard.cooldown_until_utc)
+    : (guard?.cooldown_active ? humanizeCooldownRemaining(guard?.cooldown_remaining_seconds || 0) : "Off");
+  const lastSuppressed = Array.isArray(guard?.last_suppressed_addresses) ? guard.last_suppressed_addresses : [];
+  const events = Array.isArray(guard?.events) ? guard.events.slice(0, 3) : [];
+
+  return `
+    <section class="detail-section detail-guard-panel detail-guard-panel-${escapeHtml(tone)}">
+      <div class="detail-section-head">
+        <strong>JC Bounce Guard</strong>
+        <span class="mini-pill">${escapeHtml(guard?.status_label || "Idle")}</span>
+      </div>
+      <p class="detail-guard-note">${escapeHtml(guard?.status_note || "Automatic private bounce sync, suppression, and clustered-bounce cooldown protection.")}</p>
+
+      <div class="detail-guard-grid">
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Last Sync</div>
+          <div class="detail-guard-value">${escapeHtml(lastSyncText)}</div>
+        </article>
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Suppressed This Sync</div>
+          <div class="detail-guard-value">${Number(guard?.last_added_suppressed || 0).toLocaleString()}</div>
+        </article>
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Recent Bounce Window</div>
+          <div class="detail-guard-value">${Number(guard?.recent_bounces_window || 0)}/${Number(guard?.bounce_threshold || 0)} in ${Number(guard?.window_minutes || 0)}m</div>
+        </article>
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Cooldown</div>
+          <div class="detail-guard-value">${escapeHtml(cooldownText)}</div>
+        </article>
+      </div>
+
+      <div class="detail-guard-stack">
+        <div>
+          <div class="detail-guard-subhead">Last Suppressed Addresses</div>
+          <div class="pill-row">
+            ${lastSuppressed.length
+              ? lastSuppressed.slice(0, 6).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("")
+              : `<span class="mini-pill">No new addresses</span>`}
+          </div>
+        </div>
+        <div>
+          <div class="detail-guard-subhead">Recent Guard Events</div>
+          ${events.length
+            ? `
+              <div class="detail-guard-events">
+                ${events.map((event) => `
+                  <article class="detail-guard-event detail-guard-event-${escapeHtml(String(event?.severity || "info"))}">
+                    <div class="detail-guard-event-head">
+                      <strong>${escapeHtml(event?.title || "Event")}</strong>
+                      <span class="muted">${escapeHtml(event?.occurred_at_utc ? formatGeneratedAt(event.occurred_at_utc) : "-")}</span>
+                    </div>
+                    <p>${escapeHtml(event?.message || "")}</p>
+                  </article>
+                `).join("")}
+              </div>
+            `
+            : `<p class="muted">No private bounce guard events yet.</p>`}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function createSelectOptionNode() {
   return document.createElement("option");
 }
@@ -2048,6 +2117,7 @@ function createProfileDetailNode() {
           </section>
 
           <div class="detail-live-slot"></div>
+          <div class="detail-guard-slot"></div>
           <div class="detail-webhook-slot"></div>
         </div>
 
@@ -2098,6 +2168,7 @@ function createProfileDetailNode() {
     feedback: node.querySelector(".detail-feedback-slot"),
     metrics: node.querySelector(".detail-metrics"),
     live: node.querySelector(".detail-live-slot"),
+    guard: node.querySelector(".detail-guard-slot"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
@@ -2124,6 +2195,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
     feedback: node.querySelector(".detail-feedback-slot"),
     metrics: node.querySelector(".detail-metrics"),
     live: node.querySelector(".detail-live-slot"),
+    guard: node.querySelector(".detail-guard-slot"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
@@ -2184,6 +2256,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   );
 
   setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
+  setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}));
   setNodeText(
     refs.progressNote,
     `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.`,
