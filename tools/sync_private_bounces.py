@@ -9,19 +9,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from private_bounce_hygiene import sync_private_bounces
+from private_bounce_hygiene import normalize_private_bounce_folders, sync_private_bounces
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default="private_jc")
-    parser.add_argument("--folder", default="INBOX")
+    parser.add_argument("--folder", action="append", default=[])
+    parser.add_argument("--include-trash", action="store_true")
     parser.add_argument("--lookback-days", type=int, default=14)
     args = parser.parse_args()
+    folders = normalize_private_bounce_folders(args.folder or None)
+    if args.include_trash and "trash" not in {folder.casefold() for folder in folders}:
+        folders.append("Trash")
 
     report = sync_private_bounces(
         profile_name=args.profile,
-        folder=args.folder,
+        folders=folders,
         lookback_days=args.lookback_days,
     )
     print(

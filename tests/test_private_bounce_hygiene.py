@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import csv
+import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from unittest.mock import patch
 
 from private_bounce_hygiene import (
     append_unique_suppressed_emails,
     extract_bounced_recipients_from_message,
     is_probable_bounce_message,
     run_private_bounce_monitor_cycle,
+    sync_private_bounces,
 )
 
 
@@ -63,6 +67,229 @@ class PrivateBounceHygieneTests(unittest.TestCase):
                 ["existing@example.com", "new@example.com"],
                 [row["Email"] for row in rows],
             )
+
+    def test_sync_private_bounces_defaults_to_inbox_and_spam(self) -> None:
+        class FakeIMAP:
+            def __init__(self, host: str, port: int, timeout: int = 0) -> None:
+                self.current_folder = "INBOX"
+                self._messages = {
+                    "INBOX": {},
+                    "Spam": {
+                        1: self._build_bounce(
+                            "Thu, 02 Apr 2026 20:30:01 +0000",
+                            "one@example.com",
+                        ),
+                    },
+                    "Trash": {
+                        14: self._build_bounce(
+                            "Thu, 02 Apr 2026 20:34:48 +0000",
+                            "two@example.com",
+                        ),
+                    },
+                }
+
+            @staticmethod
+            def _build_bounce(date_header: str, recipient: str) -> bytes:
+                msg = EmailMessage()
+                msg["From"] = "Mail Delivery System <MAILER-DAEMON@example.com>"
+                msg["Subject"] = "Undelivered Mail Returned to Sender"
+                msg["Date"] = date_header
+                msg.set_content(
+                    "This is the mail system at host pe-b.jellyfish.systems.\n"
+                    f"Final-Recipient: rfc822; {recipient}\n"
+                    "Diagnostic-Code: smtp; 550 5.1.1 User unknown\n"
+                )
+                return msg.as_bytes()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def login(self, email_addr: str, password: str):
+                return ("OK", [b"logged in"])
+
+            def select(self, folder: str, readonly: bool = True):
+                self.current_folder = folder
+                count = len(self._messages.get(folder, {}))
+                return ("OK", [str(count).encode()])
+
+            def uid(self, command: str, *args):
+                command = command.lower()
+                folder_messages = self._messages.get(self.current_folder, {})
+                if command == "search":
+                    if args and len(args) >= 2 and str(args[1]).endswith(":*"):
+                        start_uid = int(str(args[1]).split(":", 1)[0])
+                        uids = [uid for uid in sorted(folder_messages) if uid >= start_uid]
+                    else:
+                        uids = sorted(folder_messages)
+                    return ("OK", [b" ".join(str(uid).encode() for uid in uids)])
+                if command == "fetch":
+                    uid = int(str(args[0]))
+                    payload = folder_messages[uid]
+                    return ("OK", [(b"RFC822", payload)])
+                raise AssertionError(f"Unsupported command: {command}")
+
+            def logout(self):
+                return ("BYE", [b"logout"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            state_path = tmp / "state.json"
+            suppressed_path = tmp / "suppressed.csv"
+            with patch.dict(os.environ, {"PRIVATE_JC_PASSWORD": "secret"}, clear=False):
+                with patch("private_bounce_hygiene.imaplib.IMAP4_SSL", FakeIMAP):
+                    report = sync_private_bounces(
+                        profile_name="private_jc",
+                        state_path=state_path,
+                        suppressed_path=suppressed_path,
+                        report_dir=tmp,
+                    )
+
+            self.assertEqual(["INBOX", "Spam"], report["folders"])
+            self.assertEqual(1, report["scanned_messages"])
+            self.assertEqual(1, report["matched_messages"])
+            self.assertEqual({"one@example.com"}, set(report["extracted_recipient_list"]))
+            self.assertEqual(1, report["added_suppressed"])
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"INBOX": 0, "Spam": 1},
+                state["private_jc"]["last_uid_by_folder"],
+            )
+
+    def test_sync_private_bounces_can_include_trash_for_backfill(self) -> None:
+        class FakeIMAP:
+            def __init__(self, host: str, port: int, timeout: int = 0) -> None:
+                self.current_folder = "INBOX"
+                self._messages = {
+                    "INBOX": {},
+                    "Spam": {},
+                    "Trash": {
+                        14: self._build_bounce(
+                            "Thu, 02 Apr 2026 20:34:48 +0000",
+                            "two@example.com",
+                        ),
+                    },
+                }
+
+            @staticmethod
+            def _build_bounce(date_header: str, recipient: str) -> bytes:
+                msg = EmailMessage()
+                msg["From"] = "Mail Delivery System <MAILER-DAEMON@example.com>"
+                msg["Subject"] = "Undelivered Mail Returned to Sender"
+                msg["Date"] = date_header
+                msg.set_content(
+                    "This is the mail system at host pe-b.jellyfish.systems.\n"
+                    f"Final-Recipient: rfc822; {recipient}\n"
+                    "Diagnostic-Code: smtp; 550 5.1.1 User unknown\n"
+                )
+                return msg.as_bytes()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def login(self, email_addr: str, password: str):
+                return ("OK", [b"logged in"])
+
+            def select(self, folder: str, readonly: bool = True):
+                self.current_folder = folder
+                count = len(self._messages.get(folder, {}))
+                return ("OK", [str(count).encode()])
+
+            def uid(self, command: str, *args):
+                command = command.lower()
+                folder_messages = self._messages.get(self.current_folder, {})
+                if command == "search":
+                    if args and len(args) >= 2 and str(args[1]).endswith(":*"):
+                        start_uid = int(str(args[1]).split(":", 1)[0])
+                        uids = [uid for uid in sorted(folder_messages) if uid >= start_uid]
+                    else:
+                        uids = sorted(folder_messages)
+                    return ("OK", [b" ".join(str(uid).encode() for uid in uids)])
+                if command == "fetch":
+                    uid = int(str(args[0]))
+                    payload = folder_messages[uid]
+                    return ("OK", [(b"RFC822", payload)])
+                raise AssertionError(f"Unsupported command: {command}")
+
+            def logout(self):
+                return ("BYE", [b"logout"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            state_path = tmp / "state.json"
+            suppressed_path = tmp / "suppressed.csv"
+            with patch.dict(os.environ, {"PRIVATE_JC_PASSWORD": "secret"}, clear=False):
+                with patch("private_bounce_hygiene.imaplib.IMAP4_SSL", FakeIMAP):
+                    report = sync_private_bounces(
+                        profile_name="private_jc",
+                        folders=["INBOX", "Spam", "Trash"],
+                        state_path=state_path,
+                        suppressed_path=suppressed_path,
+                        report_dir=tmp,
+                    )
+
+            self.assertEqual(["INBOX", "Spam", "Trash"], report["folders"])
+            self.assertEqual(1, report["scanned_messages"])
+            self.assertEqual(1, report["matched_messages"])
+            self.assertEqual({"two@example.com"}, set(report["extracted_recipient_list"]))
+            self.assertEqual(1, report["added_suppressed"])
+
+    def test_monitor_cycle_uses_message_dates_for_recent_bounce_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            def fake_sync(**_: object) -> dict[str, object]:
+                return {
+                    "generated_at_utc": "2026-04-03T03:00:00+00:00",
+                    "report_path": str(tmp / "report.json"),
+                    "scanned_messages": 3,
+                    "probable_bounce_messages": 3,
+                    "matched_messages": 3,
+                    "extracted_recipients": 3,
+                    "extracted_recipient_list": [
+                        "one@example.com",
+                        "two@example.com",
+                        "three@example.com",
+                    ],
+                    "extracted_recipient_events": [
+                        {"email": "one@example.com", "detected_at_utc": "2026-04-03T01:00:00+00:00"},
+                        {"email": "two@example.com", "detected_at_utc": "2026-04-03T01:00:00+00:00"},
+                        {"email": "three@example.com", "detected_at_utc": "2026-04-03T01:00:00+00:00"},
+                    ],
+                    "added_suppressed": 3,
+                    "added_suppressed_addresses": [
+                        "one@example.com",
+                        "two@example.com",
+                        "three@example.com",
+                    ],
+                }
+
+            result = run_private_bounce_monitor_cycle(
+                profile_name="private_jc",
+                monitor_path=tmp / "monitor.json",
+                sync_state_path=tmp / "sync.json",
+                suppressed_path=tmp / "suppressed.csv",
+                report_dir=tmp,
+                profile_active=True,
+                now=datetime(2026, 4, 3, 3, 0, tzinfo=timezone.utc),
+                interval_seconds=60,
+                window_minutes=15,
+                bounce_threshold=3,
+                cooldown_minutes=15,
+                sync_func=fake_sync,
+                stop_profile=lambda profile_name: (True, f"Stopped {profile_name}"),
+            )
+
+            self.assertFalse(result["cooldown_active"])
+            self.assertEqual("Watching", result["status_label"])
+            self.assertEqual(0, result["recent_bounces_window"])
+            self.assertEqual(3, result["last_added_suppressed"])
 
     def test_monitor_cycle_starts_cooldown_on_clustered_private_bounces(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

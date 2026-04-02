@@ -11,8 +11,9 @@ from email import policy
 from email.header import decode_header
 from email.message import Message
 from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import settings
 from send_shard import PROFILES
@@ -67,6 +68,15 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def _env_csv(name: str, default: Sequence[str]) -> Tuple[str, ...]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return tuple(default)
+    items = [item.strip() for item in raw.split(",")]
+    cleaned = [item for item in items if item]
+    return tuple(cleaned or list(default))
+
+
 PRIVATE_BOUNCE_MONITOR_ENABLED = _env_bool("PRIVATE_BOUNCE_MONITOR_ENABLED", True)
 PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS = _env_int("PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS", 120)
 PRIVATE_BOUNCE_CLUSTER_WINDOW_MINUTES = _env_int("PRIVATE_BOUNCE_CLUSTER_WINDOW_MINUTES", 15)
@@ -75,6 +85,7 @@ PRIVATE_BOUNCE_COOLDOWN_MINUTES = _env_int("PRIVATE_BOUNCE_COOLDOWN_MINUTES", 15
 PRIVATE_BOUNCE_LOOKBACK_DAYS = _env_int("PRIVATE_BOUNCE_LOOKBACK_DAYS", 14)
 PRIVATE_BOUNCE_IMAP_TIMEOUT_SECONDS = _env_int("PRIVATE_BOUNCE_IMAP_TIMEOUT_SECONDS", 30)
 PRIVATE_BOUNCE_EVENT_HISTORY_LIMIT = _env_int("PRIVATE_BOUNCE_EVENT_HISTORY_LIMIT", 50)
+PRIVATE_BOUNCE_FOLDERS = _env_csv("PRIVATE_BOUNCE_FOLDERS", ("INBOX", "Spam"))
 
 
 def iso_utc(dt: datetime) -> str:
@@ -165,6 +176,19 @@ def _decode_header_value(value: str) -> str:
 
 def _message_header_text(msg: Message, name: str) -> str:
     return _decode_header_value(msg.get(name, ""))
+
+
+def _message_detected_at_utc(msg: Message) -> str:
+    raw_date = _message_header_text(msg, "Date")
+    if not raw_date:
+        return ""
+    try:
+        dt = parsedate_to_datetime(raw_date)
+    except Exception:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return iso_utc(dt.astimezone(timezone.utc))
 
 
 def is_probable_bounce_message(msg: Message) -> bool:
@@ -325,6 +349,23 @@ def _report_path(report_dir: Path) -> Path:
     return report_dir / f"{PRIVATE_BOUNCE_REPORT_PREFIX}{ts}.json"
 
 
+def normalize_private_bounce_folders(folders: Optional[Sequence[str]] = None) -> List[str]:
+    raw_items = list(folders or PRIVATE_BOUNCE_FOLDERS or ("INBOX",))
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for raw in raw_items:
+        for piece in str(raw or "").split(","):
+            folder = piece.strip()
+            if not folder:
+                continue
+            folded = folder.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            normalized.append(folder)
+    return normalized or ["INBOX"]
+
+
 def _imap_uids_after(imap: imaplib.IMAP4_SSL, last_uid: int, lookback_days: int) -> List[int]:
     if last_uid > 0:
         status, data = imap.uid("search", None, f"{last_uid + 1}:*")
@@ -352,7 +393,8 @@ def _fetch_message_by_uid(imap: imaplib.IMAP4_SSL, uid: int) -> Message:
 
 def sync_private_bounces(
     profile_name: str = "private_jc",
-    folder: str = "INBOX",
+    folder: str = "",
+    folders: Optional[Sequence[str]] = None,
     lookback_days: int = 14,
     state_path: Path = PRIVATE_BOUNCE_STATE_PATH,
     suppressed_path: Path = settings.SUPPRESSED_PATH,
@@ -378,42 +420,68 @@ def sync_private_bounces(
 
     state = load_private_bounce_state(state_path)
     profile_state = state.get(profile_name, {}) if isinstance(state.get(profile_name), dict) else {}
-    last_uid_before = int(profile_state.get("last_uid", 0) or 0)
+    scan_folders = normalize_private_bounce_folders(folders if folders is not None else ([folder] if folder else None))
+    legacy_last_uid = int(profile_state.get("last_uid", 0) or 0)
+    raw_last_uid_by_folder = profile_state.get("last_uid_by_folder")
+    last_uid_by_folder = dict(raw_last_uid_by_folder) if isinstance(raw_last_uid_by_folder, dict) else {}
+    last_uid_before_map: Dict[str, int] = {}
+    last_uid_after_map: Dict[str, int] = {}
 
     scanned_messages = 0
     probable_bounces = 0
     extracted_recipients: Set[str] = set()
     matched_messages: List[Dict[str, object]] = []
-    max_uid_seen = last_uid_before
+    extracted_recipient_events: List[Dict[str, object]] = []
 
     with imaplib.IMAP4_SSL(imap_host, imap_port, timeout=max(1, int(imap_timeout_seconds or 1))) as imap:
         login_status, _ = imap.login(mailbox_email, password)
         if login_status != "OK":
             raise RuntimeError("IMAP login failed.")
-        select_status, _ = imap.select(folder, readonly=True)
-        if select_status != "OK":
-            raise RuntimeError(f"Unable to open mailbox folder: {folder}")
+        for folder_name in scan_folders:
+            folder_last_uid_before = int(last_uid_by_folder.get(folder_name, 0) or 0)
+            if folder_last_uid_before <= 0 and folder_name == "INBOX" and legacy_last_uid > 0:
+                folder_last_uid_before = legacy_last_uid
+            last_uid_before_map[folder_name] = folder_last_uid_before
 
-        uids = _imap_uids_after(imap, last_uid_before, lookback_days)
-        for uid in uids:
-            max_uid_seen = max(max_uid_seen, uid)
-            msg = _fetch_message_by_uid(imap, uid)
-            scanned_messages += 1
-            is_bounce = is_probable_bounce_message(msg)
-            recipients = extract_bounced_recipients_from_message(msg, mailbox_email=mailbox_email)
-            if is_bounce:
-                probable_bounces += 1
-            if not recipients:
-                continue
-            extracted_recipients |= recipients
-            matched_messages.append(
-                {
-                    "uid": uid,
-                    "subject": _message_header_text(msg, "Subject"),
-                    "from": _message_header_text(msg, "From"),
-                    "recipients": sorted(recipients),
-                }
-            )
+            select_status, _ = imap.select(folder_name, readonly=True)
+            if select_status != "OK":
+                raise RuntimeError(f"Unable to open mailbox folder: {folder_name}")
+
+            max_uid_seen = folder_last_uid_before
+            uids = _imap_uids_after(imap, folder_last_uid_before, lookback_days)
+            for uid in uids:
+                max_uid_seen = max(max_uid_seen, uid)
+                msg = _fetch_message_by_uid(imap, uid)
+                scanned_messages += 1
+                is_bounce = is_probable_bounce_message(msg)
+                recipients = extract_bounced_recipients_from_message(msg, mailbox_email=mailbox_email)
+                if is_bounce:
+                    probable_bounces += 1
+                if not recipients:
+                    continue
+                extracted_recipients |= recipients
+                detected_at_utc = _message_detected_at_utc(msg)
+                matched_messages.append(
+                    {
+                        "folder": folder_name,
+                        "uid": uid,
+                        "subject": _message_header_text(msg, "Subject"),
+                        "from": _message_header_text(msg, "From"),
+                        "date": _message_header_text(msg, "Date"),
+                        "detected_at_utc": detected_at_utc,
+                        "recipients": sorted(recipients),
+                    }
+                )
+                for email_addr in sorted(recipients):
+                    extracted_recipient_events.append(
+                        {
+                            "email": email_addr,
+                            "folder": folder_name,
+                            "uid": uid,
+                            "detected_at_utc": detected_at_utc,
+                        }
+                    )
+            last_uid_after_map[folder_name] = max_uid_seen
         try:
             imap.logout()
         except Exception:
@@ -426,14 +494,18 @@ def sync_private_bounces(
         "profile_name": profile_name,
         "mailbox_email": mailbox_email,
         "folder": folder,
+        "folders": list(scan_folders),
         "imap_host": imap_host,
-        "last_uid_before": last_uid_before,
-        "last_uid_after": max_uid_seen,
+        "last_uid_before": max(last_uid_before_map.values(), default=legacy_last_uid),
+        "last_uid_after": max(last_uid_after_map.values(), default=legacy_last_uid),
+        "last_uid_before_by_folder": last_uid_before_map,
+        "last_uid_after_by_folder": last_uid_after_map,
         "scanned_messages": scanned_messages,
         "probable_bounce_messages": probable_bounces,
         "matched_messages": len(matched_messages),
         "extracted_recipients": len(extracted_recipients),
         "extracted_recipient_list": sorted(extracted_recipients),
+        "extracted_recipient_events": extracted_recipient_events,
         "added_suppressed": suppress_result["added"],
         "added_suppressed_addresses": list(suppress_result.get("added_addresses") or []),
         "already_suppressed": max(0, len(extracted_recipients) - suppress_result["added"]),
@@ -448,7 +520,8 @@ def sync_private_bounces(
 
     if persist_state:
         state[profile_name] = {
-            "last_uid": max_uid_seen,
+            "last_uid": last_uid_after_map.get("INBOX", legacy_last_uid),
+            "last_uid_by_folder": last_uid_after_map,
             "last_sync_utc": report["generated_at_utc"],
             "last_report_path": str(report_path),
         }
@@ -545,18 +618,24 @@ def _append_recent_bounce_events(profile_state: Dict[str, object], report: Dict[
         for item in events
         if isinstance(item, dict)
     }
-    for raw_email in report.get("extracted_recipient_list", []) or []:
-        email_addr = norm_email(str(raw_email or ""))
+    recipient_events = list(report.get("extracted_recipient_events") or [])
+    if recipient_events:
+        candidate_rows = recipient_events
+    else:
+        candidate_rows = [{"email": raw_email, "detected_at_utc": detected_at} for raw_email in (report.get("extracted_recipient_list", []) or [])]
+    for row in candidate_rows:
+        email_addr = norm_email(str((row or {}).get("email") or ""))
         if not email_addr:
             continue
-        fingerprint = (email_addr, detected_at)
+        event_detected_at = str((row or {}).get("detected_at_utc") or detected_at).strip() or detected_at
+        fingerprint = (email_addr, event_detected_at)
         if fingerprint in existing:
             continue
         existing.add(fingerprint)
         events.append(
             {
                 "email": email_addr,
-                "detected_at_utc": detected_at,
+                "detected_at_utc": event_detected_at,
                 "report_path": str(report.get("report_path") or ""),
             }
         )
