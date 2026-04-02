@@ -10,14 +10,16 @@ from io import StringIO
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+import settings
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DST = [
-    "recipients_sendgrid_1.csv",
-    "recipients_sendgrid_2.csv",
-    "recipients_sendgrid_3.csv",
-    "recipients_sendgrid_4.csv",
-    "recipients_sendgrid_5.csv",
+    str(settings.SHARDS_DIR / "recipients_sendgrid_1.csv"),
+    str(settings.SHARDS_DIR / "recipients_sendgrid_2.csv"),
+    str(settings.SHARDS_DIR / "recipients_sendgrid_3.csv"),
+    str(settings.SHARDS_DIR / "recipients_sendgrid_4.csv"),
+    str(settings.SHARDS_DIR / "recipients_sendgrid_5.csv"),
 ]
 EMAIL_HEADER_CANDIDATES = (
     "email",
@@ -110,6 +112,13 @@ def run_command(args: Sequence[str]) -> None:
     subprocess.run(args, cwd=ROOT, check=True)
 
 
+def resolve_cli_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (ROOT / path).resolve()
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="Normalize raw leads, run precheck, then distribute valid leads into the 5 SendGrid shards."
@@ -117,12 +126,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     ap.add_argument("--in", dest="inp", default="leads.csv", help="Raw lead file to validate.")
     ap.add_argument(
         "--prechecked-out",
-        default="leads_prechecked.csv",
+        default=str(settings.state_path("leads_prechecked.csv")),
         help="Validated lead staging file written by precheck.",
     )
     ap.add_argument(
         "--suppressed",
-        default="suppressed.csv",
+        default=str(settings.SUPPRESSED_PATH),
         help="Reject report / suppression file maintained by precheck.",
     )
     ap.add_argument(
@@ -175,10 +184,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
-    input_path = ROOT / args.inp
-    prechecked_path = ROOT / args.prechecked_out
-    suppressed_path = ROOT / args.suppressed
-    dst_paths = [ROOT / path for path in args.dst]
+    input_path = resolve_cli_path(args.inp)
+    prechecked_path = resolve_cli_path(args.prechecked_out)
+    suppressed_path = resolve_cli_path(args.suppressed)
+    dst_paths = [resolve_cli_path(path) for path in args.dst]
 
     rows = load_source_rows(input_path)
     if not rows:

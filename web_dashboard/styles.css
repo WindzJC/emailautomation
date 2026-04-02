@@ -898,6 +898,12 @@ h3 {
   font-weight: 700;
 }
 
+.overview-chip-manual {
+  background: rgba(216, 179, 106, 0.14);
+  border-color: rgba(216, 179, 106, 0.26);
+  color: #ffe3ad;
+}
+
 .overview-sent {
   display: grid;
   gap: 4px;

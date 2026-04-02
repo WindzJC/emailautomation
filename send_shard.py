@@ -247,6 +247,30 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "prune_sent": True,
         "password_env": "PRIVATE_FIORELA_APP_PW",
     },
+    "private_jc": {
+        "provider": "private",
+        "csv": "recipients_private_jc.csv",
+        "log": "private_jc_log.csv",
+        "pitch": "pitch_jc",
+        "from_email": "jc@astraproductions.co",
+        "my_domains": "astraproductions.co,astraproductionsbyjc.com",
+        "interval": 90,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
+        "repeat": True,
+        "human_mode": True,
+        "max_total": 5,
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "global_dedupe": False,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "astraproductionsbyjc@gmail.com",
+        "prune_sent": False,
+        "password_env": "PRIVATE_JC_PASSWORD",
+        "dashboard_enabled": True,
+        "dashboard_manual_only": True,
+        "tmux_session": "private_jc",
+    },
 
         #SEND GRID
     "sendgrid_annette": {
@@ -425,6 +449,7 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
     "alisonaguair@barnesnoblemarketing.com": "sig_private_alison.png",
     "fiorelladelima@barnesnoblemarketing.com": "sig_private_fiorela.png",
     "annettedanek-akey@barnesnoblemarketing.com": "sig_private_annette.png",
+    "jc@astraproductions.co": "LOGO ASTRA bg.png",
     "astraproductionsbyjc@gmail.com": "LOGO ASTRA bg.png",
 }
 SIGNATURE_BY_PITCH = {
@@ -472,6 +497,24 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 (or just reply “unsubscribe”).
 """
 
+PITCH_JC_BODY = """Hi {AuthorName},
+
+I help authors shape how a book is seen before it is read.
+
+I work from a creative direction angle — clarifying the hook, strengthening the visual presentation, and building the kind of promo materials that make the book feel sharper, more intentional, and more marketable from the first impression onward.
+
+That can include trailer direction, launch visuals, and author websites designed to present the book more clearly and professionally.
+
+If useful, I can send one free concept direction for your book’s promotion so you can see how I would approach it.
+
+Windelle JC
+Astra Productions
+astraproductions.co
+
+P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
+(or just reply “unsubscribe”).
+"""
+
 PITCHES = {
     "pitch1": {
         "subject": "Final Call: Consignment Consideration",
@@ -498,8 +541,15 @@ PITCHES = {
         "body": PITCH_1_5_BODY,
 
   },
+    "pitch_jc": {
+        "subject": "Free concept direction for your book",
+        "body": PITCH_JC_BODY,
+    },
 
 }
+
+JC_SIGNATURE_BLOCK = "Astra Productions\nastraproductions.co"
+JC_SIGNATURE_LINK_HTML = "<a href='https://astraproductions.co'>astraproductions.co</a>"
 
 
 def norm_email(s: str) -> str:
@@ -1078,22 +1128,30 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
 def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
     """
     HTML version:
-    - converts {UnsubMailto} into a clickable link
+    - converts {UnsubMailto} into a clickable link except on the JC first email
     - replaces {SIGIMG} with an inline CID image IF cid is provided
     - removes {SIGIMG} if cid is not provided
     """
     safe = html.escape(body_text)
 
     # clickable unsubscribe
-    if "<%asm_group_unsubscribe_url%" in unsub_mailto:
-        unsub_href = unsub_mailto
-        unsub_text = unsub_mailto
-    else:
-        unsub_href = html.escape(unsub_mailto)
-        unsub_text = "unsubscribe"
-    safe = safe.replace(html.escape(unsub_mailto), f"<a href='{unsub_href}'>{unsub_text}</a>")
-    # keep ASM token unescaped if present
-    safe = safe.replace("&lt;%asm_group_unsubscribe_url%&gt;", "<%asm_group_unsubscribe_url%>")
+    if JC_SIGNATURE_BLOCK not in body_text:
+        if "<%asm_group_unsubscribe_url%" in unsub_mailto:
+            unsub_href = unsub_mailto
+            unsub_text = unsub_mailto
+        else:
+            unsub_href = html.escape(unsub_mailto)
+            unsub_text = "unsubscribe"
+        safe = safe.replace(html.escape(unsub_mailto), f"<a href='{unsub_href}'>{unsub_text}</a>")
+        # keep ASM token unescaped if present
+        safe = safe.replace("&lt;%asm_group_unsubscribe_url%&gt;", "<%asm_group_unsubscribe_url%>")
+
+    # Keep the plain-text template simple, but make the JC site clickable in HTML.
+    safe = safe.replace(
+        html.escape(JC_SIGNATURE_BLOCK),
+        "Astra Productions\n" + JC_SIGNATURE_LINK_HTML,
+        1,
+    )
 
     # signature marker replacement
     if cid:

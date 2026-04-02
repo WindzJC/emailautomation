@@ -202,9 +202,24 @@ function formatGeneratedAt(value) {
 }
 
 function formatProfileName(value) {
-  const raw = String(value || "").replace("sendgrid_", "").replaceAll("_", " ").trim();
+  const raw = String(value || "")
+    .replace(/^sendgrid_/, "")
+    .replace(/^private_/, "")
+    .replaceAll("_", " ")
+    .trim();
   if (!raw) return "-";
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
+  return raw
+    .split(/\s+/)
+    .map((part) => {
+      if (!part) return "";
+      if (part.toLowerCase() === "jc") return "JC";
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
+function isManualOnlyProfile(profile) {
+  return String(profile?.name || "") === "private_jc";
 }
 
 function senderLogStatusLabel(status) {
@@ -937,6 +952,7 @@ function createOverviewCardNode() {
           <h3></h3>
           <div class="overview-subline">
             <span class="badge stopped"></span>
+            <span class="overview-chip overview-chip-manual hidden"></span>
             <span class="overview-age"></span>
           </div>
         </div>
@@ -970,6 +986,7 @@ function createOverviewCardNode() {
   node._refs = {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
+    manualTag: node.querySelector(".overview-chip-manual"),
     age: node.querySelector(".overview-age"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
@@ -986,6 +1003,7 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
+    manualTag: node.querySelector(".overview-chip-manual"),
     age: node.querySelector(".overview-age"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
@@ -1030,6 +1048,8 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   setNodeText(refs.title, formatProfileName(profile.name));
   refs.badge.className = `badge ${statusClass}`;
   setNodeText(refs.badge, profile.runtime_label || "Stopped");
+  refs.manualTag.className = `overview-chip overview-chip-manual${isManualOnlyProfile(profile) ? "" : " hidden"}`;
+  setNodeText(refs.manualTag, isManualOnlyProfile(profile) ? "Manual Start Only" : "");
   setNodeText(refs.age, profileAgeText(profile));
   refs.dot.className = `overview-dot overview-dot-${tone}`;
 
