@@ -30,40 +30,39 @@
             <button id="leads-tab-btn" class="tab-btn" type="button" aria-pressed="false">Leads</button>
           </div>
         </div>
-      </header>
-
-      <section class="toolbar-wrap panel-shell">
-        <div class="toolbar-header">
-          <div>
-            <p class="eyebrow">Controls</p>
-            <h2>Run The Fleet</h2>
+        <div class="topbar-controls">
+          <div class="toolbar-header">
+            <div>
+              <p class="eyebrow">Controls</p>
+              <h2>Fleet Controls</h2>
+            </div>
+            <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
           </div>
-          <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
+          <section class="toolbar">
+            <label>
+              Activity window
+              <select id="hours-select">
+                <option value="6">6h</option>
+                <option value="12">12h</option>
+                <option value="24" selected>24h</option>
+                <option value="72">72h</option>
+                <option value="168">168h</option>
+              </select>
+            </label>
+            <label>
+              Emails / sender
+              <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
+              <span id="send-cap-note" class="toolbar-field-note muted">Awaiting first snapshot</span>
+            </label>
+            <div class="toolbar-actions">
+              <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save Cap</button>
+              <button id="refresh-btn" class="btn btn-secondary">Refresh</button>
+              <button id="start-btn" class="btn btn-primary">Start All</button>
+              <button id="stop-btn" class="btn btn-danger">Stop All</button>
+            </div>
+          </section>
         </div>
-        <section class="toolbar">
-          <label>
-            Activity window
-            <select id="hours-select">
-              <option value="6">6h</option>
-              <option value="12">12h</option>
-              <option value="24" selected>24h</option>
-              <option value="72">72h</option>
-              <option value="168">168h</option>
-            </select>
-          </label>
-          <label>
-            Emails / sender
-            <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
-            <span id="send-cap-note" class="toolbar-field-note muted">Applies to new dashboard starts.</span>
-          </label>
-          <div class="toolbar-actions">
-            <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save Cap</button>
-            <button id="refresh-btn" class="btn btn-secondary">Refresh</button>
-            <button id="start-btn" class="btn btn-primary">Start All</button>
-            <button id="stop-btn" class="btn btn-danger">Stop All</button>
-          </div>
-        </section>
-      </section>
+      </header>
 
       <section id="message-bar" class="message-bar hidden"></section>
       <section id="ops-view" class="dashboard-view">
@@ -71,22 +70,11 @@
 
         <section id="summary-grid" class="summary-grid"></section>
 
-        <section id="private-bounce-panel" class="panel panel-shell private-bounce-panel">
-          <div class="panel-header">
-            <div>
-              <h2>JC Bounce Guard</h2>
-              <span id="private-bounce-caption" class="muted">Automatic private bounce sync, suppression, and clustered-bounce cooldown protection.</span>
-            </div>
-          </div>
-          <div id="private-bounce-status" class="bounce-guard-grid"></div>
-          <div id="private-bounce-events" class="bounce-guard-events"></div>
-        </section>
-
         <section class="ops-stack">
           <section id="overview-panel" class="panel panel-shell">
             <div class="panel-header">
               <h2>Fleet Overview</h2>
-              <span class="muted">SendGrid plus JC. Click a tile to focus one sender. JC stays manual-only.</span>
+              <span class="muted">Fleet senders. Click a tile to focus one sender.</span>
             </div>
             <div id="overview-grid" class="overview-grid"></div>
           </section>
@@ -112,11 +100,12 @@
       </section>
 
       <section id="leads-view" class="dashboard-view hidden">
-        <section class="panel panel-shell leads-panel leads-quick-panel">
+        <section class="panel panel-shell leads-panel leads-step-panel">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Step 1</p>
               <h2>Check Leads</h2>
-              <span class="muted">Drop raw leads into `_important/leadschecker.csv`, then clean them into the master file. Extra columns are preserved.</span>
+              <span class="muted">Clean `_important/leadschecker.csv` into the master file. Extra columns stay in place.</span>
             </div>
           </div>
           <div class="leads-quick-grid">
@@ -138,21 +127,22 @@
               <strong>_important/leads_rejected.csv</strong>
             </div>
           </div>
-          <div id="leads-important-check-meta" class="leads-meta muted">Ready. Put raw leads in `_important/leadschecker.csv`, then click Check Leads.</div>
+          <div id="leads-important-check-meta" class="leads-meta muted">Ready to clean `_important/leadschecker.csv`.</div>
           <div id="leads-important-check-results" class="leads-results"></div>
         </section>
 
-        <section class="panel panel-shell leads-panel leads-dispatch-panel">
+        <section class="panel panel-shell leads-panel leads-step-panel">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Step 2</p>
               <h2>Dispatch Leads</h2>
-              <span class="muted">Dispatch reads `_important/leads.csv`, checks Astra and SendGrid separately, then writes each fresh lead into JC, one SendGrid shard, or both when each channel is still eligible. All senders must be stopped first.</span>
+              <span class="muted">Route fresh leads from `_important/leads.csv` after checking Astra and SendGrid separately. All senders must be stopped first.</span>
             </div>
           </div>
           <div class="leads-dispatch-grid">
             <div class="leads-quick-file">
               <span class="label">Dispatch Rule</span>
-              <strong>Astra and SendGrid are checked separately</strong>
+              <strong>Astra + one SendGrid shard per lead</strong>
               <span class="toolbar-field-note muted">If Astra has not sent or queued the lead, it goes to `recipients_private_jc.csv`. If SendGrid has not sent or queued it, it goes to exactly one SendGrid shard.</span>
             </div>
             <div class="leads-action-slot">

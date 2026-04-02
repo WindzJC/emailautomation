@@ -10,9 +10,6 @@ const els = {
   alertsGrid: document.getElementById("alerts-grid"),
   alertsCaption: document.getElementById("alerts-caption"),
   summaryGrid: document.getElementById("summary-grid"),
-  privateBounceCaption: document.getElementById("private-bounce-caption"),
-  privateBounceStatus: document.getElementById("private-bounce-status"),
-  privateBounceEvents: document.getElementById("private-bounce-events"),
   trendsGrid: document.getElementById("trends-grid"),
   webhookHealth: document.getElementById("webhook-health"),
   webhookHealthCaption: document.getElementById("webhook-health-caption"),
@@ -237,10 +234,6 @@ function formatProfileName(value) {
     .join(" ");
 }
 
-function isManualOnlyProfile(profile) {
-  return String(profile?.name || "") === "private_jc";
-}
-
 function senderLogStatusLabel(status) {
   const labels = {
     SENT: "Accepted",
@@ -257,14 +250,6 @@ function profileCooldownRemaining(profile) {
   const remaining = Number(profile?.cooldown_remaining_seconds ?? 0);
   if (!Number.isFinite(remaining) || remaining <= 0) return 0;
   return Math.max(0, Math.round(remaining));
-}
-
-function profileAgeText(profile) {
-  const remaining = profileCooldownRemaining(profile);
-  if ((profile?.runtime_state || "") === "cooldown" && remaining > 0) {
-    return `${remaining}s left`;
-  }
-  return profile?.last_age || "-";
 }
 
 function profileLastUpdateText(profile) {
@@ -992,16 +977,6 @@ function updateOverviewStatNode(node, label, value) {
   setNodeText(refs.value, value);
 }
 
-function createOverviewChipNode() {
-  const node = elementFromHTML(`<span class="overview-chip"></span>`);
-  node._refs = { value: node };
-  return node;
-}
-
-function updateOverviewChipNode(node, value) {
-  setNodeText(node._refs?.value || node, value);
-}
-
 function humanizeSecondsAge(totalSeconds) {
   const seconds = Number(totalSeconds);
   if (!Number.isFinite(seconds) || seconds < 0) return "-";
@@ -1024,114 +999,12 @@ function humanizeCooldownRemaining(totalSeconds) {
   return `${hours}h left`;
 }
 
-function privateBounceSummaryCard(guard = {}) {
-  const status = String(guard?.status || "idle");
-  let tone = "neutral";
-  if (status === "watching") tone = "good";
-  else if (status === "cooldown" || (guard?.sync_stale && guard?.profile_active)) tone = "warn";
-  else if (status === "error") tone = "bad";
-
-  const lastSync = guard?.last_sync_utc
-    ? (guard?.last_sync_age_seconds == null ? "Just now" : humanizeSecondsAge(guard.last_sync_age_seconds))
-    : "Never";
-
-  const cooldownDetail = guard?.cooldown_active
-    ? { label: "Until", value: guard?.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : humanizeCooldownRemaining(guard?.cooldown_remaining_seconds || 0) }
-    : { label: "Cooldown", value: "Off" };
-
-  return {
-    key: "private_bounce_guard",
-    label: "JC Bounce Guard",
-    value: guard?.status_label || "Idle",
-    note: guard?.status_note || "Automatic private bounce sync, suppressions, and cooldown protection.",
-    tone,
-    details: [
-      { label: "Last Sync", value: lastSync },
-      { label: "Suppressed", value: Number(guard?.last_added_suppressed || 0).toLocaleString() },
-      { label: "Recent", value: `${Number(guard?.recent_bounces_window || 0)}/${Number(guard?.bounce_threshold || 0)} in ${Number(guard?.window_minutes || 0)}m` },
-      cooldownDetail,
-    ],
-  };
-}
-
 function privateBounceTone(guard = {}) {
   const status = String(guard?.status || "idle");
   if (status === "watching") return "good";
   if (status === "cooldown" || (guard?.sync_stale && guard?.profile_active)) return "warn";
   if (status === "error") return "bad";
   return "neutral";
-}
-
-function renderPrivateBounceGuard(snapshot) {
-  const guard = snapshot.private_bounce_guard || {};
-  if (!els.privateBounceStatus || !els.privateBounceEvents) return;
-  const tone = privateBounceTone(guard);
-  const lastSyncText = guard?.last_sync_utc ? formatGeneratedAt(guard.last_sync_utc) : "Never";
-  const cooldownUntilText = guard?.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : "Not cooling down";
-  const lastSuppressed = Array.isArray(guard?.last_suppressed_addresses) ? guard.last_suppressed_addresses : [];
-  const recentPreview = Array.isArray(guard?.recent_bounce_preview) ? guard.recent_bounce_preview : [];
-  if (els.privateBounceCaption) {
-    const suffix = guard?.last_sync_utc ? `Last sync ${lastSyncText}.` : "No successful private bounce sync yet.";
-    setNodeText(els.privateBounceCaption, `${guard?.status_note || "Automatic private bounce sync, suppression, and clustered-bounce cooldown protection."} ${suffix}`);
-  }
-  setNodeHtml(
-    els.privateBounceStatus,
-    `
-      <article class="bounce-guard-card bounce-guard-card-${tone}">
-        <div class="bounce-guard-kicker">Status</div>
-        <div class="bounce-guard-value">${escapeHtml(guard?.status_label || "Idle")}</div>
-        <p class="bounce-guard-note">${escapeHtml(guard?.status_note || "Automatic private bounce sync, suppression, and cooldown protection.")}</p>
-      </article>
-      <article class="bounce-guard-card">
-        <div class="bounce-guard-kicker">Last Sync</div>
-        <div class="bounce-guard-inline">${escapeHtml(lastSyncText)}</div>
-        <p class="bounce-guard-note">Scanned ${Number(guard?.last_scanned_messages || 0)} message(s), matched ${Number(guard?.last_matched_messages || 0)} bounce(s).</p>
-      </article>
-      <article class="bounce-guard-card">
-        <div class="bounce-guard-kicker">Last Suppression</div>
-        <div class="bounce-guard-inline">${Number(guard?.last_added_suppressed || 0)} added</div>
-        <div class="pill-row">
-          ${lastSuppressed.length ? lastSuppressed.slice(0, 5).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("") : `<span class="mini-pill">No new addresses</span>`}
-        </div>
-      </article>
-      <article class="bounce-guard-card">
-        <div class="bounce-guard-kicker">Cooldown</div>
-        <div class="bounce-guard-inline">${escapeHtml(cooldownUntilText)}</div>
-        <p class="bounce-guard-note">Recent bounces ${Number(guard?.recent_bounces_window || 0)}/${Number(guard?.bounce_threshold || 0)} in ${Number(guard?.window_minutes || 0)} minute(s).</p>
-        ${recentPreview.length ? `<div class="pill-row">${recentPreview.slice(0, 5).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("")}</div>` : ""}
-      </article>
-    `,
-  );
-
-  const events = Array.isArray(guard?.events) ? guard.events : [];
-  setNodeHtml(
-    els.privateBounceEvents,
-    events.length
-      ? `
-        <div class="bounce-guard-events-list">
-          ${events.slice(0, 10).map((event) => {
-            const severity = String(event?.severity || "info");
-            const addresses = Array.isArray(event?.addresses) ? event.addresses.filter(Boolean) : [];
-            const cooldownUntil = event?.cooldown_until_utc ? formatGeneratedAt(event.cooldown_until_utc) : "";
-            return `
-              <article class="bounce-guard-event bounce-guard-event-${escapeHtml(severity)}">
-                <div class="bounce-guard-event-head">
-                  <div>
-                    <h3>${escapeHtml(event?.title || "Event")}</h3>
-                    <p class="muted">${escapeHtml(event?.occurred_at_utc ? formatGeneratedAt(event.occurred_at_utc) : "-")}</p>
-                  </div>
-                  <span class="mini-pill">${escapeHtml(String(event?.event_type || "event").replaceAll("_", " "))}</span>
-                </div>
-                <p class="bounce-guard-event-message">${escapeHtml(event?.message || "")}</p>
-                ${cooldownUntil ? `<p class="bounce-guard-event-meta">Cooldown until ${escapeHtml(cooldownUntil)}</p>` : ""}
-                ${addresses.length ? `<div class="pill-row">${addresses.slice(0, 6).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("")}</div>` : ""}
-              </article>
-            `;
-          }).join("")}
-        </div>
-      `
-      : `<p class="muted">No private bounce guard events yet.</p>`,
-  );
 }
 
 function renderDetailPrivateBounceGuard(profile, guard = {}) {
@@ -1229,7 +1102,6 @@ function renderSummary(snapshot) {
         { label: "SendGrid", value: Number(summary.sendgrid_pending || 0).toLocaleString() },
       ],
     },
-    privateBounceSummaryCard(snapshot.private_bounce_guard || {}),
     { key: "accepted", label: "Accepted", value: summary.total_run_sent, note: "API accepted this run" },
     { key: "alerts", label: "Alerts", value: summary.active_alerts || 0, note: "needs attention" },
     { key: "api_errors", label: "API Errors", value: summary.total_run_errors, note: "sender-side issues" },
@@ -1463,12 +1335,10 @@ function createOverviewCardNode() {
           <h3></h3>
           <div class="overview-subline">
             <span class="badge stopped"></span>
-            <span class="overview-chip overview-chip-manual hidden"></span>
-            <span class="overview-age"></span>
           </div>
         </div>
         <div class="overview-signal">
-          <span class="overview-dot overview-dot-idle"></span>
+          <span class="overview-dot overview-dot-stopped"></span>
         </div>
       </div>
 
@@ -1485,27 +1355,16 @@ function createOverviewCardNode() {
       </div>
 
       <div class="overview-footer"></div>
-
-      <div class="overview-sent">
-        <span class="overview-sent-label">Last accepted</span>
-        <span class="overview-sent-value"></span>
-      </div>
-
-      <div class="overview-latest"></div>
     </article>
   `);
   node._refs = {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
-    manualTag: node.querySelector(".overview-chip-manual"),
-    age: node.querySelector(".overview-age"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
     progressValue: node.querySelector(".overview-progress-value"),
     progressFill: node.querySelector(".overview-fill"),
     footer: node.querySelector(".overview-footer"),
-    sentValue: node.querySelector(".overview-sent-value"),
-    latest: node.querySelector(".overview-latest"),
   };
   return node;
 }
@@ -1514,45 +1373,21 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
-    manualTag: node.querySelector(".overview-chip-manual"),
-    age: node.querySelector(".overview-age"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
     progressValue: node.querySelector(".overview-progress-value"),
     progressFill: node.querySelector(".overview-fill"),
     footer: node.querySelector(".overview-footer"),
-    sentValue: node.querySelector(".overview-sent-value"),
-    latest: node.querySelector(".overview-latest"),
   };
   node._refs = refs;
-  const webhook = profile.webhook || {};
-  const live = webhook.summary || {};
   const tone = overviewTone(profile);
   const glowState = overviewGlowState(profile);
   const statusClass = profileStatusClass(profile);
   const isSelected = selectedProfile && selectedProfile.name === profile.name;
-  const latestEvent = webhook.latest_event || {};
-  const stateFallback = ["starting", "cooldown", "sleeping", "finished", "scheduled_stop", "error"].includes(profile.runtime_state || "")
-    ? profile.runtime_note
-    : "";
-  const latestLabel = latestEvent.time
-    ? `${statusLabel(latestEvent.status || "")} at ${formatGeneratedAt(latestEvent.time)}`
-    : stateFallback || `${senderLogStatusLabel(profile.last_status || "No recent activity")}${profile.last_timestamp ? ` at ${profile.last_timestamp}` : ""}`;
-  const sentLabel = profile.last_status === "SENT"
-    ? `${profile.last_email || "-"}`
-    : (profile.last_email || "No recent accepted record");
   const progress = profile.max_total > 0 ? Math.min(100, Math.round((profile.run_sent / profile.max_total) * 100)) : 0;
   const stats = [
     { key: "pending", label: "Pending", value: profile.pending_count },
     { key: "accepted", label: "Accepted", value: profile.run_sent },
-    { key: "delivered", label: "Delivered", value: live.delivered || 0 },
-    { key: "failures", label: "Failures", value: live.failed || 0 },
-  ];
-  const chips = [
-    { key: "opened", value: `Opened ${live.open_unique || live.open || 0}` },
-    { key: "clicked", value: `Clicked ${live.click_unique || live.click || 0}` },
-    { key: "awaiting", value: `Awaiting ${profile.awaiting_outcome || 0}` },
-    { key: "mapped", value: `Mapped ${webhook.total || 0}` },
   ];
 
   node.dataset.profile = profile.name || "";
@@ -1560,9 +1395,6 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   setNodeText(refs.title, formatProfileName(profile.name));
   refs.badge.className = `badge ${statusClass}`;
   setNodeText(refs.badge, profile.runtime_label || "Stopped");
-  refs.manualTag.className = `overview-chip overview-chip-manual${isManualOnlyProfile(profile) ? "" : " hidden"}`;
-  setNodeText(refs.manualTag, isManualOnlyProfile(profile) ? "Manual Start Only" : "");
-  setNodeText(refs.age, profileAgeText(profile));
   refs.dot.className = `overview-dot overview-dot-${glowState}`;
 
   syncKeyedChildren(
@@ -1575,17 +1407,7 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
 
   setNodeText(refs.progressValue, `${profile.run_sent}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
-
-  syncKeyedChildren(
-    refs.footer,
-    chips,
-    (chip) => chip.key,
-    () => createOverviewChipNode(),
-    (chipNode, chip) => updateOverviewChipNode(chipNode, chip.value),
-  );
-
-  setNodeText(refs.sentValue, sentLabel);
-  setNodeText(refs.latest, latestLabel || "-");
+  setNodeText(refs.footer, profileLastUpdateText(profile));
 }
 
 function renderOverview(snapshot, selectedProfile) {
@@ -1784,10 +1606,9 @@ function renderControls(snapshot) {
   if (els.sendCapNote) {
     const activeSenders = Number(controls.active_sender_count || 0);
     const activeFleetTotal = Number(controls.fleet_total_for_active_senders || 0);
-    const startAllTotal = Number(controls.estimated_total_if_start_all || 0);
     setNodeText(
       els.sendCapNote,
-      `Per sender ${sendCap || 0}. Active senders ${activeSenders}, current fleet target ${activeFleetTotal || 0}. Start All target about ${startAllTotal}.`,
+      `Per-sender cap: ${sendCap || 0} | ${activeSenders} active senders | Fleet target: ~${activeFleetTotal || 0}`,
     );
   }
 }
@@ -1914,6 +1735,16 @@ function liveMetric(label, value, tone = "neutral") {
   `;
 }
 
+function profileTelemetryChannel(profile) {
+  const name = String(profile?.name || "").toLowerCase();
+  const csv = String(profile?.csv_path || "").toLowerCase();
+  const log = String(profile?.log_path || "").toLowerCase();
+  if (name.startsWith("sendgrid_") || csv.includes("sendgrid") || log.includes("sendgrid")) return "sendgrid";
+  if (name.startsWith("private_") || csv.includes("private") || log.includes("private")) return "private";
+  if (name.startsWith("gmail_") || csv.includes("gmail") || log.includes("gmail")) return "gmail";
+  return "other";
+}
+
 function renderDeliveryFunnel(profile, hours) {
   const summary = profile.webhook?.summary || {};
   const accepted = profile.accepted_recent || 0;
@@ -1952,6 +1783,44 @@ function renderDeliveryFunnel(profile, hours) {
 }
 
 function renderLiveDelivery(profile, hours) {
+  const channel = profileTelemetryChannel(profile);
+  if (channel !== "sendgrid") {
+    const cooldownSeconds = Number(profile.cooldown_remaining_seconds || 0);
+    const cooldownTone = cooldownSeconds > 0 ? "warn" : "good";
+    const lastStatus = senderLogStatusLabel(profile.last_status || "-");
+    const lastStatusTone = String(profile.last_status || "").toUpperCase() === "ERROR"
+      ? "bad"
+      : (String(profile.last_status || "").toUpperCase() === "SENT" ? "good" : "neutral");
+    const headLabel = channel === "private" ? "Private Mailbox" : "Sender Mailbox";
+    const headNote = channel === "private"
+      ? "SMTP delivery plus mailbox bounce handling for this sender"
+      : "Direct sender telemetry for this mailbox";
+    const lastActivityNote = profile.last_timestamp
+      ? `Last logged activity ${profile.last_timestamp}${profile.last_email ? ` for ${profile.last_email}` : ""}.`
+      : "No recent sender log activity.";
+    return `
+      <section class="live-delivery">
+        <div class="live-delivery-head">
+          <strong>${headLabel}</strong>
+          <span class="muted">${headNote}</span>
+        </div>
+        <div class="live-metrics-grid">
+          ${liveMetric("Sent Today", Number(profile.sent_today || 0).toLocaleString(), Number(profile.sent_today || 0) > 0 ? "good" : "neutral")}
+          ${liveMetric("Errors Today", Number(profile.errors_today || 0).toLocaleString(), Number(profile.errors_today || 0) > 0 ? "bad" : "neutral")}
+          ${liveMetric("Skipped Today", Number(profile.skipped_today || 0).toLocaleString(), Number(profile.skipped_today || 0) > 0 ? "warn" : "neutral")}
+          ${liveMetric("Cooldown", escapeHtml(cooldownSeconds > 0 ? humanizeCooldownRemaining(cooldownSeconds) : "Ready"), cooldownTone)}
+          ${liveMetric("Last Status", escapeHtml(lastStatus), lastStatusTone)}
+          ${liveMetric("Last Recipient", escapeHtml(profile.last_email || "-"), "neutral")}
+        </div>
+        <div class="live-delivery-note">
+          <span>No SendGrid webhook telemetry for this sender.</span>
+          <span>Delivery feedback comes from SMTP responses, sender logs, and mailbox bounce handling.</span>
+          <span>${escapeHtml(lastActivityNote)}</span>
+        </div>
+      </section>
+    `;
+  }
+
   const webhook = profile.webhook || { summary: {}, latest_event: {}, total: 0 };
   const summary = webhook.summary || {};
   const latest = webhook.latest_event || {};
@@ -1992,7 +1861,36 @@ function renderLiveDelivery(profile, hours) {
   `;
 }
 
-function renderWebhookSummary(profile) {
+function renderWebhookSummary(profile, snapshot = {}) {
+  const channel = profileTelemetryChannel(profile);
+  if (channel !== "sendgrid") {
+    const guard = profile.name === "private_jc" ? (snapshot.private_bounce_guard || {}) : {};
+    const guardLabel = profile.name === "private_jc" ? (guard.status_label || "Idle") : "N/A";
+    const cooldownText = profile.name === "private_jc"
+      ? (guard.cooldown_active
+        ? (guard.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : humanizeCooldownRemaining(guard.cooldown_remaining_seconds || 0))
+        : "Off")
+      : "Off";
+    return `
+      <section class="webhook-panel">
+        <div class="webhook-head">
+          <strong>Mailbox Feedback</strong>
+          <span class="muted">No webhook event stream for this sender</span>
+        </div>
+        <div class="event-chip-row">
+          <span class="event-chip chip-neutral">Last status: ${escapeHtml(senderLogStatusLabel(profile.last_status || "-"))}</span>
+          <span class="event-chip ${String(profile.last_status || "").toUpperCase() === "ERROR" ? "chip-bad" : "chip-good"}">Errors today: ${Number(profile.errors_today || 0)}</span>
+          <span class="event-chip chip-neutral">Sent today: ${Number(profile.sent_today || 0)}</span>
+          ${profile.name === "private_jc" ? `<span class="event-chip chip-good">JC guard: ${escapeHtml(guardLabel)}</span>` : ""}
+          ${profile.name === "private_jc" ? `<span class="event-chip ${guard?.cooldown_active ? "chip-warn" : "chip-neutral"}">Cooldown: ${escapeHtml(cooldownText)}</span>` : ""}
+        </div>
+        <p class="muted">
+          Private delivery confirmation comes from SMTP responses, sender logs, and bounce mail processing rather than SendGrid webhooks.
+        </p>
+      </section>
+    `;
+  }
+
   const webhook = profile.webhook || { counts: {}, recent: [], total: 0 };
   const counts = webhook.counts || {};
   const hasFailures = Number(webhook?.summary?.failed || 0) > 0;
@@ -2263,7 +2161,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   );
   setNodeText(refs.progressValue, `${profile.run_sent}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
-  setNodeHtml(refs.webhook, renderWebhookSummary(profile));
+  setNodeHtml(refs.webhook, renderWebhookSummary(profile, snapshot));
   setNodeHtml(
     refs.meta,
     metaBoxes.map((item) => `
@@ -2330,7 +2228,6 @@ function renderSnapshot(snapshot) {
   renderHealth(snapshot);
   renderAlerts(snapshot);
   renderSummary(snapshot);
-  renderPrivateBounceGuard(snapshot);
   renderTrends(snapshot);
   renderWebhookHealth(snapshot);
   renderAwaitingAging(snapshot, selectedProfile);
