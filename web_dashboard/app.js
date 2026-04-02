@@ -10,6 +10,9 @@ const els = {
   alertsGrid: document.getElementById("alerts-grid"),
   alertsCaption: document.getElementById("alerts-caption"),
   summaryGrid: document.getElementById("summary-grid"),
+  privateBounceCaption: document.getElementById("private-bounce-caption"),
+  privateBounceStatus: document.getElementById("private-bounce-status"),
+  privateBounceEvents: document.getElementById("private-bounce-events"),
   trendsGrid: document.getElementById("trends-grid"),
   webhookHealth: document.getElementById("webhook-health"),
   webhookHealthCaption: document.getElementById("webhook-health-caption"),
@@ -37,6 +40,12 @@ const els = {
   startBtn: document.getElementById("start-btn"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
+  leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
+  leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
+  leadsImportantCheckResults: document.getElementById("leads-important-check-results"),
+  leadsImportantDispatchBtn: document.getElementById("leads-important-dispatch-btn"),
+  leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
+  leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsUploadInput: document.getElementById("leads-upload-input"),
   leadsUploadBtn: document.getElementById("leads-upload-btn"),
   leadsUploadMeta: document.getElementById("leads-upload-meta"),
@@ -70,6 +79,8 @@ let socket = null;
 let lastSnapshot = null;
 let lastLeadsStatus = null;
 let lastShardPreview = null;
+let lastImportantLeadCheck = null;
+let lastImportantDispatch = null;
 let didHydrate = false;
 let selectedProfileName = "";
 let displayTimeZone = "America/Los_Angeles";
@@ -77,6 +88,14 @@ let wallboardMode = false;
 let activeDashboardTab = "ops";
 const profileActionState = new Map();
 const pendingProfileActions = new Map();
+
+function currentActivityHours() {
+  return els.hoursSelect?.value || "24";
+}
+
+function currentTailLines() {
+  return els.tailSelect?.value || "12";
+}
 
 function setConnectionState(live) {
   els.wsIndicator.className = `dot ${live ? "dot-live" : "dot-off"}`;
@@ -270,15 +289,36 @@ function formatPercent(value) {
   return `${(num * 100).toFixed(1)}%`;
 }
 
-function summaryCard(label, value, note = "") {
+function renderSummaryDetails(details = []) {
+  if (!Array.isArray(details) || !details.length) return "";
   return `
-    <div class="summary-card">
+    <div class="summary-details">
+      ${details.map((item) => `
+        <div class="summary-detail">
+          <span class="summary-detail-label">${escapeHtml(item.label || "")}</span>
+          <span class="summary-detail-value">${escapeHtml(item.value ?? "")}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function isSummaryTextValue(value) {
+  const text = String(value ?? "");
+  return /[A-Za-z]/.test(text) || text.length >= 8;
+}
+
+function summaryCard(label, value, note = "", details = []) {
+  const valueClass = isSummaryTextValue(value) ? "summary-value summary-value-text" : "summary-value";
+  return `
+    <div class="summary-card summary-card-neutral">
       <div class="summary-head">
         <div class="summary-label">${label}</div>
-        <span class="summary-spark"></span>
+        <span class="summary-spark summary-spark-neutral"></span>
       </div>
-      <div class="summary-value">${value}</div>
+      <div class="${valueClass}">${value}</div>
       <div class="summary-note">${note}</div>
+      ${renderSummaryDetails(details)}
     </div>
   `;
 }
@@ -436,6 +476,193 @@ function renderLeadsCleanResults(cleaned) {
   );
 }
 
+function renderImportantLeadCheck(result) {
+  if (els.leadsImportantCheckMeta) {
+    if (result?.generated_at_utc) {
+      setNodeText(
+        els.leadsImportantCheckMeta,
+        `${result.input_label} checked into ${result.output_label}. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
+      );
+    } else {
+      setNodeText(
+        els.leadsImportantCheckMeta,
+        "Ready. Put raw leads in _important/leadschecker.csv, then click Check Leads.",
+      );
+    }
+  }
+
+  if (!result?.generated_at_utc) {
+    setNodeHtml(
+      els.leadsImportantCheckResults,
+      `<p class="muted">Simple path: raw leads go in <strong>_important/leadschecker.csv</strong>, checked output lands in <strong>_important/leads.csv</strong>, and rejected rows land in <strong>_important/leads_rejected.csv</strong>.</p>`,
+    );
+    return;
+  }
+
+  const fieldnames = Array.isArray(result.output_fieldnames) ? result.output_fieldnames : [];
+  const rows = Array.isArray(result.output_preview_rows) ? result.output_preview_rows : [];
+  setNodeHtml(
+    els.leadsImportantCheckResults,
+    `
+      <article class="leads-result-card">
+        <h3>Check Result</h3>
+        <div class="leads-kpis">
+          <div class="leads-kpi"><div class="label">Input</div><div class="value">${Number(result.input_rows || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Cleaned</div><div class="value">${Number(result.cleaned_rows || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Duplicates</div><div class="value">${Number(result.duplicates_removed || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Invalid</div><div class="value">${Number(result.invalid_removed || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_removed || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Suspicious</div><div class="value">${Number(result.suspicious_flagged || 0)}</div></div>
+        </div>
+        <div class="pill-row">
+          <span class="mini-pill">Input ${escapeHtml(result.input_label || "-")}</span>
+          <span class="mini-pill">Output ${escapeHtml(result.output_label || "-")}</span>
+          <span class="mini-pill">Rejected ${escapeHtml(result.rejected_label || "-")}</span>
+          <span class="mini-pill">Safe Fixes ${Number(result.safe_fixes_applied || 0)}</span>
+        </div>
+        ${
+          Object.keys(result.reason_counts || {}).length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr><th>Reason</th><th>Count</th></tr>
+                  </thead>
+                  <tbody>
+                    ${Object.entries(result.reason_counts || {}).map(([reason, count]) => `
+                      <tr><td>${escapeHtml(reason)}</td><td>${Number(count || 0)}</td></tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+        ${
+          fieldnames.length && rows.length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>${fieldnames.map((fieldname) => `<th>${escapeHtml(fieldname)}</th>`).join("")}</tr>
+                  </thead>
+                  <tbody>
+                    ${rows.map((row) => `
+                      <tr>${fieldnames.map((fieldname) => `<td>${escapeHtml(row[fieldname] || "")}</td>`).join("")}</tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : `<p class="muted">No checked rows were written.</p>`
+        }
+      </article>
+    `,
+  );
+}
+
+function renderImportantDispatch(result) {
+  const assignedSendgridTotal = Number(result?.assigned_sg1 || 0)
+    + Number(result?.assigned_sg2 || 0)
+    + Number(result?.assigned_sg3 || 0)
+    + Number(result?.assigned_sg4 || 0)
+    + Number(result?.assigned_sg5 || 0);
+  if (els.leadsImportantDispatchMeta) {
+    if (result?.generated_at_utc) {
+      setNodeText(
+        els.leadsImportantDispatchMeta,
+        `Dispatched from ${result.master_label}. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Backup ${result.backup_dir || "-"}.`,
+      );
+    } else {
+      setNodeText(
+        els.leadsImportantDispatchMeta,
+        "Dispatch is idle. Check the master file first, then dispatch while all senders are stopped.",
+      );
+    }
+  }
+
+  if (!result?.generated_at_utc) {
+    setNodeHtml(
+      els.leadsImportantDispatchResults,
+      `<p class="muted">Dispatch reads <strong>_important/leads.csv</strong>, checks Astra and SendGrid separately, then adds each eligible lead to Astra, one SendGrid shard, or both.</p>`,
+    );
+    return;
+  }
+
+  const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows : [];
+  const previewFields = Array.isArray(result.queue_headers) ? result.queue_headers : [];
+  setNodeHtml(
+    els.leadsImportantDispatchResults,
+    `
+      <article class="leads-result-card">
+        <h3>Dispatch Result</h3>
+        <div class="leads-kpis">
+          <div class="leads-kpi"><div class="label">Master Read</div><div class="value">${Number(result.master_read || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Added Astra</div><div class="value">${Number(result.added_astra || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Added SendGrid</div><div class="value">${Number(result.added_sendgrid || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_skipped || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Skipped Both</div><div class="value">${Number(result.skipped_both || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Master Duplicates</div><div class="value">${Number(result.duplicate_master_skipped || 0)}</div></div>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr><th>Channel</th><th>Decision</th><th>Count</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Astra</td><td>Added</td><td>${Number(result.added_astra || 0)}</td></tr>
+              <tr><td>Astra</td><td>Already Sent</td><td>${Number(result.skipped_astra_already_sent || 0)}</td></tr>
+              <tr><td>Astra</td><td>Already Queued</td><td>${Number(result.skipped_astra_already_queued || 0)}</td></tr>
+              <tr><td>SendGrid</td><td>Added</td><td>${Number(result.added_sendgrid || 0)}</td></tr>
+              <tr><td>SendGrid</td><td>Already Sent</td><td>${Number(result.skipped_sendgrid_already_sent || 0)}</td></tr>
+              <tr><td>SendGrid</td><td>Already Queued</td><td>${Number(result.skipped_sendgrid_already_queued || 0)}</td></tr>
+              <tr><td>Both</td><td>Skipped Both</td><td>${Number(result.skipped_both || 0)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr><th>Queue</th><th>Assigned</th><th>Final Queue</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Astra / JC</td><td>${Number(result.added_astra || 0)}</td><td>${Number(result.final_queue_counts?.jc || 0)}</td></tr>
+              <tr><td>SG1</td><td>${Number(result.assigned_sg1 || 0)}</td><td>${Number(result.final_queue_counts?.sg1 || 0)}</td></tr>
+              <tr><td>SG2</td><td>${Number(result.assigned_sg2 || 0)}</td><td>${Number(result.final_queue_counts?.sg2 || 0)}</td></tr>
+              <tr><td>SG3</td><td>${Number(result.assigned_sg3 || 0)}</td><td>${Number(result.final_queue_counts?.sg3 || 0)}</td></tr>
+              <tr><td>SG4</td><td>${Number(result.assigned_sg4 || 0)}</td><td>${Number(result.final_queue_counts?.sg4 || 0)}</td></tr>
+              <tr><td>SG5</td><td>${Number(result.assigned_sg5 || 0)}</td><td>${Number(result.final_queue_counts?.sg5 || 0)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pill-row">
+          <span class="mini-pill">Astra + SendGrid allowed</span>
+          <span class="mini-pill">Exactly one SG shard per lead</span>
+          <span class="mini-pill">Backup ${escapeHtml(result.backup_dir || "-")}</span>
+        </div>
+        ${
+          previewFields.length && previewRows.length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>${previewFields.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                  </thead>
+                  <tbody>
+                    ${previewRows.map((row) => `
+                      <tr>${previewFields.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+      </article>
+    `,
+  );
+}
+
 function renderLeadsShardResults(report) {
   if (!report) {
     setNodeHtml(els.leadsShardResults, `<p class="muted">Run Preview to inspect shard counts and domain mix before the first write.</p>`);
@@ -516,6 +743,11 @@ function renderShardWriteGuard() {
 
 function renderLeadsStatus(status) {
   lastLeadsStatus = status || lastLeadsStatus;
+  lastImportantLeadCheck = lastLeadsStatus?.latest_master_check || lastImportantLeadCheck;
+  lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
+  renderImportantLeadCheck(lastImportantLeadCheck);
+  renderImportantDispatch(lastImportantDispatch);
+
   const latestUpload = lastLeadsStatus?.latest_upload || null;
   const latestCleaned = lastLeadsStatus?.latest_cleaned || null;
   const latestShardReport = lastLeadsStatus?.latest_shard_report_summary || lastLeadsStatus?.latest_shard_report || null;
@@ -606,7 +838,62 @@ async function fetchLeadsStatus() {
   }
 }
 
+async function runImportantLeadCheck() {
+  if (els.leadsImportantCheckBtn) {
+    els.leadsImportantCheckBtn.disabled = true;
+    setNodeText(els.leadsImportantCheckBtn, "Checking...");
+  }
+  try {
+    const data = await fetchJson("/api/leads/check-important", { method: "POST" });
+    lastImportantLeadCheck = data.check || null;
+    if (data.status) {
+      renderLeadsStatus(data.status || {});
+    } else {
+      renderImportantLeadCheck(lastImportantLeadCheck);
+    }
+    showMessage(data.message || "Quick lead check complete.", "success");
+  } catch (err) {
+    showMessage(`Quick lead check failed: ${err}`, "error");
+  } finally {
+    if (els.leadsImportantCheckBtn) {
+      els.leadsImportantCheckBtn.disabled = false;
+      setNodeText(els.leadsImportantCheckBtn, "Check Leads");
+    }
+  }
+}
+
+async function runImportantLeadDispatch() {
+  if (els.leadsImportantDispatchBtn) {
+    els.leadsImportantDispatchBtn.disabled = true;
+    setNodeText(els.leadsImportantDispatchBtn, "Dispatching...");
+  }
+  try {
+    const data = await fetchJson("/api/leads/dispatch-important", {
+      method: "POST",
+    });
+    lastImportantDispatch = data.dispatch || null;
+    renderImportantLeadCheck(lastImportantLeadCheck);
+    if (data.status) {
+      renderLeadsStatus(data.status || {});
+    } else {
+      renderImportantDispatch(lastImportantDispatch);
+    }
+    if (data.snapshot) {
+      renderSnapshot(data.snapshot);
+    }
+    showMessage(data.message || "Lead dispatch complete.", "success");
+  } catch (err) {
+    showMessage(`Lead dispatch failed: ${err}`, "error");
+  } finally {
+    if (els.leadsImportantDispatchBtn) {
+      els.leadsImportantDispatchBtn.disabled = false;
+      setNodeText(els.leadsImportantDispatchBtn, "Dispatch Leads");
+    }
+  }
+}
+
 function syncKeyedChildren(container, items, keyFn, createFn, updateFn) {
+  if (!container) return;
   const existing = new Map(
     Array.from(container.children)
       .map((node) => [node.dataset.key || "", node])
@@ -715,6 +1002,138 @@ function updateOverviewChipNode(node, value) {
   setNodeText(node._refs?.value || node, value);
 }
 
+function humanizeSecondsAge(totalSeconds) {
+  const seconds = Number(totalSeconds);
+  if (!Number.isFinite(seconds) || seconds < 0) return "-";
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function humanizeCooldownRemaining(totalSeconds) {
+  const seconds = Number(totalSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "Off";
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))}s left`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes}m left`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours}h left`;
+}
+
+function privateBounceSummaryCard(guard = {}) {
+  const status = String(guard?.status || "idle");
+  let tone = "neutral";
+  if (status === "watching") tone = "good";
+  else if (status === "cooldown" || (guard?.sync_stale && guard?.profile_active)) tone = "warn";
+  else if (status === "error") tone = "bad";
+
+  const lastSync = guard?.last_sync_utc
+    ? (guard?.last_sync_age_seconds == null ? "Just now" : humanizeSecondsAge(guard.last_sync_age_seconds))
+    : "Never";
+
+  const cooldownDetail = guard?.cooldown_active
+    ? { label: "Until", value: guard?.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : humanizeCooldownRemaining(guard?.cooldown_remaining_seconds || 0) }
+    : { label: "Cooldown", value: "Off" };
+
+  return {
+    key: "private_bounce_guard",
+    label: "JC Bounce Guard",
+    value: guard?.status_label || "Idle",
+    note: guard?.status_note || "Automatic private bounce sync, suppressions, and cooldown protection.",
+    tone,
+    details: [
+      { label: "Last Sync", value: lastSync },
+      { label: "Suppressed", value: Number(guard?.last_added_suppressed || 0).toLocaleString() },
+      { label: "Recent", value: `${Number(guard?.recent_bounces_window || 0)}/${Number(guard?.bounce_threshold || 0)} in ${Number(guard?.window_minutes || 0)}m` },
+      cooldownDetail,
+    ],
+  };
+}
+
+function privateBounceTone(guard = {}) {
+  const status = String(guard?.status || "idle");
+  if (status === "watching") return "good";
+  if (status === "cooldown" || (guard?.sync_stale && guard?.profile_active)) return "warn";
+  if (status === "error") return "bad";
+  return "neutral";
+}
+
+function renderPrivateBounceGuard(snapshot) {
+  const guard = snapshot.private_bounce_guard || {};
+  if (!els.privateBounceStatus || !els.privateBounceEvents) return;
+  const tone = privateBounceTone(guard);
+  const lastSyncText = guard?.last_sync_utc ? formatGeneratedAt(guard.last_sync_utc) : "Never";
+  const cooldownUntilText = guard?.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : "Not cooling down";
+  const lastSuppressed = Array.isArray(guard?.last_suppressed_addresses) ? guard.last_suppressed_addresses : [];
+  const recentPreview = Array.isArray(guard?.recent_bounce_preview) ? guard.recent_bounce_preview : [];
+  if (els.privateBounceCaption) {
+    const suffix = guard?.last_sync_utc ? `Last sync ${lastSyncText}.` : "No successful private bounce sync yet.";
+    setNodeText(els.privateBounceCaption, `${guard?.status_note || "Automatic private bounce sync, suppression, and clustered-bounce cooldown protection."} ${suffix}`);
+  }
+  setNodeHtml(
+    els.privateBounceStatus,
+    `
+      <article class="bounce-guard-card bounce-guard-card-${tone}">
+        <div class="bounce-guard-kicker">Status</div>
+        <div class="bounce-guard-value">${escapeHtml(guard?.status_label || "Idle")}</div>
+        <p class="bounce-guard-note">${escapeHtml(guard?.status_note || "Automatic private bounce sync, suppression, and cooldown protection.")}</p>
+      </article>
+      <article class="bounce-guard-card">
+        <div class="bounce-guard-kicker">Last Sync</div>
+        <div class="bounce-guard-inline">${escapeHtml(lastSyncText)}</div>
+        <p class="bounce-guard-note">Scanned ${Number(guard?.last_scanned_messages || 0)} message(s), matched ${Number(guard?.last_matched_messages || 0)} bounce(s).</p>
+      </article>
+      <article class="bounce-guard-card">
+        <div class="bounce-guard-kicker">Last Suppression</div>
+        <div class="bounce-guard-inline">${Number(guard?.last_added_suppressed || 0)} added</div>
+        <div class="pill-row">
+          ${lastSuppressed.length ? lastSuppressed.slice(0, 5).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("") : `<span class="mini-pill">No new addresses</span>`}
+        </div>
+      </article>
+      <article class="bounce-guard-card">
+        <div class="bounce-guard-kicker">Cooldown</div>
+        <div class="bounce-guard-inline">${escapeHtml(cooldownUntilText)}</div>
+        <p class="bounce-guard-note">Recent bounces ${Number(guard?.recent_bounces_window || 0)}/${Number(guard?.bounce_threshold || 0)} in ${Number(guard?.window_minutes || 0)} minute(s).</p>
+        ${recentPreview.length ? `<div class="pill-row">${recentPreview.slice(0, 5).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("")}</div>` : ""}
+      </article>
+    `,
+  );
+
+  const events = Array.isArray(guard?.events) ? guard.events : [];
+  setNodeHtml(
+    els.privateBounceEvents,
+    events.length
+      ? `
+        <div class="bounce-guard-events-list">
+          ${events.slice(0, 10).map((event) => {
+            const severity = String(event?.severity || "info");
+            const addresses = Array.isArray(event?.addresses) ? event.addresses.filter(Boolean) : [];
+            const cooldownUntil = event?.cooldown_until_utc ? formatGeneratedAt(event.cooldown_until_utc) : "";
+            return `
+              <article class="bounce-guard-event bounce-guard-event-${escapeHtml(severity)}">
+                <div class="bounce-guard-event-head">
+                  <div>
+                    <h3>${escapeHtml(event?.title || "Event")}</h3>
+                    <p class="muted">${escapeHtml(event?.occurred_at_utc ? formatGeneratedAt(event.occurred_at_utc) : "-")}</p>
+                  </div>
+                  <span class="mini-pill">${escapeHtml(String(event?.event_type || "event").replaceAll("_", " "))}</span>
+                </div>
+                <p class="bounce-guard-event-message">${escapeHtml(event?.message || "")}</p>
+                ${cooldownUntil ? `<p class="bounce-guard-event-meta">Cooldown until ${escapeHtml(cooldownUntil)}</p>` : ""}
+                ${addresses.length ? `<div class="pill-row">${addresses.slice(0, 6).map((email) => `<span class="mini-pill">${escapeHtml(email)}</span>`).join("")}</div>` : ""}
+              </article>
+            `;
+          }).join("")}
+        </div>
+      `
+      : `<p class="muted">No private bounce guard events yet.</p>`,
+  );
+}
+
 function createSelectOptionNode() {
   return document.createElement("option");
 }
@@ -730,32 +1149,46 @@ function renderSummary(snapshot) {
   const summary = snapshot.summary;
   const cards = [
     { key: "session", label: "Session", value: snapshot.session_label.toUpperCase(), note: "tmux session state" },
-    { key: "alerts", label: "Active Alerts", value: summary.active_alerts || 0, note: "threshold breaches" },
     { key: "active_profiles", label: "Active Profiles", value: summary.active_profiles, note: "currently sending" },
-    { key: "pending", label: "Pending", value: summary.total_pending, note: "queued recipients" },
+    {
+      key: "pending",
+      label: "Pending",
+      value: summary.total_pending,
+      note: "queued recipients across Astra + SendGrid",
+      details: [
+        { label: "Astra", value: Number(summary.astra_pending || 0).toLocaleString() },
+        { label: "SendGrid", value: Number(summary.sendgrid_pending || 0).toLocaleString() },
+      ],
+    },
+    privateBounceSummaryCard(snapshot.private_bounce_guard || {}),
     { key: "accepted", label: "Accepted", value: summary.total_run_sent, note: "API accepted this run" },
-    { key: "awaiting", label: "Awaiting Outcome", value: summary.total_awaiting_outcome || 0, note: `accepted without final event in ${snapshot.activity_hours}h` },
+    { key: "alerts", label: "Alerts", value: summary.active_alerts || 0, note: "needs attention" },
     { key: "api_errors", label: "API Errors", value: summary.total_run_errors, note: "sender-side issues" },
-    { key: "recent_failures", label: "Recent Failures", value: summary.recent_failures, note: `delivery events in ${snapshot.activity_hours}h` },
   ];
   syncKeyedChildren(
     els.summaryGrid,
     cards,
     (card) => card.key,
     (card) => {
-      const node = elementFromHTML(summaryCard(card.label, card.value, card.note));
+      const node = elementFromHTML(summaryCard(card.label, card.value, card.note, card.details || []));
       node._refs = {
         label: node.querySelector(".summary-label"),
         value: node.querySelector(".summary-value"),
         note: node.querySelector(".summary-note"),
+        details: node.querySelector(".summary-details"),
+        spark: node.querySelector(".summary-spark"),
       };
       return node;
     },
     (node, card) => {
       const refs = node._refs;
+      node.className = `summary-card summary-card-${card.tone || "neutral"}`;
+      if (refs.spark) refs.spark.className = `summary-spark summary-spark-${card.tone || "neutral"}`;
       setNodeText(refs.label, card.label);
       setNodeText(refs.value, card.value);
       setNodeText(refs.note, card.note);
+      refs.value.classList.toggle("summary-value-text", isSummaryTextValue(card.value));
+      setNodeHtml(refs.details, renderSummaryDetails(card.details || []));
     },
   );
 }
@@ -794,6 +1227,7 @@ function updateAlertCardNode(node, alert) {
 }
 
 function renderAlerts(snapshot) {
+  if (!els.alertsGrid) return;
   const activeAlerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
   const cards = activeAlerts.length
     ? activeAlerts
@@ -899,6 +1333,7 @@ function updateTrendCardNode(node, item, trends) {
 }
 
 function renderTrends(snapshot) {
+  if (!els.trendsGrid) return;
   const trendItems = [
     { key: "accepted", label: "Accepted", caption: "sender log handoff" },
     { key: "delivered", label: "Delivered", caption: "SendGrid confirmed" },
@@ -916,6 +1351,7 @@ function renderTrends(snapshot) {
 }
 
 function renderHealth(snapshot) {
+  if (!els.healthBanner) return;
   const state = snapshot.health?.state || "yellow";
   const message = snapshot.health?.message || "No status available.";
   els.healthBanner.className = `health-banner health-${state}`;
@@ -942,6 +1378,12 @@ function overviewTone(profile) {
   if (profile.tmux_dead || profile.runtime_state === "error" || profile.run_errors > 0 || (summary.failed || 0) > 0) return "bad";
   if (["starting", "running", "cooldown", "sleeping"].includes(profile.runtime_state || "")) return "good";
   return "idle";
+}
+
+function overviewGlowState(profile) {
+  return ["starting", "running", "cooldown", "sleeping"].includes(profile?.runtime_state || "")
+    ? "running"
+    : "stopped";
 }
 
 function createOverviewCardNode() {
@@ -1017,6 +1459,7 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   const webhook = profile.webhook || {};
   const live = webhook.summary || {};
   const tone = overviewTone(profile);
+  const glowState = overviewGlowState(profile);
   const statusClass = profileStatusClass(profile);
   const isSelected = selectedProfile && selectedProfile.name === profile.name;
   const latestEvent = webhook.latest_event || {};
@@ -1044,14 +1487,14 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   ];
 
   node.dataset.profile = profile.name || "";
-  node.className = `overview-card overview-${tone}${isSelected ? " is-selected" : ""}`;
+  node.className = `overview-card overview-${tone} overview-glow-${glowState}${isSelected ? " is-selected" : ""}`;
   setNodeText(refs.title, formatProfileName(profile.name));
   refs.badge.className = `badge ${statusClass}`;
   setNodeText(refs.badge, profile.runtime_label || "Stopped");
   refs.manualTag.className = `overview-chip overview-chip-manual${isManualOnlyProfile(profile) ? "" : " hidden"}`;
   setNodeText(refs.manualTag, isManualOnlyProfile(profile) ? "Manual Start Only" : "");
   setNodeText(refs.age, profileAgeText(profile));
-  refs.dot.className = `overview-dot overview-dot-${tone}`;
+  refs.dot.className = `overview-dot overview-dot-${glowState}`;
 
   syncKeyedChildren(
     refs.stats,
@@ -1088,6 +1531,7 @@ function renderOverview(snapshot, selectedProfile) {
 }
 
 function renderWebhookHealth(snapshot) {
+  if (!els.webhookHealth) return;
   const health = snapshot.webhook_health || {};
   const metrics = [
     { key: "signature", label: "Signature", value: health.signature_verification ? "Verified" : "Off", tone: health.signature_verification ? "good" : "warn" },
@@ -1118,10 +1562,13 @@ function renderWebhookHealth(snapshot) {
   const lastReceived = health.last_received_at
     ? `Last webhook ${health.last_received_at} (${health.last_received_age || "-"})`
     : "No webhook events recorded yet.";
-  els.webhookHealthCaption.textContent = `${lastReceived} | Window ${health.selected_window_hours || snapshot.activity_hours}h`;
+  if (els.webhookHealthCaption) {
+    els.webhookHealthCaption.textContent = `${lastReceived} | Window ${health.selected_window_hours || snapshot.activity_hours}h`;
+  }
 }
 
 function renderAwaitingAging(snapshot, selectedProfile) {
+  if (!els.awaitingAging) return;
   const labels = snapshot.awaiting_age_buckets?.labels || {};
   const total = snapshot.awaiting_age_buckets?.total || {};
   const selected = selectedProfile?.awaiting_age_buckets || {};
@@ -1151,6 +1598,7 @@ function renderAwaitingAging(snapshot, selectedProfile) {
 }
 
 function renderDomainBreakdown(snapshot) {
+  if (!els.domainBreakdown) return;
   const rows = Array.isArray(snapshot.domain_breakdown) ? snapshot.domain_breakdown : [];
   if (!rows.length) {
     setNodeHtml(els.domainBreakdown, `<p class="muted">No domain activity recorded in the selected window.</p>`);
@@ -1231,22 +1679,28 @@ function renderProfileActionFeedback(profile) {
 function renderSignals(snapshot) {
   const runStatus = snapshot.run_status_items || snapshot.attention_items || [];
   const telemetryNotes = snapshot.telemetry_notes || [];
-  syncKeyedChildren(
-    els.runStatusList,
-    runStatus,
-    (item) => item,
-    () => document.createElement("li"),
-    (node, item) => setNodeText(node, item),
-  );
-  syncKeyedChildren(
-    els.telemetryNotesList,
-    telemetryNotes,
-    (item) => item,
-    () => document.createElement("li"),
-    (node, item) => setNodeText(node, item),
-  );
+  if (els.runStatusList) {
+    syncKeyedChildren(
+      els.runStatusList,
+      runStatus,
+      (item) => item,
+      () => document.createElement("li"),
+      (node, item) => setNodeText(node, item),
+    );
+  }
+  if (els.telemetryNotesList) {
+    syncKeyedChildren(
+      els.telemetryNotesList,
+      telemetryNotes,
+      (item) => item,
+      () => document.createElement("li"),
+      (node, item) => setNodeText(node, item),
+    );
+  }
   const updatedLabel = `Updated ${formatGeneratedAt(snapshot.generated_at)}`;
-  els.generatedAt.textContent = updatedLabel;
+  if (els.generatedAt) {
+    els.generatedAt.textContent = updatedLabel;
+  }
   if (els.toolbarGeneratedAt) {
     els.toolbarGeneratedAt.textContent = updatedLabel;
   }
@@ -1315,6 +1769,7 @@ function shiftSelectedProfile(direction) {
 }
 
 function renderFailures(snapshot) {
+  if (!els.latestFailures) return;
   const failures = snapshot.latest_failures || [];
   if (!failures.length) {
     setNodeHtml(els.latestFailures, `<p class="muted">No recent failure events in the selected window.</p>`);
@@ -1802,6 +2257,7 @@ function renderSnapshot(snapshot) {
   renderHealth(snapshot);
   renderAlerts(snapshot);
   renderSummary(snapshot);
+  renderPrivateBounceGuard(snapshot);
   renderTrends(snapshot);
   renderWebhookHealth(snapshot);
   renderAwaitingAging(snapshot, selectedProfile);
@@ -1821,8 +2277,8 @@ function renderSnapshot(snapshot) {
 }
 
 async function fetchSnapshot() {
-  const hours = els.hoursSelect.value;
-  const tail = els.tailSelect.value;
+  const hours = currentActivityHours();
+  const tail = currentTailLines();
   const response = await fetch(`/api/snapshot?hours=${encodeURIComponent(hours)}&tail_lines=${encodeURIComponent(tail)}`);
   const data = await response.json();
   renderSnapshot(data);
@@ -2092,8 +2548,8 @@ function connectSocket() {
     socket.close();
   }
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const hours = encodeURIComponent(els.hoursSelect.value);
-  const tail = encodeURIComponent(els.tailSelect.value);
+  const hours = encodeURIComponent(currentActivityHours());
+  const tail = encodeURIComponent(currentTailLines());
   socket = new WebSocket(`${protocol}://${location.host}/ws?hours=${hours}&tail_lines=${tail}`);
 
   socket.addEventListener("open", () => {
@@ -2116,46 +2572,56 @@ function connectSocket() {
   });
 }
 
-els.refreshBtn.addEventListener("click", () => fetchSnapshot());
-els.sendCapSaveBtn.addEventListener("click", () => saveSendCap());
-els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
-els.startBtn.addEventListener("click", () => postAction("/api/start"));
-els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
-els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
-els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
-els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
-els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
-els.leadsCleanBtn.addEventListener("click", () => runLeadClean());
-els.leadsPreviewBtn.addEventListener("click", () => previewLeadShard());
-els.leadsShardBtn.addEventListener("click", () => runLeadShard());
-els.leadsRefreshBtn.addEventListener("click", () => fetchLeadsStatus());
-els.leadsShardConfirm.addEventListener("input", () => renderShardWriteGuard());
-els.leadsShardConfirm.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !els.leadsShardBtn.disabled) {
-    event.preventDefault();
-    runLeadShard();
-  }
-});
-els.leadsShardCount.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
-els.leadsShardStrategy.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
-els.sendCapInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    saveSendCap();
-  }
-});
-els.hoursSelect.addEventListener("change", () => connectSocket());
-els.tailSelect.addEventListener("change", () => connectSocket());
-els.overviewGrid.addEventListener("click", handleOverviewClick);
-els.profileDetail.addEventListener("click", handleProfileDetailClick);
-els.detailProfileSelect.addEventListener("change", (event) => {
-  selectProfileByName(event.target.value);
-});
-els.detailPrevBtn.addEventListener("click", () => shiftSelectedProfile(-1));
-els.detailNextBtn.addEventListener("click", () => shiftSelectedProfile(1));
+if (els.refreshBtn) els.refreshBtn.addEventListener("click", () => fetchSnapshot());
+if (els.sendCapSaveBtn) els.sendCapSaveBtn.addEventListener("click", () => saveSendCap());
+if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
+if (els.startBtn) els.startBtn.addEventListener("click", () => postAction("/api/start"));
+if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
+if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
+if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
+if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
+if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
+if (els.leadsImportantDispatchBtn) els.leadsImportantDispatchBtn.addEventListener("click", () => runImportantLeadDispatch());
+if (els.leadsUploadBtn) els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
+if (els.leadsCleanBtn) els.leadsCleanBtn.addEventListener("click", () => runLeadClean());
+if (els.leadsPreviewBtn) els.leadsPreviewBtn.addEventListener("click", () => previewLeadShard());
+if (els.leadsShardBtn) els.leadsShardBtn.addEventListener("click", () => runLeadShard());
+if (els.leadsRefreshBtn) els.leadsRefreshBtn.addEventListener("click", () => fetchLeadsStatus());
+if (els.leadsShardConfirm) {
+  els.leadsShardConfirm.addEventListener("input", () => renderShardWriteGuard());
+  els.leadsShardConfirm.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !els.leadsShardBtn?.disabled) {
+      event.preventDefault();
+      runLeadShard();
+    }
+  });
+}
+if (els.leadsShardCount) els.leadsShardCount.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
+if (els.leadsShardStrategy) els.leadsShardStrategy.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
+if (els.sendCapInput) {
+  els.sendCapInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveSendCap();
+    }
+  });
+}
+if (els.hoursSelect) els.hoursSelect.addEventListener("change", () => connectSocket());
+if (els.tailSelect) els.tailSelect.addEventListener("change", () => connectSocket());
+if (els.overviewGrid) els.overviewGrid.addEventListener("click", handleOverviewClick);
+if (els.profileDetail) els.profileDetail.addEventListener("click", handleProfileDetailClick);
+if (els.detailProfileSelect) {
+  els.detailProfileSelect.addEventListener("change", (event) => {
+    selectProfileByName(event.target.value);
+  });
+}
+if (els.detailPrevBtn) els.detailPrevBtn.addEventListener("click", () => shiftSelectedProfile(-1));
+if (els.detailNextBtn) els.detailNextBtn.addEventListener("click", () => shiftSelectedProfile(1));
 
 wallboardMode = readWallboardModeFromLocation();
 activeDashboardTab = readDashboardTabFromLocation();
 applyWallboardMode();
 applyDashboardTab();
+renderImportantLeadCheck(lastImportantLeadCheck);
+renderImportantDispatch(lastImportantDispatch);
 Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]).finally(() => connectSocket());

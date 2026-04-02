@@ -16,6 +16,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import settings
+from private_bounce_hygiene import private_bounce_guard_status
 from send_shard import PROFILES
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB,
@@ -47,6 +48,16 @@ SHELL_COMMANDS = {"", "bash", "sh", "zsh", "fish"}
 SENDGRID_ENV_FILES = settings.ENV_FILES
 SENDGRID_PROFILES = [
     name for name, cfg in PROFILES.items() if str(cfg.get("provider") or "") == "sendgrid"
+]
+DASHBOARD_PROFILES = [
+    name
+    for name, cfg in PROFILES.items()
+    if str(cfg.get("provider") or "") == "sendgrid" or bool(cfg.get("dashboard_enabled"))
+]
+START_ALL_PROFILES = [
+    name
+    for name in DASHBOARD_PROFILES
+    if not bool(PROFILES.get(name, {}).get("dashboard_manual_only"))
 ]
 
 STATUS_ALIASES = {
@@ -204,8 +215,19 @@ def _profile_log_path(cfg: Dict[str, object]) -> Path:
     return path
 
 
+def profile_session_name(profile_name: str) -> str:
+    cfg = PROFILES.get(profile_name, {})
+    return str(cfg.get("tmux_session") or TMUX_SESSION_NAME).strip() or TMUX_SESSION_NAME
+
+
+def profile_pane_index(profile_name: str) -> int:
+    if profile_name in SENDGRID_PROFILES:
+        return SENDGRID_PROFILES.index(profile_name)
+    return int(PROFILES.get(profile_name, {}).get("tmux_pane_index") or 0)
+
+
 def default_dashboard_send_cap_per_profile() -> int:
-    for profile_name in SENDGRID_PROFILES:
+    for profile_name in START_ALL_PROFILES:
         cfg = PROFILES.get(profile_name, {})
         try:
             value = int(cfg.get("max_total") or 0)
@@ -509,6 +531,35 @@ def ensure_sendgrid_session_layout(session: str = TMUX_SESSION_NAME) -> tuple[bo
     return True, f"tmux layout created: {target}"
 
 
+def ensure_single_profile_session(session: str) -> tuple[bool, str]:
+    target = f"{session}:run"
+    if _tmux_target_exists(target):
+        return True, f"tmux layout ready: {target}"
+    if _tmux_target_exists(session):
+        proc = subprocess.run(
+            ["tmux", "new-window", "-d", "-t", session, "-n", "run"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+            return False, output or f"Unable to create tmux window {target}."
+        return True, f"tmux layout ready: {target}"
+    proc = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session, "-n", "run"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+        return False, output or f"Unable to create tmux session {session}."
+    return True, f"tmux layout created: {target}"
+
+
 def tmux_capture_tail(pane_index: int, session: str = "sendgrid", lines: int = 16) -> str:
     try:
         out = subprocess.check_output(
@@ -531,6 +582,23 @@ def active_sendgrid_profile_snapshots(session: str = "sendgrid", tail_lines: int
     return [snapshot for snapshot in load_sendgrid_profile_snapshots(session=session, tail_lines=tail_lines) if profile_is_active(snapshot)]
 
 
+def load_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapshot]:
+    snapshots: List[ProfileSnapshot] = []
+    pane_maps: Dict[str, Dict[str, Dict[str, str]]] = {}
+    for profile_name in DASHBOARD_PROFILES:
+        session = profile_session_name(profile_name)
+        pane_info = pane_maps.get(session)
+        if pane_info is None:
+            pane_info = tmux_pane_map(session)
+            pane_maps[session] = pane_info
+        snapshots.append(load_profile_snapshot(profile_name, profile_pane_index(profile_name), pane_info, tail_lines=tail_lines))
+    return snapshots
+
+
+def active_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapshot]:
+    return [snapshot for snapshot in load_dashboard_profile_snapshots(tail_lines=tail_lines) if profile_is_active(snapshot)]
+
+
 def run_sendgrid_launcher() -> tuple[bool, str]:
     env = os.environ.copy()
     env["TMUX_SENDGRID_ATTACH"] = "0"
@@ -549,6 +617,12 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
         return False, "Launcher timed out while starting sendgrid session."
     output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
     return proc.returncode == 0, output or "(no output)"
+
+
+def _python_runtime_bin() -> Path:
+    if PYTHON_BIN.exists():
+        return PYTHON_BIN
+    return Path(shutil.which("python3") or "")
 
 
 def stop_sendgrid_session(session: str = "sendgrid") -> tuple[bool, str]:
@@ -577,6 +651,72 @@ def stop_sendgrid_profile(profile_name: str, pane_index: int, session: str = "se
         return True, f"Stop signal sent to {profile_name} (pane {pane_index})."
     output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
     return False, output or f"Unable to stop {profile_name}."
+
+
+def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
+    if profile_name not in DASHBOARD_PROFILES:
+        return False, f"Unknown profile: {profile_name}"
+    cfg = PROFILES.get(profile_name, {})
+    provider = str(cfg.get("provider") or "").strip().lower()
+    password_env = str(cfg.get("password_env") or "").strip()
+    if provider in {"private", "gmail"}:
+        if not password_env:
+            return False, f"{profile_name} is missing password_env for dashboard launches."
+        if not _load_env_value(password_env):
+            return False, f"{password_env} is not available in the dashboard environment."
+    python_bin = _python_runtime_bin()
+    if not python_bin:
+        return False, "Missing Python runtime for dashboard launches."
+
+    ok, message = ensure_single_profile_session(session)
+    if not ok:
+        return False, message
+
+    pane_index = profile_pane_index(profile_name)
+    pane_info = tmux_pane_map(session)
+    pane = pane_info.get(str(pane_index), {})
+    current_cmd = (pane.get("cmd") or "").strip()
+    if pane and current_cmd not in SHELL_COMMANDS:
+        return False, f"{profile_name} is already running in pane {pane_index}."
+
+    preflight = subprocess.run(
+        [str(python_bin), "send_shard.py", "--profile", profile_name, "--preflight"],
+        cwd=ROOT,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if preflight.returncode != 0:
+        output = "\n".join(part for part in [preflight.stdout.strip(), preflight.stderr.strip()] if part).strip()
+        return False, output or f"Preflight failed for {profile_name}."
+
+    target = f"{session}:run.{pane_index}"
+    command = f"cd {shlex.quote(str(ROOT))} && {shlex.quote(str(python_bin))} send_shard.py --profile {shlex.quote(profile_name)}"
+    subprocess.run(
+        ["tmux", "send-keys", "-t", target, "C-c"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    proc = subprocess.run(
+        ["tmux", "send-keys", "-t", target, command, "C-m"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+        return False, output or f"Unable to start {profile_name} in pane {pane_index}."
+    return True, f"Started {profile_name} in pane {pane_index}."
+
+
+def stop_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
+    pane_index = profile_pane_index(profile_name)
+    return stop_sendgrid_profile(profile_name, pane_index, session=session)
 
 
 def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TMUX_SESSION_NAME) -> tuple[bool, str]:
@@ -662,15 +802,17 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
 
 
 def archive_reset_sender_logs(session: str = "sendgrid") -> tuple[bool, str]:
-    pane_info = tmux_pane_map(session)
-    if any((pane.get("cmd") or "").strip() not in {"", "bash", "sh", "zsh", "fish"} for pane in pane_info.values()):
-        return False, "Stop the sendgrid session before archiving/resetting logs."
+    for profile_name in DASHBOARD_PROFILES:
+        profile_session = profile_session_name(profile_name)
+        pane_info = tmux_pane_map(profile_session)
+        if any((pane.get("cmd") or "").strip() not in {"", "bash", "sh", "zsh", "fish"} for pane in pane_info.values()):
+            return False, "Stop all dashboard sender sessions before archiving/resetting logs."
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_root = LOG_RESET_BACKUP_ROOT / f"log_reset_{timestamp}"
     backup_root.mkdir(parents=True, exist_ok=True)
     reset_count = 0
-    for name in SENDGRID_PROFILES:
+    for name in DASHBOARD_PROFILES:
         log_path = _profile_log_path(PROFILES[name])
         backup_path = backup_root / log_path.name
         if log_path.exists():
@@ -1332,6 +1474,7 @@ def build_threshold_alerts(
     webhook_health: Dict[str, object],
     profile_dicts: Sequence[Dict[str, object]],
     auto_stop_events: Optional[Sequence[Dict[str, object]]] = None,
+    private_bounce_guard: Optional[Dict[str, object]] = None,
 ) -> List[Dict[str, str]]:
     alerts: List[Dict[str, str]] = []
     for event in auto_stop_events or []:
@@ -1430,6 +1573,43 @@ def build_threshold_alerts(
                 "severity": "critical",
                 "title": "Sender API errors",
                 "message": f"Current run errors detected on: {', '.join(errored_profiles)}.",
+            }
+        )
+
+    guard = private_bounce_guard or {}
+    if bool(guard.get("cooldown_active")):
+        remaining_seconds = max(0, int(guard.get("cooldown_remaining_seconds", 0) or 0))
+        remaining_minutes = max(1, int((remaining_seconds + 59) / 60)) if remaining_seconds else 0
+        alerts.append(
+            {
+                "severity": "warn",
+                "title": "JC private bounce cooldown",
+                "message": (
+                    f"JC is paused for clustered private bounces. Resume in about {remaining_minutes} minute(s). "
+                    f"Recent bounces: {int(guard.get('recent_bounces_window', 0) or 0)}/"
+                    f"{int(guard.get('bounce_threshold', 0) or 0)} in "
+                    f"{int(guard.get('window_minutes', 0) or 0)}m."
+                ),
+            }
+        )
+    elif bool(guard.get("sync_error_active")):
+        alerts.append(
+            {
+                "severity": "warn",
+                "title": "JC private bounce sync error",
+                "message": str(guard.get("last_error") or "Private bounce sync failed."),
+            }
+        )
+    elif bool(guard.get("profile_active")) and bool(guard.get("sync_stale")):
+        interval_seconds = max(0, int(guard.get("interval_seconds", 0) or 0))
+        alerts.append(
+            {
+                "severity": "warn",
+                "title": "JC private bounce sync stale",
+                "message": (
+                    f"JC is running but private bounce sync has not succeeded within the last "
+                    f"{max(1, int((interval_seconds * 3 + 59) / 60))} minute(s)."
+                ),
             }
         )
 
@@ -1921,7 +2101,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     suppression_path = SUPPRESSION_CSV
     normalize_report_path = NORMALIZE_REPORT_PATH
 
-    snapshots = load_sendgrid_profile_snapshots(tail_lines=tail_lines)
+    snapshots = load_dashboard_profile_snapshots(tail_lines=tail_lines)
     controls = load_dashboard_run_settings()
     send_cap_per_profile = dashboard_send_cap_per_profile()
     attempts = collect_send_attempts(SENDGRID_PROFILES)
@@ -1956,6 +2136,8 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
 
     session_label = session_status(snapshots)
     total_pending = sum(s.pending_count for s in snapshots)
+    sendgrid_pending = sum(s.pending_count for s in snapshots if s.name in SENDGRID_PROFILES)
+    astra_pending = max(0, total_pending - sendgrid_pending)
     total_run_sent = sum(s.run_sent for s in snapshots)
     total_run_errors = sum(s.run_errors for s in snapshots)
     total_run_skipped = sum(s.run_skipped for s in snapshots)
@@ -1964,8 +2146,15 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     recent_failures = recent_failure_count(activity)
     recent_unmapped = int(activity.get("unmapped_count", 0) or 0)
     active_profiles = sum(1 for s in snapshots if profile_is_active(s))
+    active_start_all_profiles = sum(1 for s in snapshots if s.name in START_ALL_PROFILES and profile_is_active(s))
     runtime_issues = sum(1 for s in snapshots if s.runtime_state in {"dead", "error"})
     auto_stop_events = recent_auto_stop_events()
+    jc_snapshot = next((snapshot for snapshot in snapshots if snapshot.name == "private_jc"), None)
+    private_bounce_guard = private_bounce_guard_status(
+        profile_name="private_jc",
+        profile_active=profile_is_active(jc_snapshot) if jc_snapshot else False,
+        now=datetime.now(timezone.utc),
+    )
 
     profile_dicts = [asdict(s) for s in snapshots]
     for profile in profile_dicts:
@@ -1992,6 +2181,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         webhook_health=webhook_health,
         profile_dicts=profile_dicts,
         auto_stop_events=auto_stop_events,
+        private_bounce_guard=private_bounce_guard,
     )
     banner_state, banner_message = health_banner_state(
         session_label,
@@ -2008,16 +2198,19 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "activity_hours": activity_hours,
         "controls": {
             "send_cap_per_profile": send_cap_per_profile,
-            "active_sender_count": active_profiles,
-            "available_sender_count": len(SENDGRID_PROFILES),
-            "fleet_total_for_active_senders": send_cap_per_profile * active_profiles,
-            "estimated_total_if_start_all": send_cap_per_profile * len(SENDGRID_PROFILES),
+            "active_sender_count": active_start_all_profiles,
+            "available_sender_count": len(START_ALL_PROFILES),
+            "fleet_total_for_active_senders": send_cap_per_profile * active_start_all_profiles,
+            "estimated_total_if_start_all": send_cap_per_profile * len(START_ALL_PROFILES),
             "updated_at_utc": str(controls.get("updated_at_utc") or ""),
         },
         "health": {"state": banner_state, "message": banner_message},
+        "private_bounce_guard": private_bounce_guard,
         "summary": {
             "active_profiles": active_profiles,
             "total_pending": total_pending,
+            "astra_pending": astra_pending,
+            "sendgrid_pending": sendgrid_pending,
             "total_run_sent": total_run_sent,
             "total_run_errors": total_run_errors,
             "total_run_skipped": total_run_skipped,

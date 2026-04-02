@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import json
 import os
 import time
@@ -24,6 +25,16 @@ from dashboard_core import (
     build_dashboard_snapshot,
     save_dashboard_send_cap_per_profile,
 )
+from important_leads_workflow import (
+    check_master_leads,
+    dispatch_master_leads,
+    important_leads_status,
+)
+from private_bounce_hygiene import (
+    PRIVATE_BOUNCE_MONITOR_ENABLED,
+    PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS,
+    run_private_bounce_monitor_cycle,
+)
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -44,12 +55,17 @@ STATIC_DIR = settings.STATIC_DIR
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
 WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
+IMPORTANT_LEADS_INPUT = settings.APP_ROOT / "_important" / "leadschecker.csv"
+IMPORTANT_LEADS_OUTPUT = settings.APP_ROOT / "_important" / "leads.csv"
+IMPORTANT_LEADS_REJECTED = settings.APP_ROOT / "_important" / "leads_rejected.csv"
 app = FastAPI(title="Email Automation Live Dashboard")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 SENDGRID_EVENT_PUBLIC_KEY = os.environ.get("SENDGRID_EVENT_PUBLIC_KEY", "").strip()
 SENDGRID_SIG_HEADER = "X-Twilio-Email-Event-Webhook-Signature"
 SENDGRID_TS_HEADER = "X-Twilio-Email-Event-Webhook-Timestamp"
+PRIVATE_BOUNCE_PROFILE = "private_jc"
+AUTOMATION_LOOP_SECONDS = max(15, min(60, max(30, int(PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS or 120)) // 2))
 
 
 class SendCapPayload(BaseModel):
@@ -76,6 +92,83 @@ class ShardLeadsPayload(BaseModel):
     cleaned_filename: str
     shard_count: int = Field(default=5, ge=1, le=5)
     strategy: str = Field(default="domain_balanced")
+
+
+def _profile_runtime_active(profile_name: str) -> bool:
+    try:
+        snapshots = runtime_control.list_sender_snapshots(tail_lines=8)
+    except Exception:
+        return False
+    active_states = {"starting", "running", "cooldown", "sleeping"}
+    for snapshot in snapshots:
+        if getattr(snapshot, "name", "") != profile_name:
+            continue
+        if getattr(snapshot, "tmux_dead", False):
+            return False
+        return str(getattr(snapshot, "runtime_state", "") or "") in active_states
+    return False
+
+
+def _run_background_automation_once() -> None:
+    try:
+        runtime_control.apply_delivery_guards()
+    except Exception:
+        pass
+    if not PRIVATE_BOUNCE_MONITOR_ENABLED:
+        return
+    profile_active = _profile_runtime_active(PRIVATE_BOUNCE_PROFILE)
+    try:
+        run_private_bounce_monitor_cycle(
+            profile_name=PRIVATE_BOUNCE_PROFILE,
+            profile_active=profile_active,
+            stop_profile=runtime_control.stop_sender,
+            start_profile=runtime_control.start_sender,
+        )
+    except Exception:
+        return
+
+
+async def _background_automation_loop() -> None:
+    while True:
+        await asyncio.to_thread(_run_background_automation_once)
+        await asyncio.sleep(AUTOMATION_LOOP_SECONDS)
+
+
+@app.on_event("startup")
+async def _startup_background_automation() -> None:
+    if getattr(app.state, "automation_task", None) is None:
+        app.state.automation_task = asyncio.create_task(_background_automation_loop())
+
+
+@app.on_event("shutdown")
+async def _shutdown_background_automation() -> None:
+    task = getattr(app.state, "automation_task", None)
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    app.state.automation_task = None
+
+
+def _csv_preview(path: Path, limit: int = 8) -> dict[str, object]:
+    if not path.exists():
+        return {"fieldnames": [], "preview_rows": [], "row_count": 0}
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [str(name or "").lstrip("\ufeff") for name in (reader.fieldnames or [])]
+        rows: list[dict[str, str]] = []
+        total = 0
+        for row in reader:
+            cleaned = {field: str(row.get(field, "") or "") for field in fieldnames}
+            if not any(value.strip() for value in cleaned.values()):
+                continue
+            total += 1
+            if len(rows) < limit:
+                rows.append(cleaned)
+    return {"fieldnames": fieldnames, "preview_rows": rows, "row_count": total}
 
 
 @lru_cache(maxsize=1)
@@ -217,6 +310,66 @@ def clean_leads(payload: CleanLeadsPayload) -> JSONResponse:
     )
 
 
+@app.post("/api/leads/check-important")
+def check_important_leads() -> JSONResponse:
+    try:
+        report = check_master_leads(
+            input_path=IMPORTANT_LEADS_INPUT,
+            output_path=IMPORTANT_LEADS_OUTPUT,
+            rejected_path=IMPORTANT_LEADS_REJECTED,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Lead check failed: {exc}"}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                f"Checked {IMPORTANT_LEADS_INPUT.name} into {IMPORTANT_LEADS_OUTPUT.name}. "
+                f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
+                f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
+            ),
+            "check": report,
+            "status": {**shard_status(), **important_leads_status()},
+        }
+    )
+
+
+@app.post("/api/leads/dispatch-important")
+def dispatch_important_leads() -> JSONResponse:
+    try:
+        report = dispatch_master_leads(
+            master_path=IMPORTANT_LEADS_OUTPUT,
+            rejected_path=IMPORTANT_LEADS_REJECTED,
+            require_stopped=True,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Lead dispatch failed: {exc}"}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                f"Dispatch complete. Astra added {report['added_astra']} row(s), SendGrid added "
+                f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
+            ),
+            "dispatch": report,
+            "status": {**shard_status(), **important_leads_status()},
+            "snapshot": build_dashboard_snapshot(),
+        }
+    )
+
+
 @app.post("/api/leads/shard")
 def shard_leads(payload: ShardLeadsPayload) -> JSONResponse:
     active_snapshots = runtime_control.list_active_sender_snapshots(tail_lines=12)
@@ -281,7 +434,7 @@ def preview_shard(payload: ShardLeadsPayload) -> JSONResponse:
 
 @app.get("/api/leads/status")
 def leads_status() -> JSONResponse:
-    return JSONResponse({"ok": True, "status": shard_status()})
+    return JSONResponse({"ok": True, "status": {**shard_status(), **important_leads_status()}})
 
 
 @app.post("/webhooks/sendgrid/events")
