@@ -10,25 +10,25 @@ def backend_name() -> str:
 
 
 def sendgrid_profiles() -> List[str]:
-    return list(dashboard_core.SENDGRID_PROFILES)
+    return list(dashboard_core.DASHBOARD_PROFILES)
 
 
 def is_known_profile(profile_name: str) -> bool:
-    return profile_name in dashboard_core.SENDGRID_PROFILES
+    return profile_name in dashboard_core.DASHBOARD_PROFILES
 
 
 def list_sender_snapshots(
     tail_lines: int = 12,
     session: str = dashboard_core.TMUX_SESSION_NAME,
 ) -> List[dashboard_core.ProfileSnapshot]:
-    return dashboard_core.load_sendgrid_profile_snapshots(session=session, tail_lines=tail_lines)
+    return dashboard_core.load_dashboard_profile_snapshots(tail_lines=tail_lines)
 
 
 def list_active_sender_snapshots(
     tail_lines: int = 12,
     session: str = dashboard_core.TMUX_SESSION_NAME,
 ) -> List[dashboard_core.ProfileSnapshot]:
-    return dashboard_core.active_sendgrid_profile_snapshots(session=session, tail_lines=tail_lines)
+    return dashboard_core.active_dashboard_profile_snapshots(tail_lines=tail_lines)
 
 
 def snapshot_runtime_status(
@@ -50,21 +50,39 @@ def start_all_senders() -> tuple[bool, str]:
 
 
 def stop_all_senders(session: str = dashboard_core.TMUX_SESSION_NAME) -> tuple[bool, str]:
-    return dashboard_core.stop_sendgrid_session(session=session)
+    messages: List[str] = []
+    ok = True
+    sessions = {dashboard_core.profile_session_name(name) for name in dashboard_core.DASHBOARD_PROFILES}
+    for profile_session in sorted(sessions):
+        stopped, message = dashboard_core.stop_sendgrid_session(session=profile_session)
+        if stopped:
+            messages.append(message)
+        elif "is not running" not in message.lower():
+            ok = False
+            messages.append(message)
+    if not messages:
+        return True, "No dashboard sender sessions were running."
+    return ok, " | ".join(messages)
 
 
 def start_sender(profile_name: str, session: str = dashboard_core.TMUX_SESSION_NAME) -> tuple[bool, str]:
-    if profile_name not in dashboard_core.SENDGRID_PROFILES:
+    if profile_name not in dashboard_core.DASHBOARD_PROFILES:
         return False, f"Unknown profile: {profile_name}"
-    pane_index = dashboard_core.SENDGRID_PROFILES.index(profile_name)
-    return dashboard_core.start_sendgrid_profile(profile_name, pane_index, session=session)
+    profile_session = dashboard_core.profile_session_name(profile_name)
+    if profile_name in dashboard_core.SENDGRID_PROFILES:
+        pane_index = dashboard_core.profile_pane_index(profile_name)
+        return dashboard_core.start_sendgrid_profile(profile_name, pane_index, session=profile_session)
+    return dashboard_core.start_private_profile(profile_name, session=profile_session)
 
 
 def stop_sender(profile_name: str, session: str = dashboard_core.TMUX_SESSION_NAME) -> tuple[bool, str]:
-    if profile_name not in dashboard_core.SENDGRID_PROFILES:
+    if profile_name not in dashboard_core.DASHBOARD_PROFILES:
         return False, f"Unknown profile: {profile_name}"
-    pane_index = dashboard_core.SENDGRID_PROFILES.index(profile_name)
-    return dashboard_core.stop_sendgrid_profile(profile_name, pane_index, session=session)
+    profile_session = dashboard_core.profile_session_name(profile_name)
+    if profile_name in dashboard_core.SENDGRID_PROFILES:
+        pane_index = dashboard_core.profile_pane_index(profile_name)
+        return dashboard_core.stop_sendgrid_profile(profile_name, pane_index, session=profile_session)
+    return dashboard_core.stop_private_profile(profile_name, session=profile_session)
 
 
 def archive_reset_logs(session: str = dashboard_core.TMUX_SESSION_NAME) -> tuple[bool, str]:

@@ -39,7 +39,7 @@
             <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
           </div>
           <section class="toolbar">
-            <label>
+            <label class="toolbar-field toolbar-field-window">
               Activity window
               <select id="hours-select">
                 <option value="6">6h</option>
@@ -49,11 +49,11 @@
                 <option value="168">168h</option>
               </select>
             </label>
-            <label>
+            <label class="toolbar-field toolbar-field-cap">
               Emails / sender
               <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
-              <span id="send-cap-note" class="toolbar-field-note muted">Awaiting first snapshot</span>
             </label>
+            <div id="send-cap-note" class="toolbar-field-note muted">Awaiting first snapshot</div>
             <div class="toolbar-actions">
               <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save Cap</button>
               <button id="refresh-btn" class="btn btn-secondary">Refresh</button>

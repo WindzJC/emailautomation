@@ -435,21 +435,6 @@ def _resolve_app_path(value: object) -> Path:
 SIGNATURE_CID = "sigimg"
 
 SIGNATURE_BY_FROM: Dict[str, str] = {
-    # --- Gmail 4 accounts (each different) ---
-    "corporate@barnesnobleinfo.com": "sig_gmail_corporate.png",
-    "sally@littlebrowncoinfo.com":     "sig_gmail_sally.png",
-    "jordan@barnesnobleinfo.com":    "sig_gmail_jordan.png",
-    "josefina@barnesnobleinfo.com":  "sig_gmail_josefina.png",
-
-    # --- Astra 7 accounts (ALL SAME image) ---
-    "megan@astraproductionsbyjc.com":   "sig_astra.png",
-    "alex@astraproductionsbyjc.com":    "sig_astra.png",
-    "kentc@astraproductionsbyjc.com":   "sig_astra.png",
-    "zachking@astraproductionsbyjc.com":"sig_astra.png",
-    "jc@astraproductionsbyjc.com":      "sig_astra.png",
-    "jordanA@astraproductionsbyjc.com": "sig_astra.png",
-    "astra@astraproductionsbyjc.com":   "sig_astra.png",
-
     # --- PrivateEmail 5 accounts (each different) ---
     "jordankendrick@barnesnoblemarketing.com":"sig_private_jordan.png",
     "jodihorowitz@barnesnoblemarketing.com":  "sig_private_jodi.png",
