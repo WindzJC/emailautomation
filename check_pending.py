@@ -1,30 +1,30 @@
 import argparse
 import csv
-from pathlib import Path
 from email.utils import parseaddr
+from pathlib import Path
+
+import settings
+from send_shard import PROFILES
 
 
-DEFAULT_MAPPING = [
-    # Private
-    ("private_marketing_log.csv", "recipients_1.csv"),
-    ("private_jordan_kendrick_log.csv", "recipients_2.csv"),
-    ("private_jodi_horowitz_log.csv", "recipients_3.csv"),
-    ("private_alison_log.csv", "recipients_4.csv"),
-    ("private_fiorela_log.csv", "recipients_5.csv"),
-    # Gmail
-    ("gmail_corporate_log.csv", "recipients_g1.csv"),
-    ("gmail_sally_log.csv", "recipients_g2.csv"),
-    ("gmail_jordan_log.csv", "recipients_g3.csv"),
-    ("gmail_josefina_log.csv", "recipients_g4.csv"),
-    # Astra Gmail
-    ("astra_astra_log.csv", "recipients_astra1.csv"),
-    ("astra_jc_log.csv", "recipients_astra2.csv"),
-    ("astra_jordanA_log.csv", "recipients_astra3.csv"),
-    ("astra_kentc_log.csv", "recipients_astra4.csv"),
-    ("astra_zachking_log.csv", "recipients_astra5.csv"),
-    ("astra_alex_log.csv", "recipients_astra6.csv"),
-    ("astra_megan_log.csv", "recipients_astra7.csv"),
-]
+def current_mapping() -> list[tuple[str, Path, Path]]:
+    rows: list[tuple[str, Path, Path]] = []
+    for profile_name, cfg in sorted(PROFILES.items()):
+        provider = str(cfg.get("provider") or "").strip().lower()
+        if provider not in {"private", "sendgrid"}:
+            continue
+        csv_name = str(cfg.get("csv") or "").strip()
+        log_name = str(cfg.get("log") or "").strip()
+        if not csv_name or not log_name:
+            continue
+        rows.append(
+            (
+                profile_name,
+                settings.log_path(log_name),
+                settings.shard_path(csv_name),
+            )
+        )
+    return rows
 
 
 def norm_email(s: str) -> str:
@@ -61,33 +61,28 @@ def load_done_from_log(path: Path) -> set[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="", help="Base folder containing logs/recipients (default: script folder)")
     ap.add_argument("--show_list", action="store_true", help="Print pending emails per log")
     ap.add_argument("--list_limit", type=int, default=0, help="Limit pending list per log (0 = no limit)")
-    ap.add_argument("--unsub_csv", default="unsubscribed.csv")
-    ap.add_argument("--suppress_csv", default="suppressed.csv")
+    ap.add_argument("--unsub_csv", default=str(settings.UNSUBSCRIBED_PATH))
+    ap.add_argument("--suppress_csv", default=str(settings.SUPPRESSED_PATH))
     ap.add_argument("--compact", action="store_true", help="Compact output (one line per log)")
     args = ap.parse_args()
 
-    base = Path(args.base) if args.base else Path(__file__).resolve().parent
-
-    unsub = load_emails_from_csv(base / args.unsub_csv)
-    supp = load_emails_from_csv(base / args.suppress_csv)
+    unsub = load_emails_from_csv(Path(args.unsub_csv))
+    supp = load_emails_from_csv(Path(args.suppress_csv))
+    mapping = current_mapping()
 
     rows = []
     total_logs = 0
     total_pending = 0
 
-    for log_name, recipients_name in DEFAULT_MAPPING:
+    for profile_name, log_path, csv_path in mapping:
         total_logs += 1
-        log_path = base / log_name
-        csv_path = base / recipients_name
-
         if not csv_path.exists():
             rows.append({
-                "log": log_name,
+                "profile": profile_name,
                 "missing": True,
-                "recipients": recipients_name,
+                "recipients": str(csv_path),
             })
             continue
 
@@ -97,7 +92,7 @@ def main() -> None:
         total_pending += len(pending)
 
         rows.append({
-            "log": log_name,
+            "profile": profile_name,
             "missing": False,
             "pending": len(pending),
             "total": len(recipients),
@@ -110,23 +105,23 @@ def main() -> None:
     if args.compact:
         for r in rows:
             if r.get("missing"):
-                print(f"- {r['log']}: missing recipients file {r['recipients']}")
+                print(f"- {r['profile']}: missing recipients file {r['recipients']}")
                 continue
-            print(f"- {r['log']}: pending={r['pending']} / total={r['total']}")
+            print(f"- {r['profile']}: pending={r['pending']} / total={r['total']}")
     else:
-        log_width = max(len(r["log"]) for r in rows) if rows else 12
+        log_width = max(len(r["profile"]) for r in rows) if rows else 12
         header = (
-            f"{'LOG':<{log_width}}  {'PENDING':>7}  {'TOTAL':>7}  "
+            f"{'PROFILE':<{log_width}}  {'PENDING':>7}  {'TOTAL':>7}  "
             f"{'SENT':>7}  {'UNSUB':>7}  {'SUPPR':>7}"
         )
         print(header)
         print("-" * len(header))
         for r in rows:
             if r.get("missing"):
-                print(f"{r['log']:<{log_width}}  MISSING  {r['recipients']}")
+                print(f"{r['profile']:<{log_width}}  MISSING  {r['recipients']}")
                 continue
             print(
-                f"{r['log']:<{log_width}}  {r['pending']:>7}  {r['total']:>7}  "
+                f"{r['profile']:<{log_width}}  {r['pending']:>7}  {r['total']:>7}  "
                 f"{r['sent_invalid']:>7}  {r['unsub']:>7}  {r['suppressed']:>7}"
             )
 
@@ -137,7 +132,7 @@ def main() -> None:
         if not args.show_list:
             continue
         show = pending if args.list_limit <= 0 else pending[: args.list_limit]
-        print(f"\n{r['log']}: pending list")
+        print(f"\n{r['profile']}: pending list")
         for e in show:
             print(f"  {e}")
         if args.list_limit > 0 and len(pending) > args.list_limit:
