@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import settings
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
     _parse_ts_safe,
+    _resolve_shard_path,
     dedupe_scope_for_runtime,
     filter_account_map_entries_for_runtime_dedupe,
     prioritize_always_send_rows,
@@ -15,6 +19,18 @@ from send_shard import (
 
 
 class SendShardTests(unittest.TestCase):
+    def test_resolve_shard_path_creates_managed_private_jc_queue_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch(
+                "send_shard.SHARDS_DIR", shards
+            ):
+                resolved = _resolve_shard_path("recipients_private_jc.csv")
+                self.assertEqual(shards / "recipients_private_jc.csv", resolved)
+                self.assertTrue(resolved.exists())
+                self.assertEqual("Email,AuthorName,BookTitle\n", resolved.read_text(encoding="utf-8"))
+
     def test_prioritize_always_send_rows_moves_probe_to_front(self) -> None:
         rows = [
             {"Email": "lead1@example.com", "AuthorName": "Lead One"},

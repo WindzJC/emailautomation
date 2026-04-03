@@ -412,7 +412,7 @@ def _managed_path(base_dir: Path, value: object) -> Path:
 
 def _resolve_shard_path(value: object) -> Path:
     path = _managed_path(SHARDS_DIR, value)
-    settings.maybe_seed_file(path, Path(str(value or "")).name)
+    settings.ensure_managed_shard_file(path, Path(str(value or "")).name)
     return path
 
 

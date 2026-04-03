@@ -4,9 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+for env_file in ".env.local" ".env"; do
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+    break
+  fi
+done
+
 SESSION_NAME="${TMUX_TUNNEL_SESSION:-tunnel}"
 ATTACH_MODE="${TMUX_TUNNEL_ATTACH:-0}"
-TARGET_URL="${TMUX_TUNNEL_URL:-http://localhost:${LIVE_DASHBOARD_PORT:-${APP_PORT:-8000}}}"
+TARGET_URL="${TMUX_TUNNEL_URL:-http://localhost:${LIVE_DASHBOARD_PORT:-${APP_PORT:-8001}}}"
 METRICS_ADDR="${TMUX_TUNNEL_METRICS_ADDR:-127.0.0.1:20241}"
 TUNNEL_PATTERN="${TMUX_TUNNEL_PATTERN:-cloudflared tunnel --url $TARGET_URL}"
 

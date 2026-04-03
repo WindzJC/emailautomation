@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -95,6 +96,7 @@ SENDGRID_COUNTERS_PATH = STATE_DIR / "sendgrid_daily_counters.json"
 SEND_CAP_DEFAULT = _env_int("SEND_CAP_DEFAULT", 100)
 ALLOWED_ORIGINS = tuple(item.strip() for item in _env("ALLOWED_ORIGINS").split(",") if item.strip())
 SECRET_KEY = _env("SECRET_KEY", "change-me")
+MANAGED_SHARD_HEADERS = ("Email", "AuthorName", "BookTitle")
 
 
 def ensure_dirs(paths: Iterable[Path] | None = None) -> None:
@@ -111,6 +113,16 @@ def ensure_dirs(paths: Iterable[Path] | None = None) -> None:
     ))
     for path in managed_paths:
         path.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_csv_with_headers(path: Path, headers: Iterable[str]) -> Path:
+    ensure_dirs((path.parent,))
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(headers))
+        writer.writeheader()
+    return path
 
 
 def app_path(value: str | Path) -> Path:
@@ -134,7 +146,7 @@ def shard_path(value: str | Path) -> Path:
     path = _managed_file(SHARDS_DIR, value)
     name = Path(str(value or "").strip()).name
     if name:
-        maybe_seed_file(path, name)
+        ensure_managed_shard_file(path, name)
     return path
 
 
@@ -183,6 +195,18 @@ def maybe_seed_file(target: Path, legacy: str | Path | None = None) -> Path:
         return target
     shutil.copy2(legacy_path, target)
     return target
+
+
+def ensure_managed_shard_file(target: Path, legacy: str | Path | None = None) -> Path:
+    ensure_dirs((target.parent,))
+    legacy_path = app_path(legacy) if legacy else None
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    if legacy_path is not None and legacy_path.exists():
+        if legacy_path.resolve() != target.resolve() and legacy_path.stat().st_size > 0:
+            shutil.copy2(legacy_path, target)
+            return target
+    return ensure_csv_with_headers(target, MANAGED_SHARD_HEADERS)
 
 
 def maybe_seed_dir(target: Path, legacy: str | Path | None = None) -> Path:

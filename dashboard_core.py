@@ -214,7 +214,7 @@ def _profile_csv_path(cfg: Dict[str, object]) -> Path:
     path = _managed_path(SHARDS_DIR, cfg.get("csv") or "")
     name = Path(str(cfg.get("csv") or "")).name
     if name:
-        settings.maybe_seed_file(path, name)
+        settings.ensure_managed_shard_file(path, name)
     return path
 
 

@@ -4,6 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -319,7 +320,7 @@ class DashboardCoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "provider_pacing_state.json"
-            now = dashboard_core.datetime(2026, 4, 3, 0, 0, 0, tzinfo=dashboard_core.timezone.utc)
+            now = dashboard_core.datetime.now(dashboard_core.timezone.utc) - timedelta(minutes=1)
             with patch.object(provider_pacing, "PROVIDER_PACING_STATE_PATH", state_path):
                 provider_pacing.record_provider_throttle(
                     "private_jc",

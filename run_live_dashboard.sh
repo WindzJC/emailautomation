@@ -23,7 +23,7 @@ export TMUX_TMPDIR="$TMUX_SOCKET_ROOT"
 
 PY="${PYTHON_BIN:-./.venv/bin/python}"
 HOST="${LIVE_DASHBOARD_HOST:-${APP_HOST:-0.0.0.0}}"
-PORT="${LIVE_DASHBOARD_PORT:-${APP_PORT:-8000}}"
+PORT="${LIVE_DASHBOARD_PORT:-${APP_PORT:-8001}}"
 
 if [[ ! -x "$PY" ]]; then
   if command -v python3 >/dev/null 2>&1; then
