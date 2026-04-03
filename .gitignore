@@ -21,3 +21,6 @@ sendgrid_suppressions.csv
 sendgrid_webhook_dedupe.sqlite3
 jc_autostart_*.sh
 *.lock
+_important/*
+!_important/.gitkeep
+!_important/README.md
