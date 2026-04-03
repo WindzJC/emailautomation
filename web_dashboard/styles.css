@@ -251,6 +251,34 @@ h3 {
   line-height: 1.35;
 }
 
+.toolbar-note-line {
+  display: block;
+}
+
+.toolbar-note-line-secondary {
+  margin-top: 4px;
+  color: #bed0ea;
+}
+
+.toolbar-field {
+  min-width: 0;
+}
+
+.toolbar-field-window {
+  grid-area: window;
+}
+
+.toolbar-field-cap {
+  grid-area: cap;
+}
+
+#send-cap-note {
+  grid-area: note;
+  align-self: start;
+  margin-top: -2px;
+  padding-right: 10px;
+}
+
 .view-tabs {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
@@ -547,6 +575,43 @@ h3 {
   color: #dce6f6;
   font-size: 12px;
   font-weight: 700;
+}
+
+.health-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.health-pill-good {
+  background: rgba(124, 224, 183, 0.12);
+  border-color: rgba(124, 224, 183, 0.24);
+  color: #dbfff0;
+}
+
+.health-pill-warn,
+.health-pill-neutral {
+  background: rgba(240, 192, 103, 0.12);
+  border-color: rgba(240, 192, 103, 0.22);
+  color: #ffe8bc;
+}
+
+.health-pill-bad {
+  background: rgba(255, 139, 152, 0.12);
+  border-color: rgba(255, 139, 152, 0.22);
+  color: #ffd4da;
+}
+
+.health-pill-paused {
+  background: rgba(123, 183, 255, 0.12);
+  border-color: rgba(123, 183, 255, 0.22);
+  color: #ddeaff;
 }
 
 .btn {
@@ -1841,6 +1906,12 @@ h3 {
   line-height: 1.35;
 }
 
+.detail-guard-caption {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .detail-guard-stack {
   display: grid;
   gap: 14px;
@@ -2064,6 +2135,12 @@ h3 {
   background: rgba(255, 255, 255, 0.08);
   color: #d6e1f4;
   border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.badge.paused {
+  background: rgba(123, 183, 255, 0.14);
+  color: #deecff;
+  border: 1px solid rgba(123, 183, 255, 0.24);
 }
 
 .badge.error,
@@ -2524,6 +2601,9 @@ pre {
 
   .topbar-controls .toolbar {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      "window cap actions"
+      "note note actions";
   }
 
   .leads-form-grid,
@@ -2549,6 +2629,9 @@ pre {
 
   .page.wallboard-mode .topbar-controls .toolbar {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-areas:
+      "window cap actions actions"
+      "note note actions actions";
   }
 
   .profiles-grid {
@@ -2591,6 +2674,10 @@ pre {
 
   .topbar-controls .toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "window cap"
+      "note note"
+      "actions actions";
   }
 
   .leads-form-grid,
@@ -2606,6 +2693,10 @@ pre {
 
   .page.wallboard-mode .topbar-controls .toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "window cap"
+      "note note"
+      "actions actions";
     justify-content: stretch;
   }
 
@@ -2730,6 +2821,15 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .toolbar,
+  .page.wallboard-mode .topbar-controls .toolbar {
+    grid-template-areas:
+      "window"
+      "cap"
+      "note"
+      "actions";
+  }
+
   .profile-actions {
     justify-content: stretch;
   }
@@ -2808,13 +2908,18 @@ pre {
 .toolbar {
   display: grid;
   grid-template-columns: minmax(140px, 180px) minmax(220px, 320px) minmax(0, 1fr);
+  grid-template-areas:
+    "window cap actions"
+    ". note actions";
   gap: 12px;
-  align-items: end;
+  align-items: start;
 }
 
 .toolbar-actions {
+  grid-area: actions;
   display: flex;
   flex-wrap: wrap;
+  align-self: end;
   justify-content: flex-end;
   gap: 12px;
 }
@@ -2874,6 +2979,14 @@ pre {
   .topbar,
   .toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .toolbar {
+    grid-template-areas:
+      "window"
+      "cap"
+      "note"
+      "actions";
   }
 
   .topbar-side {

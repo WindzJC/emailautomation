@@ -12,8 +12,12 @@ cleaned/
 reports/
 run_logs/
 dashboard_run_settings.json
+dashboard_auto_start_state.json
+dashboard_timer_state.json
+provider_pacing_state.json
 leads_dashboard_state.json
 sendgrid_events.jsonl
 sendgrid_suppressions.csv
 sendgrid_webhook_dedupe.sqlite3
+jc_autostart_*.sh
 *.lock

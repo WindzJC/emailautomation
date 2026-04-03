@@ -247,6 +247,8 @@ function senderLogStatusLabel(status) {
 }
 
 function profileCooldownRemaining(profile) {
+  const providerRemaining = Number(profile?.provider_cooldown_remaining_seconds ?? 0);
+  if (Number.isFinite(providerRemaining) && providerRemaining > 0) return Math.max(0, Math.round(providerRemaining));
   const remaining = Number(profile?.cooldown_remaining_seconds ?? 0);
   if (!Number.isFinite(remaining) || remaining <= 0) return 0;
   return Math.max(0, Math.round(remaining));
@@ -254,6 +256,9 @@ function profileCooldownRemaining(profile) {
 
 function profileLastUpdateText(profile) {
   const remaining = profileCooldownRemaining(profile);
+  if ((profile?.runtime_state || "") === "paused" && remaining > 0) {
+    return `Paused ${humanizeDurationCompact(remaining)} remaining`;
+  }
   if ((profile?.runtime_state || "") === "cooldown" && remaining > 0) {
     return `Cooldown ${remaining}s remaining`;
   }
@@ -262,6 +267,9 @@ function profileLastUpdateText(profile) {
 
 function profileLastAgeText(profile) {
   const remaining = profileCooldownRemaining(profile);
+  if ((profile?.runtime_state || "") === "paused" && remaining > 0) {
+    return `Next safe start in ${humanizeDurationCompact(remaining)}`;
+  }
   if ((profile?.runtime_state || "") === "cooldown" && remaining > 0) {
     return `Next send in ${remaining}s`;
   }
@@ -999,6 +1007,18 @@ function humanizeCooldownRemaining(totalSeconds) {
   return `${hours}h left`;
 }
 
+function humanizeDurationCompact(totalSeconds) {
+  const seconds = Number(totalSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "due";
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))}s`;
+  const totalMinutes = Math.ceil(seconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!minutes) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
+}
+
 function privateBounceTone(guard = {}) {
   const status = String(guard?.status || "idle");
   if (status === "watching") return "good";
@@ -1007,13 +1027,27 @@ function privateBounceTone(guard = {}) {
   return "neutral";
 }
 
-function renderDetailPrivateBounceGuard(profile, guard = {}) {
+function renderDetailPrivateBounceGuard(profile, guard = {}, automation = {}) {
   if (!profile || profile.name !== "private_jc") return "";
   const tone = privateBounceTone(guard);
   const lastSyncText = guard?.last_sync_utc ? formatGeneratedAt(guard.last_sync_utc) : "Never";
   const cooldownText = guard?.cooldown_until_utc
     ? formatGeneratedAt(guard.cooldown_until_utc)
     : (guard?.cooldown_active ? humanizeCooldownRemaining(guard?.cooldown_remaining_seconds || 0) : "Off");
+  const recovery = automation?.private_jc_recovery || {};
+  const daily = automation?.private_jc_daily || {};
+  const recoveryText = recovery?.active
+    ? `${recovery?.target_local_clock || recovery?.target_local_label || "-"}`
+    : "Not armed";
+  const recoveryCaption = recovery?.active
+    ? `${humanizeDurationCompact(recovery?.remaining_seconds || 0)} remaining`
+    : (recovery?.note || "No one-shot recovery timer");
+  const dailyText = daily?.enabled
+    ? `${daily?.local_time || "-"} daily`
+    : "Off";
+  const dailyCaption = daily?.enabled
+    ? `Next ${daily?.next_run_local_label || daily?.next_run_local_clock || "-"}`
+    : "Automatic daily start disabled";
   const lastSuppressed = Array.isArray(guard?.last_suppressed_addresses) ? guard.last_suppressed_addresses : [];
   const events = Array.isArray(guard?.events) ? guard.events.slice(0, 3) : [];
 
@@ -1041,6 +1075,16 @@ function renderDetailPrivateBounceGuard(profile, guard = {}) {
         <article class="detail-guard-stat">
           <div class="detail-guard-label">Cooldown</div>
           <div class="detail-guard-value">${escapeHtml(cooldownText)}</div>
+        </article>
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Recovery Start</div>
+          <div class="detail-guard-value">${escapeHtml(recoveryText)}</div>
+          <div class="detail-guard-caption">${escapeHtml(recoveryCaption)}</div>
+        </article>
+        <article class="detail-guard-stat">
+          <div class="detail-guard-label">Daily Auto Start</div>
+          <div class="detail-guard-value">${escapeHtml(dailyText)}</div>
+          <div class="detail-guard-caption">${escapeHtml(dailyCaption)}</div>
         </article>
       </div>
 
@@ -1335,6 +1379,7 @@ function createOverviewCardNode() {
           <h3></h3>
           <div class="overview-subline">
             <span class="badge stopped"></span>
+            <span class="health-pill health-pill-neutral"></span>
           </div>
         </div>
         <div class="overview-signal">
@@ -1360,6 +1405,7 @@ function createOverviewCardNode() {
   node._refs = {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
+    health: node.querySelector(".health-pill"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
     progressValue: node.querySelector(".overview-progress-value"),
@@ -1373,6 +1419,7 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
     badge: node.querySelector(".badge"),
+    health: node.querySelector(".health-pill"),
     dot: node.querySelector(".overview-dot"),
     stats: node.querySelector(".overview-stats"),
     progressValue: node.querySelector(".overview-progress-value"),
@@ -1395,6 +1442,8 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
   setNodeText(refs.title, formatProfileName(profile.name));
   refs.badge.className = `badge ${statusClass}`;
   setNodeText(refs.badge, profile.runtime_label || "Stopped");
+  refs.health.className = `health-pill health-pill-${profile.health_tone || "neutral"}`;
+  setNodeText(refs.health, profile.health_label || "Healthy");
   refs.dot.className = `overview-dot overview-dot-${glowState}`;
 
   syncKeyedChildren(
@@ -1543,7 +1592,7 @@ function isProfileActive(profile) {
 }
 
 function canStartProfile(profile) {
-  return !isProfileActive(profile);
+  return !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
 }
 
 function canStopProfile(profile) {
@@ -1599,6 +1648,7 @@ function renderSignals(snapshot) {
 
 function renderControls(snapshot) {
   const controls = snapshot.controls || {};
+  const automation = snapshot.automation || {};
   const sendCap = Number(controls.send_cap_per_profile || 0);
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendCap > 0) {
     els.sendCapInput.value = String(sendCap);
@@ -1606,9 +1656,27 @@ function renderControls(snapshot) {
   if (els.sendCapNote) {
     const activeSenders = Number(controls.active_sender_count || 0);
     const activeFleetTotal = Number(controls.fleet_total_for_active_senders || 0);
-    setNodeText(
-      els.sendCapNote,
+    const lines = [
       `Per-sender cap: ${sendCap || 0} | ${activeSenders} active senders | Fleet target: ~${activeFleetTotal || 0}`,
+    ];
+    const scheduleBits = [];
+    if (automation?.sendgrid_daily?.enabled) {
+      scheduleBits.push(`SG daily ${automation.sendgrid_daily.local_time}`);
+    }
+    if (automation?.private_jc_daily?.enabled) {
+      scheduleBits.push(`JC daily ${automation.private_jc_daily.local_time}`);
+    }
+    if (automation?.private_jc_recovery?.active) {
+      scheduleBits.push(`JC recovery ${automation.private_jc_recovery.target_local_clock} (${humanizeDurationCompact(automation.private_jc_recovery.remaining_seconds || 0)})`);
+    }
+    if (scheduleBits.length) {
+      lines.push(scheduleBits.join(" | "));
+    }
+    setNodeHtml(
+      els.sendCapNote,
+      lines.map((line, index) => `
+        <span class="toolbar-note-line${index ? " toolbar-note-line-secondary" : ""}">${escapeHtml(line)}</span>
+      `).join(""),
     );
   }
 }
@@ -1694,7 +1762,7 @@ function renderFailures(snapshot) {
 function profileStatusClass(profile) {
   const state = String(profile.runtime_state || "").trim().replaceAll("_", "-");
   if (!state) return "stopped";
-  if (["starting", "running", "cooldown", "sleeping", "finished", "scheduled-stop", "error", "dead"].includes(state)) {
+  if (["starting", "running", "cooldown", "sleeping", "finished", "scheduled-stop", "paused", "error", "dead"].includes(state)) {
     return state;
   }
   return "stopped";
@@ -1953,6 +2021,9 @@ function buildDetailKicker(profile) {
   const accepted = Number(profile.run_sent || 0);
   const awaiting = Number(profile.awaiting_outcome || 0);
   const errors = Number(profile.run_errors || 0);
+  if ((profile?.runtime_state || "") === "paused") {
+    return `${pending} pending in this queue. ${profile?.restart_block_reason || profile?.health_note || "Provider cooldown is active before the next safe restart."}`;
+  }
   if (isProfileActive(profile)) {
     return `${accepted} accepted, ${awaiting} awaiting outcome, and ${pending} still pending in this queue.`;
   }
@@ -1963,6 +2034,9 @@ function buildDetailKicker(profile) {
 }
 
 function buildProfileActionNote(profile) {
+  if (profile?.restart_blocked) {
+    return profile?.restart_block_reason || "Start is blocked until the provider cooldown window ends.";
+  }
   if (canStopProfile(profile)) {
     return `Profile is active. Dashboard start cap is ${profile.max_total || "∞"} for new launches. Stop pauses only this sender.`;
   }
@@ -1979,6 +2053,9 @@ function createProfileDetailNode() {
         <div>
           <p class="eyebrow">Focused Detail</p>
           <h3></h3>
+          <div class="detail-subline">
+            <span class="health-pill health-pill-neutral detail-health-pill"></span>
+          </div>
           <p class="detail-kicker muted"></p>
         </div>
         <section class="detail-action-card">
@@ -2054,6 +2131,7 @@ function createProfileDetailNode() {
   `);
   node._refs = {
     title: node.querySelector("h3"),
+    health: node.querySelector(".detail-health-pill"),
     kicker: node.querySelector(".detail-kicker"),
     badge: node.querySelector(".badge"),
     paneLabel: node.querySelector(".detail-pane-label"),
@@ -2081,6 +2159,7 @@ function createProfileDetailNode() {
 function updateProfileDetailNode(node, snapshot, profile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
+    health: node.querySelector(".detail-health-pill"),
     kicker: node.querySelector(".detail-kicker"),
     badge: node.querySelector(".badge"),
     paneLabel: node.querySelector(".detail-pane-label"),
@@ -2126,6 +2205,8 @@ function updateProfileDetailNode(node, snapshot, profile) {
 
   node.dataset.profile = profile.name || "";
   setNodeText(refs.title, formatProfileName(profile.name));
+  refs.health.className = `health-pill health-pill-${profile.health_tone || "neutral"} detail-health-pill`;
+  setNodeText(refs.health, profile.health_label || "Healthy");
   setNodeText(refs.kicker, buildDetailKicker(profile));
   refs.badge.className = `badge ${statusClass}`;
   setNodeText(refs.badge, profile.runtime_label || "Stopped");
@@ -2154,7 +2235,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   );
 
   setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
-  setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}));
+  setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}, snapshot.automation || {}));
   setNodeText(
     refs.progressNote,
     `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.`,

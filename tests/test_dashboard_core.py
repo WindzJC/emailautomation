@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import dashboard_core
+import provider_pacing
 import sendgrid_hygiene
 
 
@@ -249,6 +250,8 @@ class DashboardCoreTests(unittest.TestCase):
                 LOG_RESET_BACKUP_ROOT=base / "backups",
                 PROFILES=profiles,
                 SENDGRID_PROFILES=["sendgrid_alpha"],
+                DASHBOARD_PROFILES=["sendgrid_alpha"],
+                START_ALL_PROFILES=["sendgrid_alpha"],
                 PYTHON_BIN=python_bin,
                 DASHBOARD_RUN_SETTINGS_PATH=settings_path,
                 ensure_sendgrid_session_layout=lambda session="sendgrid": (True, "ok"),
@@ -264,6 +267,80 @@ class DashboardCoreTests(unittest.TestCase):
         )
         send_keys_commands = [cmd for cmd in calls if cmd[:3] == ["tmux", "send-keys", "-t"]]
         self.assertTrue(any("--max_total 25" in " ".join(cmd) for cmd in send_keys_commands))
+
+    def test_start_private_profile_requires_password_env_value(self) -> None:
+        profiles = {
+            "private_jc": {
+                "provider": "private",
+                "csv": "recipients_private_jc.csv",
+                "log": "private_jc_log.csv",
+                "from_email": "jc@astraproductions.co",
+                "max_total": 5,
+                "password_env": "PRIVATE_JC_PASSWORD",
+                "dashboard_enabled": True,
+                "dashboard_manual_only": True,
+                "tmux_session": "private_jc",
+            }
+        }
+
+        with patch.multiple(
+            dashboard_core,
+            PROFILES=profiles,
+            SENDGRID_PROFILES=[],
+            DASHBOARD_PROFILES=["private_jc"],
+            START_ALL_PROFILES=[],
+            _load_env_value=lambda name: "",
+            load_dashboard_recovery_timer=lambda: {
+                "private_jc_recovery_start_at_utc": "",
+                "private_jc_recovery_note": "",
+                "updated_at_utc": "",
+            },
+        ):
+            ok, message = dashboard_core.start_private_profile("private_jc", session="private_jc")
+
+        self.assertFalse(ok)
+        self.assertEqual("PRIVATE_JC_PASSWORD is not available in the dashboard environment.", message)
+
+    def test_start_private_profile_blocks_while_provider_cooldown_active(self) -> None:
+        profiles = {
+            "private_jc": {
+                "provider": "private",
+                "csv": "recipients_private_jc.csv",
+                "log": "private_jc_log.csv",
+                "from_email": "jc@astraproductions.co",
+                "cooldown_seconds": 90,
+                "max_total": 0,
+                "password_env": "PRIVATE_JC_PASSWORD",
+                "dashboard_enabled": True,
+                "dashboard_manual_only": True,
+                "tmux_session": "private_jc",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "provider_pacing_state.json"
+            now = dashboard_core.datetime(2026, 4, 3, 0, 0, 0, tzinfo=dashboard_core.timezone.utc)
+            with patch.object(provider_pacing, "PROVIDER_PACING_STATE_PATH", state_path):
+                provider_pacing.record_provider_throttle(
+                    "private_jc",
+                    "private",
+                    75 * 60,
+                    90,
+                    "450 4.7.1 sending limit reached",
+                    now=now,
+                )
+                with patch.multiple(
+                    dashboard_core,
+                    PROFILES=profiles,
+                    SENDGRID_PROFILES=[],
+                    DASHBOARD_PROFILES=["private_jc"],
+                    START_ALL_PROFILES=[],
+                    _load_env_value=lambda name: "secret",
+                ):
+                    ok, message = dashboard_core.start_private_profile("private_jc", session="private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("provider cooldown", message.lower())
 
     def test_build_run_status_items_ignores_idle_profiles_during_partial_run(self) -> None:
         base_fields = {
@@ -387,6 +464,8 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 PROFILES=profiles,
                 SENDGRID_PROFILES=list(profiles.keys()),
+                DASHBOARD_PROFILES=list(profiles.keys()),
+                START_ALL_PROFILES=list(profiles.keys()),
             ):
                 trends = dashboard_core.build_trend_panels(attempts, events)
 
@@ -518,6 +597,8 @@ class DashboardCoreTests(unittest.TestCase):
                     dashboard_core,
                     PROFILES=profiles,
                     SENDGRID_PROFILES=list(profiles.keys()),
+                    DASHBOARD_PROFILES=list(profiles.keys()),
+                    START_ALL_PROFILES=list(profiles.keys()),
                 ):
                     domains = dashboard_core.build_domain_breakdown(attempts, events, hours=24)
                     buckets = dashboard_core.build_awaiting_age_buckets(attempts, events, list(profiles.keys()))
@@ -628,7 +709,13 @@ class DashboardCoreTests(unittest.TestCase):
             {"processed_at_utc": "2026-03-13T12:04:30+00:00", "status": "bounce", "profile": "sendgrid_alpha", "email": "reader4@example.com", "message_id": "msg-4"},
         ]
 
-        with patch.multiple(dashboard_core, PROFILES=profiles):
+        with patch.multiple(
+            dashboard_core,
+            PROFILES=profiles,
+            SENDGRID_PROFILES=list(profiles.keys()),
+            DASHBOARD_PROFILES=list(profiles.keys()),
+            START_ALL_PROFILES=list(profiles.keys()),
+        ):
             decisions = dashboard_core.evaluate_profile_delivery_guards([snapshot], attempts, events)
 
         self.assertEqual(1, len(decisions))
@@ -692,7 +779,13 @@ class DashboardCoreTests(unittest.TestCase):
             dashboard_core.AUTO_STOP_EVENTS.clear()
 
         try:
-            with patch.multiple(dashboard_core, PROFILES=profiles), patch.object(
+            with patch.multiple(
+                dashboard_core,
+                PROFILES=profiles,
+                SENDGRID_PROFILES=list(profiles.keys()),
+                DASHBOARD_PROFILES=list(profiles.keys()),
+                START_ALL_PROFILES=list(profiles.keys()),
+            ), patch.object(
                 dashboard_core,
                 "stop_sendgrid_profile",
                 return_value=(True, "Stop signal sent to sendgrid_alpha (pane 0)."),
@@ -857,6 +950,8 @@ class DashboardCoreTests(unittest.TestCase):
             DASHBOARD_RUN_SETTINGS_PATH=base / "dashboard_run_settings.json",
             PROFILES=profiles,
             SENDGRID_PROFILES=list(profiles.keys()),
+            DASHBOARD_PROFILES=list(profiles.keys()),
+            START_ALL_PROFILES=list(profiles.keys()),
             tmux_pane_map=lambda session="sendgrid": {},
             tmux_capture_tail=lambda pane_index, session="sendgrid", lines=16: "",
         )

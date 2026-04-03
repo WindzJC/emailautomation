@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
+from provider_pacing import provider_pacing_status
 from send_shard import PROFILES
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB,
@@ -44,8 +45,10 @@ LOG_RESET_BACKUP_ROOT = settings.LOG_RESET_BACKUP_ROOT
 TMUX_SESSION_NAME = os.environ.get("TMUX_SENDGRID_SESSION", "sendgrid").strip() or "sendgrid"
 DASHBOARD_TIMEZONE_NAME = os.environ.get("DASHBOARD_TIMEZONE", "America/Los_Angeles").strip() or "America/Los_Angeles"
 DASHBOARD_RUN_SETTINGS_PATH = settings.DASHBOARD_RUN_SETTINGS_PATH
+DASHBOARD_TIMER_STATE_PATH = settings.STATE_DIR / "dashboard_timer_state.json"
 SHELL_COMMANDS = {"", "bash", "sh", "zsh", "fish"}
 SENDGRID_ENV_FILES = settings.ENV_FILES
+DEFAULT_AUTO_START_LOCAL_TIME = "18:00"
 SENDGRID_PROFILES = [
     name for name, cfg in PROFILES.items() if str(cfg.get("provider") or "") == "sendgrid"
 ]
@@ -175,6 +178,14 @@ class ProfileSnapshot:
     runtime_label: str
     runtime_note: str
     configured_max_total: int = 0
+    effective_cooldown_seconds: int = 0
+    provider_cooldown_remaining_seconds: int = 0
+    provider_cooldown_until: str = ""
+    restart_blocked: bool = False
+    restart_block_reason: str = ""
+    health_label: str = ""
+    health_tone: str = ""
+    health_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -238,12 +249,33 @@ def default_dashboard_send_cap_per_profile() -> int:
     return max(1, int(settings.SEND_CAP_DEFAULT))
 
 
-def load_dashboard_run_settings() -> Dict[str, object]:
+def _normalize_dashboard_local_time(value: object, default: str = DEFAULT_AUTO_START_LOCAL_TIME) -> str:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        return default
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _default_dashboard_run_settings() -> Dict[str, object]:
     default_cap = default_dashboard_send_cap_per_profile()
-    settings: Dict[str, object] = {
+    return {
         "send_cap_per_profile": default_cap,
+        "auto_start_sendgrid_enabled": True,
+        "auto_start_sendgrid_local_time": DEFAULT_AUTO_START_LOCAL_TIME,
+        "auto_start_private_jc_enabled": True,
+        "auto_start_private_jc_local_time": DEFAULT_AUTO_START_LOCAL_TIME,
         "updated_at_utc": "",
     }
+
+
+def load_dashboard_run_settings() -> Dict[str, object]:
+    defaults = _default_dashboard_run_settings()
+    settings: Dict[str, object] = dict(defaults)
     if not DASHBOARD_RUN_SETTINGS_PATH.exists():
         return settings
     try:
@@ -253,17 +285,38 @@ def load_dashboard_run_settings() -> Dict[str, object]:
     if not isinstance(raw, dict):
         return settings
     try:
-        send_cap = int(raw.get("send_cap_per_profile") or default_cap)
+        send_cap = int(raw.get("send_cap_per_profile") or defaults["send_cap_per_profile"])
     except Exception:
-        send_cap = default_cap
+        send_cap = int(defaults["send_cap_per_profile"])
     settings["send_cap_per_profile"] = max(1, send_cap)
+    settings["auto_start_sendgrid_enabled"] = bool(raw.get("auto_start_sendgrid_enabled", defaults["auto_start_sendgrid_enabled"]))
+    settings["auto_start_sendgrid_local_time"] = _normalize_dashboard_local_time(
+        raw.get("auto_start_sendgrid_local_time"),
+        default=str(defaults["auto_start_sendgrid_local_time"]),
+    )
+    settings["auto_start_private_jc_enabled"] = bool(raw.get("auto_start_private_jc_enabled", defaults["auto_start_private_jc_enabled"]))
+    settings["auto_start_private_jc_local_time"] = _normalize_dashboard_local_time(
+        raw.get("auto_start_private_jc_local_time"),
+        default=str(defaults["auto_start_private_jc_local_time"]),
+    )
     settings["updated_at_utc"] = str(raw.get("updated_at_utc") or "")
     return settings
 
 
-def save_dashboard_send_cap_per_profile(send_cap_per_profile: int) -> Dict[str, object]:
+def save_dashboard_run_settings_patch(patch: Dict[str, object]) -> Dict[str, object]:
+    current = load_dashboard_run_settings()
     payload = {
-        "send_cap_per_profile": max(1, int(send_cap_per_profile)),
+        "send_cap_per_profile": max(1, int(patch.get("send_cap_per_profile", current["send_cap_per_profile"]))),
+        "auto_start_sendgrid_enabled": bool(patch.get("auto_start_sendgrid_enabled", current["auto_start_sendgrid_enabled"])),
+        "auto_start_sendgrid_local_time": _normalize_dashboard_local_time(
+            patch.get("auto_start_sendgrid_local_time", current["auto_start_sendgrid_local_time"]),
+            default=str(current["auto_start_sendgrid_local_time"]),
+        ),
+        "auto_start_private_jc_enabled": bool(patch.get("auto_start_private_jc_enabled", current["auto_start_private_jc_enabled"])),
+        "auto_start_private_jc_local_time": _normalize_dashboard_local_time(
+            patch.get("auto_start_private_jc_local_time", current["auto_start_private_jc_local_time"]),
+            default=str(current["auto_start_private_jc_local_time"]),
+        ),
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
     DASHBOARD_RUN_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +324,12 @@ def save_dashboard_send_cap_per_profile(send_cap_per_profile: int) -> Dict[str, 
     tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp_path.replace(DASHBOARD_RUN_SETTINGS_PATH)
     return payload
+
+
+def save_dashboard_send_cap_per_profile(send_cap_per_profile: int) -> Dict[str, object]:
+    return save_dashboard_run_settings_patch({
+        "send_cap_per_profile": max(1, int(send_cap_per_profile)),
+    })
 
 
 def dashboard_send_cap_per_profile() -> int:
@@ -289,6 +348,25 @@ def parse_log_timestamp(raw: str) -> Optional[datetime]:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def load_dashboard_recovery_timer() -> Dict[str, str]:
+    state = {
+        "private_jc_recovery_start_at_utc": "",
+        "private_jc_recovery_note": "",
+        "updated_at_utc": "",
+    }
+    if not DASHBOARD_TIMER_STATE_PATH.exists():
+        return state
+    try:
+        raw = json.loads(DASHBOARD_TIMER_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return state
+    if not isinstance(raw, dict):
+        return state
+    for key in state:
+        state[key] = str(raw.get(key) or "")
+    return state
 
 
 def dashboard_now() -> datetime:
@@ -405,6 +483,8 @@ def infer_runtime_state(current_cmd: str, pane_dead: bool, tail: str) -> Tuple[s
             return "scheduled_stop", "Scheduled Stop", "Stopped by the configured schedule window."
         if "max_total" in stop_lower or "daily_cap" in stop_lower:
             return "finished", "Finished", stop_line
+        if "provider_throttle_cooldown" in stop_lower:
+            return "paused", "Paused", "Provider cooldown is active before the next safe restart."
         if "auth_error" in stop_lower or "account_error" in stop_lower or "reconnect_failed" in stop_lower:
             return "error", "Error", stop_line
         return "stopped", "Stopped", stop_line
@@ -658,6 +738,27 @@ def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
         return False, f"Unknown profile: {profile_name}"
     cfg = PROFILES.get(profile_name, {})
     provider = str(cfg.get("provider") or "").strip().lower()
+    cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
+    pacing = provider_pacing_status(profile_name, provider, cooldown_seconds)
+    remaining_seconds = max(0, int(pacing.get("cooldown_remaining_seconds") or 0))
+    if remaining_seconds <= 0 and profile_name == "private_jc":
+        timer_state = load_dashboard_recovery_timer()
+        recovery_target = parse_iso_utc(timer_state.get("private_jc_recovery_start_at_utc"))
+        if recovery_target and recovery_target > datetime.now(timezone.utc):
+            remaining_seconds = max(0, int((recovery_target - datetime.now(timezone.utc)).total_seconds()))
+            pacing = {
+                **pacing,
+                "cooldown_until_utc": recovery_target.isoformat(),
+            }
+    if remaining_seconds > 0:
+        cooldown_until = str(pacing.get("cooldown_until_utc") or "")
+        next_safe_start = format_when(parse_iso_utc(cooldown_until)) or cooldown_until
+        remaining_minutes = max(1, int((remaining_seconds + 59) / 60))
+        return (
+            False,
+            f"{profile_name} is paused by provider cooldown for about {remaining_minutes} minute(s). "
+            f"Next safe start {next_safe_start}.",
+        )
     password_env = str(cfg.get("password_env") or "").strip()
     if provider in {"private", "gmail"}:
         if not password_env:
@@ -831,6 +932,9 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
     configured_max_total = int(cfg.get("max_total") or 0)
     effective_max_total = dashboard_send_cap_per_profile() if profile_name in SENDGRID_PROFILES else configured_max_total
     cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
+    provider_name = str(cfg.get("provider") or "").strip().lower()
+    pacing = provider_pacing_status(profile_name, provider_name, cooldown_seconds)
+    effective_cooldown_seconds = max(cooldown_seconds, int(pacing.get("recommended_cooldown_seconds") or 0))
     rows = read_csv_rows(log_path)
     start, end = local_today_bounds()
     always_send_email = (cfg.get("always_send") or "").strip().lower()
@@ -886,10 +990,29 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
     tmux_tail = tmux_capture_tail(pane_index, lines=tail_lines) if pane else ""
     runtime_state, runtime_label, runtime_note = infer_runtime_state(current_cmd, pane_dead, tmux_tail)
     cooldown_remaining_seconds = 0
-    if runtime_state == "cooldown" and cooldown_seconds > 0 and last_timestamp is not None:
+    provider_cooldown_remaining_seconds = max(0, int(pacing.get("cooldown_remaining_seconds") or 0))
+    provider_cooldown_until = str(pacing.get("cooldown_until_utc") or "")
+    if provider_cooldown_remaining_seconds <= 0 and profile_name == "private_jc":
+        timer_state = load_dashboard_recovery_timer()
+        recovery_target = parse_iso_utc(timer_state.get("private_jc_recovery_start_at_utc"))
+        if recovery_target and recovery_target > datetime.now(timezone.utc):
+            provider_cooldown_until = recovery_target.isoformat()
+            provider_cooldown_remaining_seconds = max(0, int((recovery_target - datetime.now(timezone.utc)).total_seconds()))
+    restart_blocked = provider_cooldown_remaining_seconds > 0
+    restart_block_reason = ""
+    if restart_blocked:
+        restart_block_reason = (
+            f"Provider cooldown active for about {max(1, int((provider_cooldown_remaining_seconds + 59) / 60))} minute(s). "
+            f"Next safe start {format_when(parse_iso_utc(provider_cooldown_until)) or provider_cooldown_until}."
+        )
+    if runtime_state == "cooldown" and effective_cooldown_seconds > 0 and last_timestamp is not None:
         elapsed = max(0, int((datetime.now(timezone.utc) - last_timestamp).total_seconds()))
-        cooldown_remaining_seconds = max(0, cooldown_seconds - elapsed)
+        cooldown_remaining_seconds = max(0, effective_cooldown_seconds - elapsed)
         runtime_note = f"Cooling down between sends: {cooldown_remaining_seconds}s remaining."
+    elif restart_blocked and runtime_state not in ACTIVE_RUNTIME_STATES:
+        runtime_state = "paused"
+        runtime_label = "Paused"
+        runtime_note = restart_block_reason
     running = runtime_state in ACTIVE_RUNTIME_STATES and not pane_dead
     return ProfileSnapshot(
         name=profile_name,
@@ -920,6 +1043,11 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
         runtime_state=runtime_state,
         runtime_label=runtime_label,
         runtime_note=runtime_note,
+        effective_cooldown_seconds=effective_cooldown_seconds,
+        provider_cooldown_remaining_seconds=provider_cooldown_remaining_seconds,
+        provider_cooldown_until=provider_cooldown_until,
+        restart_blocked=restart_blocked,
+        restart_block_reason=restart_block_reason,
     )
 
 
@@ -1462,6 +1590,85 @@ def build_telemetry_notes(unmapped_events: int) -> List[str]:
     if not items:
         items.append("Webhook attribution looks clean in the selected window.")
     return items
+
+
+def build_profile_health_status(
+    profile: Dict[str, object],
+    *,
+    webhook_health: Dict[str, object],
+    private_bounce_guard: Dict[str, object],
+) -> Dict[str, str]:
+    name = str(profile.get("name") or "")
+    runtime_state = str(profile.get("runtime_state") or "")
+    run_errors = int(profile.get("run_errors", 0) or 0)
+    provider_cooldown = max(0, int(profile.get("provider_cooldown_remaining_seconds", 0) or 0))
+    if provider_cooldown > 0 or bool(profile.get("restart_blocked")) or runtime_state == "paused":
+        remaining_minutes = max(1, int((provider_cooldown + 59) / 60))
+        return {
+            "label": "Paused",
+            "tone": "paused",
+            "note": str(profile.get("restart_block_reason") or f"Provider cooldown active for about {remaining_minutes} minute(s)."),
+        }
+
+    if name == "private_jc" and bool(private_bounce_guard.get("cooldown_active")):
+        remaining_seconds = max(0, int(private_bounce_guard.get("cooldown_remaining_seconds", 0) or 0))
+        remaining_minutes = max(1, int((remaining_seconds + 59) / 60)) if remaining_seconds else 0
+        return {
+            "label": "Paused",
+            "tone": "paused",
+            "note": f"Bounce guard cooldown active for about {remaining_minutes} minute(s).",
+        }
+
+    if runtime_state in {"error", "dead"} or run_errors > 0:
+        return {
+            "label": "Risk",
+            "tone": "bad",
+            "note": "Sender has current-run errors and needs review.",
+        }
+
+    if name == "private_jc" and bool(private_bounce_guard.get("sync_error_active")):
+        return {
+            "label": "Watch",
+            "tone": "warn",
+            "note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
+        }
+
+    if name == "private_jc" and bool(private_bounce_guard.get("sync_stale")) and bool(private_bounce_guard.get("profile_active")):
+        return {
+            "label": "Watch",
+            "tone": "warn",
+            "note": "Private bounce sync is stale while JC is active.",
+        }
+
+    if name in SENDGRID_PROFILES and str(webhook_health.get("last_received_age") or "").strip() == "never":
+        return {
+            "label": "Watch",
+            "tone": "warn",
+            "note": "No recent webhook intake; delivery outcomes may lag or be stale.",
+        }
+
+    if name in SENDGRID_PROFILES:
+        last_received = parse_iso_utc(webhook_health.get("last_received_iso"))
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=ALERT_WEBHOOK_STALE_MINUTES)
+        if ALERT_WEBHOOK_STALE_MINUTES > 0 and last_received and last_received < stale_cutoff:
+            return {
+                "label": "Watch",
+                "tone": "warn",
+                "note": "Webhook intake is stale for the current active window.",
+            }
+
+    if name in SENDGRID_PROFILES and int(profile.get("awaiting_outcome", 0) or 0) >= ALERT_PROFILE_AWAITING_THRESHOLD > 0:
+        return {
+            "label": "Watch",
+            "tone": "warn",
+            "note": "Accepted recipients are backing up without final outcomes.",
+        }
+
+    return {
+        "label": "Healthy",
+        "tone": "good",
+        "note": "No live sender risk detected right now.",
+    }
 
 
 def build_threshold_alerts(
@@ -2163,6 +2370,14 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         profile["accepted_recent"] = int(awaiting_metrics.get(profile["name"], {}).get("accepted_recent", 0) or 0)
         profile["final_outcome"] = int(awaiting_metrics.get(profile["name"], {}).get("final_outcome", 0) or 0)
         profile["awaiting_age_buckets"] = dict(awaiting_age_buckets.get(profile["name"], empty_awaiting_buckets()))
+        health = build_profile_health_status(
+            profile,
+            webhook_health=webhook_health,
+            private_bounce_guard=private_bounce_guard,
+        )
+        profile["health_label"] = str(health.get("label") or "")
+        profile["health_tone"] = str(health.get("tone") or "")
+        profile["health_note"] = str(health.get("note") or "")
 
     run_status_items = build_run_status_items(
         session_label,

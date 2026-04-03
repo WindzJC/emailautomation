@@ -22,11 +22,17 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 from getpass import getpass
 from pathlib import Path
-from typing import Optional, Tuple, Set, Dict, List, Deque
+from typing import Optional, Tuple, Set, Dict, List, Deque, Sequence
 from urllib.parse import quote
 
 import settings
 from recipient_file_lock import lock_files
+from provider_pacing import (
+    mark_recovery_started,
+    provider_pacing_status,
+    record_provider_throttle,
+    throttle_pause_seconds,
+)
 from sendgrid_hygiene import load_active_suppressed_emails
 
 # ===== SMTP PRESETS =====
@@ -256,16 +262,17 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
         "interval": 90,
         "batch_size": 1,
-        "cooldown_seconds": 0,
+        "cooldown_seconds": 90,
         "repeat": True,
         "human_mode": True,
-        "max_total": 5,
+        "max_total": 0,
+        "stop_at_local": "12:00",
         "domain_log": "private_domain_log.csv",
         "suppress_invalid": True,
         "global_dedupe": False,
         "account_map": "account_map_private_sendgrid.csv",
         "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": False,
+        "prune_sent": True,
         "password_env": "PRIVATE_JC_PASSWORD",
         "dashboard_enabled": True,
         "dashboard_manual_only": True,
@@ -280,11 +287,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch1",
         "from_email": "annettedanek-akey@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 120,
+        "interval": 45,
         "batch_size": 1,
-        "cooldown_seconds": 120,
+        "cooldown_seconds": 45,
         "repeat": True,
-        "stop_at_local": "13:00",
+        "stop_at_local": "12:00",
         "max_total": 201,
         "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
@@ -303,11 +310,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch2",
         "from_email": "jordankendrick@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 120,
+        "interval": 45,
         "batch_size": 1,
-        "cooldown_seconds": 120,
+        "cooldown_seconds": 45,
         "repeat": True,
-        "stop_at_local": "13:00",
+        "stop_at_local": "12:00",
         "max_total": 201,
         "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
@@ -326,11 +333,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch3",
         "from_email": "jodihorowitz@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 120,
+        "interval": 45,
         "batch_size": 1,
-        "cooldown_seconds": 120,
+        "cooldown_seconds": 45,
         "repeat": True,
-        "stop_at_local": "13:00",
+        "stop_at_local": "12:00",
         "max_total": 201,
         "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
@@ -349,11 +356,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch4",
         "from_email": "alisonaguair@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 120,
+        "interval": 45,
         "batch_size": 1,
-        "cooldown_seconds": 120,
+        "cooldown_seconds": 45,
         "repeat": True,
-        "stop_at_local": "13:00",
+        "stop_at_local": "12:00",
         "max_total": 201,
         "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
@@ -372,11 +379,11 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch5",
         "from_email": "fiorelladelima@barnesnoblemarketing.com",
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 120,
+        "interval": 45,
         "batch_size": 1,
-        "cooldown_seconds": 120,
+        "cooldown_seconds": 45,
         "repeat": True,
-        "stop_at_local": "13:00",
+        "stop_at_local": "12:00",
         "max_total": 201,
         "domain_log": "sendgrid_domain_log.csv",
         "suppress_invalid": True,
@@ -499,20 +506,19 @@ P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
 
 PITCH_JC_BODY = """Hi {AuthorName},
 
-I help authors shape how a book is seen before it is read.
+I’m reaching out because I work specifically with authors on the visual side of promotion.
 
-I work from a creative direction angle — clarifying the hook, strengthening the visual presentation, and building the kind of promo materials that make the book feel sharper, more intentional, and more marketable from the first impression onward.
+A strong book can still lose attention online when the hook does not land fast enough. At Astra Productions, I help fix that with hook-first trailers that feel closer to a film preview, premium author pages, and launch visuals built to make the story clearer, build trust faster, and turn more interest into clicks.
 
-That can include trailer direction, launch visuals, and author websites designed to present the book more clearly and professionally.
+I’ve spent 6+ years helping authors strengthen how their books are presented online. You can review the work at astraproductions.co. Trailer projects start at $999, author websites at $499, and the launch bundle at $1299.
 
-If useful, I can send one free concept direction for your book’s promotion so you can see how I would approach it.
+If that sounds aligned, reply and I’ll send one concise idea for how I’d approach it.
 
 Windelle JC
-Astra Productions
-astraproductions.co
+Creative Director, Astra Productions
+{SIGIMG}
 
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
+P.S. If you’d rather not hear from me again, just reply unsub.
 """
 
 PITCHES = {
@@ -542,14 +548,11 @@ PITCHES = {
 
   },
     "pitch_jc": {
-        "subject": "Free concept direction for your book",
+        "subject": "Quick thought on your book",
         "body": PITCH_JC_BODY,
     },
 
 }
-
-JC_SIGNATURE_BLOCK = "Astra Productions\nastraproductions.co"
-JC_SIGNATURE_LINK_HTML = "<a href='https://astraproductions.co'>astraproductions.co</a>"
 
 
 def norm_email(s: str) -> str:
@@ -980,6 +983,46 @@ def load_account_map(map_path: Path) -> List[Tuple[Path, Path]]:
     return out
 
 
+def dedupe_scope_for_runtime(provider: str, current_csv: Path) -> str:
+    name = current_csv.name.lower()
+    if str(provider or "").strip().lower() == "sendgrid":
+        return "sendgrid"
+    if name == "recipients_private_jc.csv":
+        return "astra"
+    return "global"
+
+
+def _path_matches_dedupe_scope(path: Path, scope: str, kind: str) -> bool:
+    name = path.name.lower()
+    if scope == "sendgrid":
+        if kind == "recipient":
+            return name.startswith("recipients_sendgrid_")
+        return name.startswith("sendgrid_")
+    if scope == "astra":
+        if kind == "recipient":
+            return name == "recipients_private_jc.csv"
+        return name == "private_jc_log.csv"
+    return True
+
+
+def filter_account_map_entries_for_runtime_dedupe(
+    map_entries: Sequence[Tuple[Path, Path]],
+    provider: str,
+    current_csv: Path,
+) -> List[Tuple[Path, Path]]:
+    scope = dedupe_scope_for_runtime(provider, current_csv)
+    if scope == "global":
+        return list(map_entries)
+    out: List[Tuple[Path, Path]] = []
+    for recipient_path, log_path in map_entries:
+        if not _path_matches_dedupe_scope(recipient_path, scope, "recipient"):
+            continue
+        if not _path_matches_dedupe_scope(log_path, scope, "log"):
+            continue
+        out.append((recipient_path, log_path))
+    return out
+
+
 def load_done_from_logs(paths: List[Path]) -> Set[str]:
     out: Set[str] = set()
     for p in paths:
@@ -1128,30 +1171,22 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
 def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
     """
     HTML version:
-    - converts {UnsubMailto} into a clickable link except on the JC first email
+    - converts {UnsubMailto} into a clickable link
     - replaces {SIGIMG} with an inline CID image IF cid is provided
     - removes {SIGIMG} if cid is not provided
     """
     safe = html.escape(body_text)
 
     # clickable unsubscribe
-    if JC_SIGNATURE_BLOCK not in body_text:
-        if "<%asm_group_unsubscribe_url%" in unsub_mailto:
-            unsub_href = unsub_mailto
-            unsub_text = unsub_mailto
-        else:
-            unsub_href = html.escape(unsub_mailto)
-            unsub_text = "unsubscribe"
-        safe = safe.replace(html.escape(unsub_mailto), f"<a href='{unsub_href}'>{unsub_text}</a>")
-        # keep ASM token unescaped if present
-        safe = safe.replace("&lt;%asm_group_unsubscribe_url%&gt;", "<%asm_group_unsubscribe_url%>")
-
-    # Keep the plain-text template simple, but make the JC site clickable in HTML.
-    safe = safe.replace(
-        html.escape(JC_SIGNATURE_BLOCK),
-        "Astra Productions\n" + JC_SIGNATURE_LINK_HTML,
-        1,
-    )
+    if "<%asm_group_unsubscribe_url%" in unsub_mailto:
+        unsub_href = unsub_mailto
+        unsub_text = unsub_mailto
+    else:
+        unsub_href = html.escape(unsub_mailto)
+        unsub_text = "unsubscribe"
+    safe = safe.replace(html.escape(unsub_mailto), f"<a href='{unsub_href}'>{unsub_text}</a>")
+    # keep ASM token unescaped if present
+    safe = safe.replace("&lt;%asm_group_unsubscribe_url%&gt;", "<%asm_group_unsubscribe_url%>")
 
     # signature marker replacement
     if cid:
@@ -1710,6 +1745,26 @@ def main():
     if args.profile and not args.status:
         print(f"PROFILE: {args.profile}")
 
+    provider_guard = provider_pacing_status(
+        str(args.profile or ""),
+        str(args.provider or ""),
+        int(getattr(args, "cooldown_seconds", 0) or 0),
+    )
+    if args.profile:
+        recommended_cooldown_seconds = max(
+            0,
+            int(provider_guard.get("recommended_cooldown_seconds") or 0),
+        )
+        if recommended_cooldown_seconds > int(getattr(args, "cooldown_seconds", 0) or 0):
+            args.cooldown_seconds = recommended_cooldown_seconds
+            if str(args.provider or "").strip().lower() == "private":
+                args.interval = max(int(getattr(args, "interval", 0) or 0), recommended_cooldown_seconds)
+            pace_per_hour = max(1, round(3600 / recommended_cooldown_seconds))
+            print(
+                "PACE ADJUST: provider guard raised cooldown to "
+                f"{recommended_cooldown_seconds}s (~{pace_per_hour}/h)"
+            )
+
     if args.resync_sendgrid:
         candidates: Dict[str, Dict[str, object]] = {}
         if args.profile:
@@ -1952,8 +2007,10 @@ def main():
 
     global_done: Set[str] = set()
     other_recipients: Set[str] = set()
+    dedupe_scope = dedupe_scope_for_runtime(args.provider, csv_path)
     if args.global_dedupe:
         map_entries = load_account_map(_resolve_app_path(args.account_map))
+        map_entries = filter_account_map_entries_for_runtime_dedupe(map_entries, args.provider, csv_path)
         if map_entries:
             log_paths = [log_p for _, log_p in map_entries]
             recipient_paths = [rec_p for rec_p, _ in map_entries]
@@ -1961,6 +2018,8 @@ def main():
             base_dir = csv_path.parent
             log_paths = sorted(base_dir.glob(args.global_dedupe_logs_pattern))
             recipient_paths = sorted(base_dir.glob(args.global_dedupe_recipients_pattern))
+            log_paths = [p for p in log_paths if _path_matches_dedupe_scope(p, dedupe_scope, "log")]
+            recipient_paths = [p for p in recipient_paths if _path_matches_dedupe_scope(p, dedupe_scope, "recipient")]
 
         global_done = load_done_from_logs(log_paths)
 
@@ -2036,7 +2095,8 @@ def main():
     print(f"FILES: csv={csv_path.name} log={log_path.name} pending={len(pending)} interval={args.interval}s")
     if args.global_dedupe:
         print(
-            "GLOBAL DEDUPE:"
+            "CHANNEL DEDUPE:"
+            f" scope={dedupe_scope} |"
             f" logs={len(global_done)} | other_recipients={len(other_recipients)} |"
             f" skipped_logs={skipped_global_logs} | skipped_recipients={skipped_global_recipients}"
         )
@@ -2220,6 +2280,7 @@ def main():
     batch_size = max(0, int(args.batch_size))
     human_mode_active = bool(getattr(args, "human_mode", False)) and args.provider == "private" and repeat_mode
     human_state: Dict[str, int] = {}
+    provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
     if human_mode_active:
         every_min = max(1, int(getattr(args, "human_break_every_min", 120) or 120))
         every_max = max(every_min, int(getattr(args, "human_break_every_max", 240) or every_min))
@@ -2246,6 +2307,16 @@ def main():
         sendgrid_account_sent_today = _safe_int(
             counts.get(sendgrid_counter_key, sendgrid_account_sent_today)
         )
+
+    def note_provider_recovery_started() -> None:
+        nonlocal provider_recovery_pending
+        if not provider_recovery_pending or not args.profile:
+            return
+        try:
+            mark_recovery_started(str(args.profile))
+        except Exception:
+            pass
+        provider_recovery_pending = False
 
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
@@ -2435,7 +2506,11 @@ def main():
                         stop_reason = "daily_cap"
                         break
 
-                author = choose_salutation_name(r.get("AuthorName") or "", to_email)
+                raw_author = get_row_value_ci(
+                    r,
+                    ["authorname", "author_name", "firstname", "first_name", "first name", "author", "name"],
+                )
+                author = choose_salutation_name(raw_author, to_email)
                 book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
                 msg, subject_text, body_text, html_body, cid = build_message(
@@ -2466,6 +2541,7 @@ def main():
                         sent_this_run_emails.add(to_email)
                         consecutive_errors = 0
                         consecutive_throttle_errors = 0
+                        note_provider_recovery_started()
                         record_sendgrid_success()
                         quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
@@ -2520,9 +2596,24 @@ def main():
                         if args.provider == "private":
                             t = (f"{code} {text}").lower()
                             if "4.7.1" in t and "sending limit" in t:
-                                wait_seconds = random.randint(60 * 60, 75 * 60)
-                                print(f"PAUSE: private throttle detected; sleeping {wait_seconds}s (~{wait_seconds//60}m)")
-                                sleep_with_jitter(wait_seconds, jitter=0)
+                                throttle_count_after = max(1, int(provider_guard.get("recent_throttle_count_24h") or 0) + 1)
+                                wait_seconds = throttle_pause_seconds(args.provider, throttle_count_after)
+                                guard_status = record_provider_throttle(
+                                    str(args.profile or ""),
+                                    str(args.provider or ""),
+                                    wait_seconds,
+                                    cooldown_seconds,
+                                    f"{code} {text}",
+                                )
+                                cooldown_until = str(guard_status.get("cooldown_until_utc") or "")
+                                recommended = max(0, int(guard_status.get("recommended_cooldown_seconds") or cooldown_seconds))
+                                print(
+                                    "PAUSE: private throttle detected; provider cooldown until "
+                                    f"{cooldown_until or '-'} with {recommended}s pacing on recovery"
+                                )
+                                print("STOP: provider_throttle_cooldown")
+                                stop_reason = "provider_throttle_cooldown"
+                                break
                         continue
 
                     log_row(log_path, to_email, "ERROR", str(e))
@@ -2536,9 +2627,24 @@ def main():
                     if args.provider == "private":
                         t = str(e).lower()
                         if "4.7.1" in t and "sending limit" in t:
-                            wait_seconds = random.randint(60 * 60, 75 * 60)
-                            print(f"PAUSE: private throttle detected; sleeping {wait_seconds}s (~{wait_seconds//60}m)")
-                            sleep_with_jitter(wait_seconds, jitter=0)
+                            throttle_count_after = max(1, int(provider_guard.get("recent_throttle_count_24h") or 0) + 1)
+                            wait_seconds = throttle_pause_seconds(args.provider, throttle_count_after)
+                            guard_status = record_provider_throttle(
+                                str(args.profile or ""),
+                                str(args.provider or ""),
+                                wait_seconds,
+                                cooldown_seconds,
+                                str(e),
+                            )
+                            cooldown_until = str(guard_status.get("cooldown_until_utc") or "")
+                            recommended = max(0, int(guard_status.get("recommended_cooldown_seconds") or cooldown_seconds))
+                            print(
+                                "PAUSE: private throttle detected; provider cooldown until "
+                                f"{cooldown_until or '-'} with {recommended}s pacing on recovery"
+                            )
+                            print("STOP: provider_throttle_cooldown")
+                            stop_reason = "provider_throttle_cooldown"
+                            break
                     continue
 
                 except smtplib.SMTPAuthenticationError as e:
@@ -2578,6 +2684,7 @@ def main():
                         sent_this_run_emails.add(to_email)
                         consecutive_errors = 0
                         consecutive_throttle_errors = 0
+                        note_provider_recovery_started()
                         record_sendgrid_success()
                         quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
@@ -2658,6 +2765,7 @@ def main():
                             sent_this_run_emails.add(to_email)
                             consecutive_errors = 0
                             consecutive_throttle_errors = 0
+                            note_provider_recovery_started()
                             record_sendgrid_success()
                             quality_reason = note_quality_event(is_invalid=False)
                             if args.provider in ("sendgrid", "private"):
@@ -2821,7 +2929,7 @@ def main():
             f" total_skipped_suppressed={skipped_sendgrid_suppressed if args.provider == 'sendgrid' else 0}"
             f" total_sent_attempted={total_sent_attempted}"
         )
-        if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+        if args.prune_sent and sent_this_run_emails:
             prunable = sent_this_run_emails - always_send_set
             removed = prune_sent_from_csv(csv_path, prunable)
             if removed:

@@ -6,7 +6,7 @@ import csv
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import List
@@ -22,7 +22,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 import settings
 import runtime_control
 from dashboard_core import (
+    SENDGRID_PROFILES,
     build_dashboard_snapshot,
+    load_dashboard_run_settings,
     save_dashboard_send_cap_per_profile,
 )
 from important_leads_workflow import (
@@ -35,6 +37,7 @@ from private_bounce_hygiene import (
     PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS,
     run_private_bounce_monitor_cycle,
 )
+from provider_pacing import mark_recovery_started, provider_pacing_status
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -50,6 +53,7 @@ from leads_workflow import (
     shard_cleaned_leads,
     shard_status,
 )
+from send_shard import PROFILES
 
 STATIC_DIR = settings.STATIC_DIR
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
@@ -66,6 +70,9 @@ SENDGRID_SIG_HEADER = "X-Twilio-Email-Event-Webhook-Signature"
 SENDGRID_TS_HEADER = "X-Twilio-Email-Event-Webhook-Timestamp"
 PRIVATE_BOUNCE_PROFILE = "private_jc"
 AUTOMATION_LOOP_SECONDS = max(15, min(60, max(30, int(PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS or 120)) // 2))
+DASHBOARD_AUTO_START_STATE_PATH = settings.STATE_DIR / "dashboard_auto_start_state.json"
+DASHBOARD_TIMER_STATE_PATH = settings.STATE_DIR / "dashboard_timer_state.json"
+AUTO_START_RETRY_MINUTES = 10
 
 
 class SendCapPayload(BaseModel):
@@ -109,7 +116,328 @@ def _profile_runtime_active(profile_name: str) -> bool:
     return False
 
 
+def _load_dashboard_auto_start_state() -> dict[str, str]:
+    state = {
+        "sendgrid_last_started_local_date": "",
+        "sendgrid_last_attempt_utc": "",
+        "private_jc_last_started_local_date": "",
+        "private_jc_last_attempt_utc": "",
+        "private_jc_recovery_last_attempt_utc": "",
+        "updated_at_utc": "",
+    }
+    if not DASHBOARD_AUTO_START_STATE_PATH.exists():
+        return state
+    try:
+        raw = json.loads(DASHBOARD_AUTO_START_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return state
+    if not isinstance(raw, dict):
+        return state
+    for key in state:
+        state[key] = str(raw.get(key) or "")
+    return state
+
+
+def _save_dashboard_auto_start_state(state: dict[str, str]) -> None:
+    payload = {
+        **state,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    DASHBOARD_AUTO_START_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = DASHBOARD_AUTO_START_STATE_PATH.with_suffix(f".{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(DASHBOARD_AUTO_START_STATE_PATH)
+
+
+def _load_dashboard_timer_state() -> dict[str, str]:
+    state = {
+        "private_jc_recovery_start_at_utc": "",
+        "private_jc_recovery_note": "",
+        "updated_at_utc": "",
+    }
+    if not DASHBOARD_TIMER_STATE_PATH.exists():
+        return state
+    try:
+        raw = json.loads(DASHBOARD_TIMER_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return state
+    if not isinstance(raw, dict):
+        return state
+    for key in state:
+        state[key] = str(raw.get(key) or "")
+    return state
+
+
+def _save_dashboard_timer_state(state: dict[str, str]) -> None:
+    payload = {
+        **state,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    DASHBOARD_TIMER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = DASHBOARD_TIMER_STATE_PATH.with_suffix(f".{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(DASHBOARD_TIMER_STATE_PATH)
+
+
+def _clear_dashboard_recovery_timer() -> None:
+    _save_dashboard_timer_state(
+        {
+            "private_jc_recovery_start_at_utc": "",
+            "private_jc_recovery_note": "",
+        }
+    )
+
+
+def _parse_local_trigger_time(raw: object) -> tuple[int, int]:
+    text = str(raw or "").strip()
+    try:
+        hour_text, minute_text = text.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except Exception:
+        return 18, 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return 18, 0
+    return hour, minute
+
+
+def _auto_start_due(now_local: datetime, trigger_text: object) -> bool:
+    hour, minute = _parse_local_trigger_time(trigger_text)
+    return (now_local.hour, now_local.minute) >= (hour, minute)
+
+
+def _retry_due(last_attempt_utc: str) -> bool:
+    text = str(last_attempt_utc or "").strip()
+    if not text:
+        return True
+    try:
+        previous = datetime.fromisoformat(text)
+    except Exception:
+        return True
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - previous >= timedelta(minutes=AUTO_START_RETRY_MINUTES)
+
+
+def _format_local_offset(dt: datetime) -> str:
+    offset = dt.utcoffset() or timedelta()
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{sign}{hours:02d}:{minutes:02d}"
+
+
+def _format_local_label(dt: datetime) -> str:
+    local_dt = dt.astimezone()
+    return f"{local_dt.strftime('%Y-%m-%d %H:%M')} {_format_local_offset(local_dt)}"
+
+
+def _format_local_clock(dt: datetime) -> str:
+    local_dt = dt.astimezone()
+    return f"{local_dt.strftime('%H:%M')} {_format_local_offset(local_dt)}"
+
+
+def _next_local_run(now_local: datetime, trigger_text: object) -> datetime:
+    hour, minute = _parse_local_trigger_time(trigger_text)
+    target = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now_local:
+        target += timedelta(days=1)
+    return target
+
+
+def _build_automation_status() -> dict[str, object]:
+    run_settings = load_dashboard_run_settings()
+    auto_state = _load_dashboard_auto_start_state()
+    timer_state = _load_dashboard_timer_state()
+    now_local = datetime.now().astimezone()
+    now_utc = datetime.now(timezone.utc)
+
+    sendgrid_next = _next_local_run(now_local, run_settings.get("auto_start_sendgrid_local_time"))
+    jc_daily_next = _next_local_run(now_local, run_settings.get("auto_start_private_jc_local_time"))
+
+    jc_configured_cooldown = max(0, int(PROFILES.get(PRIVATE_BOUNCE_PROFILE, {}).get("cooldown_seconds") or 0))
+    jc_pacing = provider_pacing_status(PRIVATE_BOUNCE_PROFILE, "private", jc_configured_cooldown, now=now_utc)
+
+    recovery_target_utc = None
+    if jc_pacing.get("recovery_pending"):
+        recovery_raw = str(jc_pacing.get("cooldown_until_utc") or "").strip()
+    else:
+        recovery_raw = str(timer_state.get("private_jc_recovery_start_at_utc") or "").strip()
+    if recovery_raw:
+        try:
+            recovery_target_utc = datetime.fromisoformat(recovery_raw)
+            if recovery_target_utc.tzinfo is None:
+                recovery_target_utc = recovery_target_utc.replace(tzinfo=timezone.utc)
+            else:
+                recovery_target_utc = recovery_target_utc.astimezone(timezone.utc)
+        except Exception:
+            recovery_target_utc = None
+
+    recovery_active = False
+    recovery_remaining_seconds = 0
+    if recovery_target_utc and not _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+        recovery_active = True
+        recovery_remaining_seconds = max(0, int((recovery_target_utc - now_utc).total_seconds()))
+
+    return {
+        "local_timezone_offset": _format_local_offset(now_local),
+        "sendgrid_daily": {
+            "enabled": bool(run_settings.get("auto_start_sendgrid_enabled")),
+            "local_time": str(run_settings.get("auto_start_sendgrid_local_time") or ""),
+            "next_run_utc": sendgrid_next.astimezone(timezone.utc).isoformat(),
+            "next_run_local_label": _format_local_label(sendgrid_next),
+            "next_run_local_clock": _format_local_clock(sendgrid_next),
+            "remaining_seconds": max(0, int((sendgrid_next - now_local).total_seconds())),
+            "last_started_local_date": str(auto_state.get("sendgrid_last_started_local_date") or ""),
+        },
+        "private_jc_daily": {
+            "enabled": bool(run_settings.get("auto_start_private_jc_enabled")),
+            "local_time": str(run_settings.get("auto_start_private_jc_local_time") or ""),
+            "next_run_utc": jc_daily_next.astimezone(timezone.utc).isoformat(),
+            "next_run_local_label": _format_local_label(jc_daily_next),
+            "next_run_local_clock": _format_local_clock(jc_daily_next),
+            "remaining_seconds": max(0, int((jc_daily_next - now_local).total_seconds())),
+            "last_started_local_date": str(auto_state.get("private_jc_last_started_local_date") or ""),
+        },
+        "private_jc_recovery": {
+            "active": recovery_active,
+            "target_utc": recovery_target_utc.isoformat() if recovery_target_utc else "",
+            "target_local_label": _format_local_label(recovery_target_utc.astimezone()) if recovery_target_utc else "",
+            "target_local_clock": _format_local_clock(recovery_target_utc.astimezone()) if recovery_target_utc else "",
+            "remaining_seconds": recovery_remaining_seconds,
+            "note": str(jc_pacing.get("last_throttle_reason") or timer_state.get("private_jc_recovery_note") or ""),
+        },
+    }
+
+
+def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
+    snapshot = build_dashboard_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
+    snapshot["automation"] = _build_automation_status()
+    return snapshot
+
+
+def _active_dashboard_profiles() -> set[str]:
+    active_states = {"starting", "running", "cooldown", "sleeping"}
+    active: set[str] = set()
+    try:
+        snapshots = runtime_control.list_sender_snapshots(tail_lines=6)
+    except Exception:
+        return active
+    for snapshot in snapshots:
+        name = str(getattr(snapshot, "name", "") or "")
+        state = str(getattr(snapshot, "runtime_state", "") or "")
+        dead = bool(getattr(snapshot, "tmux_dead", False))
+        if name and not dead and state in active_states:
+            active.add(name)
+    return active
+
+
+def _run_dashboard_daily_auto_start_once() -> None:
+    settings_payload = load_dashboard_run_settings()
+    now_local = datetime.now().astimezone()
+    today = now_local.date().isoformat()
+    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    state = _load_dashboard_auto_start_state()
+    active_profiles = _active_dashboard_profiles()
+    dirty = False
+
+    if bool(settings_payload.get("auto_start_sendgrid_enabled")) and _auto_start_due(now_local, settings_payload.get("auto_start_sendgrid_local_time")):
+        if state.get("sendgrid_last_started_local_date") != today:
+            if all(name in active_profiles for name in SENDGRID_PROFILES):
+                state["sendgrid_last_started_local_date"] = today
+                dirty = True
+            elif _retry_due(state.get("sendgrid_last_attempt_utc", "")):
+                state["sendgrid_last_attempt_utc"] = now_utc_iso
+                dirty = True
+                all_ready = True
+                for profile_name in SENDGRID_PROFILES:
+                    if profile_name in active_profiles:
+                        continue
+                    ok, _message = runtime_control.start_sender(profile_name)
+                    if ok:
+                        active_profiles.add(profile_name)
+                        continue
+                    all_ready = False
+                if all_ready and all(name in active_profiles for name in SENDGRID_PROFILES):
+                    state["sendgrid_last_started_local_date"] = today
+                    dirty = True
+
+    if bool(settings_payload.get("auto_start_private_jc_enabled")) and _auto_start_due(now_local, settings_payload.get("auto_start_private_jc_local_time")):
+        if state.get("private_jc_last_started_local_date") != today:
+            if PRIVATE_BOUNCE_PROFILE in active_profiles:
+                state["private_jc_last_started_local_date"] = today
+                dirty = True
+            elif _retry_due(state.get("private_jc_last_attempt_utc", "")):
+                state["private_jc_last_attempt_utc"] = now_utc_iso
+                dirty = True
+                ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+                if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+                    state["private_jc_last_started_local_date"] = today
+                    dirty = True
+
+    if dirty:
+        _save_dashboard_auto_start_state(state)
+
+
+def _run_private_jc_recovery_auto_start_once() -> None:
+    now_utc = datetime.now(timezone.utc)
+    state = _load_dashboard_auto_start_state()
+    pacing = provider_pacing_status(
+        PRIVATE_BOUNCE_PROFILE,
+        "private",
+        max(0, int(PROFILES.get(PRIVATE_BOUNCE_PROFILE, {}).get("cooldown_seconds") or 0)),
+        now=now_utc,
+    )
+
+    if bool(pacing.get("recovery_pending")):
+        if _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+            mark_recovery_started(PRIVATE_BOUNCE_PROFILE, now=now_utc)
+            return
+        if bool(pacing.get("cooldown_active")):
+            return
+        if not _retry_due(state.get("private_jc_recovery_last_attempt_utc", "")):
+            return
+        state["private_jc_recovery_last_attempt_utc"] = now_utc.isoformat()
+        _save_dashboard_auto_start_state(state)
+        ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+        if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+            mark_recovery_started(PRIVATE_BOUNCE_PROFILE, now=now_utc)
+        return
+
+    timer_state = _load_dashboard_timer_state()
+    recovery_raw = str(timer_state.get("private_jc_recovery_start_at_utc") or "").strip()
+    if not recovery_raw:
+        return
+    try:
+        recovery_target_utc = datetime.fromisoformat(recovery_raw)
+    except Exception:
+        _clear_dashboard_recovery_timer()
+        return
+    if recovery_target_utc.tzinfo is None:
+        recovery_target_utc = recovery_target_utc.replace(tzinfo=timezone.utc)
+    else:
+        recovery_target_utc = recovery_target_utc.astimezone(timezone.utc)
+    if recovery_target_utc > now_utc or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+        return
+    if not _retry_due(state.get("private_jc_recovery_last_attempt_utc", "")):
+        return
+    state["private_jc_recovery_last_attempt_utc"] = now_utc.isoformat()
+    _save_dashboard_auto_start_state(state)
+    ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+    if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
+        _clear_dashboard_recovery_timer()
+
+
 def _run_background_automation_once() -> None:
+    try:
+        _run_dashboard_daily_auto_start_once()
+    except Exception:
+        pass
+    try:
+        _run_private_jc_recovery_auto_start_once()
+    except Exception:
+        pass
     try:
         runtime_control.apply_delivery_guards()
     except Exception:
@@ -207,14 +535,14 @@ def snapshot(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> dict[str, object]:
-    return build_dashboard_snapshot(activity_hours=hours, tail_lines=tail_lines)
+    return _build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
 
 
 @app.post("/api/start")
 def start() -> JSONResponse:
     ok, message = runtime_control.start_all_senders()
     time.sleep(0.6)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": build_dashboard_snapshot()})
+    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
 @app.post("/api/start/{profile_name}")
@@ -223,13 +551,13 @@ def start_profile(profile_name: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     ok, message = runtime_control.start_sender(profile_name)
     time.sleep(0.6)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": build_dashboard_snapshot()})
+    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
 @app.post("/api/stop")
 def stop() -> JSONResponse:
     ok, message = runtime_control.stop_all_senders()
-    return JSONResponse({"ok": ok, "message": message, "snapshot": build_dashboard_snapshot()})
+    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
 @app.post("/api/stop/{profile_name}")
@@ -237,13 +565,13 @@ def stop_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     ok, message = runtime_control.stop_sender(profile_name)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": build_dashboard_snapshot()})
+    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
 @app.post("/api/archive-reset-logs")
 def archive_reset_logs() -> JSONResponse:
     ok, message = runtime_control.archive_reset_logs()
-    return JSONResponse({"ok": ok, "message": message, "snapshot": build_dashboard_snapshot()})
+    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
 @app.post("/api/settings/send-cap")
@@ -254,7 +582,7 @@ def update_send_cap(payload: SendCapPayload) -> JSONResponse:
         {
             "ok": True,
             "message": f"Dashboard send cap saved: {cap} per sender.",
-            "snapshot": build_dashboard_snapshot(),
+            "snapshot": _build_live_snapshot(),
         }
     )
 
@@ -365,7 +693,7 @@ def dispatch_important_leads() -> JSONResponse:
             ),
             "dispatch": report,
             "status": {**shard_status(), **important_leads_status()},
-            "snapshot": build_dashboard_snapshot(),
+            "snapshot": _build_live_snapshot(),
         }
     )
 
@@ -403,7 +731,7 @@ def shard_leads(payload: ShardLeadsPayload) -> JSONResponse:
             "message": f"Shards updated from {report['source_cleaned_filename']} using {report['strategy']}.",
             "shard": report,
             "status": shard_status(),
-            "snapshot": build_dashboard_snapshot(),
+            "snapshot": _build_live_snapshot(),
         }
     )
 
@@ -498,7 +826,7 @@ async def websocket_snapshot_stream(
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(build_dashboard_snapshot(activity_hours=hours, tail_lines=tail_lines))
+            await websocket.send_json(_build_live_snapshot(activity_hours=hours, tail_lines=tail_lines))
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
