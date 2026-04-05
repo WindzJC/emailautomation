@@ -320,8 +320,13 @@ class DashboardCoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "provider_pacing_state.json"
-            now = dashboard_core.datetime.now(dashboard_core.timezone.utc) - timedelta(minutes=1)
-            with patch.object(provider_pacing, "PROVIDER_PACING_STATE_PATH", state_path):
+            now = dashboard_core.datetime(2026, 4, 3, 0, 0, 0, tzinfo=dashboard_core.timezone.utc)
+            current_time = now + dashboard_core.timedelta(minutes=15)
+            with patch.object(provider_pacing, "PROVIDER_PACING_STATE_PATH", state_path), patch.object(
+                provider_pacing,
+                "_now_utc",
+                return_value=current_time,
+            ):
                 provider_pacing.record_provider_throttle(
                     "private_jc",
                     "private",
@@ -616,8 +621,8 @@ class DashboardCoreTests(unittest.TestCase):
 
     def test_build_threshold_alerts_flags_backlog_unmapped_stale_and_errors(self) -> None:
         profile_dicts = [
-            {"name": "sendgrid_alpha", "awaiting_outcome": 6, "run_errors": 1},
-            {"name": "sendgrid_beta", "awaiting_outcome": 5, "run_errors": 0},
+            {"name": "sendgrid_alpha", "awaiting_outcome": 6, "run_errors": 1, "runtime_state": "running"},
+            {"name": "sendgrid_beta", "awaiting_outcome": 5, "run_errors": 0, "runtime_state": "finished"},
         ]
         fake_now = dashboard_core.datetime(2026, 3, 13, 12, 30, 0, tzinfo=dashboard_core.timezone.utc)
 
@@ -654,6 +659,23 @@ class DashboardCoreTests(unittest.TestCase):
             },
             titles,
         )
+
+    def test_build_threshold_alerts_ignores_finished_run_errors_for_sender_api_alert(self) -> None:
+        alerts = dashboard_core.build_threshold_alerts(
+            session_label="stopped",
+            active_profiles=0,
+            recent_failures=0,
+            recent_unmapped=0,
+            total_awaiting_outcome=0,
+            webhook_health={},
+            profile_dicts=[
+                {"name": "private_jc", "run_errors": 2, "runtime_state": "finished"},
+                {"name": "sendgrid_alpha", "run_errors": 1, "runtime_state": "stopped"},
+            ],
+        )
+
+        titles = {alert["title"] for alert in alerts}
+        self.assertNotIn("Sender API errors", titles)
 
     def test_evaluate_profile_delivery_guards_flags_hard_bounce_cluster(self) -> None:
         profiles = {

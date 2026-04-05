@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,10 @@ from send_shard import (
     _parse_ts_safe,
     _resolve_shard_path,
     dedupe_scope_for_runtime,
+    domain_finalize_attempt,
+    domain_wait_for_slot,
     filter_account_map_entries_for_runtime_dedupe,
+    is_temporary_auth_failure,
     prioritize_always_send_rows,
 )
 
@@ -102,6 +106,29 @@ class SendShardTests(unittest.TestCase):
             ],
             [(recipient.name, log.name) for recipient, log in filtered],
         )
+
+    def test_domain_attempt_slot_finalizes_to_attempt_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            domain_log = Path(tmpdir) / "private_domain_log.csv"
+
+            reservation_token = domain_wait_for_slot(domain_log, 5, jitter_sec=0)
+            domain_finalize_attempt(domain_log, reservation_token, "reader@example.com", "temporary_auth_failure", "454 4.7.0")
+
+            with domain_log.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(1, len(rows))
+            self.assertEqual("ATTEMPT", rows[0]["Status"])
+            self.assertEqual("reader@example.com", rows[0]["Email"])
+            self.assertIn("outcome=temporary_auth_failure", rows[0]["Info"])
+
+    def test_temporary_auth_failure_classifier_matches_454(self) -> None:
+        self.assertTrue(
+            is_temporary_auth_failure(
+                454,
+                "4.7.0 Temporary authentication failure: Connection lost to authentication server",
+            )
+        )
+        self.assertFalse(is_temporary_auth_failure(535, "5.7.8 Username and Password not accepted"))
 
 
 if __name__ == "__main__":

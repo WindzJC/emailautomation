@@ -1769,17 +1769,18 @@ def build_threshold_alerts(
                 }
             )
 
-    if any(int(profile.get("run_errors", 0) or 0) > 0 for profile in profile_dicts):
-        errored_profiles = [
-            str(profile.get("name", "")).replace("sendgrid_", "")
-            for profile in profile_dicts
-            if int(profile.get("run_errors", 0) or 0) > 0
-        ]
+    active_error_profiles = [
+        str(profile.get("name", "")).replace("sendgrid_", "")
+        for profile in profile_dicts
+        if int(profile.get("run_errors", 0) or 0) > 0
+        and str(profile.get("runtime_state") or "").strip() in ACTIVE_RUNTIME_STATES
+    ]
+    if active_error_profiles:
         alerts.append(
             {
                 "severity": "critical",
                 "title": "Sender API errors",
-                "message": f"Current run errors detected on: {', '.join(errored_profiles)}.",
+                "message": f"Current run errors detected on: {', '.join(active_error_profiles)}.",
             }
         )
 

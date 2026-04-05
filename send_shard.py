@@ -15,7 +15,7 @@ import tempfile
 import time
 import os
 import fcntl
-import sys
+import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
@@ -30,8 +30,10 @@ from recipient_file_lock import lock_files
 from provider_pacing import (
     mark_recovery_started,
     provider_pacing_status,
+    record_provider_temporary_failure,
     record_provider_throttle,
     throttle_pause_seconds,
+    temporary_failure_pause_seconds,
 )
 from sendgrid_hygiene import load_active_suppressed_emails
 
@@ -260,9 +262,10 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "pitch": "pitch_jc",
         "from_email": "jc@astraproductions.co",
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
-        "interval": 90,
+        "interval": 120,
         "batch_size": 1,
-        "cooldown_seconds": 90,
+        "cooldown_seconds": 120,
+        "max_messages_1h": 30,
         "repeat": True,
         "human_mode": True,
         "max_total": 0,
@@ -449,44 +452,32 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {AuthorName},
 
-Hope you’re having a great day. I’m reaching out after seeing your work and wanted to personally invite you in our Barnes Noble Consignment Program. We’re selective with what we stock, and we believe your work has strong shelf potential with the right readers.
+We are currently reviewing a limited number of titles for possible consignment placement, and part of that review is whether the presentation is strong enough to support the book properly in a retail setting.
 
-We’re opening a few consignment spots. In a store, people buy differently: they notice the cover, pick it up, flip through a few pages, and decide.
+A strong book can still lose momentum when the cover, positioning, and supporting materials are not doing enough to communicate value early. In both online and physical retail, that first layer of presentation often shapes whether a reader looks closer or moves on.
 
-We accept a limited number of titles and review each one for content fit, print/production quality, and retail-ready pricing.
+Before we move forward with any title, we look closely at content fit, print quality, presentation, and retail-ready pricing.
 
-Before we move forward, we require two things to be in place for placement and promotion once your book is stocked:
-1) a book teaser/trailer for promotion, and
-2) a clean author/book page so readers can find the book online, join your list, and go straight to your retailer links.
+To support a book effectively once stocked, we generally like to see two essentials in place:
 
-If you already have a teaser and author/book page, send them over (links are fine). I’ll review them and let you know what’s ready to use and what needs adjusting before placement.
+a short book teaser or trailer
+a clean author or book page where readers can learn more and go directly to retailer links
 
-Consignment terms
-- You earn 85% of the sale price (example: $8.50 on a $10.00 book)
-- You cover shipping to our store(s)
-- Sales reporting + payouts quarterly (within 90 days after quarter-end)
-- You choose the stocking option that fits your budget—no additional consignment fees beyond shipping
+If those assets are already in place, feel free to send them over. If not, and the title appears to be a fit, we can advise on what would need to be strengthened before placement.
 
-Stocking options (choose one)
-- $250 — 750 copies
-- $500 — 1,500 copies
-- $750 — 2,500 copies
-- $1,000 — 3,500 copies
+Our consignment structure is straightforward:
 
-If you need us to build the required assets:
-- Book teaser + promo clips — $999
-- Author/book page — $499
-- Bundle (teaser + website) — $1,299 (save $199)
+you retain 85% of the sale price
+shipping to participating store locations is covered by the author
+sales reporting and payouts are issued quarterly, within 90 days after quarter-end
+there are no added consignment fees beyond shipping
 
-If you’d like to move forward, reply “Interested” and send the link for the title you want us to review (or the ISBN) and your retail price. I’ll confirm fit and send the next steps along with a straightforward agreement for your review.
+If this is of interest, reply with Interested and send the title, ISBN or retailer link, and retail price. If the book appears to be a fit, I’ll send the next steps.
 
-We’d be glad to work with you.
+I look forward to hearing from you.
 
-Regards,
+Best regards,
 {SIGIMG}
-
-P.S. If you’d prefer I don’t reach out again, click here: {UnsubMailto}
-(or just reply “unsubscribe”).
 """
 
 PITCH_JC_BODY = """Hi {AuthorName},
@@ -1442,6 +1433,19 @@ def extract_code_text_from_exception(e: Exception) -> Tuple[Optional[int], str]:
     return code, text
 
 
+def is_temporary_auth_failure(code: Optional[int], text: str) -> bool:
+    smtp_text = (text or "").lower()
+    if code == 454:
+        return True
+    if "4.7.0" in smtp_text and "auth" in smtp_text:
+        return True
+    if "temporary authentication failure" in smtp_text:
+        return True
+    if "connection lost to authentication server" in smtp_text:
+        return True
+    return False
+
+
 def is_sendgrid_forbidden(code: Optional[int], text: str) -> bool:
     if code == 403:
         return True
@@ -1482,22 +1486,46 @@ def _parse_ts_safe(ts: str) -> Optional[datetime]:
         return None
 
 
-def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec: int = 5) -> None:
+def _domain_log_fieldnames() -> List[str]:
+    return ["TimestampUTC", "Email", "Status", "Info"]
+
+
+def _write_domain_log_rows(handle, rows: List[Dict[str, str]]) -> None:
+    handle.seek(0)
+    writer = csv.DictWriter(handle, fieldnames=_domain_log_fieldnames())
+    writer.writeheader()
+    writer.writerows(rows)
+    handle.truncate()
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _domain_attempt_info(reservation_token: str, outcome: str, info: str = "") -> str:
+    details = f"token={reservation_token} outcome={outcome}".strip()
+    extra = (info or "").strip()
+    if extra:
+        details = f"{details} {extra}".strip()
+    return details[:300]
+
+
+def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec: int = 5) -> str:
     """
     Domain-wide rolling 60-min limiter using a file lock.
-    Counts SENT in the last hour plus only *active* SLOT reservations.
-    SLOT rows are short-lived reservations used to prevent races across panes.
+    Counts ATTEMPT rows in the last hour plus only active SLOT reservations.
+    Legacy SENT rows are still counted during the transition away from SENT-based
+    limiting so the rolling window stays conservative until old rows age out.
     """
     if max_messages_1h <= 0:
-        return
+        return ""
 
     domain_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not domain_log_path.exists():
         with domain_log_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
+            w = csv.DictWriter(f, fieldnames=_domain_log_fieldnames())
             w.writeheader()
 
+    reservation_token = uuid.uuid4().hex
     while True:
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=1)
@@ -1512,12 +1540,12 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
             expiry_times: List[datetime] = []
             for r in rows:
                 st = (r.get("Status") or "").strip().upper()
-                if st not in ("SENT", "SLOT"):
+                if st not in ("ATTEMPT", "SENT", "SLOT"):
                     continue
                 t = _parse_ts_safe(r.get("TimestampUTC") or "")
                 if not t:
                     continue
-                if st == "SENT" and t >= cutoff:
+                if st in {"ATTEMPT", "SENT"} and t >= cutoff:
                     expiry_times.append(t + timedelta(hours=1))
                     continue
                 if st == "SLOT" and t >= slot_cutoff:
@@ -1528,23 +1556,60 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
 
             if used < max_messages_1h:
                 f.seek(0, os.SEEK_END)
-                w = csv.DictWriter(f, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
+                w = csv.DictWriter(f, fieldnames=_domain_log_fieldnames())
                 w.writerow({
                     "TimestampUTC": now.isoformat(),
                     "Email": "",
                     "Status": "SLOT",
-                    "Info": "reserve",
+                    "Info": f"token={reservation_token}",
                 })
                 f.flush()
                 os.fsync(f.fileno())
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                return
+                return reservation_token
 
             earliest = expiry_times[0] if expiry_times else (now + timedelta(seconds=30))
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         wait_s = max(1, int((earliest - datetime.now(timezone.utc)).total_seconds())) + random.randint(0, jitter_sec)
         time.sleep(wait_s)
+
+
+def domain_finalize_attempt(domain_log_path: Path, reservation_token: str, email: str, outcome: str, info: str = "") -> None:
+    if not reservation_token:
+        return
+    domain_log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not domain_log_path.exists():
+        with domain_log_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_domain_log_fieldnames())
+            w.writeheader()
+
+    with domain_log_path.open("r+", newline="", encoding="utf-8-sig") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        rows = list(csv.DictReader(handle))
+        matched = False
+        slot_marker = f"token={reservation_token}"
+        for row in rows:
+            status = (row.get("Status") or "").strip().upper()
+            info_text = str(row.get("Info") or "")
+            if status == "SLOT" and slot_marker in info_text:
+                row["Email"] = email
+                row["Status"] = "ATTEMPT"
+                row["Info"] = _domain_attempt_info(reservation_token, outcome, info)
+                matched = True
+                break
+        if not matched:
+            rows.append(
+                {
+                    "TimestampUTC": datetime.now(timezone.utc).isoformat(),
+                    "Email": email,
+                    "Status": "ATTEMPT",
+                    "Info": _domain_attempt_info(reservation_token, outcome, info),
+                }
+            )
+        _write_domain_log_rows(handle, rows)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def sleep_with_jitter(seconds: int, jitter: int = 10) -> None:
@@ -1730,6 +1795,9 @@ def main():
     if args.profile and not args.status:
         print(f"PROFILE: {args.profile}")
 
+    configured_interval_seconds = max(0, int(getattr(profile_defaults, "get", lambda *_: 0)("interval", 0) or getattr(args, "interval", 0) or 0))
+    configured_cooldown_seconds = max(0, int(getattr(profile_defaults, "get", lambda *_: 0)("cooldown_seconds", 0) or getattr(args, "cooldown_seconds", 0) or 0))
+
     provider_guard = provider_pacing_status(
         str(args.profile or ""),
         str(args.provider or ""),
@@ -1749,6 +1817,27 @@ def main():
                 "PACE ADJUST: provider guard raised cooldown to "
                 f"{recommended_cooldown_seconds}s (~{pace_per_hour}/h)"
             )
+
+    if str(args.profile or "").strip() == "private_jc" and str(args.provider or "").strip().lower() == "private":
+        resolved_private_spacing_seconds = max(
+            0,
+            int(getattr(args, "interval", 0) or 0),
+            int(getattr(args, "cooldown_seconds", 0) or 0),
+        )
+        if resolved_private_spacing_seconds > 0:
+            if int(getattr(args, "interval", 0) or 0) != resolved_private_spacing_seconds:
+                print(
+                    "PACE NORMALIZE: private_jc raised interval to "
+                    f"{resolved_private_spacing_seconds}s to match the effective send spacing"
+                )
+            if bool(getattr(args, "repeat", False)) and int(getattr(args, "cooldown_seconds", 0) or 0) != resolved_private_spacing_seconds:
+                print(
+                    "PACE NORMALIZE: private_jc raised cooldown to "
+                    f"{resolved_private_spacing_seconds}s to match the effective send spacing"
+                )
+            args.interval = resolved_private_spacing_seconds
+            if bool(getattr(args, "repeat", False)):
+                args.cooldown_seconds = resolved_private_spacing_seconds
 
     if args.resync_sendgrid:
         candidates: Dict[str, Dict[str, object]] = {}
@@ -2140,6 +2229,21 @@ def main():
             f" total_temp_active={sendgrid_suppressed_temp_active}"
             f" skipped={skipped_sendgrid_suppressed}"
         )
+    if str(args.profile or "").strip() == "private_jc":
+        preflight_effective_spacing_seconds = (
+            max(0, int(getattr(args, "cooldown_seconds", 0) or 0))
+            if bool(getattr(args, "repeat", False)) and int(getattr(args, "cooldown_seconds", 0) or 0) > 0
+            else max(0, int(getattr(args, "interval", 0) or 0))
+        )
+        if preflight_effective_spacing_seconds > 0:
+            preflight_pace_per_hour = max(1, round(3600 / preflight_effective_spacing_seconds))
+            print(
+                "PACE RESOLVED: profile=private_jc"
+                f" configured_interval={configured_interval_seconds}s"
+                f" configured_cooldown={configured_cooldown_seconds}s"
+                f" provider_recommended={max(0, int(provider_guard.get('recommended_cooldown_seconds') or 0))}s"
+                f" effective_spacing={preflight_effective_spacing_seconds}s (~{preflight_pace_per_hour}/h)"
+            )
 
     gmail_messages_24h = 0
     gmail_unique_ext: Set[str] = set()
@@ -2266,6 +2370,7 @@ def main():
     human_mode_active = bool(getattr(args, "human_mode", False)) and args.provider == "private" and repeat_mode
     human_state: Dict[str, int] = {}
     provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
+    last_success_sent_at_utc: Optional[datetime] = None
     if human_mode_active:
         every_min = max(1, int(getattr(args, "human_break_every_min", 120) or 120))
         every_max = max(every_min, int(getattr(args, "human_break_every_max", 240) or every_min))
@@ -2276,6 +2381,17 @@ def main():
             f"microbreak={int(getattr(args, 'human_break_seconds_min', 6) or 0)}-{int(getattr(args, 'human_break_seconds_max', 18) or 0)}s "
             f"every {every_min}-{every_max} sends, first≈#{human_state['next_break_at']})"
         )
+    if str(args.profile or "").strip() == "private_jc":
+        effective_spacing_seconds = cooldown_seconds if repeat_mode and cooldown_seconds > 0 else max(0, int(getattr(args, "interval", 0) or 0))
+        if effective_spacing_seconds > 0:
+            pace_per_hour = max(1, round(3600 / effective_spacing_seconds))
+            print(
+                "PACE RESOLVED: profile=private_jc"
+                f" configured_interval={configured_interval_seconds}s"
+                f" configured_cooldown={configured_cooldown_seconds}s"
+                f" provider_recommended={max(0, int(provider_guard.get('recommended_cooldown_seconds') or 0))}s"
+                f" effective_spacing={effective_spacing_seconds}s (~{pace_per_hour}/h)"
+            )
     if repeat_mode and batch_size <= 0:
         print("ERROR: --batch_size must be > 0 when --repeat is set.")
         return
@@ -2302,6 +2418,21 @@ def main():
         except Exception:
             pass
         provider_recovery_pending = False
+
+    def reserve_domain_attempt_slot() -> str:
+        if args.dry_run:
+            return ""
+        if args.provider not in ("private", "sendgrid") or not args.max_messages_1h:
+            return ""
+        return domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+
+    def finalize_domain_attempt_slot(reservation_token: str, email: str, outcome: str, info: str = "") -> None:
+        if not reservation_token:
+            return
+        try:
+            domain_finalize_attempt(domain_log_path, reservation_token, email, outcome, info)
+        except Exception:
+            pass
 
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
@@ -2506,21 +2637,35 @@ def main():
                 )
 
                 next_index = idx + 1
+                attempt_slot_token = ""
                 try:
                     total_sent_attempted += 1
                     if args.dry_run:
                         log_row(log_path, to_email, "DRYRUN", "not_sent")
                         print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                     else:
-                        if args.provider in ("private", "sendgrid") and args.max_messages_1h:
-                            domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+                        attempt_slot_token = reserve_domain_attempt_slot()
 
                         send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = ""
                         if args.provider == "sendgrid" and send_result.get("message_id"):
                             send_info = f"sg_message_id={send_result['message_id']}"
+                        now_sent_utc = datetime.now(timezone.utc)
+                        if str(args.profile or "").strip() == "private_jc":
+                            if last_success_sent_at_utc is None:
+                                print(f"SEND GAP: first_success_utc={now_sent_utc.isoformat()}")
+                            else:
+                                observed_gap_seconds = (now_sent_utc - last_success_sent_at_utc).total_seconds()
+                                print(
+                                    "SEND GAP:"
+                                    f" previous_success_utc={last_success_sent_at_utc.isoformat()}"
+                                    f" current_success_utc={now_sent_utc.isoformat()}"
+                                    f" gap_seconds={observed_gap_seconds:.1f}"
+                                )
+                            last_success_sent_at_utc = now_sent_utc
 
                         log_row(log_path, to_email, "SENT", send_info)
+                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "sent", send_info)
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
@@ -2537,9 +2682,6 @@ def main():
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
-
-                        if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
-                            log_row(domain_log_path, to_email, "SENT")
 
                         if quality_reason:
                             print(f"STOP: {quality_reason}")
@@ -2558,6 +2700,7 @@ def main():
                         cls = classify_smtp(int(code) if code is not None else None, text)
 
                         if cls == "BAD_RECIPIENT":
+                            finalize_domain_attempt_slot(attempt_slot_token, to_email, "invalid", f"{code} {text}")
                             log_row(log_path, to_email, "INVALID", f"{code} {text}")
                             invalid_count += 1
                             print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
@@ -2570,6 +2713,7 @@ def main():
                                 break
                             continue
 
+                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "recipient_error", f"{code} {text}")
                         log_row(log_path, to_email, "ERROR", f"{code} {text}")
                         error_count += 1
                         print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
@@ -2598,9 +2742,10 @@ def main():
                                 )
                                 print("STOP: provider_throttle_cooldown")
                                 stop_reason = "provider_throttle_cooldown"
-                                break
+                            break
                         continue
 
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "recipient_error", str(e))
                     log_row(log_path, to_email, "ERROR", str(e))
                     error_count += 1
                     print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
@@ -2633,6 +2778,142 @@ def main():
                     continue
 
                 except smtplib.SMTPAuthenticationError as e:
+                    code, text = extract_code_text_from_exception(e)
+                    if is_temporary_auth_failure(code, text):
+                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "temporary_auth_failure", f"{code} {text}")
+                        log_row(log_path, to_email, "ERROR", f"temporary_auth_failure: {code} {text}")
+                        error_count += 1
+                        circuit_reason = note_error(is_throttle=True)
+                        retry_wait_s = min(180, max(30, int(args.interval or 0), 60))
+                        print(
+                            f"[{i}/{len(pending)}] TEMP AUTH FAILURE {to_email} :: "
+                            f"backoff {retry_wait_s}s then retry"
+                        )
+                        if circuit_reason:
+                            print(f"STOP: {circuit_reason} after temporary auth failures")
+                            stop_reason = circuit_reason
+                            break
+
+                        smtp_close(smtp)
+                        smtp = None
+                        time.sleep(retry_wait_s)
+
+                        retry_slot_token = ""
+                        try:
+                            retry_slot_token = reserve_domain_attempt_slot()
+                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_info = "auth_retry_ok"
+                            if args.provider == "sendgrid" and send_result.get("message_id"):
+                                send_info = f"auth_retry_ok sg_message_id={send_result['message_id']}"
+                            now_sent_utc = datetime.now(timezone.utc)
+                            if str(args.profile or "").strip() == "private_jc":
+                                if last_success_sent_at_utc is None:
+                                    print(f"SEND GAP: first_success_utc={now_sent_utc.isoformat()}")
+                                else:
+                                    observed_gap_seconds = (now_sent_utc - last_success_sent_at_utc).total_seconds()
+                                    print(
+                                        "SEND GAP:"
+                                        f" previous_success_utc={last_success_sent_at_utc.isoformat()}"
+                                        f" current_success_utc={now_sent_utc.isoformat()}"
+                                        f" gap_seconds={observed_gap_seconds:.1f}"
+                                    )
+                                last_success_sent_at_utc = now_sent_utc
+
+                            log_row(log_path, to_email, "SENT", send_info)
+                            finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
+                            print(f"[{i}/{len(pending)}] SENT (auth retry) {to_email}")
+                            sent_this_run += 1
+                            sent_this_run_emails.add(to_email)
+                            consecutive_errors = 0
+                            consecutive_throttle_errors = 0
+                            note_provider_recovery_started()
+                            record_sendgrid_success()
+                            quality_reason = note_quality_event(is_invalid=False)
+                            if args.provider in ("sendgrid", "private"):
+                                if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                    print(f"CSV: removed {to_email} from {csv_path.name}")
+                            batch_sent += 1
+                            if args.provider == "gmail":
+                                gmail_messages_24h += 1
+                                if is_external(to_email, my_domains):
+                                    gmail_unique_ext.add(to_email)
+
+                            if quality_reason:
+                                print(f"STOP: {quality_reason}")
+                                stop_reason = "invalid_rate_1h"
+                                break
+
+                            if repeat_mode and args.max_total and sent_this_run >= args.max_total:
+                                print(f"STOP: reached --max_total={args.max_total}")
+                                stop_reason = "max_total"
+                            continue
+                        except smtplib.SMTPAuthenticationError as retry_exc:
+                            retry_code, retry_text = extract_code_text_from_exception(retry_exc)
+                            if not is_temporary_auth_failure(retry_code, retry_text):
+                                finalize_domain_attempt_slot(
+                                    retry_slot_token,
+                                    to_email,
+                                    "auth_retry_failed",
+                                    f"{retry_code} {retry_text}",
+                                )
+                                log_row(log_path, to_email, "ERROR", f"auth_retry_failed: {retry_code} {retry_text}")
+                                error_count += 1
+                                note_error()
+                                print(f"[{i}/{len(pending)}] AUTH ERROR (stop) {to_email} :: {single_line(f'{retry_code} {retry_text}')}")
+                                stop_reason = "auth_error"
+                                break
+                            finalize_domain_attempt_slot(
+                                retry_slot_token,
+                                to_email,
+                                "temporary_auth_failure",
+                                f"{retry_code} {retry_text}",
+                            )
+                            pause_seconds = temporary_failure_pause_seconds(
+                                args.provider,
+                                max(1, int(provider_guard.get("recent_temporary_failure_count_24h") or 0) + 1),
+                            )
+                            guard_status = record_provider_temporary_failure(
+                                str(args.profile or ""),
+                                str(args.provider or ""),
+                                pause_seconds,
+                                cooldown_seconds,
+                                f"{retry_code} {retry_text}",
+                            )
+                            provider_recovery_pending = True
+                            cooldown_until = str(guard_status.get("cooldown_until_utc") or "")
+                            log_row(
+                                log_path,
+                                to_email,
+                                "ERROR",
+                                f"temporary_auth_failure: {retry_code} {retry_text}",
+                            )
+                            error_count += 1
+                            print(
+                                "PAUSE: temporary auth failure; dashboard recovery scheduled until "
+                                f"{cooldown_until or '-'}"
+                            )
+                            print(
+                                f"[{i}/{len(pending)}] TEMP AUTH FAILURE (pause) {to_email} :: "
+                                f"{single_line(f'{retry_code} {retry_text}')}"
+                            )
+                            stop_reason = "temporary_auth_failure"
+                            break
+                        except Exception as retry_exc:
+                            retry_code, retry_text = extract_code_text_from_exception(retry_exc)
+                            finalize_domain_attempt_slot(
+                                retry_slot_token,
+                                to_email,
+                                "auth_retry_failed",
+                                f"{retry_code} {retry_text or retry_exc}",
+                            )
+                            log_row(log_path, to_email, "ERROR", f"auth_retry_failed: {retry_code} {retry_text or retry_exc}")
+                            error_count += 1
+                            note_error(is_throttle=True)
+                            print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{retry_code} {retry_text or retry_exc}')}")
+                            stop_reason = "auth_retry_failed"
+                            break
+
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "auth_error", str(e))
                     log_row(log_path, to_email, "ERROR", f"auth_failed: {e}")
                     error_count += 1
                     note_error()
@@ -2641,6 +2922,7 @@ def main():
                     break
 
                 except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "disconnect", str(e))
                     log_row(log_path, to_email, "ERROR", f"disconnected: {e}")
                     error_count += 1
                     circuit_reason = note_error(is_throttle=True)
@@ -2654,17 +2936,31 @@ def main():
                     smtp = None
                     sleep_with_jitter(max(args.interval, 60), jitter=10)
 
+                    retry_slot_token = ""
                     try:
-                        if args.provider in ("private", "sendgrid") and args.max_messages_1h:
-                            domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+                        retry_slot_token = reserve_domain_attempt_slot()
 
-                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
-                            send_info = "reconnect_ok"
-                            if args.provider == "sendgrid" and send_result.get("message_id"):
-                                send_info = f"reconnect_ok sg_message_id={send_result['message_id']}"
+                        send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                        send_info = "reconnect_ok"
+                        if args.provider == "sendgrid" and send_result.get("message_id"):
+                            send_info = f"reconnect_ok sg_message_id={send_result['message_id']}"
+                        now_sent_utc = datetime.now(timezone.utc)
+                        if str(args.profile or "").strip() == "private_jc":
+                            if last_success_sent_at_utc is None:
+                                print(f"SEND GAP: first_success_utc={now_sent_utc.isoformat()}")
+                            else:
+                                observed_gap_seconds = (now_sent_utc - last_success_sent_at_utc).total_seconds()
+                                print(
+                                    "SEND GAP:"
+                                    f" previous_success_utc={last_success_sent_at_utc.isoformat()}"
+                                    f" current_success_utc={now_sent_utc.isoformat()}"
+                                    f" gap_seconds={observed_gap_seconds:.1f}"
+                                )
+                            last_success_sent_at_utc = now_sent_utc
 
-                            log_row(log_path, to_email, "SENT", send_info)
-                            print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
+                        log_row(log_path, to_email, "SENT", send_info)
+                        finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
+                        print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
                         consecutive_errors = 0
@@ -2681,9 +2977,6 @@ def main():
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
 
-                        if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
-                            log_row(domain_log_path, to_email, "SENT")
-
                         if quality_reason:
                             print(f"STOP: {quality_reason}")
                             stop_reason = "invalid_rate_1h"
@@ -2695,6 +2988,7 @@ def main():
 
                     except Exception as e2:
                         code2, text2 = extract_code_text_from_exception(e2)
+                        finalize_domain_attempt_slot(retry_slot_token, to_email, "reconnect_failed", f"{code2} {text2}")
                         log_row(log_path, to_email, "ERROR", f"reconnect_failed: {code2} {text2}")
                         error_count += 1
                         note_error(is_throttle=True)
@@ -2707,6 +3001,7 @@ def main():
                     cls = classify_smtp(code, text)
 
                     if cls == "BAD_RECIPIENT":
+                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "invalid", f"{code} {text}")
                         log_row(log_path, to_email, "INVALID", f"{code} {text}")
                         invalid_count += 1
                         print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
@@ -2720,6 +3015,7 @@ def main():
                         continue
 
                     if cls == "TEMP_THROTTLE":
+                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "temp_throttle", f"{code} {text}")
                         log_row(log_path, to_email, "ERROR", f"{code} {text}")
                         wait_s = backoff_seconds()
                         error_count += 1
@@ -2735,16 +3031,30 @@ def main():
                         smtp = None
                         sleep_with_jitter(max(args.interval, 60), jitter=10)
 
+                        retry_slot_token = ""
                         try:
-                            if args.provider in ("private", "sendgrid") and args.max_messages_1h:
-                                domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+                            retry_slot_token = reserve_domain_attempt_slot()
 
                             send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                             send_info = "throttle_retry_ok"
                             if args.provider == "sendgrid" and send_result.get("message_id"):
                                 send_info = f"throttle_retry_ok sg_message_id={send_result['message_id']}"
+                            now_sent_utc = datetime.now(timezone.utc)
+                            if str(args.profile or "").strip() == "private_jc":
+                                if last_success_sent_at_utc is None:
+                                    print(f"SEND GAP: first_success_utc={now_sent_utc.isoformat()}")
+                                else:
+                                    observed_gap_seconds = (now_sent_utc - last_success_sent_at_utc).total_seconds()
+                                    print(
+                                        "SEND GAP:"
+                                        f" previous_success_utc={last_success_sent_at_utc.isoformat()}"
+                                        f" current_success_utc={now_sent_utc.isoformat()}"
+                                        f" gap_seconds={observed_gap_seconds:.1f}"
+                                    )
+                                last_success_sent_at_utc = now_sent_utc
 
                             log_row(log_path, to_email, "SENT", send_info)
+                            finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
@@ -2762,9 +3072,6 @@ def main():
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
 
-                            if args.provider in ("private", "sendgrid") and args.max_messages_1h and domain_log_path != log_path:
-                                log_row(domain_log_path, to_email, "SENT")
-
                             if quality_reason:
                                 print(f"STOP: {quality_reason}")
                                 stop_reason = "invalid_rate_1h"
@@ -2779,6 +3086,7 @@ def main():
                             continue
                         except Exception as e2:
                             code2, text2 = extract_code_text_from_exception(e2)
+                            finalize_domain_attempt_slot(retry_slot_token, to_email, "retry_failed", f"{code2} {text2}")
                             log_row(log_path, to_email, "ERROR", f"retry_failed: {code2} {text2}")
                             error_count += 1
                             note_error(is_throttle=True)
@@ -2786,6 +3094,7 @@ def main():
                             stop_reason = "retry_failed"
                             break
 
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "smtp_error", f"{code} {text}")
                     log_row(log_path, to_email, "ERROR", f"{code} {text}")
                     error_count += 1
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(f'{code} {text}')}")
@@ -2800,6 +3109,7 @@ def main():
                     code, text = extract_code_text_from_exception(e)
                     if not text:
                         text = err_text
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "error", text or err_text)
                     log_row(log_path, to_email, "ERROR", err_text)
                     error_count += 1
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(err_text)}")

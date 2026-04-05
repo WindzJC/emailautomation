@@ -306,7 +306,12 @@ def _build_automation_status() -> dict[str, object]:
             "target_local_label": _format_local_label(recovery_target_utc.astimezone()) if recovery_target_utc else "",
             "target_local_clock": _format_local_clock(recovery_target_utc.astimezone()) if recovery_target_utc else "",
             "remaining_seconds": recovery_remaining_seconds,
-            "note": str(jc_pacing.get("last_throttle_reason") or timer_state.get("private_jc_recovery_note") or ""),
+            "note": str(
+                jc_pacing.get("recovery_reason")
+                or jc_pacing.get("last_throttle_reason")
+                or timer_state.get("private_jc_recovery_note")
+                or ""
+            ),
         },
     }
 
