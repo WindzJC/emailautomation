@@ -31,6 +31,7 @@ from important_leads_workflow import (
     check_master_leads,
     dispatch_master_leads,
     important_leads_status,
+    important_leads_path_state,
 )
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
@@ -48,10 +49,12 @@ from sendgrid_hygiene import (
 )
 from leads_workflow import (
     clean_uploaded_leads,
+    save_state,
     preview_shard_cleaned_leads,
     save_uploaded_csv,
     shard_cleaned_leads,
     shard_status,
+    timestamp_slug,
 )
 from send_shard import PROFILES
 
@@ -62,6 +65,7 @@ WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
 IMPORTANT_LEADS_INPUT = settings.APP_ROOT / "_important" / "leadschecker.csv"
 IMPORTANT_LEADS_OUTPUT = settings.APP_ROOT / "_important" / "leads.csv"
 IMPORTANT_LEADS_REJECTED = settings.APP_ROOT / "_important" / "leads_rejected.csv"
+IMPORTANT_LEADS_CHECK_RUNS = settings.APP_ROOT / "_important" / "check_runs"
 app = FastAPI(title="Email Automation Live Dashboard")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -101,6 +105,13 @@ class ShardLeadsPayload(BaseModel):
     strategy: str = Field(default="domain_balanced")
 
 
+class ImportantLeadPathsPayload(BaseModel):
+    input_path: str = ""
+    output_path: str = ""
+    rejected_path: str = ""
+    input_text: str = ""
+
+
 def _profile_runtime_active(profile_name: str) -> bool:
     try:
         snapshots = runtime_control.list_sender_snapshots(tail_lines=8)
@@ -114,6 +125,38 @@ def _profile_runtime_active(profile_name: str) -> bool:
             return False
         return str(getattr(snapshot, "runtime_state", "") or "") in active_states
     return False
+
+
+def _resolve_dashboard_csv_path(raw_value: str, default_path: Path) -> Path:
+    candidate = str(raw_value or "").strip()
+    if not candidate:
+        return default_path
+    path = Path(candidate)
+    if not path.is_absolute():
+        path = settings.APP_ROOT / path
+    resolved_root = settings.APP_ROOT.resolve()
+    resolved_path = path.resolve(strict=False)
+    if resolved_path.suffix.lower() != ".csv":
+        raise ValueError("Leads paths must point to .csv files.")
+    if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        raise ValueError("Leads paths must stay inside this workspace.")
+    return resolved_path
+
+
+def _important_path_labels_for_state(input_path: Path, output_path: Path, rejected_path: Path) -> dict[str, str]:
+    root = settings.APP_ROOT.resolve()
+
+    def label(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(root))
+        except Exception:
+            return str(path)
+
+    return {
+        "input_path": label(input_path),
+        "output_path": label(output_path),
+        "rejected_path": label(rejected_path),
+    }
 
 
 def _load_dashboard_auto_start_state() -> dict[str, str]:
@@ -644,12 +687,35 @@ def clean_leads(payload: CleanLeadsPayload) -> JSONResponse:
 
 
 @app.post("/api/leads/check-important")
-def check_important_leads() -> JSONResponse:
+def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> JSONResponse:
     try:
+        current_paths = important_leads_path_state()
+        input_path = _resolve_dashboard_csv_path(
+            payload.input_path if payload else current_paths["input_path"],
+            IMPORTANT_LEADS_INPUT,
+        )
+        output_path = _resolve_dashboard_csv_path(
+            payload.output_path if payload else current_paths["output_path"],
+            IMPORTANT_LEADS_OUTPUT,
+        )
+        rejected_path = _resolve_dashboard_csv_path(
+            payload.rejected_path if payload else current_paths["rejected_path"],
+            IMPORTANT_LEADS_REJECTED,
+        )
+        effective_input_path = input_path
+        input_text = str(payload.input_text or "") if payload else ""
+        if input_text.strip():
+            IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
+            effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
+            normalized_text = input_text.replace("\r\n", "\n").replace("\r", "\n")
+            if not normalized_text.endswith("\n"):
+                normalized_text += "\n"
+            effective_input_path.write_text(normalized_text, encoding="utf-8")
+        save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         report = check_master_leads(
-            input_path=IMPORTANT_LEADS_INPUT,
-            output_path=IMPORTANT_LEADS_OUTPUT,
-            rejected_path=IMPORTANT_LEADS_REJECTED,
+            input_path=effective_input_path,
+            output_path=output_path,
+            rejected_path=rejected_path,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
@@ -662,7 +728,7 @@ def check_important_leads() -> JSONResponse:
         {
             "ok": True,
             "message": (
-                f"Checked {IMPORTANT_LEADS_INPUT.name} into {IMPORTANT_LEADS_OUTPUT.name}. "
+                f"Checked {report['input_label']} into {report['output_label']}. "
                 f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
                 f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
             ),
@@ -673,11 +739,25 @@ def check_important_leads() -> JSONResponse:
 
 
 @app.post("/api/leads/dispatch-important")
-def dispatch_important_leads() -> JSONResponse:
+def dispatch_important_leads(payload: ImportantLeadPathsPayload | None = None) -> JSONResponse:
     try:
+        current_paths = important_leads_path_state()
+        input_path = _resolve_dashboard_csv_path(
+            payload.input_path if payload else current_paths["input_path"],
+            IMPORTANT_LEADS_INPUT,
+        )
+        output_path = _resolve_dashboard_csv_path(
+            payload.output_path if payload else current_paths["output_path"],
+            IMPORTANT_LEADS_OUTPUT,
+        )
+        rejected_path = _resolve_dashboard_csv_path(
+            payload.rejected_path if payload else current_paths["rejected_path"],
+            IMPORTANT_LEADS_REJECTED,
+        )
+        save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         report = dispatch_master_leads(
-            master_path=IMPORTANT_LEADS_OUTPUT,
-            rejected_path=IMPORTANT_LEADS_REJECTED,
+            master_path=output_path,
+            rejected_path=rejected_path,
             require_stopped=True,
         )
     except FileNotFoundError as exc:
