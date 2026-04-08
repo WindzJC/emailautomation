@@ -14,7 +14,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from recipient_file_lock import lock_files
 
 
-DEFAULT_HEADERS = ["Email", "AuthorName"]
+DEFAULT_HEADERS = ["Email", "FirstName"]
 
 
 def norm_email(s: str) -> str:
@@ -24,10 +24,10 @@ def norm_email(s: str) -> str:
 @dataclass(frozen=True)
 class Row:
     email: str
-    author_name: str
+    first_name: str
 
     def as_dict(self) -> Dict[str, str]:
-        return {"Email": self.email, "AuthorName": self.author_name}
+        return {"Email": self.email, "FirstName": self.first_name}
 
 
 @dataclass
@@ -53,7 +53,7 @@ def first_name_only(value: str) -> str:
 
 def detect_fieldnames(fieldnames: Optional[Sequence[str]]) -> Tuple[str, str]:
     if not fieldnames:
-        return ("Email", "AuthorName")
+        return ("Email", "FirstName")
 
     # Handle BOM in first header (common on Windows exports)
     fn = [f.lstrip("\ufeff") for f in fieldnames]
@@ -66,7 +66,7 @@ def detect_fieldnames(fieldnames: Optional[Sequence[str]]) -> Tuple[str, str]:
         return None
 
     email_key = pick(["email", "e-mail", "e_mail", "mail", "address"]) or fn[0]
-    name_key = pick(["authorname", "author_name", "name", "firstname", "first_name"]) or (fn[1] if len(fn) > 1 else fn[0])
+    name_key = pick(["firstname", "first_name", "authorname", "author_name", "name"]) or (fn[1] if len(fn) > 1 else fn[0])
     return (email_key, name_key)
 
 
@@ -93,7 +93,7 @@ def read_rows_csv(path: Path) -> Tuple[List[str], List[Row]]:
             out.append(
                 Row(
                     email=email,
-                    author_name=first_name_only(r.get(name_key) or ""),
+                    first_name=first_name_only(r.get(name_key) or ""),
                 )
             )
         return (headers, out)
@@ -214,7 +214,7 @@ def main(argv: Sequence[str]) -> int:
     if keep_top_email:
         top_row = Row(
             email=args.keep_top_email.strip(),
-            author_name=first_name_only(args.keep_top_name or ""),
+            first_name=first_name_only(args.keep_top_name or ""),
         )
 
     want_count = args.count

@@ -156,7 +156,7 @@ def main():
     ap.add_argument("--out", dest="out", required=True)
     ap.add_argument("--suppressed", default="suppressed.csv", help="Suppression list (loaded) and reject report (rewritten/extended).")
     ap.add_argument("--email_col", default="Email")
-    ap.add_argument("--author_col", default="AuthorName")
+    ap.add_argument("--author_col", default="FirstName")
     ap.add_argument("--title_col", default="BookTitle")
     ap.add_argument("--no_mx", action="store_true")
     ap.add_argument("--allow_role", action="store_true", help="Allow role-based addresses (info@, support@, etc.).")
@@ -165,12 +165,12 @@ def main():
     ap.add_argument(
         "--require_author",
         action="store_true",
-        help="Reject rows missing AuthorName.",
+        help="Reject rows missing FirstName.",
     )
     ap.add_argument(
         "--require_fields",
         action="store_true",
-        help="Reject rows missing AuthorName or BookTitle.",
+        help="Reject rows missing FirstName or BookTitle.",
     )
     ap.add_argument(
         "--overwrite_in",
@@ -226,7 +226,7 @@ def main():
          supp.open("w", newline="", encoding="utf-8") as fs:
 
         r = csv.DictReader(f)
-        input_header = r.fieldnames or ["Email", "AuthorName", "BookTitle"]
+        input_header = r.fieldnames or ["Email", "FirstName", "BookTitle"]
         w_ok = csv.DictWriter(fo, fieldnames=input_header)
         w_bad = csv.DictWriter(fs, fieldnames=["TimestampUTC","Email","Reason"])
         w_ok.writeheader()
@@ -244,7 +244,7 @@ def main():
                 summary["reason:missing_email"] += 1
                 continue
             if args.require_fields:
-                author_val = (row.get(args.author_col) or "").strip()
+                author_val = (row.get(args.author_col) or row.get("AuthorName") or "").strip()
                 title_val = (row.get(args.title_col) or "").strip()
                 if not author_val:
                     w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "missing_author"})
@@ -257,7 +257,7 @@ def main():
                     summary["reason:missing_title"] += 1
                     continue
             elif args.require_author:
-                author_val = (row.get(args.author_col) or "").strip()
+                author_val = (row.get(args.author_col) or row.get("AuthorName") or "").strip()
                 if not author_val:
                     w_bad.writerow({"TimestampUTC": now_utc(), "Email": email, "Reason": "missing_author"})
                     summary["rejected"] += 1
@@ -288,7 +288,7 @@ def main():
                 summary[f"reason:{reason}"] += 1
 
     if args.drain_in:
-        inp.write_text(",".join(input_header or ["Email", "AuthorName", "BookTitle"]) + "\n", encoding="utf-8")
+        inp.write_text(",".join(input_header or ["Email", "FirstName", "BookTitle"]) + "\n", encoding="utf-8")
     elif args.overwrite_in:
         inp.write_text(outp.read_text(encoding="utf-8"), encoding="utf-8")
 

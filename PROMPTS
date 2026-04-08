@@ -43,7 +43,7 @@ PENDING
 python3 check_pending.py
 
 CHECK LEADS (PRECHECK)
-./.venv/bin/python precheck_leads.py --in leads.csv --out leads_prechecked.csv --suppressed suppressed.csv --email_col AuthorEmail --author_col AuthorName --mx_timeout 2 --mx_lifetime 6 --require_author --no_drain_in
+./.venv/bin/python precheck_leads.py --in leads.csv --out leads_prechecked.csv --suppressed suppressed.csv --email_col AuthorEmail --author_col FirstName --mx_timeout 2 --mx_lifetime 6 --require_author --no_drain_in
 
 CHECK + DISTRIBUTE TO SENDGRID SHARDS (ONE COMMAND)
 ./.venv/bin/python tools/prepare_sendgrid_leads.py \

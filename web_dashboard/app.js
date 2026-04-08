@@ -37,9 +37,22 @@ const els = {
   startBtn: document.getElementById("start-btn"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
+  leadsImportantInputPath: document.getElementById("leads-important-input-path"),
+  leadsImportantOutputPath: document.getElementById("leads-important-output-path"),
+  leadsImportantRejectedPath: document.getElementById("leads-important-rejected-path"),
+  leadsImportantInputText: document.getElementById("leads-important-input-text"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
   leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
   leadsImportantCheckResults: document.getElementById("leads-important-check-results"),
+  leadsImportantVerifyInputPath: document.getElementById("leads-verify-input-path"),
+  leadsImportantVerifyOutputPath: document.getElementById("leads-verify-output-path"),
+  leadsImportantVerifyRejectedPath: document.getElementById("leads-verify-rejected-path"),
+  leadsImportantVerifyQuarantinePath: document.getElementById("leads-verify-quarantine-path"),
+  leadsImportantVerifyBtn: document.getElementById("leads-verify-btn"),
+  leadsImportantVerifyMeta: document.getElementById("leads-verify-meta"),
+  leadsImportantVerifyResults: document.getElementById("leads-verify-results"),
+  leadsImportantDispatchSourceMode: document.getElementById("leads-dispatch-source-mode"),
+  leadsImportantDispatchSourceNote: document.getElementById("leads-dispatch-source-note"),
   leadsImportantDispatchBtn: document.getElementById("leads-important-dispatch-btn"),
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
@@ -47,7 +60,7 @@ const els = {
   leadsUploadBtn: document.getElementById("leads-upload-btn"),
   leadsUploadMeta: document.getElementById("leads-upload-meta"),
   leadsEmailColumn: document.getElementById("leads-email-column"),
-  leadsAuthorColumn: document.getElementById("leads-author-column"),
+  leadsFirstNameColumn: document.getElementById("leads-first-name-column"),
   leadsBookColumn: document.getElementById("leads-book-column"),
   leadsUploadPreview: document.getElementById("leads-upload-preview"),
   cleanRemoveInvalid: document.getElementById("clean-remove-invalid"),
@@ -77,7 +90,9 @@ let lastSnapshot = null;
 let lastLeadsStatus = null;
 let lastShardPreview = null;
 let lastImportantLeadCheck = null;
+let lastImportantVerify = null;
 let lastImportantDispatch = null;
+let lastImportantDispatchSource = null;
 let didHydrate = false;
 let selectedProfileName = "";
 let displayTimeZone = "America/Los_Angeles";
@@ -365,8 +380,64 @@ function previewMatchesCurrentSelection() {
 function selectedLeadsMapping() {
   return {
     email: els.leadsEmailColumn?.value || "",
-    author_name: els.leadsAuthorColumn?.value || "",
+    first_name: els.leadsFirstNameColumn?.value || "",
     book_title: els.leadsBookColumn?.value || "",
+  };
+}
+
+function importantLeadPathsPayload() {
+  return {
+    input_path: els.leadsImportantInputPath?.value?.trim() || "",
+    output_path: els.leadsImportantOutputPath?.value?.trim() || "",
+    rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
+    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "verified",
+    input_text: els.leadsImportantInputText?.value || "",
+  };
+}
+
+function syncImportantLeadPathInputs(status) {
+  const inputLabel = status?.important_input_label || "_important/leadschecker.csv";
+  const outputLabel = status?.important_output_label || "_important/leads.csv";
+  const rejectedLabel = status?.important_rejected_label || "_important/leads_rejected.csv";
+  if (els.leadsImportantInputPath) els.leadsImportantInputPath.value = inputLabel;
+  if (els.leadsImportantOutputPath) els.leadsImportantOutputPath.value = outputLabel;
+  if (els.leadsImportantRejectedPath) els.leadsImportantRejectedPath.value = rejectedLabel;
+}
+
+function importantLeadVerifyPayload() {
+  return {
+    input_path: els.leadsImportantVerifyInputPath?.value?.trim() || "",
+    verified_path: els.leadsImportantVerifyOutputPath?.value?.trim() || "",
+    rejected_path: els.leadsImportantVerifyRejectedPath?.value?.trim() || "",
+    quarantine_path: els.leadsImportantVerifyQuarantinePath?.value?.trim() || "",
+  };
+}
+
+function syncImportantVerifyPathInputs(status) {
+  const inputLabel = status?.important_verify_input_label || "_important/leads.csv";
+  const verifiedLabel = status?.important_verify_keep_label || "_important/leads_verified.csv";
+  const rejectedLabel = status?.important_verify_rejected_label || "_important/leads_verify_rejected.csv";
+  const quarantineLabel = status?.important_verify_quarantine_label || "_important/leads_quarantine.csv";
+  if (els.leadsImportantVerifyInputPath) els.leadsImportantVerifyInputPath.value = inputLabel;
+  if (els.leadsImportantVerifyOutputPath) els.leadsImportantVerifyOutputPath.value = verifiedLabel;
+  if (els.leadsImportantVerifyRejectedPath) els.leadsImportantVerifyRejectedPath.value = rejectedLabel;
+  if (els.leadsImportantVerifyQuarantinePath) els.leadsImportantVerifyQuarantinePath.value = quarantineLabel;
+}
+
+function syncImportantDispatchSourceMode(status) {
+  const mode = status?.dispatch_source_mode || lastImportantDispatchSource?.dispatch_source_mode || "verified";
+  if (els.leadsImportantDispatchSourceMode) {
+    els.leadsImportantDispatchSourceMode.value = mode === "cleaned" ? "cleaned" : "verified";
+  }
+}
+
+function dispatchSourceForSelectedMode() {
+  const status = lastLeadsStatus || {};
+  const selectedMode = els.leadsImportantDispatchSourceMode?.value || status.dispatch_source_mode || "verified";
+  const options = status.dispatch_source_options || {};
+  return {
+    mode: selectedMode === "cleaned" ? "cleaned" : "verified",
+    source: options[selectedMode] || status.dispatch_source || {},
   };
 }
 
@@ -385,7 +456,7 @@ function renderLeadsMappingOptions(upload) {
   const mapping = upload?.mapping || {};
   const selects = [
     { node: els.leadsEmailColumn, selected: mapping.email || "", allowEmpty: false },
-    { node: els.leadsAuthorColumn, selected: mapping.author_name || "", allowEmpty: true },
+    { node: els.leadsFirstNameColumn, selected: mapping.first_name || "", allowEmpty: true },
     { node: els.leadsBookColumn, selected: mapping.book_title || "", allowEmpty: true },
   ];
   selects.forEach(({ node, selected, allowEmpty }) => {
@@ -554,7 +625,139 @@ function renderImportantLeadCheck(result) {
   );
 }
 
+function renderImportantLeadVerify(result) {
+  if (els.leadsImportantVerifyMeta) {
+    if (result?.generated_at_utc) {
+      setNodeText(
+        els.leadsImportantVerifyMeta,
+        `${result.input_label} verified into ${result.verified_label}. KEEP ${Number(result.keep_count || 0)}, REJECT ${Number(result.reject_count || 0)}, QUARANTINE ${Number(result.quarantine_count || 0)}.`,
+      );
+    } else {
+      setNodeText(
+        els.leadsImportantVerifyMeta,
+        "Ready. Verify the cleaned leads file against public evidence before dispatching.",
+      );
+    }
+  }
+
+  if (!result?.generated_at_utc) {
+    setNodeHtml(
+      els.leadsImportantVerifyResults,
+      `<p class="muted">Verify runs from <strong>_important/leads.csv</strong> by default and writes verified, rejected, and quarantine outputs separately.</p>`,
+    );
+    return;
+  }
+
+  const keepRows = Array.isArray(result.keep_preview_rows) ? result.keep_preview_rows : [];
+  const rejectRows = Array.isArray(result.reject_preview_rows) ? result.reject_preview_rows : [];
+  const quarantineRows = Array.isArray(result.quarantine_preview_rows) ? result.quarantine_preview_rows : [];
+  setNodeHtml(
+    els.leadsImportantVerifyResults,
+    `
+      <article class="leads-result-card">
+        <h3>Verify Result</h3>
+        <div class="leads-kpis">
+          <div class="leads-kpi"><div class="label">Input</div><div class="value">${Number(result.total_input_rows || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Keep</div><div class="value">${Number(result.keep_count || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Reject</div><div class="value">${Number(result.reject_count || 0)}</div></div>
+          <div class="leads-kpi"><div class="label">Quarantine</div><div class="value">${Number(result.quarantine_count || 0)}</div></div>
+        </div>
+        <div class="pill-row">
+          <span class="mini-pill">Input ${escapeHtml(result.input_label || "-")}</span>
+          <span class="mini-pill">Keep ${escapeHtml(result.verified_label || "-")}</span>
+          <span class="mini-pill">Reject ${escapeHtml(result.rejected_label || "-")}</span>
+          <span class="mini-pill">Quarantine ${escapeHtml(result.quarantine_label || "-")}</span>
+        </div>
+        ${
+          Object.keys(result.reason_counts || {}).length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr><th>Reason</th><th>Count</th></tr>
+                  </thead>
+                  <tbody>
+                    ${Object.entries(result.reason_counts || {}).map(([reason, count]) => `
+                      <tr><td>${escapeHtml(reason)}</td><td>${Number(count || 0)}</td></tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+        ${
+          keepRows.length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>${Object.keys(keepRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                  </thead>
+                  <tbody>
+                    ${keepRows.map((row) => `
+                      <tr>${Object.keys(keepRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+        ${
+          rejectRows.length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>${Object.keys(rejectRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                  </thead>
+                  <tbody>
+                    ${rejectRows.map((row) => `
+                      <tr>${Object.keys(rejectRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+        ${
+          quarantineRows.length
+            ? `
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>${Object.keys(quarantineRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                  </thead>
+                  <tbody>
+                    ${quarantineRows.map((row) => `
+                      <tr>${Object.keys(quarantineRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              </div>
+            `
+            : ""
+        }
+      </article>
+    `,
+  );
+}
+
 function renderImportantDispatch(result) {
+  const selectedDispatchSource = dispatchSourceForSelectedMode();
+  const dispatchSource = selectedDispatchSource.source || {};
+  const liveQueues = Array.isArray(lastLeadsStatus?.sendgrid_queues) ? lastLeadsStatus.sendgrid_queues : [];
+  const liveQueueMap = new Map(liveQueues.map((item) => [String(item.name || ""), Number(item.count || 0)]));
+  const liveJcCount = Number(lastLeadsStatus?.jc_queue?.count || 0);
+  const liveSg1 = Number(liveQueueMap.get("SG1") || 0);
+  const liveSg2 = Number(liveQueueMap.get("SG2") || 0);
+  const liveSg3 = Number(liveQueueMap.get("SG3") || 0);
+  const liveSg4 = Number(liveQueueMap.get("SG4") || 0);
+  const liveSg5 = Number(liveQueueMap.get("SG5") || 0);
+  const liveSendgridTotal = liveSg1 + liveSg2 + liveSg3 + liveSg4 + liveSg5;
+  const lastDispatchGeneratedAt = result?.generated_at_utc ? formatGeneratedAt(result.generated_at_utc) : "-";
   const assignedSendgridTotal = Number(result?.assigned_sg1 || 0)
     + Number(result?.assigned_sg2 || 0)
     + Number(result?.assigned_sg3 || 0)
@@ -564,78 +767,195 @@ function renderImportantDispatch(result) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        `Dispatched from ${result.master_label}. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Backup ${result.backup_dir || "-"}.`,
+        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_mode || "verified")} from ${escapeHtml(result.dispatch_source_path || "-")}. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
       );
     } else {
-      setNodeText(
-        els.leadsImportantDispatchMeta,
-        "Dispatch is idle. Check the master file first, then dispatch while all senders are stopped.",
-      );
+      const sourceMode = selectedDispatchSource.mode;
+      const sourcePath = dispatchSource?.dispatch_source_path || (sourceMode === "cleaned" ? "_important/leads.csv" : "_important/leads_verified.csv");
+      setNodeText(els.leadsImportantDispatchMeta, `Dispatch is idle. Source mode ${sourceMode} from ${sourcePath}. Check the source file first, then dispatch while all senders are stopped.`);
     }
   }
 
   if (!result?.generated_at_utc) {
+    const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
+    const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
+    const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
+    if (els.leadsImportantDispatchBtn) {
+      els.leadsImportantDispatchBtn.disabled = sourceBlocked;
+    }
     setNodeHtml(
       els.leadsImportantDispatchResults,
-      `<p class="muted">Dispatch reads <strong>_important/leads.csv</strong>, checks Astra and SendGrid separately, then adds each eligible lead to Astra, one SendGrid shard, or both.</p>`,
+      `
+        <div class="leads-split-grid">
+          <article class="leads-result-card">
+            <h3>Dispatch Source</h3>
+            <div class="leads-kpis">
+              <div class="leads-kpi"><div class="label">Mode</div><div class="value">${escapeHtml(dispatchSource.dispatch_source_mode || "verified")}</div></div>
+              <div class="leads-kpi"><div class="label">Rows</div><div class="value">${Number(dispatchSource.dispatch_source_row_count || 0)}</div></div>
+              <div class="leads-kpi"><div class="label">Eligible</div><div class="value">${Number(dispatchSource.dispatch_eligible_row_count || 0)}</div></div>
+              <div class="leads-kpi"><div class="label">Exists</div><div class="value">${dispatchSource.dispatch_source_exists ? "Yes" : "No"}</div></div>
+            </div>
+            <div class="pill-row">
+              <span class="mini-pill">Path ${escapeHtml(dispatchSource.dispatch_source_path || "-")}</span>
+              <span class="mini-pill">Verification ${dispatchSource.verification_required ? "required" : "off"}</span>
+              ${dispatchSource.verification_file_mtime ? `<span class="mini-pill">Verified ${escapeHtml(dispatchSource.verification_file_mtime)}</span>` : ""}
+              ${dispatchSource.dispatch_block_reason ? `<span class="mini-pill">Blocked ${escapeHtml(dispatchSource.dispatch_block_reason)}</span>` : `<span class="mini-pill">Ready</span>`}
+            </div>
+            ${
+              sourceHeaders.length && sourcePreviewRows.length
+                ? `
+                  <div class="table-shell">
+                    <table>
+                      <thead>
+                        <tr>${sourceHeaders.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                      </thead>
+                      <tbody>
+                        ${sourcePreviewRows.map((row) => `
+                          <tr>${sourceHeaders.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                        `).join("")}
+                      </tbody>
+                    </table>
+                  </div>
+                `
+                : `<p class="muted">No source preview available yet.</p>`
+            }
+          </article>
+          <article class="leads-result-card">
+            <h3>Current Live Queues</h3>
+            <div class="leads-kpis">
+              <div class="leads-kpi"><div class="label">JC Live</div><div class="value">${liveJcCount}</div></div>
+              <div class="leads-kpi"><div class="label">SG Live</div><div class="value">${liveSendgridTotal}</div></div>
+            </div>
+            <div class="table-shell">
+              <table>
+                <thead>
+                  <tr><th>Queue</th><th>Current Live</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Astra / JC</td><td>${liveJcCount}</td></tr>
+                  <tr><td>SG1</td><td>${liveSg1}</td></tr>
+                  <tr><td>SG2</td><td>${liveSg2}</td></tr>
+                  <tr><td>SG3</td><td>${liveSg3}</td></tr>
+                  <tr><td>SG4</td><td>${liveSg4}</td></tr>
+                  <tr><td>SG5</td><td>${liveSg5}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+      `,
     );
     return;
   }
 
+  const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
+  const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
+  const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
+  if (els.leadsImportantDispatchBtn) {
+    els.leadsImportantDispatchBtn.disabled = sourceBlocked;
+  }
   const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows : [];
   const previewFields = Array.isArray(result.queue_headers) ? result.queue_headers : [];
   setNodeHtml(
     els.leadsImportantDispatchResults,
     `
-      <article class="leads-result-card">
-        <h3>Dispatch Result</h3>
-        <div class="leads-kpis">
-          <div class="leads-kpi"><div class="label">Master Read</div><div class="value">${Number(result.master_read || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Added Astra</div><div class="value">${Number(result.added_astra || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Added SendGrid</div><div class="value">${Number(result.added_sendgrid || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_skipped || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Skipped Both</div><div class="value">${Number(result.skipped_both || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Master Duplicates</div><div class="value">${Number(result.duplicate_master_skipped || 0)}</div></div>
-        </div>
-        <div class="table-shell">
-          <table>
-            <thead>
-              <tr><th>Channel</th><th>Decision</th><th>Count</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>Astra</td><td>Added</td><td>${Number(result.added_astra || 0)}</td></tr>
-              <tr><td>Astra</td><td>Already Sent</td><td>${Number(result.skipped_astra_already_sent || 0)}</td></tr>
-              <tr><td>Astra</td><td>Already Queued</td><td>${Number(result.skipped_astra_already_queued || 0)}</td></tr>
-              <tr><td>SendGrid</td><td>Added</td><td>${Number(result.added_sendgrid || 0)}</td></tr>
-              <tr><td>SendGrid</td><td>Already Sent</td><td>${Number(result.skipped_sendgrid_already_sent || 0)}</td></tr>
-              <tr><td>SendGrid</td><td>Already Queued</td><td>${Number(result.skipped_sendgrid_already_queued || 0)}</td></tr>
-              <tr><td>Both</td><td>Skipped Both</td><td>${Number(result.skipped_both || 0)}</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="table-shell">
-          <table>
-            <thead>
-              <tr><th>Queue</th><th>Assigned</th><th>Final Queue</th></tr>
-            </thead>
-            <tbody>
-              <tr><td>Astra / JC</td><td>${Number(result.added_astra || 0)}</td><td>${Number(result.final_queue_counts?.jc || 0)}</td></tr>
-              <tr><td>SG1</td><td>${Number(result.assigned_sg1 || 0)}</td><td>${Number(result.final_queue_counts?.sg1 || 0)}</td></tr>
-              <tr><td>SG2</td><td>${Number(result.assigned_sg2 || 0)}</td><td>${Number(result.final_queue_counts?.sg2 || 0)}</td></tr>
-              <tr><td>SG3</td><td>${Number(result.assigned_sg3 || 0)}</td><td>${Number(result.final_queue_counts?.sg3 || 0)}</td></tr>
-              <tr><td>SG4</td><td>${Number(result.assigned_sg4 || 0)}</td><td>${Number(result.final_queue_counts?.sg4 || 0)}</td></tr>
-              <tr><td>SG5</td><td>${Number(result.assigned_sg5 || 0)}</td><td>${Number(result.final_queue_counts?.sg5 || 0)}</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="pill-row">
-          <span class="mini-pill">Astra + SendGrid allowed</span>
-          <span class="mini-pill">Exactly one SG shard per lead</span>
-          <span class="mini-pill">Backup ${escapeHtml(result.backup_dir || "-")}</span>
-        </div>
-        ${
-          previewFields.length && previewRows.length
-            ? `
+      <div class="leads-split-grid">
+        <article class="leads-result-card">
+          <h3>Dispatch Source</h3>
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">Mode</div><div class="value">${escapeHtml(dispatchSource.dispatch_source_mode || result.dispatch_source_mode || "verified")}</div></div>
+            <div class="leads-kpi"><div class="label">Rows</div><div class="value">${Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Eligible</div><div class="value">${Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Exists</div><div class="value">${dispatchSource.dispatch_source_exists ? "Yes" : "No"}</div></div>
+          </div>
+          <div class="pill-row">
+            <span class="mini-pill">Path ${escapeHtml(dispatchSource.dispatch_source_path || result.dispatch_source_path || "-")}</span>
+            <span class="mini-pill">Verification ${dispatchSource.verification_required || result.verification_required ? "required" : "off"}</span>
+            ${dispatchSource.verification_file_mtime || result.verification_file_mtime ? `<span class="mini-pill">Verified ${escapeHtml(dispatchSource.verification_file_mtime || result.verification_file_mtime || "")}</span>` : ""}
+            ${dispatchSource.dispatch_block_reason || result.dispatch_block_reason ? `<span class="mini-pill">Blocked ${escapeHtml(dispatchSource.dispatch_block_reason || result.dispatch_block_reason || "")}</span>` : `<span class="mini-pill">Ready</span>`}
+          </div>
+          ${
+            sourceHeaders.length && sourcePreviewRows.length
+              ? `
+                <div class="table-shell">
+                  <table>
+                    <thead>
+                      <tr>${sourceHeaders.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+                    </thead>
+                    <tbody>
+                      ${sourcePreviewRows.map((row) => `
+                        <tr>${sourceHeaders.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
+                      `).join("")}
+                    </tbody>
+                  </table>
+                </div>
+              `
+              : ""
+          }
+        </article>
+        <article class="leads-result-card">
+          <h3>Last Dispatch Result</h3>
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">Master Read</div><div class="value">${Number(result.master_read || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Added Astra</div><div class="value">${Number(result.added_astra || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Added SendGrid</div><div class="value">${Number(result.added_sendgrid || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_skipped || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Skipped Both</div><div class="value">${Number(result.skipped_both || 0)}</div></div>
+            <div class="leads-kpi"><div class="label">Master Duplicates</div><div class="value">${Number(result.duplicate_master_skipped || 0)}</div></div>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr><th>Channel</th><th>Decision</th><th>Count</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Astra</td><td>Added</td><td>${Number(result.added_astra || 0)}</td></tr>
+                <tr><td>Astra</td><td>Already Sent</td><td>${Number(result.skipped_astra_already_sent || 0)}</td></tr>
+                <tr><td>Astra</td><td>Already Queued</td><td>${Number(result.skipped_astra_already_queued || 0)}</td></tr>
+                <tr><td>SendGrid</td><td>Added</td><td>${Number(result.added_sendgrid || 0)}</td></tr>
+                <tr><td>SendGrid</td><td>Already Sent</td><td>${Number(result.skipped_sendgrid_already_sent || 0)}</td></tr>
+                <tr><td>SendGrid</td><td>Already Queued</td><td>${Number(result.skipped_sendgrid_already_queued || 0)}</td></tr>
+                <tr><td>Both</td><td>Skipped Both</td><td>${Number(result.skipped_both || 0)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pill-row">
+            <span class="mini-pill">Generated ${escapeHtml(lastDispatchGeneratedAt)}</span>
+            <span class="mini-pill">Source ${escapeHtml(result.dispatch_source_mode || "verified")}</span>
+            <span class="mini-pill">Astra + SendGrid allowed</span>
+            <span class="mini-pill">Exactly one SG shard per lead</span>
+            <span class="mini-pill">Backup ${escapeHtml(result.backup_dir || "-")}</span>
+          </div>
+        </article>
+        <article class="leads-result-card">
+          <h3>Current Live Queues</h3>
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">JC Live</div><div class="value">${liveJcCount}</div></div>
+            <div class="leads-kpi"><div class="label">SG Live</div><div class="value">${liveSendgridTotal}</div></div>
+          </div>
+          <p class="muted">These counts come from the live queue files, so they can be lower than the last dispatch report after sending drains the queues.</p>
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr><th>Queue</th><th>Current Live</th><th>At Last Dispatch</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Astra / JC</td><td>${liveJcCount}</td><td>${Number(result.final_queue_counts?.jc || 0)}</td></tr>
+                <tr><td>SG1</td><td>${liveSg1}</td><td>${Number(result.final_queue_counts?.sg1 || 0)}</td></tr>
+                <tr><td>SG2</td><td>${liveSg2}</td><td>${Number(result.final_queue_counts?.sg2 || 0)}</td></tr>
+                <tr><td>SG3</td><td>${liveSg3}</td><td>${Number(result.final_queue_counts?.sg3 || 0)}</td></tr>
+                <tr><td>SG4</td><td>${liveSg4}</td><td>${Number(result.final_queue_counts?.sg4 || 0)}</td></tr>
+                <tr><td>SG5</td><td>${liveSg5}</td><td>${Number(result.final_queue_counts?.sg5 || 0)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+      ${
+        previewFields.length && previewRows.length
+          ? `
+            <article class="leads-result-card">
+              <h3>Last Assigned Preview</h3>
               <div class="table-shell">
                 <table>
                   <thead>
@@ -648,10 +968,10 @@ function renderImportantDispatch(result) {
                   </tbody>
                 </table>
               </div>
-            `
-            : ""
-        }
-      </article>
+            </article>
+          `
+          : ""
+      }
     `,
   );
 }
@@ -736,9 +1056,15 @@ function renderShardWriteGuard() {
 
 function renderLeadsStatus(status) {
   lastLeadsStatus = status || lastLeadsStatus;
+  syncImportantLeadPathInputs(lastLeadsStatus);
+  syncImportantVerifyPathInputs(lastLeadsStatus);
+  syncImportantDispatchSourceMode(lastLeadsStatus);
   lastImportantLeadCheck = lastLeadsStatus?.latest_master_check || lastImportantLeadCheck;
+  lastImportantVerify = lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
+  lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
   renderImportantLeadCheck(lastImportantLeadCheck);
+  renderImportantLeadVerify(lastImportantVerify);
   renderImportantDispatch(lastImportantDispatch);
 
   const latestUpload = lastLeadsStatus?.latest_upload || null;
@@ -837,7 +1163,11 @@ async function runImportantLeadCheck() {
     setNodeText(els.leadsImportantCheckBtn, "Checking...");
   }
   try {
-    const data = await fetchJson("/api/leads/check-important", { method: "POST" });
+    const data = await fetchJson("/api/leads/check-important", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(importantLeadPathsPayload()),
+    });
     lastImportantLeadCheck = data.check || null;
     if (data.status) {
       renderLeadsStatus(data.status || {});
@@ -855,6 +1185,34 @@ async function runImportantLeadCheck() {
   }
 }
 
+async function runImportantLeadVerify() {
+  if (els.leadsImportantVerifyBtn) {
+    els.leadsImportantVerifyBtn.disabled = true;
+    setNodeText(els.leadsImportantVerifyBtn, "Verifying...");
+  }
+  try {
+    const data = await fetchJson("/api/leads/verify-important", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(importantLeadVerifyPayload()),
+    });
+    lastImportantVerify = data.verify || null;
+    if (data.status) {
+      renderLeadsStatus(data.status || {});
+    } else {
+      renderImportantLeadVerify(lastImportantVerify);
+    }
+    showMessage(data.message || "Lead verification complete.", "success");
+  } catch (err) {
+    showMessage(`Lead verification failed: ${err}`, "error");
+  } finally {
+    if (els.leadsImportantVerifyBtn) {
+      els.leadsImportantVerifyBtn.disabled = false;
+      setNodeText(els.leadsImportantVerifyBtn, "Verify Leads");
+    }
+  }
+}
+
 async function runImportantLeadDispatch() {
   if (els.leadsImportantDispatchBtn) {
     els.leadsImportantDispatchBtn.disabled = true;
@@ -863,6 +1221,8 @@ async function runImportantLeadDispatch() {
   try {
     const data = await fetchJson("/api/leads/dispatch-important", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(importantLeadPathsPayload()),
     });
     lastImportantDispatch = data.dispatch || null;
     renderImportantLeadCheck(lastImportantLeadCheck);
@@ -1892,6 +2252,9 @@ function renderLiveDelivery(profile, hours) {
   const webhook = profile.webhook || { summary: {}, latest_event: {}, total: 0 };
   const summary = webhook.summary || {};
   const latest = webhook.latest_event || {};
+  const mapped24h = Number(webhook.mapped_events_24h || webhook.total || 0);
+  const unmapped24h = Number(webhook.unmapped_events_24h || 0);
+  const lastWebhookText = webhook.last_received_at || (webhook.last_received_iso ? formatGeneratedAt(webhook.last_received_iso) : "No webhook yet");
   const failureBits = [];
   if (summary.bounce) failureBits.push(`Bounced ${summary.bounce}`);
   if (summary.blocked) failureBits.push(`Blocked ${summary.blocked}`);
@@ -1908,16 +2271,16 @@ function renderLiveDelivery(profile, hours) {
     <section class="live-delivery">
       <div class="live-delivery-head">
         <strong>Live SendGrid</strong>
-        <span class="muted">${webhook.total || 0} mapped event${(webhook.total || 0) === 1 ? "" : "s"} in ${hours}h</span>
+        <span class="muted">Last webhook ${lastWebhookText}</span>
       </div>
       <div class="live-metrics-grid">
+        ${liveMetric(`Mapped ${hours}h`, mapped24h, mapped24h > 0 ? "good" : "neutral")}
+        ${liveMetric(`Unmapped ${hours}h`, unmapped24h, unmapped24h > 0 ? "warn" : "neutral")}
+        ${liveMetric("Processed", summary.processed || 0, (summary.processed || 0) > 0 ? "good" : "neutral")}
         ${liveMetric("Delivered", summary.delivered || 0, "good")}
-        ${liveMetric("Opened (uniq)", summary.open_unique || 0, "good")}
-        ${liveMetric("Opened (all)", summary.open || 0, "good")}
-        ${liveMetric("Clicked (uniq)", summary.click_unique || 0, "good")}
-        ${liveMetric("Clicked (all)", summary.click || 0, "good")}
         ${liveMetric("Deferred", summary.deferred || 0, summary.deferred ? "warn" : "neutral")}
-        ${liveMetric("Failures", summary.failed || 0, summary.failed ? "bad" : "neutral")}
+        ${liveMetric("Bounced", summary.bounce || 0, summary.bounce ? "bad" : "neutral")}
+        ${liveMetric("Dropped", summary.dropped || 0, summary.dropped ? "bad" : "neutral")}
       </div>
       ${renderDeliveryFunnel(profile, hours)}
       <div class="live-delivery-note">
@@ -1931,6 +2294,7 @@ function renderLiveDelivery(profile, hours) {
 
 function renderWebhookSummary(profile, snapshot = {}) {
   const channel = profileTelemetryChannel(profile);
+  const detailHours = Number(snapshot.activity_hours || 24);
   if (channel !== "sendgrid") {
     const guard = profile.name === "private_jc" ? (snapshot.private_bounce_guard || {}) : {};
     const guardLabel = profile.name === "private_jc" ? (guard.status_label || "Idle") : "N/A";
@@ -1986,7 +2350,11 @@ function renderWebhookSummary(profile, snapshot = {}) {
     <section class="webhook-panel">
       <div class="webhook-head">
         <strong>Webhook Events</strong>
-        <span class="muted">Total ${webhook.total || 0}</span>
+        <span class="muted">${webhook.last_received_at ? `Last received ${webhook.last_received_at}` : `Total ${webhook.total || 0}`}</span>
+      </div>
+      <div class="event-chip-row">
+        <span class="event-chip chip-good">Mapped ${detailHours}h: ${Number(webhook.mapped_events_24h || webhook.total || 0)}</span>
+        <span class="event-chip ${Number(webhook.unmapped_events_24h || 0) > 0 ? "chip-warn" : "chip-neutral"}">Unmapped ${detailHours}h: ${Number(webhook.unmapped_events_24h || 0)}</span>
       </div>
       <details class="webhook-details-panel"${shouldOpen ? " open" : ""}>
         <summary>
@@ -2632,7 +3000,11 @@ if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/
 if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
+if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify());
 if (els.leadsImportantDispatchBtn) els.leadsImportantDispatchBtn.addEventListener("click", () => runImportantLeadDispatch());
+if (els.leadsImportantDispatchSourceMode) {
+  els.leadsImportantDispatchSourceMode.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+}
 if (els.leadsUploadBtn) els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
 if (els.leadsCleanBtn) els.leadsCleanBtn.addEventListener("click", () => runLeadClean());
 if (els.leadsPreviewBtn) els.leadsPreviewBtn.addEventListener("click", () => previewLeadShard());
@@ -2674,5 +3046,6 @@ activeDashboardTab = readDashboardTabFromLocation();
 applyWallboardMode();
 applyDashboardTab();
 renderImportantLeadCheck(lastImportantLeadCheck);
+renderImportantLeadVerify(lastImportantVerify);
 renderImportantDispatch(lastImportantDispatch);
 Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]).finally(() => connectSocket());

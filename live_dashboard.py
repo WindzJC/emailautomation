@@ -28,10 +28,16 @@ from dashboard_core import (
     save_dashboard_send_cap_per_profile,
 )
 from important_leads_workflow import (
+    ImportantLeadsCheckError,
     check_master_leads,
     dispatch_master_leads,
     important_leads_status,
     important_leads_path_state,
+)
+from important_leads_verify import (
+    important_leads_verify_path_state,
+    important_leads_verify_status,
+    verify_master_leads,
 )
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
@@ -85,7 +91,7 @@ class SendCapPayload(BaseModel):
 
 class ColumnMappingPayload(BaseModel):
     email: str = ""
-    author_name: str = ""
+    first_name: str = ""
     book_title: str = ""
 
 
@@ -109,7 +115,15 @@ class ImportantLeadPathsPayload(BaseModel):
     input_path: str = ""
     output_path: str = ""
     rejected_path: str = ""
+    dispatch_source_mode: str = "verified"
     input_text: str = ""
+
+
+class ImportantLeadVerifyPayload(BaseModel):
+    input_path: str = ""
+    verified_path: str = ""
+    rejected_path: str = ""
+    quarantine_path: str = ""
 
 
 def _profile_runtime_active(profile_name: str) -> bool:
@@ -157,6 +171,68 @@ def _important_path_labels_for_state(input_path: Path, output_path: Path, reject
         "output_path": label(output_path),
         "rejected_path": label(rejected_path),
     }
+
+
+def _important_verify_path_labels_for_state(input_path: Path, verified_path: Path, rejected_path: Path, quarantine_path: Path) -> dict[str, str]:
+    root = settings.APP_ROOT.resolve()
+
+    def label(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(root))
+        except Exception:
+            return str(path)
+
+    return {
+        "input_path": label(input_path),
+        "verified_path": label(verified_path),
+        "rejected_path": label(rejected_path),
+        "quarantine_path": label(quarantine_path),
+    }
+
+
+def _important_dispatch_source_labels_for_state(mode: str) -> dict[str, str]:
+    normalized = str(mode or "").strip().lower() or "verified"
+    if normalized not in {"verified", "cleaned"}:
+        normalized = "verified"
+    return {"dispatch_source_mode": normalized}
+
+
+def _normalize_pasted_leads_csv(input_text: str) -> str:
+    normalized_text = str(input_text or "").lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized_text.endswith("\n"):
+        normalized_text += "\n"
+
+    non_empty_lines = [line for line in normalized_text.splitlines() if line.strip()]
+    if not non_empty_lines:
+        return normalized_text
+
+    sample = "\n".join(non_empty_lines[:5])
+    try:
+        delimiter = csv.Sniffer().sniff(sample, delimiters=",\t;|").delimiter
+    except csv.Error:
+        delimiter = "," if "," in non_empty_lines[0] else "\t"
+
+    first_row = next(csv.reader([non_empty_lines[0]], delimiter=delimiter), [])
+    normalized_headers = {"".join(ch for ch in str(cell or "").strip().lower() if ch.isalnum()) for cell in first_row}
+    known_email_headers = {
+        "email",
+        "emailaddress",
+        "email_address",
+        "e_mail",
+        "mail",
+        "authoremail",
+        "contactemail",
+    }
+    if normalized_headers & known_email_headers:
+        return normalized_text
+
+    if len(first_row) >= 2:
+        second_cell = str(first_row[1] or "").strip()
+        first_cell = str(first_row[0] or "").strip()
+        if "@" in second_cell and "@" not in first_cell:
+            return f"FirstName{delimiter}Email\n{normalized_text}"
+
+    return normalized_text
 
 
 def _load_dashboard_auto_start_state() -> dict[str, str]:
@@ -672,6 +748,16 @@ def clean_leads(payload: CleanLeadsPayload) -> JSONResponse:
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ImportantLeadsCheckError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": exc.message,
+                "error": exc.code,
+                "details": exc.details,
+            },
+            status_code=400,
+        )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     except Exception as exc:
@@ -707,9 +793,7 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
         if input_text.strip():
             IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
             effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
-            normalized_text = input_text.replace("\r\n", "\n").replace("\r", "\n")
-            if not normalized_text.endswith("\n"):
-                normalized_text += "\n"
+            normalized_text = _normalize_pasted_leads_csv(input_text)
             effective_input_path.write_text(normalized_text, encoding="utf-8")
         save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         report = check_master_leads(
@@ -719,6 +803,16 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ImportantLeadsCheckError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": exc.message,
+                "error": exc.code,
+                "details": exc.details,
+            },
+            status_code=400,
+        )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     except Exception as exc:
@@ -733,7 +827,62 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
                 f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
             ),
             "check": report,
-            "status": {**shard_status(), **important_leads_status()},
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        }
+    )
+
+
+@app.post("/api/leads/verify-important")
+def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) -> JSONResponse:
+    try:
+        current_paths = important_leads_verify_path_state()
+        input_path = _resolve_dashboard_csv_path(
+            payload.input_path if payload else current_paths["input_path"],
+            IMPORTANT_LEADS_OUTPUT,
+        )
+        verified_path = _resolve_dashboard_csv_path(
+            payload.verified_path if payload else current_paths["verified_path"],
+            IMPORTANT_LEADS_OUTPUT.with_name("leads_verified.csv"),
+        )
+        rejected_path = _resolve_dashboard_csv_path(
+            payload.rejected_path if payload else current_paths["rejected_path"],
+            IMPORTANT_LEADS_OUTPUT.with_name("leads_verify_rejected.csv"),
+        )
+        quarantine_path = _resolve_dashboard_csv_path(
+            payload.quarantine_path if payload else current_paths["quarantine_path"],
+            IMPORTANT_LEADS_OUTPUT.with_name("leads_quarantine.csv"),
+        )
+        save_state(
+            important_leads_verify_paths=_important_verify_path_labels_for_state(
+                input_path,
+                verified_path,
+                rejected_path,
+                quarantine_path,
+            )
+        )
+        report = verify_master_leads(
+            input_path=input_path,
+            verified_path=verified_path,
+            rejected_path=rejected_path,
+            quarantine_path=quarantine_path,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Lead verify failed: {exc}"}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                f"Verified {report['input_label']} into {report['verified_label']}. "
+                f"KEEP {int(report['keep_count'] or 0)}, REJECT {int(report['reject_count'] or 0)}, "
+                f"QUARANTINE {int(report['quarantine_count'] or 0)}."
+            ),
+            "verify": report,
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
         }
     )
 
@@ -742,6 +891,7 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
 def dispatch_important_leads(payload: ImportantLeadPathsPayload | None = None) -> JSONResponse:
     try:
         current_paths = important_leads_path_state()
+        verify_paths = important_leads_verify_path_state()
         input_path = _resolve_dashboard_csv_path(
             payload.input_path if payload else current_paths["input_path"],
             IMPORTANT_LEADS_INPUT,
@@ -754,9 +904,19 @@ def dispatch_important_leads(payload: ImportantLeadPathsPayload | None = None) -
             payload.rejected_path if payload else current_paths["rejected_path"],
             IMPORTANT_LEADS_REJECTED,
         )
+        dispatch_source_mode = str(payload.dispatch_source_mode if payload else "verified").strip().lower() or "verified"
+        if dispatch_source_mode not in {"verified", "cleaned"}:
+            raise ValueError("Dispatch source mode must be verified or cleaned.")
         save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
+        save_state(important_leads_dispatch_source=_important_dispatch_source_labels_for_state(dispatch_source_mode))
+        verified_source_path = _resolve_dashboard_csv_path(
+            verify_paths["verified_path"],
+            IMPORTANT_LEADS_OUTPUT.with_name("leads_verified.csv"),
+        )
         report = dispatch_master_leads(
             master_path=output_path,
+            verified_path=verified_source_path,
+            dispatch_source_mode=dispatch_source_mode,
             rejected_path=rejected_path,
             require_stopped=True,
         )
@@ -777,7 +937,7 @@ def dispatch_important_leads(payload: ImportantLeadPathsPayload | None = None) -
                 f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
             ),
             "dispatch": report,
-            "status": {**shard_status(), **important_leads_status()},
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             "snapshot": _build_live_snapshot(),
         }
     )
@@ -847,7 +1007,7 @@ def preview_shard(payload: ShardLeadsPayload) -> JSONResponse:
 
 @app.get("/api/leads/status")
 def leads_status() -> JSONResponse:
-    return JSONResponse({"ok": True, "status": {**shard_status(), **important_leads_status()}})
+    return JSONResponse({"ok": True, "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
 
 
 @app.post("/webhooks/sendgrid/events")

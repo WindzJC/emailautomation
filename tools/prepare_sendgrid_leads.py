@@ -29,7 +29,7 @@ EMAIL_HEADER_CANDIDATES = (
     "mail",
     "address",
 )
-AUTHOR_HEADER_CANDIDATES = (
+FIRST_NAME_HEADER_CANDIDATES = (
     "authorname",
     "author_name",
     "author",
@@ -89,21 +89,21 @@ def load_source_rows(path: Path) -> List[dict[str, str]]:
             f"Could not find an email column in {path.name}. "
             f"Headers seen: {', '.join(fieldnames)}"
         )
-    author_key = pick_header(fieldnames, AUTHOR_HEADER_CANDIDATES)
+    first_name_key = pick_header(fieldnames, FIRST_NAME_HEADER_CANDIDATES)
 
     rows: List[dict[str, str]] = []
     for row in reader:
         email = (row.get(email_key) or "").strip()
-        author_name = (row.get(author_key) or "").strip() if author_key else ""
-        if not email and not author_name:
+        first_name = (row.get(first_name_key) or "").strip() if first_name_key else ""
+        if not email and not first_name:
             continue
-        rows.append({"Email": email, "AuthorName": author_name})
+        rows.append({"Email": email, "FirstName": first_name})
     return rows
 
 
 def write_normalized_input(path: Path, rows: Sequence[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["Email", "AuthorName"])
+        writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -233,7 +233,7 @@ def main(argv: Sequence[str]) -> int:
             "--email_col",
             "Email",
             "--author_col",
-            "AuthorName",
+            "FirstName",
             "--require_author",
             "--mx_timeout",
             str(args.mx_timeout),

@@ -11,8 +11,11 @@ import settings
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
+    PITCH_JC_BODY,
     _parse_ts_safe,
     _resolve_shard_path,
+    build_sendgrid_astra_custom_args,
+    build_message,
     dedupe_scope_for_runtime,
     domain_finalize_attempt,
     domain_wait_for_slot,
@@ -33,13 +36,13 @@ class SendShardTests(unittest.TestCase):
                 resolved = _resolve_shard_path("recipients_private_jc.csv")
                 self.assertEqual(shards / "recipients_private_jc.csv", resolved)
                 self.assertTrue(resolved.exists())
-                self.assertEqual("Email,AuthorName,BookTitle\n", resolved.read_text(encoding="utf-8"))
+                self.assertEqual("Email,FirstName,BookTitle\n", resolved.read_text(encoding="utf-8"))
 
     def test_prioritize_always_send_rows_moves_probe_to_front(self) -> None:
         rows = [
-            {"Email": "lead1@example.com", "AuthorName": "Lead One"},
-            {"Email": "astraproductionsbyjc@gmail.com", "AuthorName": "Probe"},
-            {"Email": "lead2@example.com", "AuthorName": "Lead Two"},
+            {"Email": "lead1@example.com", "FirstName": "Lead One"},
+            {"Email": "astraproductionsbyjc@gmail.com", "FirstName": "Probe"},
+            {"Email": "lead2@example.com", "FirstName": "Lead Two"},
         ]
 
         ordered = prioritize_always_send_rows(rows, {"astraproductionsbyjc@gmail.com"})
@@ -129,6 +132,54 @@ class SendShardTests(unittest.TestCase):
             )
         )
         self.assertFalse(is_temporary_auth_failure(535, "5.7.8 Username and Password not accepted"))
+
+    def test_sendgrid_custom_args_use_non_pii_astra_mapping_fields(self) -> None:
+        custom_args = build_sendgrid_astra_custom_args(
+            profile_name="sendgrid_annette",
+            run_id="sendgrid_annette-20260406T000000Z-abc123",
+            recipient_email="Reader@Example.com",
+            queue_name="recipients_sendgrid_1.csv",
+            message_ordinal=42,
+        )
+
+        self.assertEqual("sendgrid_annette", custom_args["astra_profile"])
+        self.assertEqual("sendgrid_annette-20260406T000000Z-abc123", custom_args["astra_run_id"])
+        self.assertIn("astra_recipient_id", custom_args)
+        self.assertIn("astra_message_key", custom_args)
+        self.assertNotIn("@", custom_args["astra_recipient_id"])
+        self.assertNotIn("@", custom_args["astra_message_key"])
+        self.assertEqual("sendgrid", custom_args["provider"])
+
+    def test_sender_uses_first_name_in_salutation(self) -> None:
+        msg, subject_text, body_text, html_body, cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.com",
+            author="Anna Example",
+            book_title="Sample Book",
+            subject="Quick thought on your book",
+            body_template=PITCH_JC_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+        )
+
+        self.assertIn("Hi Anna,", body_text)
+        self.assertNotIn("Hi ,", body_text)
+        self.assertEqual("Quick thought on your book", subject_text)
+        self.assertIsNotNone(msg)
+        self.assertIsNotNone(html_body)
+
+    def test_sender_uses_neutral_fallback_when_first_name_missing(self) -> None:
+        _msg, _subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.com",
+            author="",
+            book_title="Sample Book",
+            subject="Quick thought on your book",
+            body_template=PITCH_JC_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+        )
+
+        self.assertIn("Hi there,", body_text)
+        self.assertNotIn("Hi ,", body_text)
 
 
 if __name__ == "__main__":
