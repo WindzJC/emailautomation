@@ -43,6 +43,7 @@ const els = {
   leadsImportantInputText: document.getElementById("leads-important-input-text"),
   leadsImportantPasteNote: document.getElementById("leads-important-paste-note"),
   leadsImportantUploadFile: document.getElementById("leads-important-upload-file"),
+  leadsImportantUploadNote: document.getElementById("leads-important-upload-note"),
   leadsImportantUploadCheckBtn: document.getElementById("leads-important-upload-check-btn"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
   leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
@@ -467,14 +468,53 @@ function updateImportantLeadPasteGuardrails() {
 
 function importantLeadUploadPayload() {
   const formData = new FormData();
-  const file = els.leadsImportantUploadFile?.files?.[0];
+  const { file, filename, size, extension } = selectedImportantLeadUploadFile();
   if (file) {
     formData.append("file", file);
   }
-  formData.append("input_path", els.leadsImportantInputPath?.value?.trim() || "");
+  formData.append("client_selected_filename", filename);
+  formData.append("client_selected_size_bytes", String(size || 0));
+  formData.append("client_selected_extension", extension);
   formData.append("output_path", els.leadsImportantOutputPath?.value?.trim() || "");
   formData.append("rejected_path", els.leadsImportantRejectedPath?.value?.trim() || "");
-  return { formData, file };
+  return { formData, file, filename, size, extension };
+}
+
+function humanizeFileSize(bytes) {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size < 0) return "-";
+  if (size < 1024) return `${size} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = size / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function selectedImportantLeadUploadFile() {
+  const file = els.leadsImportantUploadFile?.files?.[0] || null;
+  const filename = file?.name ? String(file.name) : "";
+  const extension = filename.includes(".") ? filename.slice(filename.lastIndexOf(".")).toLowerCase() : "";
+  return {
+    file,
+    filename,
+    size: Number(file?.size || 0),
+    extension,
+  };
+}
+
+function updateImportantLeadUploadNote(extra = "") {
+  const { filename, size, extension } = selectedImportantLeadUploadFile();
+  const base = filename
+    ? `Selected ${filename} (${humanizeFileSize(size)}, ${extension || "no extension"}). Uploads are file-only and never reuse the stored input path.`
+    : "Choose a CSV file, then click Upload & Check. Uploads are file-only and never reuse the stored input path.";
+  if (els.leadsImportantUploadNote) {
+    setNodeText(els.leadsImportantUploadNote, extra ? `${base} ${extra}` : base);
+  }
+  return { filename, size, extension };
 }
 
 function stopImportantLeadCheckJobPolling() {
@@ -494,6 +534,8 @@ function renderImportantLeadCheckJob(job) {
       : `Upload check ${status}`;
   const detail = job.message || job.error || job.stage || "";
   lastImportantLeadCheckJob = job;
+  const selectedFilename = job.selected_filename || job.original_uploaded_filename || job.source_label || "-";
+  const serverFilename = job.server_received_filename || job.original_uploaded_filename || job.source_label || "-";
   if (els.leadsImportantCheckMeta) {
     setNodeText(
       els.leadsImportantCheckMeta,
@@ -521,7 +563,9 @@ function renderImportantLeadCheckJob(job) {
           </div>
           <div class="pill-row">
             <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
-            <span class="mini-pill">Source ${escapeHtml(job.source_label || "-")}</span>
+            <span class="mini-pill">Mode ${escapeHtml(job.source_mode || "uploaded_file")}</span>
+            <span class="mini-pill">Selected ${escapeHtml(selectedFilename)}</span>
+            <span class="mini-pill">Server ${escapeHtml(serverFilename)}</span>
           </div>
         </article>
       `,
@@ -1354,15 +1398,21 @@ async function runImportantLeadCheck() {
 }
 
 async function runImportantLeadUploadCheck() {
-  const { formData, file } = importantLeadUploadPayload();
+  const { formData, file, filename, size, extension } = importantLeadUploadPayload();
   if (!file) {
     showMessage("Choose a CSV file before uploading.", "error");
+    return;
+  }
+  if (extension && extension !== ".csv") {
+    updateImportantLeadUploadNote(`Only .csv uploads are supported. Selected ${extension}.`);
+    showMessage("Upload CSV checks only accept .csv files.", "error");
     return;
   }
   if (els.leadsImportantUploadCheckBtn) {
     els.leadsImportantUploadCheckBtn.disabled = true;
     setNodeText(els.leadsImportantUploadCheckBtn, "Uploading...");
   }
+  updateImportantLeadUploadNote(`Submitting ${filename} (${humanizeFileSize(size)}, ${extension || "no extension"}).`);
   try {
     const data = await fetchJson("/api/leads/check-important/upload", {
       method: "POST",
@@ -1371,6 +1421,17 @@ async function runImportantLeadUploadCheck() {
     if (data.job?.job_id) {
       renderImportantLeadCheckJob(data.job);
       void pollImportantLeadCheckJob(data.job.job_id);
+      const serverFilename = data.job.server_received_filename || data.job.original_uploaded_filename || data.job.source_label || "-";
+      const mismatch = filename && serverFilename && filename !== serverFilename;
+      updateImportantLeadUploadNote(
+        mismatch
+          ? `Server received ${serverFilename}. Filename mismatch detected.`
+          : `Server received ${serverFilename}. Job ${data.job.job_id}.`,
+      );
+      if (mismatch) {
+        showMessage(`Upload filename mismatch: selected ${filename}, server received ${serverFilename}.`, "error");
+        return;
+      }
     } else if (data.check) {
       lastImportantLeadCheck = data.check || null;
       if (data.status) {
@@ -3214,6 +3275,9 @@ if (els.leadsImportantDispatchBtn) els.leadsImportantDispatchBtn.addEventListene
 if (els.leadsImportantInputText) {
   els.leadsImportantInputText.addEventListener("input", () => updateImportantLeadPasteGuardrails());
   els.leadsImportantInputText.addEventListener("change", () => updateImportantLeadPasteGuardrails());
+}
+if (els.leadsImportantUploadFile) {
+  els.leadsImportantUploadFile.addEventListener("change", () => updateImportantLeadUploadNote());
 }
 if (els.leadsImportantDispatchSourceMode) {
   els.leadsImportantDispatchSourceMode.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));

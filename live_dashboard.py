@@ -375,6 +375,12 @@ def _start_important_check_job(
     rejected_path: Path,
     effective_input_path: Path,
     source_label: str,
+    source_mode: str,
+    original_uploaded_filename: str = "",
+    server_received_filename: str = "",
+    selected_filename: str = "",
+    selected_size_bytes: int = 0,
+    selected_extension: str = "",
     total_input_rows: int,
 ) -> dict[str, object]:
     job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
@@ -385,7 +391,14 @@ def _start_important_check_job(
         "created_at_utc": iso_utc(),
         "updated_at_utc": iso_utc(),
         "source_label": source_label,
+        "source_mode": str(source_mode or "").strip() or "uploaded_file",
+        "original_uploaded_filename": str(original_uploaded_filename or "").strip() or source_label,
+        "server_received_filename": str(server_received_filename or "").strip() or source_label,
+        "selected_filename": str(selected_filename or "").strip() or source_label,
+        "selected_size_bytes": int(selected_size_bytes or 0),
+        "selected_extension": str(selected_extension or "").strip(),
         "input_path": str(input_path),
+        "saved_input_path": str(effective_input_path),
         "output_path": str(output_path),
         "rejected_path": str(rejected_path),
         "effective_input_path": str(effective_input_path),
@@ -1031,16 +1044,14 @@ async def upload_leads(file: UploadFile = File(...)) -> JSONResponse:
 
 @app.post("/api/leads/check-important/upload")
 async def check_important_leads_upload(
-    file: UploadFile = File(...),
-    input_path: str = Form(""),
+    file: UploadFile | None = File(None),
+    client_selected_filename: str = Form(""),
+    client_selected_size_bytes: str = Form(""),
+    client_selected_extension: str = Form(""),
     output_path: str = Form(""),
     rejected_path: str = Form(""),
 ) -> JSONResponse:
     current_paths = important_leads_path_state()
-    resolved_input_path = _resolve_dashboard_csv_path(
-        input_path or current_paths["input_path"],
-        IMPORTANT_LEADS_INPUT,
-    )
     resolved_output_path = _resolve_dashboard_csv_path(
         output_path or current_paths["output_path"],
         IMPORTANT_LEADS_OUTPUT,
@@ -1049,28 +1060,110 @@ async def check_important_leads_upload(
         rejected_path or current_paths["rejected_path"],
         IMPORTANT_LEADS_REJECTED,
     )
-    filename = (file.filename or "").strip()
+    if file is None:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Missing uploaded file. Upload CSV files only.",
+                "error": "UPLOAD_FILE_REQUIRED",
+                "details": {"allowed_extensions": [".csv"]},
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=400,
+        )
+    filename = Path(str(file.filename or "").strip()).name
     if not filename:
-        return JSONResponse({"ok": False, "message": "Missing upload filename."}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Missing upload filename. Upload CSV files only.",
+                "error": "UPLOAD_FILENAME_REQUIRED",
+                "details": {"allowed_extensions": [".csv"]},
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=400,
+        )
+    extension = Path(filename).suffix.lower()
+    if extension != ".csv":
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"Unsupported upload file type: {extension or '[none]'}. Only .csv files are supported for upload checks.",
+                "error": "UPLOAD_UNSUPPORTED_FILE_TYPE",
+                "details": {
+                    "allowed_extensions": [".csv"],
+                    "server_received_filename": filename,
+                    "server_received_extension": extension or "",
+                },
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=415,
+        )
+    selected_filename = Path(str(client_selected_filename or "").strip()).name
+    if selected_filename and selected_filename != filename:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": (
+                    "Selected filename mismatch. "
+                    f"Selected {selected_filename}, server received {filename}."
+                ),
+                "error": "UPLOAD_FILENAME_MISMATCH",
+                "details": {
+                    "selected_filename": selected_filename,
+                    "server_received_filename": filename,
+                    "allowed_extensions": [".csv"],
+                },
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=400,
+        )
+    try:
+        selected_size_bytes = max(0, int(str(client_selected_size_bytes or "0").strip() or 0))
+    except Exception:
+        selected_size_bytes = 0
     content = await file.read()
     if not content:
-        return JSONResponse({"ok": False, "message": "Uploaded file is empty."}, status_code=400)
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Uploaded file is empty.",
+                "error": "UPLOAD_FILE_EMPTY",
+                "details": {
+                    "allowed_extensions": [".csv"],
+                    "server_received_filename": filename,
+                    "server_received_extension": extension,
+                },
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=400,
+        )
     IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
     effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
     effective_input_path.write_bytes(content)
     total_input_rows = _count_csv_rows(effective_input_path)
     job = _start_important_check_job(
-        input_path=resolved_input_path,
+        input_path=effective_input_path,
         output_path=resolved_output_path,
         rejected_path=resolved_rejected_path,
         effective_input_path=effective_input_path,
         source_label=filename,
+        source_mode="uploaded_file",
+        original_uploaded_filename=filename,
+        server_received_filename=filename,
+        selected_filename=selected_filename or filename,
+        selected_size_bytes=selected_size_bytes,
+        selected_extension=str(client_selected_extension or extension or "").strip().lower() or extension,
         total_input_rows=total_input_rows,
     )
     return JSONResponse(
         {
             "ok": True,
             "message": f"Queued upload check for {filename} as {job['job_id']}.",
+            "server_received_filename": filename,
+            "selected_filename": selected_filename or filename,
+            "selected_size_bytes": selected_size_bytes,
+            "selected_extension": extension,
             "job": job,
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
         },

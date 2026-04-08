@@ -350,8 +350,15 @@ class LiveDashboardTests(unittest.TestCase):
                 "stage": "queued",
                 "created_at_utc": "2026-04-09T12:02:30+00:00",
                 "updated_at_utc": "2026-04-09T12:02:30+00:00",
+                "source_mode": "uploaded_file",
                 "source_label": "authors_upload.csv",
-                "input_path": str(input_path),
+                "original_uploaded_filename": "authors_upload.csv",
+                "server_received_filename": "authors_upload.csv",
+                "selected_filename": "authors_upload.csv",
+                "selected_size_bytes": 37,
+                "selected_extension": ".csv",
+                "input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "saved_input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
                 "output_path": str(output_path),
                 "rejected_path": str(rejected_path),
                 "effective_input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
@@ -397,7 +404,9 @@ class LiveDashboardTests(unittest.TestCase):
                 response = asyncio.run(
                     live_dashboard.check_important_leads_upload(
                         file=upload,
-                        input_path=str(input_path),
+                        client_selected_filename="authors_upload.csv",
+                        client_selected_size_bytes="37",
+                        client_selected_extension=".csv",
                         output_path=str(output_path),
                         rejected_path=str(rejected_path),
                     )
@@ -412,6 +421,140 @@ class LiveDashboardTests(unittest.TestCase):
                 "Email,FirstName\nanna@example.com,Anna\n",
                 run_input_path.read_text(encoding="utf-8"),
             )
+            self.assertEqual("uploaded_file", body["job"]["source_mode"])
+            self.assertEqual("authors_upload.csv", body["job"]["server_received_filename"])
+            self.assertEqual("authors_upload.csv", body["job"]["selected_filename"])
+            self.assertEqual(37, body["job"]["selected_size_bytes"])
+            self.assertEqual(str(run_input_path), body["job"]["input_path"])
+            self.assertEqual(str(run_input_path), body["job"]["saved_input_path"])
+            self.assertEqual(str(run_input_path), body["job"]["effective_input_path"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_requires_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=None,
+                        client_selected_filename="authors_upload.csv",
+                        client_selected_size_bytes="0",
+                        client_selected_extension=".csv",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(400, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_FILE_REQUIRED", body["error"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_rejects_unsupported_extension(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.xlsx",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="authors_upload.xlsx",
+                        client_selected_size_bytes="37",
+                        client_selected_extension=".xlsx",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(415, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_UNSUPPORTED_FILE_TYPE", body["error"])
+            self.assertIn(".csv", body["message"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_rejects_filename_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.csv",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="different_name.csv",
+                        client_selected_size_bytes="37",
+                        client_selected_extension=".csv",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(400, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_FILENAME_MISMATCH", body["error"])
+            self.assertIn("mismatch", body["message"].lower())
             check_master_leads.assert_not_called()
 
     def test_check_important_leads_blocks_large_paste_and_recommends_upload(self) -> None:
