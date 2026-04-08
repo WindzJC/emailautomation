@@ -41,6 +41,9 @@ const els = {
   leadsImportantOutputPath: document.getElementById("leads-important-output-path"),
   leadsImportantRejectedPath: document.getElementById("leads-important-rejected-path"),
   leadsImportantInputText: document.getElementById("leads-important-input-text"),
+  leadsImportantPasteNote: document.getElementById("leads-important-paste-note"),
+  leadsImportantUploadFile: document.getElementById("leads-important-upload-file"),
+  leadsImportantUploadCheckBtn: document.getElementById("leads-important-upload-check-btn"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
   leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
   leadsImportantCheckResults: document.getElementById("leads-important-check-results"),
@@ -90,6 +93,8 @@ let lastSnapshot = null;
 let lastLeadsStatus = null;
 let lastShardPreview = null;
 let lastImportantLeadCheck = null;
+let lastImportantLeadCheckJob = null;
+let importantLeadCheckJobTimer = null;
 let lastImportantVerify = null;
 let lastImportantDispatch = null;
 let lastImportantDispatchSource = null;
@@ -395,6 +400,163 @@ function importantLeadPathsPayload() {
   };
 }
 
+function importantLeadPastePolicy() {
+  const policy = lastLeadsStatus?.check_paste_policy || {};
+  return {
+    mode: policy.mode || "small_manual_only",
+    warningRows: Number(policy.paste_warning_rows || 250),
+    maxRows: Number(policy.paste_max_rows || 1000),
+    uploadRequiredRows: Number(policy.upload_required_rows || 1000),
+    uploadRecommendedRows: Number(policy.upload_recommended_rows || 250),
+  };
+}
+
+function estimateImportantLeadPasteRows(text) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!normalized) return 0;
+  return normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .length;
+}
+
+function updateImportantLeadPasteGuardrails() {
+  const policy = importantLeadPastePolicy();
+  const text = String(els.leadsImportantInputText?.value || "");
+  const estimatedRows = estimateImportantLeadPasteRows(text);
+  const limit = Math.max(1, policy.maxRows || 1000);
+  const warning = Math.max(1, Math.min(policy.warningRows || 250, limit));
+  if (!text.trim()) {
+    if (els.leadsImportantPasteNote) {
+      setNodeText(
+        els.leadsImportantPasteNote,
+        `Small/manual only. Use Upload CSV for ${limit}+ rows. Paste first, then Check Leads writes the run file and cleans it into Output and Rejected. Use FullName upstream when you have it.`,
+      );
+    }
+    if (els.leadsImportantCheckBtn) {
+      els.leadsImportantCheckBtn.disabled = false;
+    }
+    return;
+  }
+  if (estimatedRows > limit) {
+    if (els.leadsImportantPasteNote) {
+      setNodeText(
+        els.leadsImportantPasteNote,
+        `Paste detected about ${estimatedRows} row(s). Paste intake is limited to ${limit} rows. Use Upload CSV for this batch.`,
+      );
+    }
+    if (els.leadsImportantCheckBtn) {
+      els.leadsImportantCheckBtn.disabled = true;
+    }
+    return;
+  }
+  if (els.leadsImportantPasteNote) {
+    const suffix = estimatedRows >= warning
+      ? `Estimated ${estimatedRows} row(s). Upload CSV is recommended above ${warning} rows.`
+      : `Estimated ${estimatedRows} row(s). Small/manual only.`;
+    setNodeText(
+      els.leadsImportantPasteNote,
+      `${suffix} Paste first, then Check Leads writes the run file and cleans it into Output and Rejected. Use FullName upstream when you have it.`,
+    );
+  }
+  if (els.leadsImportantCheckBtn) {
+    els.leadsImportantCheckBtn.disabled = false;
+  }
+}
+
+function importantLeadUploadPayload() {
+  const formData = new FormData();
+  const file = els.leadsImportantUploadFile?.files?.[0];
+  if (file) {
+    formData.append("file", file);
+  }
+  formData.append("input_path", els.leadsImportantInputPath?.value?.trim() || "");
+  formData.append("output_path", els.leadsImportantOutputPath?.value?.trim() || "");
+  formData.append("rejected_path", els.leadsImportantRejectedPath?.value?.trim() || "");
+  return { formData, file };
+}
+
+function stopImportantLeadCheckJobPolling() {
+  if (importantLeadCheckJobTimer) {
+    clearTimeout(importantLeadCheckJobTimer);
+    importantLeadCheckJobTimer = null;
+  }
+}
+
+function renderImportantLeadCheckJob(job) {
+  if (!job || !job.job_id) return;
+  const status = String(job.status || job.stage || "queued").toLowerCase();
+  const label = status === "completed"
+    ? "Upload check complete"
+    : status === "failed"
+      ? "Upload check failed"
+      : `Upload check ${status}`;
+  const detail = job.message || job.error || job.stage || "";
+  lastImportantLeadCheckJob = job;
+  if (els.leadsImportantCheckMeta) {
+    setNodeText(
+      els.leadsImportantCheckMeta,
+      detail ? `${label}: ${detail}` : `${label}.`,
+    );
+  }
+  if (status !== "completed" && status !== "failed" && els.leadsImportantCheckResults) {
+    const stage = job.stage || status || "queued";
+    const totalRows = Number(job.total_input_rows || 0);
+    const processedRows = Number(job.processed_rows || 0);
+    const remainingRows = Number(job.remaining_rows || Math.max(0, totalRows - processedRows));
+    const etaSeconds = Number(job.eta_seconds);
+    const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? humanizeDurationCompact(etaSeconds) : "n/a";
+    setNodeHtml(
+      els.leadsImportantCheckResults,
+      `
+        <article class="leads-result-card">
+          <h3>Upload Job</h3>
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">Stage</div><div class="value">${escapeHtml(stage)}</div></div>
+            <div class="leads-kpi"><div class="label">Rows</div><div class="value">${totalRows}</div></div>
+            <div class="leads-kpi"><div class="label">Processed</div><div class="value">${processedRows}</div></div>
+            <div class="leads-kpi"><div class="label">Remaining</div><div class="value">${remainingRows}</div></div>
+            <div class="leads-kpi"><div class="label">ETA</div><div class="value">${escapeHtml(etaText)}</div></div>
+          </div>
+          <div class="pill-row">
+            <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
+            <span class="mini-pill">Source ${escapeHtml(job.source_label || "-")}</span>
+          </div>
+        </article>
+      `,
+    );
+  }
+}
+
+async function pollImportantLeadCheckJob(jobId) {
+  if (!jobId) return;
+  stopImportantLeadCheckJobPolling();
+  try {
+    const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(jobId)}`);
+    const job = data.job || {};
+    renderImportantLeadCheckJob(job);
+    if (job.status === "completed") {
+      lastImportantLeadCheck = job.check || null;
+      if (data.status) {
+        renderLeadsStatus(data.status || {});
+      } else {
+        renderImportantLeadCheck(lastImportantLeadCheck);
+      }
+      showMessage(job.message || "Upload check complete.", "success");
+      return;
+    }
+    if (job.status === "failed") {
+      showMessage(job.error || "Upload check failed.", "error");
+      return;
+    }
+    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 1500);
+  } catch (err) {
+    showMessage(`Upload job poll failed: ${err}`, "error");
+    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 2500);
+  }
+}
+
 function syncImportantLeadPathInputs(status) {
   const inputLabel = status?.important_input_label || "_important/leadschecker.csv";
   const outputLabel = status?.important_output_label || "_important/leads.csv";
@@ -550,7 +712,7 @@ function renderImportantLeadCheck(result) {
     } else {
       setNodeText(
         els.leadsImportantCheckMeta,
-        "Ready. Put raw leads in _important/leadschecker.csv, then click Check Leads.",
+        "Ready. Put email-first leads in _important/leadschecker.csv, then click Check Leads. Keep FullName upstream when you have it.",
       );
     }
   }
@@ -558,7 +720,7 @@ function renderImportantLeadCheck(result) {
   if (!result?.generated_at_utc) {
     setNodeHtml(
       els.leadsImportantCheckResults,
-      `<p class="muted">Simple path: raw leads go in <strong>_important/leadschecker.csv</strong>, checked output lands in <strong>_important/leads.csv</strong>, and rejected rows land in <strong>_important/leads_rejected.csv</strong>.</p>`,
+      `<p class="muted">Simple path: email-first intake goes in <strong>_important/leadschecker.csv</strong>, checked output lands in <strong>_important/leads.csv</strong>, and rejected rows land in <strong>_important/leads_rejected.csv</strong>.</p>`,
     );
     return;
   }
@@ -635,7 +797,7 @@ function renderImportantLeadVerify(result) {
     } else {
       setNodeText(
         els.leadsImportantVerifyMeta,
-        "Ready. Verify the cleaned leads file against public evidence before dispatching.",
+        "Ready. Verify the cleaned leads file against public evidence before dispatching. FullName + Email is the strongest proof input; FirstName alone is weak.",
       );
     }
   }
@@ -643,7 +805,7 @@ function renderImportantLeadVerify(result) {
   if (!result?.generated_at_utc) {
     setNodeHtml(
       els.leadsImportantVerifyResults,
-      `<p class="muted">Verify runs from <strong>_important/leads.csv</strong> by default and writes verified, rejected, and quarantine outputs separately.</p>`,
+      `<p class="muted">Verify runs from <strong>_important/leads.csv</strong> by default, prefers <strong>FullName</strong> + <strong>Email</strong>, and writes verified, rejected, and quarantine outputs separately.</p>`,
     );
     return;
   }
@@ -767,12 +929,12 @@ function renderImportantDispatch(result) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_mode || "verified")} from ${escapeHtml(result.dispatch_source_path || "-")}. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
+        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_mode || "verified")} from ${escapeHtml(result.dispatch_source_path || "-")}. Verify-first is the default. The queue sends Email + FirstName only. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
       );
     } else {
       const sourceMode = selectedDispatchSource.mode;
       const sourcePath = dispatchSource?.dispatch_source_path || (sourceMode === "cleaned" ? "_important/leads.csv" : "_important/leads_verified.csv");
-      setNodeText(els.leadsImportantDispatchMeta, `Dispatch is idle. Source mode ${sourceMode} from ${sourcePath}. Check the source file first, then dispatch while all senders are stopped.`);
+      setNodeText(els.leadsImportantDispatchMeta, `Dispatch is idle. Source mode ${sourceMode} from ${sourcePath}. Verify-first is the default; cleaned stays available. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`);
     }
   }
 
@@ -1059,6 +1221,7 @@ function renderLeadsStatus(status) {
   syncImportantLeadPathInputs(lastLeadsStatus);
   syncImportantVerifyPathInputs(lastLeadsStatus);
   syncImportantDispatchSourceMode(lastLeadsStatus);
+  updateImportantLeadPasteGuardrails();
   lastImportantLeadCheck = lastLeadsStatus?.latest_master_check || lastImportantLeadCheck;
   lastImportantVerify = lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
@@ -1158,6 +1321,11 @@ async function fetchLeadsStatus() {
 }
 
 async function runImportantLeadCheck() {
+  updateImportantLeadPasteGuardrails();
+  if (els.leadsImportantCheckBtn?.disabled) {
+    showMessage(`Textarea paste is limited to ${importantLeadPastePolicy().maxRows || 1000} rows. Use Upload CSV for larger batches.`, "error");
+    return;
+  }
   if (els.leadsImportantCheckBtn) {
     els.leadsImportantCheckBtn.disabled = true;
     setNodeText(els.leadsImportantCheckBtn, "Checking...");
@@ -1181,6 +1349,46 @@ async function runImportantLeadCheck() {
     if (els.leadsImportantCheckBtn) {
       els.leadsImportantCheckBtn.disabled = false;
       setNodeText(els.leadsImportantCheckBtn, "Check Leads");
+    }
+  }
+}
+
+async function runImportantLeadUploadCheck() {
+  const { formData, file } = importantLeadUploadPayload();
+  if (!file) {
+    showMessage("Choose a CSV file before uploading.", "error");
+    return;
+  }
+  if (els.leadsImportantUploadCheckBtn) {
+    els.leadsImportantUploadCheckBtn.disabled = true;
+    setNodeText(els.leadsImportantUploadCheckBtn, "Uploading...");
+  }
+  try {
+    const data = await fetchJson("/api/leads/check-important/upload", {
+      method: "POST",
+      body: formData,
+    });
+    if (data.job?.job_id) {
+      renderImportantLeadCheckJob(data.job);
+      void pollImportantLeadCheckJob(data.job.job_id);
+    } else if (data.check) {
+      lastImportantLeadCheck = data.check || null;
+      if (data.status) {
+        renderLeadsStatus(data.status || {});
+      } else {
+        renderImportantLeadCheck(lastImportantLeadCheck);
+      }
+    }
+    if (els.leadsImportantUploadFile) {
+      els.leadsImportantUploadFile.value = "";
+    }
+    showMessage(data.message || "Uploaded file queued.", "success");
+  } catch (err) {
+    showMessage(`Upload lead check failed: ${err}`, "error");
+  } finally {
+    if (els.leadsImportantUploadCheckBtn) {
+      els.leadsImportantUploadCheckBtn.disabled = false;
+      setNodeText(els.leadsImportantUploadCheckBtn, "Upload & Check");
     }
   }
 }
@@ -2999,9 +3207,14 @@ if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/st
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
 if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
+if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
 if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify());
 if (els.leadsImportantDispatchBtn) els.leadsImportantDispatchBtn.addEventListener("click", () => runImportantLeadDispatch());
+if (els.leadsImportantInputText) {
+  els.leadsImportantInputText.addEventListener("input", () => updateImportantLeadPasteGuardrails());
+  els.leadsImportantInputText.addEventListener("change", () => updateImportantLeadPasteGuardrails());
+}
 if (els.leadsImportantDispatchSourceMode) {
   els.leadsImportantDispatchSourceMode.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
 }

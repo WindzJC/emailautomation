@@ -5,13 +5,17 @@ import base64
 import csv
 import json
 import os
+import io
+import re
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, File, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -55,6 +59,7 @@ from sendgrid_hygiene import (
 )
 from leads_workflow import (
     clean_uploaded_leads,
+    iso_utc,
     save_state,
     preview_shard_cleaned_leads,
     save_uploaded_csv,
@@ -64,6 +69,16 @@ from leads_workflow import (
 )
 from send_shard import PROFILES
 
+
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return max(minimum, int(default))
+    try:
+        return max(minimum, int(raw))
+    except Exception:
+        return max(minimum, int(default))
+
 STATIC_DIR = settings.STATIC_DIR
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
@@ -72,6 +87,9 @@ IMPORTANT_LEADS_INPUT = settings.APP_ROOT / "_important" / "leadschecker.csv"
 IMPORTANT_LEADS_OUTPUT = settings.APP_ROOT / "_important" / "leads.csv"
 IMPORTANT_LEADS_REJECTED = settings.APP_ROOT / "_important" / "leads_rejected.csv"
 IMPORTANT_LEADS_CHECK_RUNS = settings.APP_ROOT / "_important" / "check_runs"
+IMPORTANT_LEADS_CHECK_JOBS = IMPORTANT_LEADS_CHECK_RUNS / "jobs"
+IMPORTANT_LEADS_PASTE_WARNING_ROWS = _int_env("IMPORTANT_LEADS_PASTE_WARNING_ROWS", 250)
+IMPORTANT_LEADS_PASTE_MAX_ROWS = max(IMPORTANT_LEADS_PASTE_WARNING_ROWS, _int_env("IMPORTANT_LEADS_PASTE_MAX_ROWS", 1000))
 app = FastAPI(title="Email Automation Live Dashboard")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -83,6 +101,7 @@ AUTOMATION_LOOP_SECONDS = max(15, min(60, max(30, int(PRIVATE_BOUNCE_SYNC_INTERV
 DASHBOARD_AUTO_START_STATE_PATH = settings.STATE_DIR / "dashboard_auto_start_state.json"
 DASHBOARD_TIMER_STATE_PATH = settings.STATE_DIR / "dashboard_timer_state.json"
 AUTO_START_RETRY_MINUTES = 10
+_PARSER_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
 class SendCapPayload(BaseModel):
@@ -197,6 +216,221 @@ def _important_dispatch_source_labels_for_state(mode: str) -> dict[str, str]:
     return {"dispatch_source_mode": normalized}
 
 
+def _important_check_batch_policy() -> dict[str, object]:
+    return {
+        "paste_mode": "small_manual_only",
+        "paste_warning_rows": IMPORTANT_LEADS_PASTE_WARNING_ROWS,
+        "paste_max_rows": IMPORTANT_LEADS_PASTE_MAX_ROWS,
+        "upload_required_rows": IMPORTANT_LEADS_PASTE_MAX_ROWS,
+        "upload_recommended_rows": IMPORTANT_LEADS_PASTE_WARNING_ROWS,
+    }
+
+
+def _important_check_job_path(job_id: str) -> Path:
+    return IMPORTANT_LEADS_CHECK_JOBS / f"{job_id}.json"
+
+
+def _load_important_check_job(job_id: str) -> dict[str, object]:
+    path = _important_check_job_path(job_id)
+    if not path.exists():
+        raise FileNotFoundError(f"Check job not found: {job_id}")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_important_check_job(job: dict[str, object]) -> None:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Missing check job id.")
+    IMPORTANT_LEADS_CHECK_JOBS.mkdir(parents=True, exist_ok=True)
+    payload = dict(job)
+    payload["updated_at_utc"] = iso_utc()
+    write_path = _important_check_job_path(job_id)
+    tmp_path = write_path.with_suffix(f".{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(write_path)
+
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    count = 0
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if any(str(value or "").strip() for value in row.values()):
+                count += 1
+    return count
+
+
+def _execute_important_check(
+    *,
+    input_path: Path,
+    output_path: Path,
+    rejected_path: Path,
+    effective_input_path: Path,
+) -> dict[str, object]:
+    save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
+    return check_master_leads(
+        input_path=effective_input_path,
+        output_path=output_path,
+        rejected_path=rejected_path,
+    )
+
+
+def _check_important_leads_response(
+    *,
+    input_path: Path,
+    output_path: Path,
+    rejected_path: Path,
+    effective_input_path: Path,
+    source_label: str | None = None,
+) -> JSONResponse:
+    try:
+        report = _execute_important_check(
+            input_path=input_path,
+            output_path=output_path,
+            rejected_path=rejected_path,
+            effective_input_path=effective_input_path,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    except ImportantLeadsCheckError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": exc.message,
+                "error": exc.code,
+                "details": exc.details,
+            },
+            status_code=400,
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Lead check failed: {exc}"}, status_code=500)
+
+    prefix = f"Uploaded {source_label} and " if source_label else ""
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                f"{prefix}checked {report['input_label']} into {report['output_label']}. "
+                f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
+                f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
+            ),
+            "check": report,
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        }
+    )
+
+
+def _run_important_check_job(job_id: str) -> None:
+    try:
+        job = _load_important_check_job(job_id)
+    except Exception:
+        return
+    if str(job.get("status") or "") in {"completed", "failed"}:
+        return
+    try:
+        job["status"] = "running"
+        job["stage"] = "checking"
+        job["processed_rows"] = 0
+        job["remaining_rows"] = int(job.get("total_input_rows") or 0)
+        job["eta_seconds"] = ""
+        _save_important_check_job(job)
+        report = _execute_important_check(
+            input_path=Path(str(job.get("input_path") or "")),
+            output_path=Path(str(job.get("output_path") or "")),
+            rejected_path=Path(str(job.get("rejected_path") or "")),
+            effective_input_path=Path(str(job.get("effective_input_path") or "")),
+        )
+        job["status"] = "completed"
+        job["stage"] = "done"
+        job["completed_at_utc"] = iso_utc()
+        job["check"] = report
+        job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
+        job["remaining_rows"] = 0
+        job["eta_seconds"] = 0
+        job["message"] = (
+            f"Checked {report['input_label']} into {report['output_label']}. "
+            f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
+            f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
+        )
+        _save_important_check_job(job)
+    except Exception as exc:
+        job["status"] = "failed"
+        job["stage"] = "failed"
+        job["completed_at_utc"] = iso_utc()
+        job["processed_rows"] = 0
+        job["remaining_rows"] = int(job.get("total_input_rows") or 0)
+        job["error"] = str(exc)
+        _save_important_check_job(job)
+
+
+def _start_important_check_job(
+    *,
+    input_path: Path,
+    output_path: Path,
+    rejected_path: Path,
+    effective_input_path: Path,
+    source_label: str,
+    total_input_rows: int,
+) -> dict[str, object]:
+    job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "queued",
+        "created_at_utc": iso_utc(),
+        "updated_at_utc": iso_utc(),
+        "source_label": source_label,
+        "input_path": str(input_path),
+        "output_path": str(output_path),
+        "rejected_path": str(rejected_path),
+        "effective_input_path": str(effective_input_path),
+        "total_input_rows": int(total_input_rows or 0),
+        "processed_rows": 0,
+        "remaining_rows": int(total_input_rows or 0),
+        "eta_seconds": "",
+    }
+    _save_important_check_job(job)
+    thread = threading.Thread(target=_run_important_check_job, args=(job_id,), daemon=True)
+    thread.start()
+    return job
+
+
+def _resume_pending_important_check_jobs() -> None:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return
+    for path in sorted(IMPORTANT_LEADS_CHECK_JOBS.glob("*.json")):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("status") or "") not in {"queued", "running"}:
+            continue
+        job_id = str(job.get("job_id") or path.stem).strip()
+        if not job_id:
+            continue
+        thread = threading.Thread(target=_run_important_check_job, args=(job_id,), daemon=True)
+        thread.start()
+
+
+def _count_pasted_lead_rows(input_text: str) -> int:
+    normalized_text = _normalize_pasted_leads_csv(input_text)
+    if not normalized_text.strip():
+        return 0
+    reader = csv.DictReader(io.StringIO(normalized_text))
+    count = 0
+    for row in reader:
+        if any(str(value or "").strip() for value in row.values()):
+            count += 1
+    return count
+
+
 def _normalize_pasted_leads_csv(input_text: str) -> str:
     normalized_text = str(input_text or "").lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
     if not normalized_text.endswith("\n"):
@@ -226,13 +460,74 @@ def _normalize_pasted_leads_csv(input_text: str) -> str:
     if normalized_headers & known_email_headers:
         return normalized_text
 
-    if len(first_row) >= 2:
-        second_cell = str(first_row[1] or "").strip()
-        first_cell = str(first_row[0] or "").strip()
-        if "@" in second_cell and "@" not in first_cell:
-            return f"FirstName{delimiter}Email\n{normalized_text}"
+    def _safe_email_cell(value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"^\s*mailto:\s*", "", raw, flags=re.IGNORECASE)
+        matches = _PARSER_EMAIL_RE.findall(raw)
+        if len(matches) > 1:
+            return ""
+        candidate = matches[0] if matches else raw
+        candidate = candidate.strip().strip("<>()[]{}\"'")
+        candidate = candidate.rstrip(".,;:!?")
+        if candidate.count("@") != 1:
+            return ""
+        local, domain = candidate.split("@", 1)
+        if not local or not domain:
+            return ""
+        return f"{local}@{domain.lower()}"
 
-    return normalized_text
+    swapped = io.StringIO()
+    writer = csv.writer(swapped, delimiter=",", lineterminator="\n")
+    writer.writerow(["Email", "FirstName"])
+
+    def _emit(email: str, first_name: str = "") -> None:
+        writer.writerow([email, first_name])
+
+    reader = csv.reader(non_empty_lines, delimiter=delimiter)
+    for row in reader:
+        cells = [str(cell or "").strip() for cell in row if str(cell or "").strip()]
+        if not cells:
+            continue
+        if len(cells) == 1:
+            email = _safe_email_cell(cells[0])
+            if email:
+                _emit(email, "")
+            else:
+                _emit("", cells[0])
+            continue
+        if len(cells) == 2:
+            first_email = _safe_email_cell(cells[0])
+            second_email = _safe_email_cell(cells[1])
+            if first_email and not second_email:
+                _emit(first_email, cells[1])
+                continue
+            if second_email and not first_email:
+                _emit(second_email, cells[0])
+                continue
+            if first_email and second_email:
+                _emit(first_email, "")
+                if second_email != first_email:
+                    _emit(second_email, "")
+                continue
+            _emit("", cells[0])
+            continue
+        extracted = [_safe_email_cell(cell) for cell in cells]
+        emails = [email for email in extracted if email]
+        if emails and len(emails) == len(cells):
+            for email in emails:
+                _emit(email, "")
+            continue
+        if emails:
+            _emit(emails[0], "")
+            continue
+        _emit("", cells[0])
+
+    normalized_rows = swapped.getvalue()
+    if not normalized_rows.endswith("\n"):
+        normalized_rows += "\n"
+    return normalized_rows
 
 
 def _load_dashboard_auto_start_state() -> dict[str, str]:
@@ -590,6 +885,7 @@ async def _background_automation_loop() -> None:
 async def _startup_background_automation() -> None:
     if getattr(app.state, "automation_task", None) is None:
         app.state.automation_task = asyncio.create_task(_background_automation_loop())
+    _resume_pending_important_check_jobs()
 
 
 @app.on_event("shutdown")
@@ -733,6 +1029,66 @@ async def upload_leads(file: UploadFile = File(...)) -> JSONResponse:
     )
 
 
+@app.post("/api/leads/check-important/upload")
+async def check_important_leads_upload(
+    file: UploadFile = File(...),
+    input_path: str = Form(""),
+    output_path: str = Form(""),
+    rejected_path: str = Form(""),
+) -> JSONResponse:
+    current_paths = important_leads_path_state()
+    resolved_input_path = _resolve_dashboard_csv_path(
+        input_path or current_paths["input_path"],
+        IMPORTANT_LEADS_INPUT,
+    )
+    resolved_output_path = _resolve_dashboard_csv_path(
+        output_path or current_paths["output_path"],
+        IMPORTANT_LEADS_OUTPUT,
+    )
+    resolved_rejected_path = _resolve_dashboard_csv_path(
+        rejected_path or current_paths["rejected_path"],
+        IMPORTANT_LEADS_REJECTED,
+    )
+    filename = (file.filename or "").strip()
+    if not filename:
+        return JSONResponse({"ok": False, "message": "Missing upload filename."}, status_code=400)
+    content = await file.read()
+    if not content:
+        return JSONResponse({"ok": False, "message": "Uploaded file is empty."}, status_code=400)
+    IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
+    effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
+    effective_input_path.write_bytes(content)
+    total_input_rows = _count_csv_rows(effective_input_path)
+    job = _start_important_check_job(
+        input_path=resolved_input_path,
+        output_path=resolved_output_path,
+        rejected_path=resolved_rejected_path,
+        effective_input_path=effective_input_path,
+        source_label=filename,
+        total_input_rows=total_input_rows,
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"Queued upload check for {filename} as {job['job_id']}.",
+            "job": job,
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        },
+        status_code=202,
+    )
+
+
+@app.get("/api/leads/check-important/job/{job_id}")
+def get_check_important_leads_job(job_id: str) -> JSONResponse:
+    try:
+        job = _load_important_check_job(job_id)
+    except FileNotFoundError:
+        return JSONResponse({"ok": False, "message": f"Check job not found: {job_id}"}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to load check job: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, "job": job, "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+
+
 @app.post("/api/leads/clean")
 def clean_leads(payload: CleanLeadsPayload) -> JSONResponse:
     mapping = payload.mapping.model_dump() if payload.mapping else None
@@ -774,61 +1130,49 @@ def clean_leads(payload: CleanLeadsPayload) -> JSONResponse:
 
 @app.post("/api/leads/check-important")
 def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> JSONResponse:
-    try:
-        current_paths = important_leads_path_state()
-        input_path = _resolve_dashboard_csv_path(
-            payload.input_path if payload else current_paths["input_path"],
-            IMPORTANT_LEADS_INPUT,
-        )
-        output_path = _resolve_dashboard_csv_path(
-            payload.output_path if payload else current_paths["output_path"],
-            IMPORTANT_LEADS_OUTPUT,
-        )
-        rejected_path = _resolve_dashboard_csv_path(
-            payload.rejected_path if payload else current_paths["rejected_path"],
-            IMPORTANT_LEADS_REJECTED,
-        )
-        effective_input_path = input_path
-        input_text = str(payload.input_text or "") if payload else ""
-        if input_text.strip():
-            IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
-            effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
-            normalized_text = _normalize_pasted_leads_csv(input_text)
-            effective_input_path.write_text(normalized_text, encoding="utf-8")
-        save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
-        report = check_master_leads(
-            input_path=effective_input_path,
-            output_path=output_path,
-            rejected_path=rejected_path,
-        )
-    except FileNotFoundError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
-    except ImportantLeadsCheckError as exc:
-        return JSONResponse(
-            {
-                "ok": False,
-                "message": exc.message,
-                "error": exc.code,
-                "details": exc.details,
-            },
-            status_code=400,
-        )
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": f"Lead check failed: {exc}"}, status_code=500)
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "message": (
-                f"Checked {report['input_label']} into {report['output_label']}. "
-                f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
-                f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
-            ),
-            "check": report,
-            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
-        }
+    current_paths = important_leads_path_state()
+    input_path = _resolve_dashboard_csv_path(
+        payload.input_path if payload else current_paths["input_path"],
+        IMPORTANT_LEADS_INPUT,
+    )
+    output_path = _resolve_dashboard_csv_path(
+        payload.output_path if payload else current_paths["output_path"],
+        IMPORTANT_LEADS_OUTPUT,
+    )
+    rejected_path = _resolve_dashboard_csv_path(
+        payload.rejected_path if payload else current_paths["rejected_path"],
+        IMPORTANT_LEADS_REJECTED,
+    )
+    effective_input_path = input_path
+    input_text = str(payload.input_text or "") if payload else ""
+    if input_text.strip():
+        pasted_rows = _count_pasted_lead_rows(input_text)
+        if pasted_rows > IMPORTANT_LEADS_PASTE_MAX_ROWS:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "PASTE_TOO_LARGE",
+                    "message": (
+                        f"Paste intake is limited to {IMPORTANT_LEADS_PASTE_MAX_ROWS} rows. "
+                        f"This paste has {pasted_rows} rows; use CSV upload for large batches."
+                    ),
+                    "details": {
+                        "paste_rows": pasted_rows,
+                        "paste_max_rows": IMPORTANT_LEADS_PASTE_MAX_ROWS,
+                    },
+                    "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+                },
+                status_code=413,
+            )
+        IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
+        effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
+        normalized_text = _normalize_pasted_leads_csv(input_text)
+        effective_input_path.write_text(normalized_text, encoding="utf-8")
+    return _check_important_leads_response(
+        input_path=input_path,
+        output_path=output_path,
+        rejected_path=rejected_path,
+        effective_input_path=effective_input_path,
     )
 
 

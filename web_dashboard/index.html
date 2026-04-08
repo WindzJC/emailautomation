@@ -105,17 +105,17 @@
             <div>
               <p class="eyebrow">Step 1</p>
               <h2>Check Leads</h2>
-              <span class="muted">Clean `_important/leadschecker.csv` into the master file. Extra columns stay in place.</span>
+              <span class="muted">Email-first hygiene. Preserve <strong>FullName</strong> when you have it, keep <strong>FirstName</strong> for sending, and leave proof work for Verify. Large batch imports belong on CSV upload, not the paste box.</span>
             </div>
           </div>
           <div class="leads-quick-grid">
             <div class="leads-quick-file">
               <span class="label">Input</span>
-              <strong>_important/leadschecker.csv</strong>
+              <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
             </div>
             <div class="leads-quick-file">
               <span class="label">Output</span>
-              <strong>_important/leads.csv</strong>
+              <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
             </div>
             <div class="leads-action-slot">
               <button id="leads-important-check-btn" class="btn btn-primary" type="button">Check Leads</button>
@@ -123,8 +123,24 @@
           </div>
           <div class="leads-quick-grid leads-quick-secondary">
             <div class="leads-quick-file">
+              <span class="label">Upload CSV</span>
+              <input id="leads-important-upload-file" type="file" accept=".csv,text/csv" />
+            </div>
+            <div class="leads-action-slot">
+              <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
+            </div>
+          </div>
+          <div class="leads-quick-grid leads-quick-secondary">
+            <div class="leads-quick-file">
               <span class="label">Rejected</span>
-              <strong>_important/leads_rejected.csv</strong>
+              <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
+            </div>
+          </div>
+          <div class="leads-quick-grid leads-quick-secondary">
+            <div class="leads-quick-file leads-quick-file-wide">
+              <span class="label">Paste Intake CSV</span>
+              <textarea id="leads-important-input-text" rows="8" placeholder="Small/manual only. Use Upload CSV for 1,000+ rows.&#10;Email,FirstName&#10;info@example.com,Jane&#10;john@example.com,John" spellcheck="false"></textarea>
+              <span id="leads-important-paste-note" class="toolbar-field-note muted">Small/manual only. Use Upload CSV for 1,000+ rows. Paste first, then Check Leads writes the run file and cleans it into Output and Rejected. Use <strong>FullName</strong> upstream when you have it.</span>
             </div>
           </div>
           <div id="leads-important-check-meta" class="leads-meta muted">Ready to clean `_important/leadschecker.csv`.</div>
@@ -135,15 +151,58 @@
           <div class="panel-header">
             <div>
               <p class="eyebrow">Step 2</p>
+              <h2>Verify Leads</h2>
+              <span class="muted">Proof-based public verification. Use <strong>FullName + Email</strong> when you want to prove the person. <strong>FirstName</strong> alone is weak and usually quarantines unless proof is explicit. This is the slow bottleneck stage by design.</span>
+            </div>
+          </div>
+          <div class="leads-quick-grid">
+            <div class="leads-quick-file">
+              <span class="label">Input</span>
+              <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
+            </div>
+            <div class="leads-quick-file">
+              <span class="label">Keep</span>
+              <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
+            </div>
+            <div class="leads-action-slot">
+              <button id="leads-verify-btn" class="btn btn-primary" type="button">Verify Leads</button>
+            </div>
+          </div>
+          <div class="leads-quick-grid leads-quick-secondary">
+            <div class="leads-quick-file">
+              <span class="label">Reject</span>
+              <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
+            </div>
+            <div class="leads-quick-file">
+              <span class="label">Quarantine</span>
+              <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
+            </div>
+          </div>
+          <div id="leads-verify-meta" class="leads-meta muted">Verify is idle. Run Check Leads first, then verify the cleaned file against public evidence.</div>
+          <div id="leads-verify-results" class="leads-results"></div>
+        </section>
+
+        <section class="panel panel-shell leads-panel leads-step-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Step 3</p>
               <h2>Dispatch Leads</h2>
-              <span class="muted">Route fresh leads from `_important/leads.csv` after checking Astra and SendGrid separately. All senders must be stopped first.</span>
+              <span class="muted">Send from verified keep rows by default. The queue uses <strong>Email</strong> + <strong>FirstName</strong> only, so the email still says <code>Hi {FirstName},</code>. Cleaned mode stays available, and all senders must be stopped first. Dispatch is the fast queue-safety/write stage.</span>
             </div>
           </div>
           <div class="leads-dispatch-grid">
             <div class="leads-quick-file">
+              <span class="label">Dispatch Source</span>
+              <select id="leads-dispatch-source-mode">
+                <option value="verified">Verified (default)</option>
+                <option value="cleaned">Cleaned</option>
+              </select>
+              <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Verified mode reads <strong>_important/leads_verified.csv</strong>. Cleaned mode keeps the legacy <strong>_important/leads.csv</strong> path.</span>
+            </div>
+            <div class="leads-quick-file">
               <span class="label">Dispatch Rule</span>
               <strong>Astra + one SendGrid shard per lead</strong>
-              <span class="toolbar-field-note muted">If Astra has not sent or queued the lead, it goes to `recipients_private_jc.csv`. If SendGrid has not sent or queued it, it goes to exactly one SendGrid shard.</span>
+              <span class="toolbar-field-note muted">If Astra has not sent or queued the lead, it goes to <code>recipients_private_jc.csv</code>. If SendGrid has not sent or queued it, it goes to exactly one SendGrid shard.</span>
             </div>
             <div class="leads-action-slot">
               <button id="leads-important-dispatch-btn" class="btn btn-primary" type="button">Dispatch Leads</button>

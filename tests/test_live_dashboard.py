@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from io import BytesIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -134,7 +136,432 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(200, response.status_code)
             run_input_path = check_runs_dir / "leadschecker_20260409_120100.csv"
             self.assertEqual(
-                "FirstName,Email\nJane,jane@example.com\nJohn,john@example.com\n",
+                "Email,FirstName\njane@example.com,Jane\njohn@example.com,John\n",
+                run_input_path.read_text(encoding="utf-8"),
+            )
+            kwargs = check_master_leads.call_args.kwargs
+            self.assertEqual(run_input_path.resolve(), kwargs["input_path"])
+
+    def test_check_important_leads_normalizes_email_only_rows_to_canonical_queue_shape(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "pasted_leads.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            payload = live_dashboard.ImportantLeadPathsPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                input_text="  User.Tag+promo@Example.COM  \r\nsecond.person@EXAMPLE.org\r\n",
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120200.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 1,
+                "reason_counts": {},
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120200",
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.check_important_leads(payload)
+
+            self.assertEqual(200, response.status_code)
+            run_input_path = check_runs_dir / "leadschecker_20260409_120200.csv"
+            self.assertEqual(
+                "Email,FirstName\nUser.Tag+promo@example.com,\nsecond.person@example.org,\n",
+                run_input_path.read_text(encoding="utf-8"),
+            )
+            kwargs = check_master_leads.call_args.kwargs
+            self.assertEqual(run_input_path.resolve(), kwargs["input_path"])
+
+    def test_check_important_leads_extracts_email_from_wrapper_text(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "pasted_leads.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            payload = live_dashboard.ImportantLeadPathsPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                input_text="Contact: Jane.Doe+Promo@EXAMPLE.com\r\n",
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120205.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 1,
+                "reason_counts": {},
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120205",
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.check_important_leads(payload)
+
+            self.assertEqual(200, response.status_code)
+            run_input_path = check_runs_dir / "leadschecker_20260409_120205.csv"
+            self.assertEqual(
+                "Email,FirstName\nJane.Doe+Promo@example.com,\n",
+                run_input_path.read_text(encoding="utf-8"),
+            )
+            kwargs = check_master_leads.call_args.kwargs
+            self.assertEqual(run_input_path.resolve(), kwargs["input_path"])
+
+    def test_check_important_leads_splits_comma_separated_email_list(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "pasted_leads.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            payload = live_dashboard.ImportantLeadPathsPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                input_text="alice@example.com,bob@example.com,charlie@example.com\r\n",
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120210.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 3,
+                "reason_counts": {},
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120210",
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.check_important_leads(payload)
+
+            self.assertEqual(200, response.status_code)
+            run_input_path = check_runs_dir / "leadschecker_20260409_120210.csv"
+            self.assertEqual(
+                "Email,FirstName\nalice@example.com,\nbob@example.com,\ncharlie@example.com,\n",
+                run_input_path.read_text(encoding="utf-8"),
+            )
+            kwargs = check_master_leads.call_args.kwargs
+            self.assertEqual(run_input_path.resolve(), kwargs["input_path"])
+
+    def test_check_important_leads_upload_uses_run_scoped_input(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "canonical.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            input_path.write_text("Email,FirstName\nLegacy,legacy@example.com\n", encoding="utf-8")
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.csv",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 1,
+                "reason_counts": {},
+            }
+            fake_job = {
+                "job_id": "check_20260409_120230_abcd1234",
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-04-09T12:02:30+00:00",
+                "updated_at_utc": "2026-04-09T12:02:30+00:00",
+                "source_label": "authors_upload.csv",
+                "input_path": str(input_path),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "effective_input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "total_input_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+                "eta_seconds": "",
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120230",
+            ), patch.object(
+                live_dashboard,
+                "_start_important_check_job",
+                return_value=fake_job,
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        input_path=str(input_path),
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            self.assertEqual(202, response.status_code)
+            body = json.loads(response.body)
+            self.assertTrue(body["ok"])
+            self.assertEqual(fake_job["job_id"], body["job"]["job_id"])
+            run_input_path = check_runs_dir / "leadschecker_20260409_120230.csv"
+            self.assertEqual(
+                "Email,FirstName\nanna@example.com,Anna\n",
+                run_input_path.read_text(encoding="utf-8"),
+            )
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_blocks_large_paste_and_recommends_upload(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "pasted_leads.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            payload = live_dashboard.ImportantLeadPathsPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                input_text="\n".join(f"lead{i:04d}@example.com,Author{i:04d}" for i in range(live_dashboard.IMPORTANT_LEADS_PASTE_MAX_ROWS + 1)),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.check_important_leads(payload)
+
+            body = json.loads(response.body)
+            self.assertEqual(413, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("PASTE_TOO_LARGE", body["error"])
+            self.assertEqual(live_dashboard.IMPORTANT_LEADS_PASTE_MAX_ROWS + 1, body["details"]["paste_rows"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_job_runner_persists_completed_report(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            job_id = "check_20260409_120231_abcd1234"
+            job_path = jobs_dir / f"{job_id}.json"
+            job = {
+                "job_id": job_id,
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-04-09T12:02:31+00:00",
+                "updated_at_utc": "2026-04-09T12:02:31+00:00",
+                "source_label": "authors_upload.csv",
+                "input_path": str(tmp / "input.csv"),
+                "output_path": str(tmp / "cleaned.csv"),
+                "rejected_path": str(tmp / "rejected.csv"),
+                "effective_input_path": str(tmp / "check_runs" / "leadschecker_20260409_120231.csv"),
+                "total_input_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+                "eta_seconds": "",
+            }
+            report = {
+                "input_label": "leadschecker_20260409_120231.csv",
+                "output_label": "cleaned.csv",
+                "rejected_label": "rejected.csv",
+                "cleaned_rows": 1,
+                "reason_counts": {},
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "_execute_important_check",
+                return_value=report,
+            ) as execute_check:
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._run_important_check_job(job_id)
+
+            saved = json.loads(job_path.read_text(encoding="utf-8"))
+            self.assertEqual("completed", saved["status"])
+            self.assertEqual(report, saved["check"])
+            self.assertEqual(1, saved["processed_rows"])
+            self.assertEqual(0, saved["remaining_rows"])
+            self.assertEqual(0, saved["eta_seconds"])
+            execute_check.assert_called_once()
+
+    def test_check_important_leads_flags_ambiguous_text_without_guessing(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "pasted_leads.csv"
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            payload = live_dashboard.ImportantLeadPathsPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                input_text="This is not an email address\r\n",
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120220.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 0,
+                "reason_counts": {"MISSING_EMAIL": 1},
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120220",
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.check_important_leads(payload)
+
+            self.assertEqual(200, response.status_code)
+            run_input_path = check_runs_dir / "leadschecker_20260409_120220.csv"
+            self.assertEqual(
+                "Email,FirstName\n,This is not an email address\n",
                 run_input_path.read_text(encoding="utf-8"),
             )
             kwargs = check_master_leads.call_args.kwargs
@@ -389,6 +816,13 @@ class LiveDashboardTests(unittest.TestCase):
             live_dashboard,
             "important_leads_status",
             return_value={
+                "check_paste_policy": {
+                    "mode": "small_manual_only",
+                    "paste_warning_rows": 250,
+                    "paste_max_rows": 1000,
+                    "upload_required_rows": 1000,
+                    "upload_recommended_rows": 250,
+                },
                 "check": 2,
                 "dispatch": 3,
                 "dispatch_source_mode": "verified",
@@ -412,6 +846,13 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(
             {
                 "shard": 1,
+                "check_paste_policy": {
+                    "mode": "small_manual_only",
+                    "paste_warning_rows": 250,
+                    "paste_max_rows": 1000,
+                    "upload_required_rows": 1000,
+                    "upload_recommended_rows": 250,
+                },
                 "check": 2,
                 "dispatch": 3,
                 "verify": 4,
