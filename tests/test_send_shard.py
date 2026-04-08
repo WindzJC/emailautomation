@@ -14,7 +14,9 @@ from send_shard import (
     PITCH_JC_BODY,
     _parse_ts_safe,
     _resolve_shard_path,
+    append_sendgrid_unsubscribe_footer,
     build_sendgrid_astra_custom_args,
+    build_sendgrid_list_unsubscribe_header,
     build_message,
     dedupe_scope_for_runtime,
     domain_finalize_attempt,
@@ -180,6 +182,25 @@ class SendShardTests(unittest.TestCase):
 
         self.assertIn("Hi there,", body_text)
         self.assertNotIn("Hi ,", body_text)
+
+    def test_sendgrid_unsubscribe_footer_uses_mailto_list_link(self) -> None:
+        text_content, html_content = append_sendgrid_unsubscribe_footer(
+            "Hello there",
+            "<html><body>Hello there</body></html>",
+            "unsubscribe@barnesnoblemarketing.com",
+        )
+
+        self.assertIn("Unsubscribe from this list", text_content)
+        self.assertIn("<%asm_group_unsubscribe_raw_url%>", text_content)
+        self.assertIn("Unsubscribe from this list", html_content)
+        self.assertIn("<%asm_group_unsubscribe_raw_url%>", html_content)
+        self.assertNotIn("asm_group_unsubscribe_url", html_content)
+
+    def test_sendgrid_list_unsubscribe_header_includes_mailto_and_https(self) -> None:
+        header = build_sendgrid_list_unsubscribe_header("unsubscribe@barnesnoblemarketing.com")
+
+        self.assertIn("<mailto:unsubscribe@barnesnoblemarketing.com?subject=unsubscribe&body=unsubscribe>", header)
+        self.assertIn("<%asm_group_unsubscribe_raw_url%>", header)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
 import argparse
 import base64
 import csv
+import hashlib
 import html
 import json
 import random
@@ -93,6 +94,32 @@ ROLE_LOCALPART_BLOCKLIST = {
     "team",
     "webmaster",
 }
+
+
+def _short_sha256(*parts: object, length: int = 24) -> str:
+    payload = "|".join(str(part or "").strip() for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[: max(8, int(length or 24))]
+
+
+def build_sendgrid_astra_custom_args(
+    *,
+    profile_name: str,
+    run_id: str,
+    recipient_email: str,
+    queue_name: str,
+    message_ordinal: int,
+) -> Dict[str, str]:
+    recipient_id = _short_sha256("recipient", profile_name, recipient_email.lower())
+    message_key = _short_sha256("message", profile_name, run_id, recipient_id, queue_name, message_ordinal)
+    return {
+        "profile": str(profile_name or "").strip(),
+        "shard": str(queue_name or "").strip(),
+        "provider": "sendgrid",
+        "astra_profile": str(profile_name or "").strip(),
+        "astra_run_id": str(run_id or "").strip(),
+        "astra_recipient_id": recipient_id,
+        "astra_message_key": message_key,
+    }
 
 GENERIC_SALUTATION = "there"
 
@@ -450,7 +477,7 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """Hi {AuthorName},
+PITCH_1_5_BODY = """Hi {FirstName},
 
 We are currently reviewing a limited number of titles for possible consignment placement, and part of that review is whether the presentation is strong enough to support the book properly in a retail setting.
 
@@ -480,7 +507,7 @@ Best regards,
 {SIGIMG}
 """
 
-PITCH_JC_BODY = """Hi {AuthorName},
+PITCH_JC_BODY = """Hi {FirstName},
 
 I’m reaching out because I work specifically with authors on the visual side of promotion.
 
@@ -538,6 +565,15 @@ def norm_email(s: str) -> str:
 
 def make_unsub_mailto(unsub_email: str) -> str:
     return f"mailto:{unsub_email}?subject={quote('unsubscribe')}&body={quote('unsubscribe')}"
+
+
+SENDGRID_ASM_GROUP_UNSUB_RAW_URL = "<%asm_group_unsubscribe_raw_url%>"
+
+
+def build_sendgrid_list_unsubscribe_header(unsub_email: str) -> str:
+    mailto_target = make_unsub_mailto(unsub_email)
+    https_target = SENDGRID_ASM_GROUP_UNSUB_RAW_URL
+    return f"<{mailto_target}>, <{https_target}>"
 
 
 def parse_ts(ts: str) -> Optional[datetime]:
@@ -1108,7 +1144,7 @@ def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
     with lock_files([csv_path]):
         with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+            fieldnames = reader.fieldnames or ["Email", "FirstName", "BookTitle"]
             kept_rows = []
             for row in reader:
                 clean_row = {k: v for k, v in row.items() if k is not None}
@@ -1129,7 +1165,7 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
     with lock_files([csv_path]):
         with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or ["Email", "AuthorName", "BookTitle"]
+            fieldnames = reader.fieldnames or ["Email", "FirstName", "BookTitle"]
             kept_rows = []
             target = norm_email(email_addr)
             for row in reader:
@@ -1185,16 +1221,14 @@ def render_message_parts(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path],
-    unsub_mailto_override: Optional[str] = None,
 ) -> Tuple[str, str, str, Optional[str]]:
-    unsub_mailto = unsub_mailto_override or make_unsub_mailto(unsub_email)
+    unsub_mailto = make_unsub_mailto(unsub_email)
 
     author = (author or GENERIC_SALUTATION).strip()
     first_name = author.split()[0] if author else GENERIC_SALUTATION
     book_title = (book_title or "").strip() or "your book"
 
     format_args = {
-        "AuthorName": author,
         "FirstName": first_name,
         "BookTitle": book_title,
         "UnsubEmail": unsub_email,
@@ -1204,7 +1238,6 @@ def render_message_parts(
 
     body_text = body_template.format(**format_args)
     subject_text = subject.format(
-        AuthorName=author,
         FirstName=first_name,
         BookTitle=book_title,
         UnsubEmail=unsub_email,
@@ -1226,7 +1259,6 @@ def build_message(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path] = None,
-    unsub_mailto_override: Optional[str] = None,
 ) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
     subject_text, body_text, html_body, cid = render_message_parts(
         author,
@@ -1235,7 +1267,6 @@ def build_message(
         body_template,
         unsub_email,
         signature_file,
-        unsub_mailto_override,
     )
 
     msg = EmailMessage()
@@ -1263,6 +1294,31 @@ def build_message(
         )
 
     return msg, subject_text, body_text, html_body, cid
+
+
+def append_sendgrid_unsubscribe_footer(
+    text_content: str,
+    html_content: str,
+    unsub_email: str,
+) -> Tuple[str, str]:
+    label = "Unsubscribe from this list"
+    href = SENDGRID_ASM_GROUP_UNSUB_RAW_URL
+    if not href:
+        return text_content, html_content
+
+    if label.lower() not in text_content.lower():
+        text_content = (text_content.rstrip() + f"\n\nP.S. {label}: {href}").strip()
+
+    if label.lower() not in html_content.lower():
+        footer_html = f'<br><br><a href="{href}">{html.escape(label)}</a>'
+        if "</body>" in html_content:
+            html_content = html_content.replace("</body>", f"{footer_html}</body>", 1)
+        elif "</html>" in html_content:
+            html_content = html_content.replace("</html>", f"{footer_html}</html>", 1)
+        else:
+            html_content = f"{html_content}{footer_html}"
+
+    return text_content, html_content
 
 
 def send_via_sendgrid(
@@ -1302,27 +1358,17 @@ def send_via_sendgrid(
         ) from exc
 
     asm_enabled = int(unsubscribe_group_id or 0) > 0
-    unsub_token = "<%asm_group_unsubscribe_url%>" if asm_enabled else ""
 
     text_content = body_text.replace("{SIGIMG}", "").strip()
-    if unsub_token and unsub_token not in text_content:
-        text_content = (text_content + "\n\nP.S. Unsubscribe: <%asm_group_unsubscribe_url%>").strip()
-
     html_content = html_body
-    if unsub_token and unsub_token not in html_content:
-        unsub_html = f'<br><br><a href="{unsub_token}">Unsubscribe</a>'
-        if "</body>" in html_content:
-            html_content = html_content.replace("</body>", f"{unsub_html}</body>", 1)
-        elif "</html>" in html_content:
-            html_content = html_content.replace("</html>", f"{unsub_html}</html>", 1)
-        else:
-            html_content = f"{html_content}{unsub_html}"
+    text_content, html_content = append_sendgrid_unsubscribe_footer(text_content, html_content, unsub_email)
 
     mail = Mail(from_email=from_email, to_emails=to_email, subject=subject_text)
     mail.add_content(Content("text/plain", text_content))
     mail.add_content(Content("text/html", html_content))
     mail.reply_to = ReplyTo(reply_to)
-    mail.add_header(Header("List-Unsubscribe", f"<mailto:{unsub_email}?subject=unsubscribe>"))
+    mail.add_header(Header("List-Unsubscribe", build_sendgrid_list_unsubscribe_header(unsub_email)))
+    mail.add_header(Header("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"))
     if asm_enabled:
         groups_list = [int(x) for x in (groups_to_display or [unsubscribe_group_id]) if int(x) > 0]
         if not groups_list:
@@ -2292,17 +2338,14 @@ def main():
     sendgrid_groups_to_display = [int(x) for x in raw_groups if int(x) > 0]
     if sendgrid_unsub_group_id > 0 and not sendgrid_groups_to_display:
         sendgrid_groups_to_display = [sendgrid_unsub_group_id]
-    sendgrid_custom_args = {
-        "profile": (args.profile or "").strip(),
-        "from_email": from_user,
-        "shard": csv_path.name,
-        "provider": "sendgrid" if args.provider == "sendgrid" else "",
-    }
-    unsub_mailto_override = (
-        "<%asm_group_unsubscribe_url%>"
-        if args.provider == "sendgrid" and sendgrid_unsub_group_id > 0
-        else None
-    )
+    sendgrid_run_id = ""
+    if args.provider == "sendgrid":
+        sendgrid_run_id = (
+            f"{(args.profile or 'sendgrid').strip()}-"
+            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+            f"{uuid.uuid4().hex[:10]}"
+        )
+    sendgrid_custom_args: Dict[str, str] = {}
 
     sendgrid_counters: Dict[str, Dict[str, object]] = {}
     sendgrid_counter_key = ""
@@ -2633,7 +2676,6 @@ def main():
                     from_user, to_email, author, book_title,
                     subject, body_template, unsub_email,
                     signature_file=sig_path,
-                    unsub_mailto_override=unsub_mailto_override,
                 )
 
                 next_index = idx + 1
@@ -2645,7 +2687,17 @@ def main():
                         print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                     else:
                         attempt_slot_token = reserve_domain_attempt_slot()
-
+                        sendgrid_custom_args = (
+                            build_sendgrid_astra_custom_args(
+                                profile_name=str(args.profile or "").strip(),
+                                run_id=sendgrid_run_id,
+                                recipient_email=to_email,
+                                queue_name=csv_path.name,
+                                message_ordinal=next_index,
+                            )
+                            if args.provider == "sendgrid"
+                            else {}
+                        )
                         send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = ""
                         if args.provider == "sendgrid" and send_result.get("message_id"):
