@@ -1158,6 +1158,19 @@ def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
     return removed
 
 
+def count_prunable_rows(csv_path: Path, sent_emails: Set[str]) -> int:
+    if not sent_emails or not csv_path.exists():
+        return 0
+    removed = 0
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            email_addr = norm_email((row or {}).get("Email") or "")
+            if email_addr and email_addr in sent_emails:
+                removed += 1
+    return removed
+
+
 def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
     if not email_addr or not csv_path.exists():
         return False
@@ -2154,10 +2167,14 @@ def main():
         if args.global_dedupe:
             sent_for_prune |= global_done
         sent_for_prune -= always_send_set
-        removed = prune_sent_from_csv(csv_path, sent_for_prune)
+        prune_fn = count_prunable_rows if args.preflight else prune_sent_from_csv
+        removed = prune_fn(csv_path, sent_for_prune)
         if removed:
-            print(f"PRUNE: removed {removed} from {csv_path.name}")
-            rows = read_rows(csv_path)
+            if args.preflight:
+                print(f"PRUNE: would remove {removed} from {csv_path.name} (preflight only)")
+            else:
+                print(f"PRUNE: removed {removed} from {csv_path.name}")
+                rows = read_rows(csv_path)
 
     pending: List[Dict[str, str]] = []
     seen_in_input: Set[str] = set()
