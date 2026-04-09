@@ -34,57 +34,63 @@ from send_shard import (
 
 
 class SendShardTests(unittest.TestCase):
+    def _build_sendgrid_runtime_fixture(self, tmpdir: str) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path, dict[str, object]]:
+        base = Path(tmpdir)
+        shards = base / "data" / "shards"
+        logs = base / "data" / "logs"
+        state = base / "data" / "state"
+        shards.mkdir(parents=True)
+        logs.mkdir(parents=True)
+        state.mkdir(parents=True)
+
+        csv_path = shards / "recipients_sendgrid_1.csv"
+        log_path = logs / "sendgrid_annette_log.csv"
+        account_map = base / "account_map_private_sendgrid.csv"
+        unsub = state / "unsubscribed.csv"
+        suppress = state / "suppressed.csv"
+        sg_suppress = state / "sendgrid_suppressions.csv"
+        counters = state / "sendgrid_daily_counters.json"
+
+        csv_path.write_text(
+            "Email,FirstName,BookTitle\n"
+            "already-sent@example.com,Sent,Book A\n"
+            "astraproductionsbyjc@gmail.com,Probe,Book B\n"
+            "fresh@example.com,Fresh,Book C\n",
+            encoding="utf-8",
+        )
+        log_path.write_text(
+            "TimestampUTC,Email,Status,Info\n"
+            "2026-04-10T00:00:00+00:00,already-sent@example.com,SENT,\n"
+            "2026-04-10T00:00:01+00:00,astraproductionsbyjc@gmail.com,SENT,\n",
+            encoding="utf-8",
+        )
+        account_map.write_text(
+            "RecipientsCSV,LogCSV\n"
+            "data/shards/recipients_sendgrid_1.csv,data/logs/sendgrid_annette_log.csv\n",
+            encoding="utf-8",
+        )
+        unsub.write_text("Email\n", encoding="utf-8")
+        suppress.write_text("Email\n", encoding="utf-8")
+        sg_suppress.write_text("Email,Status,Reason,Source,CreatedAtUtc,ExpiresAtUtc\n", encoding="utf-8")
+        counters.write_text("{}", encoding="utf-8")
+
+        profile = {
+            **send_shard.PROFILES["sendgrid_annette"],
+            "csv": csv_path.name,
+            "log": log_path.name,
+            "account_map": account_map.name,
+            "unsub_csv": unsub.name,
+            "suppress_csv": suppress.name,
+            "sendgrid_suppression_csv": sg_suppress.name,
+            "interval": 0,
+            "repeat": False,
+        }
+        return base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile
+
     def test_preflight_reports_prune_without_mutating_shard_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
-            shards = base / "data" / "shards"
-            logs = base / "data" / "logs"
-            state = base / "data" / "state"
-            shards.mkdir(parents=True)
-            logs.mkdir(parents=True)
-            state.mkdir(parents=True)
-
-            csv_path = shards / "recipients_sendgrid_1.csv"
-            log_path = logs / "sendgrid_annette_log.csv"
-            account_map = base / "account_map_private_sendgrid.csv"
-            unsub = state / "unsubscribed.csv"
-            suppress = state / "suppressed.csv"
-            sg_suppress = state / "sendgrid_suppressions.csv"
-            counters = state / "sendgrid_daily_counters.json"
-
-            csv_path.write_text(
-                "Email,FirstName,BookTitle\n"
-                "already-sent@example.com,Sent,Book A\n"
-                "astraproductionsbyjc@gmail.com,Probe,Book B\n"
-                "fresh@example.com,Fresh,Book C\n",
-                encoding="utf-8",
-            )
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
             original_csv = csv_path.read_text(encoding="utf-8")
-            log_path.write_text(
-                "TimestampUTC,Email,Status,Info\n"
-                "2026-04-10T00:00:00+00:00,already-sent@example.com,SENT,\n"
-                "2026-04-10T00:00:01+00:00,astraproductionsbyjc@gmail.com,SENT,\n",
-                encoding="utf-8",
-            )
-            account_map.write_text(
-                "RecipientsCSV,LogCSV\n"
-                "data/shards/recipients_sendgrid_1.csv,data/logs/sendgrid_annette_log.csv\n",
-                encoding="utf-8",
-            )
-            unsub.write_text("Email\n", encoding="utf-8")
-            suppress.write_text("Email\n", encoding="utf-8")
-            sg_suppress.write_text("Email,Status,Reason,Source,CreatedAtUtc,ExpiresAtUtc\n", encoding="utf-8")
-            counters.write_text("{}", encoding="utf-8")
-
-            profile = {
-                **send_shard.PROFILES["sendgrid_annette"],
-                "csv": csv_path.name,
-                "log": log_path.name,
-                "account_map": account_map.name,
-                "unsub_csv": unsub.name,
-                "suppress_csv": suppress.name,
-                "sendgrid_suppression_csv": sg_suppress.name,
-            }
 
             stdout = io.StringIO()
             with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch.object(
@@ -115,6 +121,84 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
             self.assertIn("PRUNE: would remove 1 from recipients_sendgrid_1.csv (preflight only)", stdout.getvalue())
             self.assertIn("PREFLIGHT: ok (no sending).", stdout.getvalue())
+
+    def test_startup_guard_skips_initial_prune_without_mutating_shard_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+            original_csv = csv_path.read_text(encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(settings, "STATE_DIR", state), patch.object(
+                send_shard, "SHARDS_DIR", shards
+            ), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(
+                send_shard, "STATE_DIR", state
+            ), patch.object(
+                send_shard, "ROOT", base
+            ), patch.object(
+                send_shard, "DEFAULT_UNSUB_CSV", unsub
+            ), patch.object(
+                send_shard, "DEFAULT_SUPPRESS_CSV", suppress
+            ), patch.object(
+                send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress
+            ), patch.object(
+                send_shard, "SENDGRID_COUNTERS_PATH", counters
+            ), patch.object(
+                send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True
+            ), patch.dict(
+                send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False
+            ), patch.object(
+                sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette", "--dry_run", "--max_total", "1"]
+            ), redirect_stdout(stdout):
+                send_shard.main()
+
+            self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
+            self.assertIn("PRUNE: startup would remove 1 from recipients_sendgrid_1.csv (guard active)", stdout.getvalue())
+            self.assertIn("DRY RUN: no emails will be sent.", stdout.getvalue())
+
+    def test_startup_without_guard_prunes_shard_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+
+            stdout = io.StringIO()
+            with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(settings, "STATE_DIR", state), patch.object(
+                send_shard, "SHARDS_DIR", shards
+            ), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(
+                send_shard, "STATE_DIR", state
+            ), patch.object(
+                send_shard, "ROOT", base
+            ), patch.object(
+                send_shard, "DEFAULT_UNSUB_CSV", unsub
+            ), patch.object(
+                send_shard, "DEFAULT_SUPPRESS_CSV", suppress
+            ), patch.object(
+                send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress
+            ), patch.object(
+                send_shard, "SENDGRID_COUNTERS_PATH", counters
+            ), patch.object(
+                send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", False
+            ), patch.dict(
+                send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False
+            ), patch.object(
+                sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette", "--dry_run", "--max_total", "1"]
+            ), redirect_stdout(stdout):
+                send_shard.main()
+
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                ["astraproductionsbyjc@gmail.com", "fresh@example.com"],
+                [row["Email"] for row in rows],
+            )
+            self.assertIn("PRUNE: removed 1 from recipients_sendgrid_1.csv", stdout.getvalue())
+            self.assertIn("DRY RUN: no emails will be sent.", stdout.getvalue())
 
     def test_prune_sent_from_csv_mutates_during_normal_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

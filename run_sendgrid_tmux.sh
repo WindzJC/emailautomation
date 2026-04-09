@@ -15,6 +15,7 @@ REPORT_PATH="${SENDGRID_NORMALIZE_REPORT:-sendgrid_shard_normalize_report.json}"
 ENV_FILES=(".env.local" ".env")
 ATTACH_MODE="${TMUX_SENDGRID_ATTACH:-1}"
 MAX_TOTAL_OVERRIDE="${SENDGRID_DASHBOARD_MAX_TOTAL:-}"
+STARTUP_PRUNE_GUARD="${SENDGRID_SKIP_PRUNE_ON_STARTUP:-0}"
 PROFILES=(
   sendgrid_annette
   sendgrid_jordan
@@ -91,6 +92,9 @@ if [[ -n "$MAX_TOTAL_OVERRIDE" ]]; then
   EXTRA_ARGS+=(--max_total "$MAX_TOTAL_OVERRIDE")
   echo "Dashboard send cap override: $MAX_TOTAL_OVERRIDE per sender"
 fi
+if [[ "$STARTUP_PRUNE_GUARD" == "1" ]]; then
+  echo "Startup prune guard enabled for SendGrid boot."
+fi
 EXTRA_ARGS_STR=""
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   printf -v EXTRA_ARGS_STR ' %q' "${EXTRA_ARGS[@]}"
@@ -112,6 +116,7 @@ tmux split-window -v -t "$SESSION_NAME":run.2
 tmux select-layout -t "$SESSION_NAME":run tiled
 
 tmux set-environment -t "$SESSION_NAME" SENDGRID_API_KEY "$SENDGRID_API_KEY"
+tmux set-environment -t "$SESSION_NAME" SENDGRID_SKIP_PRUNE_ON_STARTUP "$STARTUP_PRUNE_GUARD"
 
 for pane_profile in \
   "$SESSION_NAME:run.0 sendgrid_annette" \
@@ -122,7 +127,8 @@ for pane_profile in \
   pane="${pane_profile%% *}"
   profile="${pane_profile##* }"
   escaped_key="$(printf '%q' "$SENDGRID_API_KEY")"
-  tmux send-keys -t "$pane" "cd \"$ROOT\"; export SENDGRID_API_KEY=$escaped_key; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR" C-m
+  escaped_guard="$(printf '%q' "$STARTUP_PRUNE_GUARD")"
+  tmux send-keys -t "$pane" "cd \"$ROOT\"; export SENDGRID_API_KEY=$escaped_key; export SENDGRID_SKIP_PRUNE_ON_STARTUP=$escaped_guard; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR" C-m
 done
 
 if [[ "$ATTACH_MODE" == "0" ]]; then

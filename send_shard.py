@@ -60,6 +60,7 @@ SENDGRID_DAILY_CAP = 0  # 0 = disabled (no global daily cap)
 SENDGRID_COUNTERS_PATH = settings.SENDGRID_COUNTERS_PATH
 SENDGRID_GLOBAL_COUNTER_KEY = "__global__"
 DOMAIN_SLOT_TTL_SECONDS = max(30, int(os.environ.get("DOMAIN_SLOT_TTL_SECONDS", "300")))
+SENDGRID_SKIP_PRUNE_ON_STARTUP = os.environ.get("SENDGRID_SKIP_PRUNE_ON_STARTUP", "").strip() == "1"
 
 PROVIDER_LIMIT_DEFAULTS = {
     "private": {"max_messages_1h": 80},
@@ -1171,6 +1172,14 @@ def count_prunable_rows(csv_path: Path, sent_emails: Set[str]) -> int:
     return removed
 
 
+def should_skip_sendgrid_prune_on_startup(args: argparse.Namespace) -> bool:
+    return bool(
+        SENDGRID_SKIP_PRUNE_ON_STARTUP
+        and not bool(getattr(args, "preflight", False))
+        and str(getattr(args, "provider", "") or "").strip().lower() == "sendgrid"
+    )
+
+
 def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
     if not email_addr or not csv_path.exists():
         return False
@@ -2167,11 +2176,16 @@ def main():
         if args.global_dedupe:
             sent_for_prune |= global_done
         sent_for_prune -= always_send_set
-        prune_fn = count_prunable_rows if args.preflight else prune_sent_from_csv
+        if args.preflight or should_skip_sendgrid_prune_on_startup(args):
+            prune_fn = count_prunable_rows
+        else:
+            prune_fn = prune_sent_from_csv
         removed = prune_fn(csv_path, sent_for_prune)
         if removed:
             if args.preflight:
                 print(f"PRUNE: would remove {removed} from {csv_path.name} (preflight only)")
+            elif should_skip_sendgrid_prune_on_startup(args):
+                print(f"PRUNE: startup would remove {removed} from {csv_path.name} (guard active)")
             else:
                 print(f"PRUNE: removed {removed} from {csv_path.name}")
                 rows = read_rows(csv_path)
