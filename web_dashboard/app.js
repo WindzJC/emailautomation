@@ -86,6 +86,14 @@ const els = {
   leadsRefreshBtn: document.getElementById("leads-refresh-btn"),
   leadsStatusMeta: document.getElementById("leads-status-meta"),
   leadsStatusGrid: document.getElementById("leads-status-grid"),
+  authOverlay: document.getElementById("auth-overlay"),
+  authOverlayNote: document.getElementById("auth-overlay-note"),
+  authForm: document.getElementById("auth-form"),
+  authUsername: document.getElementById("auth-username"),
+  authPassword: document.getElementById("auth-password"),
+  authLoginBtn: document.getElementById("auth-login-btn"),
+  authStatusLabel: document.getElementById("auth-status-label"),
+  authLogoutBtn: document.getElementById("logout-btn"),
   messageBar: document.getElementById("message-bar"),
 };
 
@@ -104,6 +112,11 @@ let selectedProfileName = "";
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
 let activeDashboardTab = "ops";
+let authState = {
+  authEnabled: true,
+  authenticated: false,
+  username: "",
+};
 const profileActionState = new Map();
 const pendingProfileActions = new Map();
 
@@ -133,6 +146,137 @@ function showMessage(message, kind = "success") {
       showMessage("");
     }
   }, 5000);
+}
+
+function renderAuthUi() {
+  const authenticated = Boolean(authState.authenticated);
+  if (els.authStatusLabel) {
+    setNodeText(
+      els.authStatusLabel,
+      authenticated
+        ? `Signed in as ${authState.username || "admin"}`
+        : authState.authEnabled
+          ? "Signed out"
+          : "Auth not configured",
+    );
+  }
+  if (els.authLogoutBtn) {
+    els.authLogoutBtn.disabled = !authenticated;
+  }
+  if (els.page) {
+    els.page.classList.toggle("is-authenticated", authenticated);
+  }
+}
+
+function showAuthOverlay(message = "") {
+  if (els.authOverlay) {
+    els.authOverlay.classList.remove("hidden");
+    els.authOverlay.setAttribute("aria-hidden", "false");
+  }
+  if (els.authOverlayNote) {
+    setNodeText(
+      els.authOverlayNote,
+      message || (authState.authEnabled ? "Sign in to unlock dashboard controls." : "Dashboard auth is not configured."),
+    );
+  }
+  if (els.authLoginBtn) {
+    els.authLoginBtn.disabled = false;
+    setNodeText(els.authLoginBtn, authState.authEnabled ? "Sign in" : "Auth unavailable" );
+  }
+  if (els.page) {
+    els.page.classList.add("is-auth-locked");
+  }
+}
+
+function hideAuthOverlay() {
+  if (els.authOverlay) {
+    els.authOverlay.classList.add("hidden");
+    els.authOverlay.setAttribute("aria-hidden", "true");
+  }
+  if (els.page) {
+    els.page.classList.remove("is-auth-locked");
+  }
+}
+
+function setAuthState(nextState = {}) {
+  authState = {
+    authEnabled: nextState.authEnabled ?? authState.authEnabled,
+    authenticated: Boolean(nextState.authenticated),
+    username: String(nextState.username || ""),
+  };
+  renderAuthUi();
+  if (authState.authenticated) {
+    hideAuthOverlay();
+  } else {
+    showAuthOverlay(nextState.message || "");
+  }
+}
+
+async function fetchAuthStatus() {
+  const response = await fetch("/api/auth/status", { credentials: "same-origin" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.message || data.detail || `Request failed (${response.status}).`);
+  }
+  setAuthState({
+    authEnabled: Boolean(data.auth_enabled),
+    authenticated: Boolean(data.authenticated),
+    username: data.username || "",
+  });
+  return data;
+}
+
+async function submitAuthLogin() {
+  const username = String(els.authUsername?.value || "").trim();
+  const password = String(els.authPassword?.value || "");
+  if (!username || !password) {
+    showMessage("Enter a username and password.", "error");
+    return;
+  }
+  if (els.authLoginBtn) {
+    els.authLoginBtn.disabled = true;
+    setNodeText(els.authLoginBtn, "Signing in...");
+  }
+  try {
+    const data = await fetchJson("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ username, password }),
+    });
+    setAuthState({
+      authEnabled: Boolean(data.auth_enabled),
+      authenticated: Boolean(data.authenticated),
+      username: data.username || username,
+    });
+    showMessage("Signed in.", "success");
+    await bootstrapAuthenticatedDashboard();
+  } catch (err) {
+    setAuthState({ authEnabled: authState.authEnabled, authenticated: false, username: "", message: String(err) });
+    showMessage(`Sign in failed: ${err}`, "error");
+  } finally {
+    if (els.authLoginBtn) {
+      els.authLoginBtn.disabled = false;
+      setNodeText(els.authLoginBtn, authState.authEnabled ? "Sign in" : "Auth unavailable");
+    }
+    if (els.authPassword) {
+      els.authPassword.value = "";
+    }
+  }
+}
+
+async function submitAuthLogout() {
+  try {
+    await fetchJson("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  } catch (err) {
+    // Fall through to local state reset even if the server session is already gone.
+  }
+  stopSocket();
+  setAuthState({ authEnabled: authState.authEnabled, authenticated: false, username: "" });
+  showMessage("Signed out.", "success");
 }
 
 function readWallboardModeFromLocation() {
@@ -648,10 +792,21 @@ function dispatchSourceForSelectedMode() {
 }
 
 async function fetchJson(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+  });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.ok === false) {
     const message = data.message || data.detail || `Request failed (${response.status}).`;
+    if (response.status === 401 || response.status === 403) {
+      setAuthState({
+        authEnabled: authState.authEnabled,
+        authenticated: false,
+        username: "",
+        message,
+      });
+    }
     throw new Error(message);
   }
   return data;
@@ -3232,6 +3387,10 @@ async function runLeadShard() {
 }
 
 function connectSocket() {
+  if (!authState.authenticated) {
+    stopSocket();
+    return;
+  }
   if (socket) {
     socket.close();
   }
@@ -3251,13 +3410,56 @@ function connectSocket() {
 
   socket.addEventListener("close", () => {
     setConnectionState(false);
-    setTimeout(connectSocket, 1500);
+    socket = null;
+    if (authState.authenticated) {
+      setTimeout(connectSocket, 1500);
+    }
   });
 
   socket.addEventListener("error", () => {
     setConnectionState(false);
-    socket.close();
+    if (socket) {
+      socket.close();
+    }
   });
+}
+
+function stopSocket() {
+  if (socket) {
+    try {
+      socket.close();
+    } catch (err) {
+      // no-op
+    }
+    socket = null;
+  }
+  setConnectionState(false);
+}
+
+async function bootstrapAuthenticatedDashboard() {
+  await Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]);
+  connectSocket();
+}
+
+async function bootstrapDashboard() {
+  try {
+    const auth = await fetchAuthStatus();
+    if (auth.authenticated) {
+      await bootstrapAuthenticatedDashboard();
+    } else {
+      stopSocket();
+      renderAuthUi();
+      showAuthOverlay(auth.auth_enabled ? "Sign in to unlock dashboard controls." : "Dashboard auth is not configured.");
+    }
+  } catch (err) {
+    stopSocket();
+    setAuthState({
+      authEnabled: authState.authEnabled,
+      authenticated: false,
+      username: "",
+      message: String(err),
+    });
+  }
 }
 
 if (els.refreshBtn) els.refreshBtn.addEventListener("click", () => fetchSnapshot());
@@ -3317,6 +3519,13 @@ if (els.detailProfileSelect) {
 }
 if (els.detailPrevBtn) els.detailPrevBtn.addEventListener("click", () => shiftSelectedProfile(-1));
 if (els.detailNextBtn) els.detailNextBtn.addEventListener("click", () => shiftSelectedProfile(1));
+if (els.authForm) {
+  els.authForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitAuthLogin();
+  });
+}
+if (els.authLogoutBtn) els.authLogoutBtn.addEventListener("click", () => submitAuthLogout());
 
 wallboardMode = readWallboardModeFromLocation();
 activeDashboardTab = readDashboardTabFromLocation();
@@ -3325,4 +3534,6 @@ applyDashboardTab();
 renderImportantLeadCheck(lastImportantLeadCheck);
 renderImportantLeadVerify(lastImportantVerify);
 renderImportantDispatch(lastImportantDispatch);
-Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]).finally(() => connectSocket());
+renderAuthUi();
+showAuthOverlay("Loading authentication status...");
+bootstrapDashboard();

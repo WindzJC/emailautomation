@@ -25,6 +25,10 @@
             <span id="ws-indicator" class="dot dot-off"></span>
             <span id="ws-label">Disconnected</span>
           </div>
+          <div class="auth-chip">
+            <span id="auth-status-label" class="auth-status-label">Signed out</span>
+            <button id="logout-btn" class="btn btn-secondary btn-sm" type="button">Log out</button>
+          </div>
           <div class="view-tabs-buttons">
             <button id="ops-tab-btn" class="tab-btn is-active" type="button" aria-pressed="true">Dashboard</button>
             <button id="leads-tab-btn" class="tab-btn" type="button" aria-pressed="false">Leads</button>
@@ -213,6 +217,25 @@
           <div id="leads-important-dispatch-results" class="leads-results"></div>
         </section>
       </section>
+    </div>
+
+    <div id="auth-overlay" class="auth-overlay hidden" aria-hidden="true">
+      <div class="auth-card panel-shell">
+        <p class="eyebrow">Dashboard Access</p>
+        <h2>Sign in</h2>
+        <p id="auth-overlay-note" class="muted">Operational endpoints are locked until you authenticate.</p>
+        <form id="auth-form" class="auth-form">
+          <label class="auth-field">
+            Username
+            <input id="auth-username" type="text" autocomplete="username" spellcheck="false" />
+          </label>
+          <label class="auth-field">
+            Password
+            <input id="auth-password" type="password" autocomplete="current-password" />
+          </label>
+          <button id="auth-login-btn" class="btn btn-primary" type="submit">Sign in</button>
+        </form>
+      </div>
     </div>
 
     <script src="/static/app.js"></script>

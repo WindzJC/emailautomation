@@ -95,6 +95,7 @@ def write_json_atomic(path: Path, payload: Dict[str, object]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
     tmp_path.replace(path)
+    settings.secure_private_file(path)
 
 
 def load_state() -> Dict[str, object]:
@@ -202,6 +203,7 @@ def save_uploaded_csv(original_filename: str, content: bytes) -> Dict[str, objec
     filename = f"leads_{timestamp_slug()}_{sanitize_filename(original_filename)}"
     path = UPLOADS_DIR / filename
     path.write_bytes(content)
+    settings.secure_private_file(path)
     preview = preview_uploaded_csv(path)
     preview["original_filename"] = original_filename
     preview["uploaded_at_utc"] = iso_utc()
@@ -288,6 +290,7 @@ def _write_csv_rows(path: Path, rows: Iterable[Dict[str, str]], fieldnames: Sequ
         writer.writeheader()
         writer.writerows(row_list)
     tmp_path.replace(path)
+    settings.secure_private_file(path)
 
 
 def clean_uploaded_leads(

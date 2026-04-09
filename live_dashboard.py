@@ -7,6 +7,7 @@ import json
 import os
 import io
 import re
+import secrets
 import threading
 import time
 import uuid
@@ -23,6 +24,13 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from openpyxl import load_workbook
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+
+try:
+    from defusedxml import defuse_stdlib
+except Exception:  # pragma: no cover - dependency fallback
+    defuse_stdlib = None
 
 import settings
 import runtime_control
@@ -71,6 +79,13 @@ from leads_workflow import (
 from send_shard import PROFILES
 
 
+if defuse_stdlib is not None:
+    try:
+        defuse_stdlib()
+    except Exception:
+        pass
+
+
 def _int_env(name: str, default: int, minimum: int = 1) -> int:
     raw = str(os.environ.get(name, "") or "").strip()
     if not raw:
@@ -93,6 +108,47 @@ IMPORTANT_LEADS_PASTE_WARNING_ROWS = _int_env("IMPORTANT_LEADS_PASTE_WARNING_ROW
 IMPORTANT_LEADS_PASTE_MAX_ROWS = max(IMPORTANT_LEADS_PASTE_WARNING_ROWS, _int_env("IMPORTANT_LEADS_PASTE_MAX_ROWS", 1000))
 app = FastAPI(title="Email Automation Live Dashboard")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+_AUTH_PUBLIC_PATHS = {
+    "/",
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/status",
+    "/webhooks/sendgrid/events",
+}
+_AUTH_PUBLIC_PREFIXES = ("/static/",)
+_AUTH_PROTECTED_DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
+_AUTH_SESSION_KEY = "dashboard_authenticated"
+
+
+class DashboardAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        path = request.url.path
+        if request.method == "OPTIONS" or path in _AUTH_PUBLIC_PATHS or any(path.startswith(prefix) for prefix in _AUTH_PUBLIC_PREFIXES):
+            return await call_next(request)
+        if path in _AUTH_PROTECTED_DOC_PATHS or path.startswith("/api/") or path == "/ws":
+            if not settings.DASHBOARD_AUTH_PASSWORD:
+                return JSONResponse(
+                    {"ok": False, "message": "Dashboard auth is not configured."},
+                    status_code=503,
+                )
+            if not bool(request.session.get(_AUTH_SESSION_KEY)):
+                return JSONResponse(
+                    {"ok": False, "message": "Authentication required."},
+                    status_code=401,
+                )
+        return await call_next(request)
+
+
+app.add_middleware(DashboardAuthMiddleware)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.DASHBOARD_SESSION_SECRET,
+    session_cookie=settings.DASHBOARD_AUTH_COOKIE_NAME,
+    same_site="lax",
+    https_only=False,
+)
 
 SENDGRID_EVENT_PUBLIC_KEY = os.environ.get("SENDGRID_EVENT_PUBLIC_KEY", "").strip()
 SENDGRID_SIG_HEADER = "X-Twilio-Email-Event-Webhook-Signature"
@@ -144,6 +200,11 @@ class ImportantLeadVerifyPayload(BaseModel):
     verified_path: str = ""
     rejected_path: str = ""
     quarantine_path: str = ""
+
+
+class DashboardAuthPayload(BaseModel):
+    username: str = ""
+    password: str = ""
 
 
 def _profile_runtime_active(profile_name: str) -> bool:
@@ -250,6 +311,7 @@ def _save_important_check_job(job: dict[str, object]) -> None:
     tmp_path = write_path.with_suffix(f".{os.getpid()}.tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp_path.replace(write_path)
+    settings.secure_private_file(write_path)
 
 
 def _count_csv_rows(path: Path) -> int:
@@ -988,6 +1050,34 @@ def _verify_sendgrid_signature(raw_body: bytes, signature_b64: str, timestamp: s
         return False
 
 
+def _dashboard_auth_enabled() -> bool:
+    return bool(settings.DASHBOARD_AUTH_PASSWORD)
+
+
+def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
+    session = getattr(scope, "session", None)
+    if not isinstance(session, dict):
+        session = {}
+    return bool(session.get(_AUTH_SESSION_KEY))
+
+
+def _dashboard_auth_response() -> dict[str, object]:
+    return {
+        "auth_enabled": _dashboard_auth_enabled(),
+        "authenticated": False,
+        "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
+    }
+
+
+async def _read_upload_bytes_with_limit(file: UploadFile, *, limit: int) -> bytes:
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise ValueError(
+            f"Upload too large. Limit is {limit} bytes."
+        )
+    return content
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -996,6 +1086,43 @@ def index() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> JSONResponse:
+    authenticated = bool(request.session.get(_AUTH_SESSION_KEY))
+    return JSONResponse(
+        {
+            "ok": True,
+            **_dashboard_auth_response(),
+            "authenticated": authenticated,
+            "username": str(request.session.get("dashboard_username") or settings.DASHBOARD_AUTH_USERNAME or "admin"),
+        }
+    )
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
+    if not _dashboard_auth_enabled():
+        return JSONResponse(
+            {"ok": False, "message": "Dashboard auth is not configured."},
+            status_code=503,
+        )
+    expected_user = str(settings.DASHBOARD_AUTH_USERNAME or "admin")
+    expected_pass = str(settings.DASHBOARD_AUTH_PASSWORD or "")
+    if not secrets.compare_digest(str(payload.username or ""), expected_user) or not secrets.compare_digest(str(payload.password or ""), expected_pass):
+        return JSONResponse({"ok": False, "message": "Invalid dashboard credentials."}, status_code=401)
+
+    request.session[_AUTH_SESSION_KEY] = True
+    request.session["dashboard_username"] = expected_user
+    request.session["dashboard_authenticated_at_utc"] = iso_utc()
+    return JSONResponse({"ok": True, "message": "Signed in.", **_dashboard_auth_response(), "authenticated": True, "username": expected_user})
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request) -> JSONResponse:
+    request.session.clear()
+    return JSONResponse({"ok": True, "message": "Signed out.", **_dashboard_auth_response()})
 
 
 @app.get("/api/snapshot")
@@ -1060,7 +1187,18 @@ async def upload_leads(file: UploadFile = File(...)) -> JSONResponse:
     filename = (file.filename or "").strip()
     if not filename:
         return JSONResponse({"ok": False, "message": "Missing upload filename."}, status_code=400)
-    content = await file.read()
+    try:
+        content = await _read_upload_bytes_with_limit(file, limit=settings.DASHBOARD_MAX_UPLOAD_BYTES)
+    except ValueError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": str(exc),
+                "error": "UPLOAD_TOO_LARGE",
+                "details": {"max_upload_bytes": settings.DASHBOARD_MAX_UPLOAD_BYTES},
+            },
+            status_code=413,
+        )
     if not content:
         return JSONResponse({"ok": False, "message": "Uploaded file is empty."}, status_code=400)
     try:
@@ -1157,7 +1295,30 @@ async def check_important_leads_upload(
         selected_size_bytes = max(0, int(str(client_selected_size_bytes or "0").strip() or 0))
     except Exception:
         selected_size_bytes = 0
-    content = await file.read()
+    if selected_size_bytes > settings.DASHBOARD_MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"Upload too large. Limit is {settings.DASHBOARD_MAX_UPLOAD_BYTES} bytes.",
+                "error": "UPLOAD_TOO_LARGE",
+                "details": {"max_upload_bytes": settings.DASHBOARD_MAX_UPLOAD_BYTES},
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=413,
+        )
+    try:
+        content = await _read_upload_bytes_with_limit(file, limit=settings.DASHBOARD_MAX_UPLOAD_BYTES)
+    except ValueError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": str(exc),
+                "error": "UPLOAD_TOO_LARGE",
+                "details": {"max_upload_bytes": settings.DASHBOARD_MAX_UPLOAD_BYTES},
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=413,
+        )
     if not content:
         return JSONResponse(
             {
@@ -1191,8 +1352,9 @@ async def check_important_leads_upload(
                 "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             },
             status_code=400,
-        )
+    )
     effective_input_path.write_text(normalized_text, encoding="utf-8")
+    settings.secure_private_file(effective_input_path)
     total_input_rows = _count_csv_rows(effective_input_path)
     job = _start_important_check_job(
         input_path=effective_input_path,
@@ -1557,6 +1719,9 @@ async def websocket_snapshot_stream(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> None:
+    if not _dashboard_auth_enabled() or not _dashboard_is_authenticated(websocket):
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     try:
         while True:

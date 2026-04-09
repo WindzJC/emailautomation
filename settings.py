@@ -41,12 +41,15 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     raw = _env(name, str(default))
     try:
-        return int(raw)
+        value = int(raw)
     except Exception:
-        return default
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
 
 
 def _resolve_path(raw: str, default: Path | None = None) -> Path:
@@ -96,6 +99,13 @@ SENDGRID_COUNTERS_PATH = STATE_DIR / "sendgrid_daily_counters.json"
 SEND_CAP_DEFAULT = _env_int("SEND_CAP_DEFAULT", 100)
 ALLOWED_ORIGINS = tuple(item.strip() for item in _env("ALLOWED_ORIGINS").split(",") if item.strip())
 SECRET_KEY = _env("SECRET_KEY", "change-me")
+DASHBOARD_SESSION_SECRET = _env("DASHBOARD_SESSION_SECRET", SECRET_KEY)
+DASHBOARD_AUTH_USERNAME = _env("DASHBOARD_AUTH_USERNAME", "admin")
+DASHBOARD_AUTH_PASSWORD = _env("DASHBOARD_AUTH_PASSWORD", SECRET_KEY)
+DASHBOARD_AUTH_COOKIE_NAME = _env("DASHBOARD_AUTH_COOKIE_NAME", "dashboard_session")
+DASHBOARD_MAX_UPLOAD_BYTES = _env_int("DASHBOARD_MAX_UPLOAD_BYTES", 25 * 1024 * 1024, minimum=1)
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = 0o700
 MANAGED_SHARD_HEADERS = ("Email", "AuthorName", "BookTitle")
 
 
@@ -113,6 +123,7 @@ def ensure_dirs(paths: Iterable[Path] | None = None) -> None:
     ))
     for path in managed_paths:
         path.mkdir(parents=True, exist_ok=True)
+        secure_private_dir(path)
 
 
 def ensure_csv_with_headers(path: Path, headers: Iterable[str]) -> Path:
@@ -122,6 +133,7 @@ def ensure_csv_with_headers(path: Path, headers: Iterable[str]) -> Path:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(headers))
         writer.writeheader()
+    secure_private_file(path)
     return path
 
 
@@ -201,12 +213,16 @@ def ensure_managed_shard_file(target: Path, legacy: str | Path | None = None) ->
     ensure_dirs((target.parent,))
     legacy_path = app_path(legacy) if legacy else None
     if target.exists() and target.stat().st_size > 0:
+        secure_private_file(target)
         return target
     if legacy_path is not None and legacy_path.exists():
         if legacy_path.resolve() != target.resolve() and legacy_path.stat().st_size > 0:
             shutil.copy2(legacy_path, target)
+            secure_private_file(target)
             return target
-    return ensure_csv_with_headers(target, MANAGED_SHARD_HEADERS)
+    ensure_csv_with_headers(target, MANAGED_SHARD_HEADERS)
+    secure_private_file(target)
+    return target
 
 
 def maybe_seed_dir(target: Path, legacy: str | Path | None = None) -> Path:
@@ -234,6 +250,22 @@ def seed_missing_dir_contents(target: Path, legacy: str | Path | None = None) ->
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
     return target
+
+
+def secure_private_file(path: Path) -> Path:
+    try:
+        path.chmod(PRIVATE_FILE_MODE)
+    except Exception:
+        pass
+    return path
+
+
+def secure_private_dir(path: Path) -> Path:
+    try:
+        path.chmod(PRIVATE_DIR_MODE)
+    except Exception:
+        pass
+    return path
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:

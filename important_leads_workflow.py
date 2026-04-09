@@ -370,6 +370,7 @@ def _write_csv_atomic(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict
         writer.writeheader()
         writer.writerows(row_list)
     tmp_path.replace(path)
+    settings.secure_private_file(path)
 
 
 def _detect_core_headers(fieldnames: Sequence[str]) -> Dict[str, str]:
