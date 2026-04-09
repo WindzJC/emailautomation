@@ -91,10 +91,14 @@ LATEST_SHARD_REPORT_PATH = STATE_DIR / "shard_report_latest.json"
 SENDGRID_NORMALIZE_REPORT_PATH = STATE_DIR / "sendgrid_shard_normalize_report.json"
 WEBHOOK_EVENTS_PATH = LOGS_DIR / "sendgrid_events.jsonl"
 WEBHOOK_DEDUPE_PATH = STATE_DIR / "sendgrid_webhook_dedupe.sqlite3"
+SENDGRID_WEBHOOK_RECEIVER_DB_PATH = STATE_DIR / "sendgrid_webhook_receiver.sqlite3"
 SENDGRID_SUPPRESSIONS_PATH = STATE_DIR / "sendgrid_suppressions.csv"
 SUPPRESSED_PATH = STATE_DIR / "suppressed.csv"
 UNSUBSCRIBED_PATH = STATE_DIR / "unsubscribed.csv"
 SENDGRID_COUNTERS_PATH = STATE_DIR / "sendgrid_daily_counters.json"
+SENDGRID_WEBHOOK_RECEIVER_URL = _env("SENDGRID_WEBHOOK_RECEIVER_URL", "")
+SENDGRID_WEBHOOK_RECEIVER_API_TOKEN = _env("SENDGRID_WEBHOOK_RECEIVER_API_TOKEN", "")
+SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS = _env_int("SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS", 2)
 
 SEND_CAP_DEFAULT = _env_int("SEND_CAP_DEFAULT", 100)
 ALLOWED_ORIGINS = tuple(item.strip() for item in _env("ALLOWED_ORIGINS").split(",") if item.strip())
@@ -106,7 +110,7 @@ DASHBOARD_AUTH_COOKIE_NAME = _env("DASHBOARD_AUTH_COOKIE_NAME", "dashboard_sessi
 DASHBOARD_MAX_UPLOAD_BYTES = _env_int("DASHBOARD_MAX_UPLOAD_BYTES", 25 * 1024 * 1024, minimum=1)
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
-MANAGED_SHARD_HEADERS = ("Email", "AuthorName", "BookTitle")
+MANAGED_SHARD_HEADERS = ("Email", "FirstName", "BookTitle")
 
 
 def ensure_dirs(paths: Iterable[Path] | None = None) -> None:

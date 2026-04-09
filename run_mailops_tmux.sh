@@ -3,13 +3,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+unset TMUX_TMPDIR
+mkdir -p "$HOME/.local/state/tmux"
+chmod 700 "$HOME/.local/state/tmux"
+export TMUX_TMPDIR="$HOME/.local/state/tmux"
+
+for env_file in ".env.local" ".env"; do
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+    break
+  fi
+done
 
 SESSION_NAME="${TMUX_MAILOPS_SESSION:-mailops}"
 WINDOW_NAME="${TMUX_MAILOPS_WINDOW:-ops}"
 ATTACH_MODE="${TMUX_MAILOPS_ATTACH:-0}"
 
 HOST="${LIVE_DASHBOARD_HOST:-${APP_HOST:-0.0.0.0}}"
-PORT="${LIVE_DASHBOARD_PORT:-${APP_PORT:-8000}}"
+PORT="${LIVE_DASHBOARD_PORT:-${APP_PORT:-8001}}"
 TARGET_URL="${TMUX_TUNNEL_URL:-http://localhost:$PORT}"
 METRICS_ADDR="${TMUX_TUNNEL_METRICS_ADDR:-127.0.0.1:20241}"
 UVICORN_PATTERN="${TMUX_DASHBOARD_PATTERN:-uvicorn live_dashboard:app}"

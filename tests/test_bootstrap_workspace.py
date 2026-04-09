@@ -13,7 +13,7 @@ class BootstrapWorkspaceTests(unittest.TestCase):
             root = Path(tmpdir)
             target = root / "data" / "shards" / "recipients_sendgrid_1.csv"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("Email,AuthorName\n", encoding="utf-8")
+            target.write_text("Email,FirstName\n", encoding="utf-8")
 
             link_path = root / "_important" / "recipients_sendgrid_1.csv"
             status = bootstrap_workspace.ensure_link(link_path, target)

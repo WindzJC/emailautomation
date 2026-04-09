@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+unset TMUX_TMPDIR
+mkdir -p "$HOME/.local/state/tmux"
+chmod 700 "$HOME/.local/state/tmux"
+export TMUX_TMPDIR="$HOME/.local/state/tmux"
 
 for env_file in ".env.local" ".env"; do
   if [[ -f "$env_file" ]]; then
@@ -16,10 +20,6 @@ done
 
 # Default the profile auto-stop guard off unless the operator explicitly re-enables it.
 export DASHBOARD_PROFILE_GUARD_ENABLED="${DASHBOARD_PROFILE_GUARD_ENABLED:-0}"
-TMUX_SOCKET_ROOT="${TMUX_TMPDIR:-$ROOT/data/state/tmux}"
-mkdir -p "$TMUX_SOCKET_ROOT"
-chmod 700 "$TMUX_SOCKET_ROOT"
-export TMUX_TMPDIR="$TMUX_SOCKET_ROOT"
 
 PY="${PYTHON_BIN:-./.venv/bin/python}"
 HOST="${LIVE_DASHBOARD_HOST:-${APP_HOST:-0.0.0.0}}"

@@ -8,11 +8,11 @@ from tools.prepare_sendgrid_leads import load_source_rows
 
 
 class PrepareSendgridLeadsTests(unittest.TestCase):
-    def test_load_source_rows_handles_tab_delimited_author_email_export(self) -> None:
+    def test_load_source_rows_handles_tab_delimited_email_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "leads.tsv"
             path.write_text(
-                "\nAuthorName\tAuthorEmail\n"
+                "\nFirstName\tAuthorEmail\n"
                 "Michael Herrick\therrick@eastlink.ca\n"
                 "Saundra Sandrock\tprofchild@gmail.com\n",
                 encoding="utf-8",
@@ -22,8 +22,8 @@ class PrepareSendgridLeadsTests(unittest.TestCase):
 
             self.assertEqual(
                 [
-                    {"Email": "herrick@eastlink.ca", "AuthorName": "Michael Herrick"},
-                    {"Email": "profchild@gmail.com", "AuthorName": "Saundra Sandrock"},
+                    {"Email": "herrick@eastlink.ca", "FirstName": "Michael Herrick"},
+                    {"Email": "profchild@gmail.com", "FirstName": "Saundra Sandrock"},
                 ],
                 rows,
             )
@@ -32,7 +32,7 @@ class PrepareSendgridLeadsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "leads.csv"
             path.write_text(
-                "Email,AuthorName\n"
+                "Email,FirstName\n"
                 "alice@example.com,Alice Smith\n"
                 "bob@example.com,Bob Jones\n",
                 encoding="utf-8",
@@ -42,8 +42,8 @@ class PrepareSendgridLeadsTests(unittest.TestCase):
 
             self.assertEqual(
                 [
-                    {"Email": "alice@example.com", "AuthorName": "Alice Smith"},
-                    {"Email": "bob@example.com", "AuthorName": "Bob Jones"},
+                    {"Email": "alice@example.com", "FirstName": "Alice Smith"},
+                    {"Email": "bob@example.com", "FirstName": "Bob Jones"},
                 ],
                 rows,
             )

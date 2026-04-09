@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+unset TMUX_TMPDIR
+mkdir -p "$HOME/.local/state/tmux"
+chmod 700 "$HOME/.local/state/tmux"
+export TMUX_TMPDIR="$HOME/.local/state/tmux"
 
 for env_file in ".env.local" ".env"; do
   if [[ -f "$env_file" ]]; then
@@ -14,14 +18,9 @@ for env_file in ".env.local" ".env"; do
   fi
 done
 
-TMUX_SOCKET_ROOT="${TMUX_TMPDIR:-$ROOT/data/state/tmux}"
 BOOTSTRAP_SESSION="${TMUX_WORKER_BOOTSTRAP_SESSION:-runtime_worker}"
 BOOTSTRAP_COMMAND="${TMUX_WORKER_BOOTSTRAP_COMMAND:-tail -f /dev/null}"
 HEARTBEAT_SECONDS="${TMUX_WORKER_HEARTBEAT_SECONDS:-30}"
-
-mkdir -p "$TMUX_SOCKET_ROOT"
-chmod 700 "$TMUX_SOCKET_ROOT"
-export TMUX_TMPDIR="$TMUX_SOCKET_ROOT"
 
 ensure_bootstrap_session() {
   if ! tmux has-session -t "$BOOTSTRAP_SESSION" 2>/dev/null; then

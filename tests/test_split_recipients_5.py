@@ -13,10 +13,10 @@ from split_recipients_5 import main
 class SplitRecipientsFiveTests(unittest.TestCase):
     def write_rows(self, path: Path, emails: list[str]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["Email", "AuthorName"])
+            writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
             writer.writeheader()
             for email in emails:
-                writer.writerow({"Email": email, "AuthorName": email.split("@", 1)[0]})
+                writer.writerow({"Email": email, "FirstName": email.split("@", 1)[0]})
 
     def read_emails(self, path: Path) -> list[str]:
         with path.open(newline="", encoding="utf-8") as handle:

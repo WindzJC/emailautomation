@@ -212,6 +212,67 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(25, snapshot["profiles"][0]["max_total"])
         self.assertEqual(100, snapshot["profiles"][0]["configured_max_total"])
 
+    def test_build_snapshot_prefers_receiver_summary_for_sendgrid_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            profiles = {
+                "sendgrid_alpha": {
+                    "provider": "sendgrid",
+                    "csv": "recipients_alpha.csv",
+                    "log": "sendgrid_alpha_log.csv",
+                    "from_email": "alpha@example.com",
+                    "always_send": "probe@example.com",
+                    "max_total": 100,
+                }
+            }
+            self._write_recipients(base / "recipients_alpha.csv", "reader@example.com")
+            self._write_log(
+                base / "sendgrid_alpha_log.csv",
+                [("2026-03-13T12:00:00+00:00", "reader@example.com", "SENT", "sg_message_id=msg-1")],
+            )
+            receiver_summary = {
+                "selected_window_hours": 24,
+                "last_received_iso": "2026-03-13T12:04:30+00:00",
+                "events_5m": 2,
+                "events_1h": 4,
+                "unmapped_events_24h": 1,
+                "profiles": {
+                    "sendgrid_alpha": {
+                        "last_webhook_received_at": "2026-03-13T12:04:30+00:00",
+                        "mapped_events_24h": 3,
+                        "unmapped_events_24h": 1,
+                        "processed": 1,
+                        "delivered": 1,
+                        "deferred": 1,
+                        "bounced": 0,
+                        "blocked": 0,
+                        "dropped": 0,
+                        "latest_event": {
+                            "time": "2026-03-13T12:04:00+00:00",
+                            "status": "delivered",
+                            "email": "reader@example.com",
+                            "reason": "250 OK",
+                        },
+                        "recent": [],
+                    }
+                },
+            }
+
+            with self._patched_dashboard_context(base, profiles), patch.object(
+                dashboard_core,
+                "fetch_sendgrid_receiver_summary",
+                return_value=receiver_summary,
+            ):
+                snapshot = dashboard_core.build_dashboard_snapshot(activity_hours=24, tail_lines=8)
+
+        profile = snapshot["profiles"][0]
+        self.assertEqual(3, profile["webhook"]["mapped_events_24h"])
+        self.assertEqual(1, profile["webhook"]["unmapped_events_24h"])
+        self.assertEqual(1, profile["webhook"]["summary"]["processed"])
+        self.assertEqual(1, profile["webhook"]["summary"]["delivered"])
+        self.assertEqual(1, snapshot["summary"]["recent_unmapped"])
+        self.assertEqual("2026-03-13T12:04:30+00:00", snapshot["webhook_health"]["last_received_iso"])
+
     def test_start_sendgrid_profile_uses_dashboard_send_cap_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

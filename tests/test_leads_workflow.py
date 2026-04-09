@@ -15,7 +15,7 @@ class LeadsWorkflowTests(unittest.TestCase):
     def test_detect_column_mapping_supports_common_variants(self) -> None:
         detected = leads_workflow.detect_column_mapping(["AuthorEmail", "Name", "title"])
         self.assertEqual("AuthorEmail", detected["mapping"]["email"])
-        self.assertEqual("Name", detected["mapping"]["author_name"])
+        self.assertEqual("Name", detected["mapping"]["first_name"])
         self.assertEqual("title", detected["mapping"]["book_title"])
         self.assertFalse(detected["mapping_required"])
 
@@ -79,9 +79,9 @@ class LeadsWorkflowTests(unittest.TestCase):
             base = Path(tmpdir)
             rows = []
             for index in range(10):
-                rows.append({"Email": f"gmail{index}@gmail.com", "AuthorName": f"Gmail {index}", "BookTitle": ""})
+                rows.append({"Email": f"gmail{index}@gmail.com", "FirstName": f"Gmail {index}", "BookTitle": ""})
             for index in range(5):
-                rows.append({"Email": f"yahoo{index}@yahoo.com", "AuthorName": f"Yahoo {index}", "BookTitle": ""})
+                rows.append({"Email": f"yahoo{index}@yahoo.com", "FirstName": f"Yahoo {index}", "BookTitle": ""})
 
             with self._patched_runtime(base, shard_count=5):
                 self._write_cleaned_csv(base / "cleaned" / "cleaned_input.csv", rows)
@@ -105,15 +105,15 @@ class LeadsWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             rows = [
-                {"Email": "astraproductionsbyjc@gmail.com", "AuthorName": "Canary", "BookTitle": ""},
-                {"Email": "one@gmail.com", "AuthorName": "One", "BookTitle": ""},
-                {"Email": "two@yahoo.com", "AuthorName": "Two", "BookTitle": ""},
-                {"Email": "three@outlook.com", "AuthorName": "Three", "BookTitle": ""},
+                {"Email": "astraproductionsbyjc@gmail.com", "FirstName": "Canary", "BookTitle": ""},
+                {"Email": "one@gmail.com", "FirstName": "One", "BookTitle": ""},
+                {"Email": "two@yahoo.com", "FirstName": "Two", "BookTitle": ""},
+                {"Email": "three@outlook.com", "FirstName": "Three", "BookTitle": ""},
             ]
 
             with self._patched_runtime(base, shard_count=2):
                 self._write_cleaned_csv(base / "cleaned" / "cleaned_input.csv", rows)
-                existing_rows = [{"Email": "existing@example.com", "AuthorName": "Existing", "BookTitle": ""}]
+                existing_rows = [{"Email": "existing@example.com", "FirstName": "Existing", "BookTitle": ""}]
                 self._write_cleaned_csv(base / "shards" / "recipients_sendgrid_1.csv", existing_rows)
                 self._write_cleaned_csv(base / "shards" / "recipients_sendgrid_2.csv", existing_rows)
                 before_one = (base / "shards" / "recipients_sendgrid_1.csv").read_text(encoding="utf-8")
@@ -133,9 +133,9 @@ class LeadsWorkflowTests(unittest.TestCase):
             base = Path(tmpdir)
             rows = []
             for index in range(8):
-                rows.append({"Email": f"gmail{index}@gmail.com", "AuthorName": f"Gmail {index}", "BookTitle": ""})
+                rows.append({"Email": f"gmail{index}@gmail.com", "FirstName": f"Gmail {index}", "BookTitle": ""})
             for index in range(4):
-                rows.append({"Email": f"yahoo{index}@yahoo.com", "AuthorName": f"Yahoo {index}", "BookTitle": ""})
+                rows.append({"Email": f"yahoo{index}@yahoo.com", "FirstName": f"Yahoo {index}", "BookTitle": ""})
 
             with self._patched_runtime(base, shard_count=3):
                 self._write_cleaned_csv(base / "cleaned" / "cleaned_input.csv", rows)
@@ -205,7 +205,7 @@ class LeadsWorkflowTests(unittest.TestCase):
     def _write_cleaned_csv(self, path: Path, rows: list[dict[str, str]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["Email", "AuthorName", "BookTitle"])
+            writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
             writer.writeheader()
             writer.writerows(rows)
 

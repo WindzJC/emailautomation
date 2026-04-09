@@ -272,11 +272,11 @@ Delivered
             )
 
             with shard.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["Email", "AuthorName"])
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
                 writer.writeheader()
-                writer.writerow({"Email": "remove@example.com", "AuthorName": "A"})
-                writer.writerow({"Email": "expired@example.com", "AuthorName": "B"})
-                writer.writerow({"Email": "keep@example.com", "AuthorName": "C"})
+                writer.writerow({"Email": "remove@example.com", "FirstName": "A"})
+                writer.writerow({"Email": "expired@example.com", "FirstName": "B"})
+                writer.writerow({"Email": "keep@example.com", "FirstName": "C"})
 
             report = clean_recipient_shards(
                 suppression_csv,

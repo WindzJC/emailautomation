@@ -26,7 +26,7 @@ LEADS_STATE_PATH = settings.LEADS_STATE_PATH
 LATEST_SHARD_REPORT_PATH = settings.LATEST_SHARD_REPORT_PATH
 SENDGRID_SUPPRESSIONS_PATH = settings.SENDGRID_SUPPRESSIONS_PATH
 
-CANONICAL_HEADERS = ["Email", "AuthorName", "BookTitle"]
+CANONICAL_HEADERS = ["Email", "FirstName", "BookTitle"]
 PREVIEW_ROWS = 25
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -40,7 +40,7 @@ EMAIL_HEADER_CANDIDATES = (
     "mail",
     "address",
 )
-AUTHOR_HEADER_CANDIDATES = (
+FIRST_NAME_HEADER_CANDIDATES = (
     "authorname",
     "author_name",
     "author",
@@ -127,7 +127,7 @@ def _pick_header(fieldnames: Sequence[str], candidates: Sequence[str]) -> str:
 def detect_column_mapping(fieldnames: Sequence[str]) -> Dict[str, object]:
     mapping = {
         "email": _pick_header(fieldnames, EMAIL_HEADER_CANDIDATES),
-        "author_name": _pick_header(fieldnames, AUTHOR_HEADER_CANDIDATES),
+        "first_name": _pick_header(fieldnames, FIRST_NAME_HEADER_CANDIDATES),
         "book_title": _pick_header(fieldnames, BOOK_HEADER_CANDIDATES),
     }
     return {
@@ -223,7 +223,7 @@ def _normalize_mapping(fieldnames: Sequence[str], requested_mapping: Optional[Di
     detection = detect_column_mapping(fieldnames)["mapping"]
     mapping = {
         "email": str((requested_mapping or {}).get("email") or detection["email"] or "").strip(),
-        "author_name": str((requested_mapping or {}).get("author_name") or detection["author_name"] or "").strip(),
+        "first_name": str((requested_mapping or {}).get("first_name") or detection["first_name"] or "").strip(),
         "book_title": str((requested_mapping or {}).get("book_title") or detection["book_title"] or "").strip(),
     }
     valid_fields = set(fieldnames)
@@ -264,11 +264,11 @@ def _role_blocklist() -> set[str]:
 
 def build_clean_row(raw_row: Dict[str, str], mapping: Dict[str, str]) -> Dict[str, str]:
     email = norm_email(raw_row.get(mapping["email"], ""))
-    author_name = first_name_only(raw_row.get(mapping["author_name"], "")) if mapping.get("author_name") else ""
+    first_name = first_name_only(raw_row.get(mapping["first_name"], "")) if mapping.get("first_name") else ""
     book_title = str(raw_row.get(mapping["book_title"], "") or "").strip() if mapping.get("book_title") else ""
     return {
         "Email": email,
-        "AuthorName": author_name,
+        "FirstName": first_name,
         "BookTitle": book_title,
     }
 
@@ -415,7 +415,7 @@ def _load_cleaned_rows(cleaned_filename: str) -> List[Dict[str, str]]:
         return [
             {
                 "Email": norm_email(row.get("Email") or ""),
-                "AuthorName": str(row.get("AuthorName") or "").strip(),
+                "FirstName": str(row.get("FirstName") or row.get("AuthorName") or "").strip(),
                 "BookTitle": str(row.get("BookTitle") or "").strip(),
             }
             for row in reader
@@ -451,7 +451,7 @@ def _load_existing_canary_rows(paths: Sequence[Path]) -> Dict[str, Dict[str, str
                     continue
                 rows_by_email[email] = {
                     "Email": email,
-                    "AuthorName": str(row.get("AuthorName") or row.get("name") or "").strip(),
+                    "FirstName": str(row.get("FirstName") or row.get("AuthorName") or row.get("name") or "").strip(),
                     "BookTitle": str(row.get("BookTitle") or row.get("title") or "").strip(),
                 }
     return rows_by_email
@@ -465,7 +465,7 @@ def canary_rows_for_shards(paths: Sequence[Path]) -> List[Optional[Dict[str, str
         if not email:
             rows.append(None)
             continue
-        row = dict(existing.get(email, {"Email": email, "AuthorName": "", "BookTitle": ""}))
+        row = dict(existing.get(email, {"Email": email, "FirstName": "", "BookTitle": ""}))
         row["Email"] = email
         rows.append(row)
     return rows
@@ -523,7 +523,7 @@ def _load_shard_rows(path: Path) -> List[Dict[str, str]]:
         return [
             {
                 "Email": norm_email(row.get("Email") or ""),
-                "AuthorName": str(row.get("AuthorName") or "").strip(),
+                "FirstName": str(row.get("FirstName") or row.get("AuthorName") or "").strip(),
                 "BookTitle": str(row.get("BookTitle") or "").strip(),
             }
             for row in reader

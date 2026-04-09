@@ -8,6 +8,9 @@ import shlex
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +44,9 @@ SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 NORMALIZE_REPORT_PATH = settings.SENDGRID_NORMALIZE_REPORT_PATH
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
 WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
+SENDGRID_WEBHOOK_RECEIVER_URL = settings.SENDGRID_WEBHOOK_RECEIVER_URL
+SENDGRID_WEBHOOK_RECEIVER_API_TOKEN = settings.SENDGRID_WEBHOOK_RECEIVER_API_TOKEN
+SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS = settings.SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS
 LOG_RESET_BACKUP_ROOT = settings.LOG_RESET_BACKUP_ROOT
 TMUX_SESSION_NAME = os.environ.get("TMUX_SENDGRID_SESSION", "sendgrid").strip() or "sendgrid"
 DASHBOARD_TIMEZONE_NAME = os.environ.get("DASHBOARD_TIMEZONE", "America/Los_Angeles").strip() or "America/Los_Angeles"
@@ -107,6 +113,12 @@ AWAITING_BUCKET_LABELS = {
 }
 AUTO_STOP_EVENT_LOCK = threading.Lock()
 AUTO_STOP_EVENTS: Dict[str, Dict[str, object]] = {}
+_WEBHOOK_RECEIVER_CACHE_LOCK = threading.Lock()
+_WEBHOOK_RECEIVER_CACHE: Dict[str, object] = {
+    "cache_key": "",
+    "fetched_at": datetime.min.replace(tzinfo=timezone.utc),
+    "payload": None,
+}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1954,6 +1966,114 @@ def build_profile_webhook_panels(
     return out
 
 
+def fetch_sendgrid_receiver_summary(selected_hours: int) -> Optional[Dict[str, object]]:
+    base_url = str(SENDGRID_WEBHOOK_RECEIVER_URL or "").strip()
+    if not base_url:
+        return None
+    normalized_base = base_url.rstrip("/")
+    cache_key = f"{normalized_base}|{int(selected_hours)}"
+    with _WEBHOOK_RECEIVER_CACHE_LOCK:
+        cached_key = str(_WEBHOOK_RECEIVER_CACHE.get("cache_key") or "")
+        cached_at = _WEBHOOK_RECEIVER_CACHE.get("fetched_at")
+        if (
+            cached_key == cache_key
+            and isinstance(cached_at, datetime)
+            and datetime.now(timezone.utc) - cached_at < timedelta(seconds=15)
+        ):
+            cached_payload = _WEBHOOK_RECEIVER_CACHE.get("payload")
+            if isinstance(cached_payload, dict):
+                return cached_payload
+    url = f"{normalized_base}/api/summary?{urllib.parse.urlencode({'hours': int(selected_hours)})}"
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    if SENDGRID_WEBHOOK_RECEIVER_API_TOKEN:
+        request.add_header("Authorization", f"Bearer {SENDGRID_WEBHOOK_RECEIVER_API_TOKEN}")
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, int(SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS or 2))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    with _WEBHOOK_RECEIVER_CACHE_LOCK:
+        _WEBHOOK_RECEIVER_CACHE["cache_key"] = cache_key
+        _WEBHOOK_RECEIVER_CACHE["fetched_at"] = datetime.now(timezone.utc)
+        _WEBHOOK_RECEIVER_CACHE["payload"] = payload
+    return payload
+
+
+def build_profile_webhook_panels_from_receiver(
+    receiver_summary: Dict[str, object],
+    profile_names: Iterable[str],
+) -> Dict[str, Dict[str, object]]:
+    profiles = receiver_summary.get("profiles")
+    if not isinstance(profiles, dict):
+        return {}
+    out: Dict[str, Dict[str, object]] = {}
+    for profile_name in profile_names:
+        raw = profiles.get(profile_name)
+        if not isinstance(raw, dict):
+            raw = {}
+        summary = {
+            "processed": int(raw.get("processed", 0) or 0),
+            "delivered": int(raw.get("delivered", 0) or 0),
+            "open": int(raw.get("open", 0) or 0),
+            "open_unique": int(raw.get("open_unique", 0) or 0),
+            "click": int(raw.get("click", 0) or 0),
+            "click_unique": int(raw.get("click_unique", 0) or 0),
+            "deferred": int(raw.get("deferred", 0) or 0),
+            "bounce": int(raw.get("bounced", raw.get("bounce", 0)) or 0),
+            "blocked": int(raw.get("blocked", 0) or 0),
+            "dropped": int(raw.get("dropped", 0) or 0),
+            "spamreport": int(raw.get("spamreport", 0) or 0),
+            "unsubscribe": int(raw.get("unsubscribe", 0) or 0),
+        }
+        summary["failed"] = (
+            summary["bounce"]
+            + summary["blocked"]
+            + summary["dropped"]
+            + summary["spamreport"]
+        )
+        counts: Dict[str, int] = {}
+        for key in ("processed", "delivered", "deferred", "bounce", "blocked", "dropped", "spamreport", "unsubscribe"):
+            if summary.get(key):
+                counts[key] = int(summary[key])
+        out[profile_name] = {
+            "counts": counts,
+            "recent": list(raw.get("recent", [])) if isinstance(raw.get("recent"), list) else [],
+            "total": int(raw.get("mapped_events_24h", 0) or 0),
+            "summary": summary,
+            "latest_event": raw.get("latest_event") if isinstance(raw.get("latest_event"), dict) else {},
+            "last_received_iso": str(raw.get("last_webhook_received_at") or ""),
+            "last_received_at": format_when(parse_iso_utc(raw.get("last_webhook_received_at"))),
+            "mapped_events_24h": int(raw.get("mapped_events_24h", 0) or 0),
+            "unmapped_events_24h": int(raw.get("unmapped_events_24h", 0) or 0),
+        }
+    return out
+
+
+def build_webhook_health_from_receiver(
+    receiver_summary: Dict[str, object],
+    selected_hours: int,
+) -> Dict[str, object]:
+    last_received = parse_iso_utc(receiver_summary.get("last_received_iso"))
+    return {
+        "signature_verification": bool(receiver_summary.get("signature_verification", False)),
+        "last_received_iso": last_received.isoformat() if last_received else "",
+        "last_received_at": format_when(last_received),
+        "last_received_age": format_age(last_received),
+        "events_5m": int(receiver_summary.get("events_5m", 0) or 0),
+        "events_1h": int(receiver_summary.get("events_1h", 0) or 0),
+        "unmapped_selected_window": int(receiver_summary.get("unmapped_events_24h", 0) or 0),
+        "selected_window_hours": int(receiver_summary.get("selected_window_hours", selected_hours) or selected_hours),
+        "bounces_with_bounce_classification": 0,
+        "bounces_missing_bounce_classification": 0,
+        "duplicate_hits_5m": 0,
+        "duplicate_hits_1h": 0,
+        "duplicate_hits_selected_window": 0,
+        "duplicate_hits_total": 0,
+    }
+
+
 def event_uniqueness_key(event: Dict[str, str], profile_hint: str = "") -> str:
     message_id = canonical_message_id(event.get("message_id", ""))
     if message_id:
@@ -2341,6 +2461,12 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         reference_utc=datetime.now(timezone.utc),
     )
     webhook_health = build_webhook_health(webhook_events, activity_hours, dedupe_stats=webhook_dedupe_stats)
+    receiver_summary = fetch_sendgrid_receiver_summary(activity_hours)
+    if receiver_summary:
+        receiver_panels = build_profile_webhook_panels_from_receiver(receiver_summary, SENDGRID_PROFILES)
+        if receiver_panels:
+            webhook_panels.update(receiver_panels)
+        webhook_health = build_webhook_health_from_receiver(receiver_summary, activity_hours)
 
     session_label = session_status(snapshots)
     total_pending = sum(s.pending_count for s in snapshots)
@@ -2353,6 +2479,8 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     historical_errors_today = sum(max(0, s.errors_today - s.run_errors) for s in snapshots)
     recent_failures = recent_failure_count(activity)
     recent_unmapped = int(activity.get("unmapped_count", 0) or 0)
+    if receiver_summary:
+        recent_unmapped = int(receiver_summary.get("unmapped_events_24h", recent_unmapped) or 0)
     active_profiles = sum(1 for s in snapshots if profile_is_active(s))
     active_start_all_profiles = sum(1 for s in snapshots if s.name in START_ALL_PROFILES and profile_is_active(s))
     runtime_issues = sum(1 for s in snapshots if s.runtime_state in {"dead", "error"})

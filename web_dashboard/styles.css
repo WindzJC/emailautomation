@@ -409,6 +409,10 @@ h3 {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.leads-quick-file-wide {
+  grid-column: 1 / -1;
+}
+
 .leads-quick-file .label {
   color: var(--muted);
   font-size: 11px;
@@ -486,13 +490,24 @@ h3 {
 .leads-panel select,
 .leads-panel textarea {
   min-width: 0;
-  height: 44px;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  padding: 0 15px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
   font: inherit;
+}
+
+.leads-panel input,
+.leads-panel select {
+  height: 44px;
+  padding: 0 15px;
+}
+
+.leads-panel textarea {
+  min-height: 170px;
+  padding: 12px 15px;
+  resize: vertical;
+  line-height: 1.5;
 }
 
 .leads-panel input[type="file"] {
@@ -517,6 +532,12 @@ h3 {
 
 .leads-results {
   display: grid;
+  gap: 14px;
+}
+
+.leads-split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 14px;
 }
 

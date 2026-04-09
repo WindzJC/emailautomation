@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+unset TMUX_TMPDIR
+mkdir -p "$HOME/.local/state/tmux"
+chmod 700 "$HOME/.local/state/tmux"
+export TMUX_TMPDIR="$HOME/.local/state/tmux"
 
 PY="${PYTHON_BIN:-./.venv/bin/python}"
 SESSION_NAME="${TMUX_SENDGRID_SESSION:-sendgrid}"
