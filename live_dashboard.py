@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from openpyxl import load_workbook
 
 import settings
 import runtime_control
@@ -261,6 +262,40 @@ def _count_csv_rows(path: Path) -> int:
             if any(str(value or "").strip() for value in row.values()):
                 count += 1
     return count
+
+
+def _normalize_uploaded_check_file(filename: str, content: bytes) -> tuple[str, str]:
+    extension = Path(str(filename or "").strip()).suffix.lower()
+    if extension == ".csv":
+        text = content.decode("utf-8-sig", errors="replace")
+        return ".csv", text if text.endswith("\n") else f"{text}\n"
+    if extension == ".xlsx":
+        try:
+            workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        except Exception as exc:
+            raise ValueError(f"Failed to read XLSX upload: {exc}") from exc
+        try:
+            worksheet = workbook[workbook.sheetnames[0]] if workbook.sheetnames else None
+            if worksheet is None:
+                raise ValueError("Uploaded XLSX file has no worksheets.")
+            rows = []
+            for row in worksheet.iter_rows(values_only=True):
+                values = ["" if cell is None else str(cell) for cell in row]
+                if any(str(value or "").strip() for value in values):
+                    rows.append(values)
+            if not rows:
+                raise ValueError("Uploaded XLSX file has no usable rows.")
+            buffer = io.StringIO()
+            writer = csv.writer(buffer, lineterminator="\n")
+            for row in rows:
+                writer.writerow(row)
+            text = buffer.getvalue()
+            if text and not text.endswith("\n"):
+                text += "\n"
+            return ".xlsx", text
+        finally:
+            workbook.close()
+    raise ValueError(f"Unsupported upload file type: {extension or '[none]'}")
 
 
 def _execute_important_check(
@@ -1084,14 +1119,14 @@ async def check_important_leads_upload(
             status_code=400,
         )
     extension = Path(filename).suffix.lower()
-    if extension != ".csv":
+    if extension not in {".csv", ".xlsx"}:
         return JSONResponse(
             {
                 "ok": False,
-                "message": f"Unsupported upload file type: {extension or '[none]'}. Only .csv files are supported for upload checks.",
+                "message": f"Unsupported upload file type: {extension or '[none]'}. Only .csv and .xlsx files are supported for upload checks.",
                 "error": "UPLOAD_UNSUPPORTED_FILE_TYPE",
                 "details": {
-                    "allowed_extensions": [".csv"],
+                    "allowed_extensions": [".csv", ".xlsx"],
                     "server_received_filename": filename,
                     "server_received_extension": extension or "",
                 },
@@ -1112,7 +1147,7 @@ async def check_important_leads_upload(
                 "details": {
                     "selected_filename": selected_filename,
                     "server_received_filename": filename,
-                    "allowed_extensions": [".csv"],
+                    "allowed_extensions": [".csv", ".xlsx"],
                 },
                 "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             },
@@ -1130,7 +1165,7 @@ async def check_important_leads_upload(
                 "message": "Uploaded file is empty.",
                 "error": "UPLOAD_FILE_EMPTY",
                 "details": {
-                    "allowed_extensions": [".csv"],
+                    "allowed_extensions": [".csv", ".xlsx"],
                     "server_received_filename": filename,
                     "server_received_extension": extension,
                 },
@@ -1140,7 +1175,24 @@ async def check_important_leads_upload(
         )
     IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
     effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
-    effective_input_path.write_bytes(content)
+    try:
+        normalized_extension, normalized_text = _normalize_uploaded_check_file(filename, content)
+    except ValueError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": str(exc),
+                "error": "UPLOAD_WORKBOOK_INVALID" if extension == ".xlsx" else "UPLOAD_FILE_INVALID",
+                "details": {
+                    "allowed_extensions": [".csv", ".xlsx"],
+                    "server_received_filename": filename,
+                    "server_received_extension": extension,
+                },
+                "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            },
+            status_code=400,
+        )
+    effective_input_path.write_text(normalized_text, encoding="utf-8")
     total_input_rows = _count_csv_rows(effective_input_path)
     job = _start_important_check_job(
         input_path=effective_input_path,
@@ -1153,7 +1205,7 @@ async def check_important_leads_upload(
         server_received_filename=filename,
         selected_filename=selected_filename or filename,
         selected_size_bytes=selected_size_bytes,
-        selected_extension=str(client_selected_extension or extension or "").strip().lower() or extension,
+        selected_extension=str(client_selected_extension or normalized_extension or extension or "").strip().lower() or normalized_extension or extension,
         total_input_rows=total_input_rows,
     )
     return JSONResponse(
@@ -1163,7 +1215,7 @@ async def check_important_leads_upload(
             "server_received_filename": filename,
             "selected_filename": selected_filename or filename,
             "selected_size_bytes": selected_size_bytes,
-            "selected_extension": extension,
+            "selected_extension": normalized_extension or extension,
             "job": job,
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
         },

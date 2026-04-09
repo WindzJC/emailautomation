@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from openpyxl import Workbook
+
 import live_dashboard
 from important_leads_workflow import ImportantLeadsCheckError
 
@@ -475,7 +477,7 @@ class LiveDashboardTests(unittest.TestCase):
             output_path = tmp / "cleaned.csv"
             rejected_path = tmp / "rejected.csv"
             upload = live_dashboard.UploadFile(
-                filename="authors_upload.xlsx",
+                filename="authors_upload.xls",
                 file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
             )
 
@@ -498,9 +500,9 @@ class LiveDashboardTests(unittest.TestCase):
                 response = asyncio.run(
                     live_dashboard.check_important_leads_upload(
                         file=upload,
-                        client_selected_filename="authors_upload.xlsx",
+                        client_selected_filename="authors_upload.xls",
                         client_selected_size_bytes="37",
-                        client_selected_extension=".xlsx",
+                        client_selected_extension=".xls",
                         output_path=str(output_path),
                         rejected_path=str(rejected_path),
                     )
@@ -511,6 +513,158 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertFalse(body["ok"])
             self.assertEqual("UPLOAD_UNSUPPORTED_FILE_TYPE", body["error"])
             self.assertIn(".csv", body["message"])
+            self.assertIn(".xlsx", body["message"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_accepts_xlsx_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            check_runs_dir = tmp / "check_runs"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Leads"
+            sheet.append(["Email", "FirstName"])
+            sheet.append(["anna@example.com", "Anna"])
+            sheet.append(["bob@example.com", "Bob"])
+            xlsx_buffer = BytesIO()
+            workbook.save(xlsx_buffer)
+            workbook.close()
+            upload = live_dashboard.UploadFile(
+                filename="EmailFullName_Leads.xlsx",
+                file=BytesIO(xlsx_buffer.getvalue()),
+            )
+            fake_report = {
+                "input_label": str(check_runs_dir / "leadschecker_20260409_120240.csv"),
+                "output_label": str(output_path),
+                "rejected_label": str(rejected_path),
+                "cleaned_rows": 2,
+                "reason_counts": {},
+            }
+            fake_job = {
+                "job_id": "check_20260409_120240_abcd1234",
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-04-09T12:02:40+00:00",
+                "updated_at_utc": "2026-04-09T12:02:40+00:00",
+                "source_mode": "uploaded_file",
+                "source_label": "EmailFullName_Leads.xlsx",
+                "original_uploaded_filename": "EmailFullName_Leads.xlsx",
+                "server_received_filename": "EmailFullName_Leads.xlsx",
+                "selected_filename": "EmailFullName_Leads.xlsx",
+                "selected_size_bytes": len(xlsx_buffer.getvalue()),
+                "selected_extension": ".xlsx",
+                "input_path": str(check_runs_dir / "leadschecker_20260409_120240.csv"),
+                "saved_input_path": str(check_runs_dir / "leadschecker_20260409_120240.csv"),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "effective_input_path": str(check_runs_dir / "leadschecker_20260409_120240.csv"),
+                "total_input_rows": 3,
+                "processed_rows": 0,
+                "remaining_rows": 3,
+                "eta_seconds": "",
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                return_value=fake_report,
+            ) as check_master_leads, patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120240",
+            ), patch.object(
+                live_dashboard,
+                "_start_important_check_job",
+                return_value=fake_job,
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="EmailFullName_Leads.xlsx",
+                        client_selected_size_bytes=str(len(xlsx_buffer.getvalue())),
+                        client_selected_extension=".xlsx",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            self.assertEqual(202, response.status_code)
+            body = json.loads(response.body)
+            self.assertTrue(body["ok"])
+            run_input_path = check_runs_dir / "leadschecker_20260409_120240.csv"
+            text = run_input_path.read_text(encoding="utf-8")
+            self.assertIn("Email,FirstName", text)
+            self.assertIn("anna@example.com,Anna", text)
+            self.assertIn("bob@example.com,Bob", text)
+            self.assertEqual("EmailFullName_Leads.xlsx", body["server_received_filename"])
+            self.assertEqual("EmailFullName_Leads.xlsx", body["selected_filename"])
+            self.assertEqual(".xlsx", body["selected_extension"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_rejects_invalid_xlsx(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "cleaned.csv"
+            rejected_path = tmp / "rejected.csv"
+            upload = live_dashboard.UploadFile(
+                filename="EmailFullName_Leads.xlsx",
+                file=BytesIO(b"not a workbook"),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="EmailFullName_Leads.xlsx",
+                        client_selected_size_bytes="14",
+                        client_selected_extension=".xlsx",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(400, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_WORKBOOK_INVALID", body["error"])
+            self.assertIn("Failed to read XLSX upload", body["message"])
             check_master_leads.assert_not_called()
 
     def test_check_important_leads_upload_rejects_filename_mismatch(self) -> None:

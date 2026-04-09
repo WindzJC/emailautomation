@@ -510,7 +510,7 @@ function updateImportantLeadUploadNote(extra = "") {
   const { filename, size, extension } = selectedImportantLeadUploadFile();
   const base = filename
     ? `Selected ${filename} (${humanizeFileSize(size)}, ${extension || "no extension"}). Uploads are file-only and never reuse the stored input path.`
-    : "Choose a CSV file, then click Upload & Check. Uploads are file-only and never reuse the stored input path.";
+    : "Choose a CSV or XLSX file, then click Upload & Check. Uploads are file-only and never reuse the stored input path.";
   if (els.leadsImportantUploadNote) {
     setNodeText(els.leadsImportantUploadNote, extra ? `${base} ${extra}` : base);
   }
@@ -1400,12 +1400,12 @@ async function runImportantLeadCheck() {
 async function runImportantLeadUploadCheck() {
   const { formData, file, filename, size, extension } = importantLeadUploadPayload();
   if (!file) {
-    showMessage("Choose a CSV file before uploading.", "error");
+    showMessage("Choose a CSV or XLSX file before uploading.", "error");
     return;
   }
-  if (extension && extension !== ".csv") {
-    updateImportantLeadUploadNote(`Only .csv uploads are supported. Selected ${extension}.`);
-    showMessage("Upload CSV checks only accept .csv files.", "error");
+  if (extension && ![".csv", ".xlsx"].includes(extension)) {
+    updateImportantLeadUploadNote(`Only .csv and .xlsx uploads are supported. Selected ${extension}.`);
+    showMessage("Upload checks only accept .csv or .xlsx files.", "error");
     return;
   }
   if (els.leadsImportantUploadCheckBtn) {
