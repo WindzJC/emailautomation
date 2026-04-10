@@ -609,12 +609,48 @@ def _display_path_label(path: Path) -> str:
             return str(path)
 
 
+def _canonical_workspace_label(path: Path) -> str:
+    try:
+        return str(path.relative_to(settings.APP_ROOT))
+    except Exception:
+        return str(path)
+
+
 def important_leads_default_paths() -> Dict[str, str]:
     return {
-        "input_path": _display_path_label(MASTER_INPUT_PATH),
-        "output_path": _display_path_label(MASTER_OUTPUT_PATH),
-        "rejected_path": _display_path_label(MASTER_REJECTED_PATH),
+        "input_path": _canonical_workspace_label(MASTER_INPUT_PATH),
+        "output_path": _canonical_workspace_label(MASTER_OUTPUT_PATH),
+        "rejected_path": _canonical_workspace_label(MASTER_REJECTED_PATH),
     }
+
+
+def _looks_like_foreign_absolute_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        return os.name != "nt"
+    if re.match(r"^/mnt/[A-Za-z]/", normalized):
+        return os.name != "nt"
+    return False
+
+
+def _saved_path_label_or_default(value: object, default_path: Path) -> str:
+    default_label = _canonical_workspace_label(default_path)
+    text = str(value or "").strip()
+    if not text or _looks_like_foreign_absolute_path(text):
+        return default_label
+
+    path = Path(text)
+    resolved = path if path.is_absolute() else settings.APP_ROOT / path
+    if not resolved.exists():
+        return default_label
+    try:
+        resolved.relative_to(IMPORTANT_DIR)
+    except Exception:
+        return default_label
+    return _canonical_workspace_label(resolved)
 
 
 def important_leads_path_state() -> Dict[str, str]:
@@ -624,9 +660,9 @@ def important_leads_path_state() -> Dict[str, str]:
     if not isinstance(raw, dict):
         return defaults
     return {
-        "input_path": str(raw.get("input_path") or defaults["input_path"]),
-        "output_path": str(raw.get("output_path") or defaults["output_path"]),
-        "rejected_path": str(raw.get("rejected_path") or defaults["rejected_path"]),
+        "input_path": _saved_path_label_or_default(raw.get("input_path"), MASTER_INPUT_PATH),
+        "output_path": _saved_path_label_or_default(raw.get("output_path"), MASTER_OUTPUT_PATH),
+        "rejected_path": _saved_path_label_or_default(raw.get("rejected_path"), MASTER_REJECTED_PATH),
     }
 
 

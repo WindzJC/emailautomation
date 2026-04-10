@@ -5,7 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import important_leads_verify
+import important_leads_workflow
 from important_leads_workflow import check_master_leads, dispatch_master_leads
 
 
@@ -18,6 +21,79 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def test_saved_windows_paths_reset_to_local_important_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            important_dir = root / "_important"
+            important_dir.mkdir()
+            defaults = {
+                "leadschecker.csv": "FullName,FirstName,Email\n",
+                "leads.csv": "FullName,FirstName,Email\n",
+                "leads_rejected.csv": "Email,reject_code\n",
+                "leads_verified.csv": "FullName,FirstName,Email,Status\n",
+                "leads_verify_rejected.csv": "FullName,FirstName,Email,Status\n",
+                "leads_quarantine.csv": "FullName,FirstName,Email,Status\n",
+            }
+            for name, content in defaults.items():
+                (important_dir / name).write_text(content, encoding="utf-8")
+
+            poisoned_state = {
+                important_leads_workflow.IMPORTANT_PATHS_STATE_KEY: {
+                    "input_path": "/mnt/d/VS/email automation/_important/leadschecker.csv",
+                    "output_path": "/mnt/d/VS/email automation/_important/leads.csv",
+                    "rejected_path": "C:\\VS\\email automation\\_important\\leads_rejected.csv",
+                },
+                important_leads_verify.VERIFY_PATHS_STATE_KEY: {
+                    "input_path": "/mnt/d/VS/email automation/_important/leads.csv",
+                    "verified_path": "leads_verified.csv",
+                    "rejected_path": "/mnt/d/VS/email automation/_important/leads_verify_rejected.csv",
+                    "quarantine_path": "D:\\VS\\email automation\\_important\\leads_quarantine.csv",
+                },
+            }
+
+            with patch.object(important_leads_workflow.settings, "APP_ROOT", root), patch.object(
+                important_leads_workflow, "IMPORTANT_DIR", important_dir
+            ), patch.object(
+                important_leads_workflow, "MASTER_INPUT_PATH", important_dir / "leadschecker.csv"
+            ), patch.object(
+                important_leads_workflow, "MASTER_OUTPUT_PATH", important_dir / "leads.csv"
+            ), patch.object(
+                important_leads_workflow, "MASTER_REJECTED_PATH", important_dir / "leads_rejected.csv"
+            ), patch.object(
+                important_leads_workflow, "load_state", return_value=poisoned_state
+            ), patch.object(
+                important_leads_verify.settings, "APP_ROOT", root
+            ), patch.object(
+                important_leads_verify, "IMPORTANT_DIR", important_dir
+            ), patch.object(
+                important_leads_verify, "DEFAULT_INPUT_PATH", important_dir / "leads.csv"
+            ), patch.object(
+                important_leads_verify, "DEFAULT_VERIFIED_PATH", important_dir / "leads_verified.csv"
+            ), patch.object(
+                important_leads_verify, "DEFAULT_REJECTED_PATH", important_dir / "leads_verify_rejected.csv"
+            ), patch.object(
+                important_leads_verify, "DEFAULT_QUARANTINE_PATH", important_dir / "leads_quarantine.csv"
+            ), patch.object(
+                important_leads_verify, "load_state", return_value=poisoned_state
+            ):
+                self.assertEqual(
+                    {
+                        "input_path": "_important/leadschecker.csv",
+                        "output_path": "_important/leads.csv",
+                        "rejected_path": "_important/leads_rejected.csv",
+                    },
+                    important_leads_workflow.important_leads_path_state(),
+                )
+                self.assertEqual(
+                    {
+                        "input_path": "_important/leads.csv",
+                        "verified_path": "_important/leads_verified.csv",
+                        "rejected_path": "_important/leads_verify_rejected.csv",
+                        "quarantine_path": "_important/leads_quarantine.csv",
+                    },
+                    important_leads_verify.important_leads_verify_path_state(),
+                )
+
     def test_check_master_leads_hardens_rows_and_writes_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -430,6 +506,51 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     sendgrid_queue_paths=[tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)],
                     jc_log_path=tmp / "private_jc_log.csv",
                     sendgrid_log_paths=[tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)],
+                    sendgrid_suppressions_path=sendgrid_suppressions_path,
+                    suppressed_path=suppressed_path,
+                    unsubscribed_path=unsubscribed_path,
+                    backup_root=backup_root,
+                    report_dir=report_dir,
+                    persist_state=False,
+                )
+
+    def test_dispatch_master_leads_verified_mode_blocks_header_only_verified_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            verified_path = tmp / "leads_verified.csv"
+            rejected_path = tmp / "leads_verify_rejected.csv"
+            report_dir = tmp / "reports"
+            backup_root = tmp / "backups"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [{"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"}])
+            write_csv(verified_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(suppressed_path, ["Email"], [])
+            write_csv(unsubscribed_path, ["Email"], [])
+            write_csv(sendgrid_suppressions_path, ["email", "state", "type"], [])
+
+            with self.assertRaisesRegex(ValueError, "Verified dispatch source is empty"):
+                dispatch_master_leads(
+                    master_path=master_path,
+                    verified_path=verified_path,
+                    rejected_path=rejected_path,
+                    dispatch_source_mode="verified",
+                    require_stopped=False,
+                    jc_queue_path=jc_queue,
+                    sendgrid_queue_paths=sg_queues,
+                    jc_log_path=logs[0],
+                    sendgrid_log_paths=logs[1:],
                     sendgrid_suppressions_path=sendgrid_suppressions_path,
                     suppressed_path=suppressed_path,
                     unsubscribed_path=unsubscribed_path,

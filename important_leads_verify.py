@@ -100,6 +100,13 @@ def _display_path_label(path: Path) -> str:
         return str(path)
 
 
+def _canonical_workspace_label(path: Path) -> str:
+    try:
+        return str(path.relative_to(settings.APP_ROOT))
+    except Exception:
+        return str(path)
+
+
 def _load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     if not path.exists():
         raise FileNotFoundError(f"Important verify input not found: {path}")
@@ -166,16 +173,45 @@ def _verify_path_state_labels(
     }
 
 
+def _looks_like_foreign_absolute_path(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        return os.name != "nt"
+    if re.match(r"^/mnt/[A-Za-z]/", normalized):
+        return os.name != "nt"
+    return False
+
+
+def _saved_path_label_or_default(value: object, default_path: Path) -> str:
+    default_label = _canonical_workspace_label(default_path)
+    text = str(value or "").strip()
+    if not text or _looks_like_foreign_absolute_path(text):
+        return default_label
+
+    path = Path(text)
+    resolved = path if path.is_absolute() else settings.APP_ROOT / path
+    if not resolved.exists():
+        return default_label
+    try:
+        resolved.relative_to(IMPORTANT_DIR)
+    except Exception:
+        return default_label
+    return _canonical_workspace_label(resolved)
+
+
 def important_leads_verify_path_state() -> dict[str, str]:
     state = load_state()
     raw = state.get(VERIFY_PATHS_STATE_KEY, {})
     if not isinstance(raw, dict):
         raw = {}
     return {
-        "input_path": str(raw.get("input_path") or _display_path_label(DEFAULT_INPUT_PATH)),
-        "verified_path": str(raw.get("verified_path") or _display_path_label(DEFAULT_VERIFIED_PATH)),
-        "rejected_path": str(raw.get("rejected_path") or _display_path_label(DEFAULT_REJECTED_PATH)),
-        "quarantine_path": str(raw.get("quarantine_path") or _display_path_label(DEFAULT_QUARANTINE_PATH)),
+        "input_path": _saved_path_label_or_default(raw.get("input_path"), DEFAULT_INPUT_PATH),
+        "verified_path": _saved_path_label_or_default(raw.get("verified_path"), DEFAULT_VERIFIED_PATH),
+        "rejected_path": _saved_path_label_or_default(raw.get("rejected_path"), DEFAULT_REJECTED_PATH),
+        "quarantine_path": _saved_path_label_or_default(raw.get("quarantine_path"), DEFAULT_QUARANTINE_PATH),
     }
 
 
