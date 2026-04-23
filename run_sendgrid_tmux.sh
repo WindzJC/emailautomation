@@ -12,7 +12,6 @@ PY="${PYTHON_BIN:-./.venv/bin/python}"
 SESSION_NAME="${TMUX_SENDGRID_SESSION:-sendgrid}"
 BACKUP_DIR="${SENDGRID_BACKUP_DIR:-backups}"
 REPORT_PATH="${SENDGRID_NORMALIZE_REPORT:-sendgrid_shard_normalize_report.json}"
-ENV_FILES=(".env.local" ".env")
 ATTACH_MODE="${TMUX_SENDGRID_ATTACH:-1}"
 MAX_TOTAL_OVERRIDE="${SENDGRID_DASHBOARD_MAX_TOTAL:-}"
 STARTUP_PRUNE_GUARD="${SENDGRID_SKIP_PRUNE_ON_STARTUP:-0}"
@@ -33,26 +32,38 @@ if [[ ! -x "$PY" ]]; then
   fi
 fi
 
-if [[ -z "${SENDGRID_API_KEY:-}" ]]; then
-  for env_file in "${ENV_FILES[@]}"; do
-    if [[ -f "$env_file" ]]; then
-      set -a
-      # shellcheck disable=SC1090
-      source "$env_file"
-      set +a
-      if [[ -n "${SENDGRID_API_KEY:-}" ]]; then
-        echo "Loaded SENDGRID_API_KEY from $env_file"
-        export SENDGRID_API_KEY
-        break
-      fi
-    fi
-  done
+eval "$("$PY" - <<'PY'
+import os
+import shlex
+
+import settings
+from sendgrid_launch_auth import resolve_sendgrid_api_key
+
+resolution = resolve_sendgrid_api_key(env=os.environ, env_files=settings.ENV_FILES)
+if not resolution.ok:
+    print("SENDGRID_KEY_OK=0")
+    print(f"SENDGRID_KEY_ERROR={shlex.quote(resolution.error)}")
+else:
+    print("SENDGRID_KEY_OK=1")
+    print(f"SENDGRID_API_KEY_RESOLVED={shlex.quote(resolution.key)}")
+    print(f"SENDGRID_API_KEY_SOURCE={shlex.quote(resolution.source_label)}")
+    print(f"SENDGRID_API_KEY_MASKED={shlex.quote(resolution.masked_key)}")
+    print(f"SENDGRID_API_KEY_WARNING={shlex.quote(resolution.warning)}")
+PY
+)"
+
+if [[ "${SENDGRID_KEY_OK:-0}" != "1" ]]; then
+  echo "SendGrid startup aborted: ${SENDGRID_KEY_ERROR:-SENDGRID_API_KEY resolution failed.}"
+  echo "Expected SENDGRID_API_KEY in the canonical env files (.env.local, .env) or a valid inherited environment value."
+  exit 1
 fi
 
-if [[ -z "${SENDGRID_API_KEY:-}" ]]; then
-  read -r -s -p "SendGrid key: " SENDGRID_API_KEY
-  echo
-  export SENDGRID_API_KEY
+SENDGRID_API_KEY="$SENDGRID_API_KEY_RESOLVED"
+export SENDGRID_API_KEY
+
+echo "SendGrid key source: $SENDGRID_API_KEY_SOURCE ($SENDGRID_API_KEY_MASKED)"
+if [[ -n "${SENDGRID_API_KEY_WARNING:-}" ]]; then
+  echo "WARNING: $SENDGRID_API_KEY_WARNING"
 fi
 
 echo "Checking SendGrid credits..."

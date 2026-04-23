@@ -11,11 +11,75 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 
+import lead_ledger
 import live_dashboard
 from important_leads_workflow import ImportantLeadsCheckError
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
+        class RequestStub:
+            headers: dict[str, str] = {}
+
+            async def body(self) -> bytes:
+                return b'[{"email":"user@example.com","event":"delivered"}]'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            with patch.object(live_dashboard, "SENDGRID_EVENT_PUBLIC_KEY", ""), patch.object(
+                live_dashboard,
+                "WEBHOOK_DEDUPE_PATH",
+                tmp / "webhook_dedupe.sqlite3",
+            ), patch.object(
+                live_dashboard,
+                "WEBHOOK_EVENTS_PATH",
+                tmp / "sendgrid_events.jsonl",
+            ), patch.object(
+                live_dashboard,
+                "SUPPRESSION_CSV",
+                tmp / "sendgrid_suppressions.csv",
+            ), patch.object(
+                live_dashboard,
+                "normalize_webhook_events",
+                return_value=[{"email": "user@example.com", "status": "delivered"}],
+            ), patch.object(
+                live_dashboard,
+                "dedupe_webhook_events",
+                return_value={"unique_events": [{"email": "user@example.com", "status": "delivered"}], "duplicates": 0},
+            ), patch.object(
+                live_dashboard,
+                "append_events_jsonl",
+                return_value=1,
+            ), patch.object(
+                live_dashboard,
+                "update_suppressions_from_events",
+                return_value={"updated_events": 0, "records_total": 0, "total_perm": 0, "total_temp_active": 0},
+            ), patch.object(
+                live_dashboard,
+                "ingest_send_outcome_events",
+                return_value={
+                    "processed_events": 1,
+                    "matched_events": 1,
+                    "unmatched_events": 0,
+                    "ignored_events": 0,
+                    "dispatch_rows_updated": 1,
+                    "lead_rows_updated": 1,
+                    "suppressed_events": 0,
+                    "outcome_counts": {"delivered": 1},
+                },
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "apply_delivery_guards",
+                return_value={},
+            ):
+                response = asyncio.run(live_dashboard.sendgrid_event_webhook(RequestStub()))
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual({"delivered": 1}, body["ledger_summary"]["outcome_counts"])
+        self.assertIn("suppression_summary", body)
+
     def test_check_important_leads_accepts_pasted_csv_text(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -432,6 +496,87 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(str(run_input_path), body["job"]["effective_input_path"])
             check_master_leads.assert_not_called()
 
+    def test_check_important_leads_upload_ignores_stale_windows_output_paths(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            check_runs_dir = tmp / "check_runs"
+            default_output = tmp / "_important" / "leads.csv"
+            default_rejected = tmp / "_important" / "leads_rejected.csv"
+            default_output.parent.mkdir(parents=True, exist_ok=True)
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.csv",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+            fake_job = {
+                "job_id": "check_20260409_120230_abcd1234",
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-04-09T12:02:30+00:00",
+                "updated_at_utc": "2026-04-09T12:02:30+00:00",
+                "source_mode": "uploaded_file",
+                "source_label": "authors_upload.csv",
+                "original_uploaded_filename": "authors_upload.csv",
+                "server_received_filename": "authors_upload.csv",
+                "selected_filename": "authors_upload.csv",
+                "selected_size_bytes": 37,
+                "selected_extension": ".csv",
+                "input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "saved_input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "output_path": str(default_output),
+                "rejected_path": str(default_rejected),
+                "effective_input_path": str(check_runs_dir / "leadschecker_20260409_120230.csv"),
+                "total_input_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+                "eta_seconds": "",
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_OUTPUT", default_output), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_REJECTED",
+                default_rejected,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_RUNS", check_runs_dir), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260409_120230",
+            ), patch.object(
+                live_dashboard,
+                "_start_important_check_job",
+                return_value=fake_job,
+            ) as start_job, patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}):
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="authors_upload.csv",
+                        client_selected_size_bytes="37",
+                        client_selected_extension=".csv",
+                        output_path="/mnt/d/VS/email automation/_important/leads.csv",
+                        rejected_path="C:\\VS\\email automation\\_important\\leads_rejected.csv",
+                    )
+                )
+
+            self.assertEqual(202, response.status_code)
+            start_job.assert_called_once()
+            kwargs = start_job.call_args.kwargs
+            self.assertEqual(default_output.resolve(strict=False), kwargs["output_path"])
+            self.assertEqual(default_rejected.resolve(strict=False), kwargs["rejected_path"])
+
     def test_check_important_leads_upload_requires_file(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -803,6 +948,222 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(0, saved["eta_seconds"])
             execute_check.assert_called_once()
 
+    def test_active_check_job_endpoint_returns_running_progress_payload(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            running_job = {
+                "job_id": "check_20260409_120231_active",
+                "status": "running",
+                "stage": "checking",
+                "created_at_utc": "2026-04-09T12:02:31+00:00",
+                "updated_at_utc": "2026-04-09T12:03:31+00:00",
+                "source_label": "authors_upload.xlsx",
+                "source_sheet": "Authors",
+                "current_sheet": "Authors",
+                "total_input_rows": 100,
+                "processed_rows": 25,
+                "remaining_rows": 75,
+                "eta_seconds": 300,
+            }
+            completed_job = {
+                "job_id": "check_20260409_120230_done",
+                "status": "completed",
+                "stage": "done",
+                "total_input_rows": 10,
+                "processed_rows": 10,
+                "remaining_rows": 0,
+                "eta_seconds": 0,
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ):
+                live_dashboard._save_important_check_job(completed_job)
+                live_dashboard._save_important_check_job(running_job)
+                response = live_dashboard.get_active_check_important_leads_job()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("check_20260409_120231_active", body["job"]["job_id"])
+            self.assertEqual(25.0, body["job"]["progress_percent"])
+            self.assertEqual(300, body["job"]["eta_seconds"])
+            self.assertEqual(25, body["job"]["processed_rows"])
+            self.assertEqual(75, body["job"]["remaining_rows"])
+            self.assertEqual("Authors", body["job"]["current_sheet"])
+
+    def test_leads_status_includes_active_check_job_source_of_truth(self) -> None:
+        active_job = {
+            "job_id": "check_20260409_120231_active",
+            "status": "queued",
+            "stage": "queued",
+            "total_input_rows": 40,
+            "processed_rows": 0,
+            "remaining_rows": 40,
+            "eta_seconds": "",
+        }
+        with patch.object(live_dashboard, "_find_active_important_check_job", return_value=active_job), patch.object(
+            live_dashboard,
+            "shard_status",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "important_leads_status",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "important_leads_verify_status",
+            return_value={},
+        ):
+            response = live_dashboard.leads_status()
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(active_job, body["status"]["active_important_check_job"])
+
+    def test_completed_check_job_is_not_returned_as_active(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            completed_job = {
+                "job_id": "check_20260409_120230_done",
+                "status": "completed",
+                "stage": "done",
+                "total_input_rows": 10,
+                "processed_rows": 10,
+                "remaining_rows": 0,
+                "eta_seconds": 0,
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ):
+                live_dashboard._save_important_check_job(completed_job)
+                response = live_dashboard.get_active_check_important_leads_job()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertIsNone(body["job"])
+
+    def test_active_verify_job_endpoint_returns_progress_payload(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "verify_jobs"
+            running_job = {
+                "job_id": "verify_20260409_120231_active",
+                "status": "running",
+                "stage": "verifying",
+                "phase": "verifying",
+                "total_rows": 100,
+                "processed_rows": 40,
+                "remaining_rows": 60,
+                "eta_seconds": 120,
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_VERIFY_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ):
+                live_dashboard._save_important_verify_job(running_job)
+                response = live_dashboard.get_active_verify_important_leads_job()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("verify_20260409_120231_active", body["job"]["job_id"])
+            self.assertEqual(40.0, body["job"]["progress_percent"])
+            self.assertEqual(40, body["job"]["processed_rows"])
+            self.assertEqual(60, body["job"]["remaining_rows"])
+            self.assertEqual(120, body["job"]["eta_seconds"])
+
+    def test_cancel_verify_job_marks_cancel_requested_without_touching_outputs(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "verify_jobs"
+            running_job = {
+                "job_id": "verify_20260409_120231_active",
+                "status": "running",
+                "stage": "verifying",
+                "phase": "verifying",
+                "total_rows": 100,
+                "processed_rows": 40,
+                "remaining_rows": 60,
+                "eta_seconds": 120,
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_VERIFY_JOBS", jobs_dir):
+                live_dashboard._save_important_verify_job(running_job)
+                response = live_dashboard.cancel_verify_important_leads_job(running_job["job_id"])
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["job"]["cancel_requested"])
+            self.assertEqual("cancel_requested", body["job"]["stage"])
+
+    def test_active_dispatch_job_endpoint_returns_progress_payload(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "dispatch_jobs"
+            running_job = {
+                "job_id": "dispatch_20260409_120231_active",
+                "status": "running",
+                "stage": "dispatching",
+                "phase": "dispatching",
+                "dispatch_source_mode": "strict_verified",
+                "total_rows": 100,
+                "processed_rows": 20,
+                "assigned_rows": 35,
+                "skipped_rows": 4,
+                "remaining_rows": 80,
+                "eta_seconds": 240,
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ):
+                live_dashboard._save_important_dispatch_job(running_job)
+                response = live_dashboard.get_active_dispatch_important_leads_job()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("dispatch_20260409_120231_active", body["job"]["job_id"])
+            self.assertEqual(20.0, body["job"]["progress_percent"])
+            self.assertEqual(35, body["job"]["assigned_rows"])
+            self.assertEqual(4, body["job"]["skipped_rows"])
+            self.assertEqual(80, body["job"]["remaining_rows"])
+            self.assertEqual("strict_verified", body["job"]["dispatch_source_mode"])
+
     def test_check_important_leads_flags_ambiguous_text_without_guessing(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -919,14 +1280,15 @@ class LiveDashboardTests(unittest.TestCase):
                 rejected_path=str(rejected_path),
                 quarantine_path=str(quarantine_path),
             )
-            fake_report = {
-                "input_label": str(input_path),
-                "verified_label": str(verified_path),
-                "rejected_label": str(rejected_path),
-                "quarantine_label": str(quarantine_path),
-                "keep_count": 1,
-                "reject_count": 0,
-                "quarantine_count": 0,
+            fake_job = {
+                "job_id": "verify_20260409_120230_abcd1234",
+                "status": "queued",
+                "stage": "queued",
+                "total_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+                "progress_percent": 0,
+                "eta_seconds": "",
             }
 
             with patch.object(
@@ -940,9 +1302,9 @@ class LiveDashboardTests(unittest.TestCase):
                 },
             ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
                 live_dashboard,
-                "verify_master_leads",
-                return_value=fake_report,
-            ) as verify_master_leads, patch.object(
+                "_start_important_verify_job",
+                return_value=fake_job,
+            ) as start_verify_job, patch.object(
                 live_dashboard,
                 "important_leads_status",
                 return_value={},
@@ -958,17 +1320,17 @@ class LiveDashboardTests(unittest.TestCase):
                 response = live_dashboard.verify_important_leads(payload)
 
             body = json.loads(response.body)
-            self.assertEqual(200, response.status_code)
+            self.assertEqual(202, response.status_code)
             self.assertTrue(body["ok"])
-            self.assertIn("Verified", body["message"])
-            kwargs = verify_master_leads.call_args.kwargs
+            self.assertEqual(fake_job["job_id"], body["job"]["job_id"])
+            kwargs = start_verify_job.call_args.kwargs
             self.assertEqual(input_path.resolve(), kwargs["input_path"])
             self.assertEqual(verified_path.resolve(), kwargs["verified_path"])
             self.assertEqual(rejected_path.resolve(), kwargs["rejected_path"])
             self.assertEqual(quarantine_path.resolve(), kwargs["quarantine_path"])
             save_state.assert_called()
 
-    def test_dispatch_important_leads_uses_selected_source_mode(self) -> None:
+    def test_preview_dispatch_important_leads_uses_selected_source_mode(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
             input_path = tmp / "leadschecker.csv"
@@ -977,36 +1339,22 @@ class LiveDashboardTests(unittest.TestCase):
             verified_path = tmp / "leads_verified.csv"
             input_path.write_text("FirstName,Email\nLegacy,legacy@example.com\n", encoding="utf-8")
             verified_path.write_text("FirstName,Email,Status\nJane,jane@example.com,KEEP\n", encoding="utf-8")
-            payload = live_dashboard.ImportantLeadPathsPayload(
+            payload = live_dashboard.ImportantLeadDispatchPayload(
                 input_path=str(input_path),
                 output_path=str(output_path),
                 rejected_path=str(rejected_path),
-                dispatch_source_mode="verified",
+                dispatch_source_mode="strict_verified",
             )
-            fake_report = {
-                "generated_at_utc": "2026-04-09T00:00:00+00:00",
-                "master_read": 1,
-                "dispatch_source_mode": "verified",
+            fake_preview = {
+                "preview_id": "dispatch_preview_20260409_120230_abcd1234",
+                "dispatch_source_mode": "strict_verified",
+                "dispatch_source_name": "Strict Public Proof Verified",
                 "dispatch_source_path": str(verified_path),
                 "dispatch_source_row_count": 1,
                 "dispatch_eligible_row_count": 1,
-                "dispatch_block_reason": "",
-                "verification_required": True,
-                "verification_file_mtime": "2026-04-09T00:00:00+00:00",
-                "added_astra": 1,
-                "added_sendgrid": 1,
-                "skipped_both": 0,
-                "suppressed_skipped": 0,
-                "duplicate_master_skipped": 0,
-                "assigned_sg1": 1,
-                "assigned_sg2": 0,
-                "assigned_sg3": 0,
-                "assigned_sg4": 0,
-                "assigned_sg5": 0,
-                "final_queue_counts": {"jc": 1, "sg1": 1, "sg2": 0, "sg3": 0, "sg4": 0, "sg5": 0},
-                "queue_headers": ["Email", "FirstName"],
-                "assigned_preview_rows": [],
-                "dispatch_source_preview_rows": [],
+                "dispatch_selected_row_count": 1,
+                "dispatch_cap": "all",
+                "total_rows_would_write": 2,
             }
 
             with patch.object(
@@ -1028,12 +1376,12 @@ class LiveDashboardTests(unittest.TestCase):
                 },
             ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
                 live_dashboard,
-                "dispatch_master_leads",
-                return_value=fake_report,
-            ) as dispatch_master_leads, patch.object(
+                "preview_dispatch_master_leads",
+                return_value=fake_preview,
+            ) as preview_dispatch_master_leads, patch.object(
                 live_dashboard,
                 "important_leads_status",
-                return_value={},
+                return_value={"dispatch_eligible_row_count": 1, "dispatch_block_reason": ""},
             ), patch.object(
                 live_dashboard,
                 "important_leads_verify_status",
@@ -1043,18 +1391,352 @@ class LiveDashboardTests(unittest.TestCase):
                 "shard_status",
                 return_value={},
             ):
-                response = live_dashboard.dispatch_important_leads(payload)
+                response = live_dashboard.preview_dispatch_important_leads(payload)
 
             body = json.loads(response.body)
             self.assertEqual(200, response.status_code)
             self.assertTrue(body["ok"])
-            kwargs = dispatch_master_leads.call_args.kwargs
-            self.assertEqual("verified", kwargs["dispatch_source_mode"])
+            self.assertEqual(fake_preview["preview_id"], body["preview"]["preview_id"])
+            kwargs = preview_dispatch_master_leads.call_args.kwargs
+            self.assertEqual("strict_verified", kwargs["dispatch_source_mode"])
             self.assertEqual(
                 Path(live_dashboard.settings.APP_ROOT / "_important" / "leads_verified.csv").resolve(),
                 kwargs["verified_path"],
             )
             save_state.assert_called()
+
+    def test_preview_dispatch_important_leads_defaults_to_triaged_keep_source(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "leadschecker.csv"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            input_path.write_text("FirstName,Email\nLegacy,legacy@example.com\n", encoding="utf-8")
+            output_path.write_text("FirstName,Email\nLegacy,legacy@example.com\n", encoding="utf-8")
+            triaged_keep_path.write_text("FirstName,Email,Status\nJane,jane@example.com,KEEP\n", encoding="utf-8")
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+            )
+            fake_preview = {
+                "preview_id": "dispatch_preview_20260409_120230_triage",
+                "dispatch_source_mode": "triaged_keep",
+                "dispatch_source_name": "Fast Triage Keep",
+                "dispatch_source_path": str(triaged_keep_path),
+                "dispatch_source_row_count": 1,
+                "dispatch_eligible_row_count": 1,
+                "dispatch_selected_row_count": 1,
+                "dispatch_cap": "all",
+                "total_rows_would_write": 2,
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_path_state",
+                return_value={
+                    "input_path": "_important/leads.csv",
+                    "verified_path": "_important/leads_verified.csv",
+                    "rejected_path": "_important/leads_verify_rejected.csv",
+                    "quarantine_path": "_important/leads_quarantine.csv",
+                },
+            ), patch.object(
+                live_dashboard,
+                "important_leads_triage_path_state",
+                return_value={
+                    "input_path": "_important/leads.csv",
+                    "keep_path": str(triaged_keep_path),
+                    "rejected_path": "_important/leads_triaged_reject.csv",
+                    "quarantine_path": "_important/leads_triaged_quarantine.csv",
+                },
+            ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                return_value=fake_preview,
+            ) as preview_dispatch_master_leads, patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={"dispatch_eligible_row_count": 1, "dispatch_block_reason": ""},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.preview_dispatch_important_leads(payload)
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertEqual(fake_preview["preview_id"], body["preview"]["preview_id"])
+            kwargs = preview_dispatch_master_leads.call_args.kwargs
+            self.assertEqual("triaged_keep", kwargs["dispatch_source_mode"])
+            self.assertEqual(triaged_keep_path.resolve(), kwargs["triaged_keep_path"])
+            save_state.assert_called()
+
+    def test_confirm_dispatch_important_leads_blocks_when_senders_active(self) -> None:
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            dispatch_source_mode="triaged_keep",
+            dispatch_cap="500",
+            preview_id="dispatch_preview_20260409_120230_blocked",
+        )
+        preview = {
+            "preview_id": payload.preview_id,
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_cap": "500",
+            "dispatch_source_name": "Fast Triage Keep",
+            "dispatch_source_path": "_important/leads_triaged_keep.csv",
+            "dispatch_source_row_count": 10,
+            "dispatch_eligible_row_count": 10,
+            "dispatch_selected_row_count": 10,
+            "total_rows_would_write": 20,
+        }
+        active_profiles = [SimpleNamespace(name="sendgrid_1", runtime_state="running")]
+
+        with patch.object(live_dashboard, "validate_dispatch_preview", return_value=preview), patch.object(
+            live_dashboard.runtime_control,
+            "list_active_sender_snapshots",
+            return_value=active_profiles,
+        ), patch.object(
+            live_dashboard,
+            "_start_important_dispatch_job",
+        ) as start_dispatch_job:
+            response = live_dashboard.confirm_dispatch_important_leads(payload)
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["blocked"])
+        self.assertEqual("senders_active", body["reason"])
+        self.assertEqual("senders_active", body["error"])
+        self.assertEqual(["sendgrid_1"], body["active_profiles"])
+        self.assertEqual(1, body["active_sender_count"])
+        start_dispatch_job.assert_not_called()
+
+    def test_preview_dispatch_important_leads_blocks_when_senders_active(self) -> None:
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            dispatch_source_mode="triaged_keep",
+            dispatch_cap="100",
+        )
+        active_profiles = [
+            SimpleNamespace(name="private_jc", runtime_state="running"),
+            SimpleNamespace(name="sendgrid_annette", runtime_state="cooldown"),
+        ]
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "list_active_sender_snapshots",
+            return_value=active_profiles,
+        ), patch.object(
+            live_dashboard,
+            "preview_dispatch_master_leads",
+        ) as preview_dispatch_master_leads:
+            response = live_dashboard.preview_dispatch_important_leads(payload)
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["blocked"])
+        self.assertEqual("senders_active", body["reason"])
+        self.assertEqual("senders_active", body["error"])
+        self.assertEqual(["private_jc", "sendgrid_annette"], body["active_profiles"])
+        self.assertEqual(2, body["active_sender_count"])
+        preview_dispatch_master_leads.assert_not_called()
+
+    def test_quarantine_review_list_returns_filtered_leads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "lead_ledger.sqlite3"
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                lead_ledger.upsert_lead(
+                    conn,
+                    email="alpha@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=4.5,
+                    reason_codes=["WEAK_PROOF"],
+                )
+                lead_ledger.upsert_lead(
+                    conn,
+                    email="beta@example.com",
+                    current_stage=lead_ledger.STRICT_PUBLIC_PROOF_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=8.7,
+                    reason_codes=["NO_PUBLIC_MATCH"],
+                )
+            finally:
+                conn.close()
+
+            with patch.object(live_dashboard.settings, "LEAD_LEDGER_DB_PATH", db_path):
+                response = live_dashboard.quarantine_review_list(
+                    reason_code="NO_PUBLIC_MATCH",
+                    stage="",
+                    status="QUARANTINE",
+                    sort="score_desc",
+                    limit=100,
+                    offset=0,
+                )
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual(1, body["review"]["counts"]["filtered"])
+        self.assertEqual("beta@example.com", body["review"]["leads"][0]["email"])
+
+    def test_quarantine_review_action_updates_operator_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "lead_ledger.sqlite3"
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                lead = lead_ledger.upsert_lead(
+                    conn,
+                    email="note-review@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=5.5,
+                    reason_codes=["WEAK_PROOF"],
+                )
+            finally:
+                conn.close()
+
+            payload = live_dashboard.QuarantineReviewActionPayload(
+                lead_ids=[lead["lead_id"]],
+                action="update_operator_note",
+                operator_note="Reviewed from dashboard.",
+            )
+            with patch.object(live_dashboard.settings, "LEAD_LEDGER_DB_PATH", db_path):
+                response = live_dashboard.quarantine_review_action(payload)
+
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                updated = lead_ledger.load_lead_by_id(conn, lead["lead_id"])
+            finally:
+                conn.close()
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual("Reviewed from dashboard.", updated["operator_note"])
+        self.assertEqual(1, body["result"]["updated"])
+
+    def test_quarantine_review_action_select_all_filtered_applies_to_full_filtered_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "lead_ledger.sqlite3"
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                alpha = lead_ledger.upsert_lead(
+                    conn,
+                    email="alpha-filtered@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=4.0,
+                    reason_codes=["WEAK_PROOF"],
+                )
+                beta = lead_ledger.upsert_lead(
+                    conn,
+                    email="beta-filtered@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=6.0,
+                    reason_codes=["WEAK_PROOF"],
+                )
+                gamma = lead_ledger.upsert_lead(
+                    conn,
+                    email="gamma-other@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=8.0,
+                    reason_codes=["OTHER_REASON"],
+                )
+            finally:
+                conn.close()
+
+            payload = live_dashboard.QuarantineReviewActionPayload(
+                action="promote_dispatch_ready",
+                select_all_filtered=True,
+                reason_code="WEAK_PROOF",
+                status="QUARANTINE",
+                sort="score_desc",
+            )
+            with patch.object(live_dashboard.settings, "LEAD_LEDGER_DB_PATH", db_path):
+                response = live_dashboard.quarantine_review_action(payload)
+
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                alpha_updated = lead_ledger.load_lead_by_id(conn, alpha["lead_id"])
+                beta_updated = lead_ledger.load_lead_by_id(conn, beta["lead_id"])
+                gamma_updated = lead_ledger.load_lead_by_id(conn, gamma["lead_id"])
+            finally:
+                conn.close()
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual(2, body["result"]["updated"])
+        self.assertEqual(lead_ledger.DISPATCH_READY_STATUS, alpha_updated["current_status"])
+        self.assertEqual(lead_ledger.DISPATCH_READY_STATUS, beta_updated["current_status"])
+        self.assertEqual(lead_ledger.QUARANTINE_STATUS, gamma_updated["current_status"])
+
+    def test_quarantine_review_action_select_all_filtered_respects_excluded_lead_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "lead_ledger.sqlite3"
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                alpha = lead_ledger.upsert_lead(
+                    conn,
+                    email="alpha-excluded@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=4.0,
+                    reason_codes=["WEAK_PROOF"],
+                )
+                beta = lead_ledger.upsert_lead(
+                    conn,
+                    email="beta-excluded@example.com",
+                    current_stage=lead_ledger.FAST_TRIAGE_STAGE,
+                    current_status=lead_ledger.QUARANTINE_STATUS,
+                    score=6.0,
+                    reason_codes=["WEAK_PROOF"],
+                )
+            finally:
+                conn.close()
+
+            payload = live_dashboard.QuarantineReviewActionPayload(
+                action="reject_permanently",
+                select_all_filtered=True,
+                reason_code="WEAK_PROOF",
+                status="QUARANTINE",
+                sort="score_desc",
+                excluded_lead_ids=[beta["lead_id"]],
+            )
+            with patch.object(live_dashboard.settings, "LEAD_LEDGER_DB_PATH", db_path):
+                response = live_dashboard.quarantine_review_action(payload)
+
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                alpha_updated = lead_ledger.load_lead_by_id(conn, alpha["lead_id"])
+                beta_updated = lead_ledger.load_lead_by_id(conn, beta["lead_id"])
+            finally:
+                conn.close()
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual(1, body["result"]["updated"])
+        self.assertEqual(lead_ledger.REJECTED_STATUS, alpha_updated["current_status"])
+        self.assertEqual(lead_ledger.QUARANTINE_STATUS, beta_updated["current_status"])
 
     def test_check_important_leads_uses_canonical_input_when_paste_empty(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -1122,7 +1804,7 @@ class LiveDashboardTests(unittest.TestCase):
                 },
                 "check": 2,
                 "dispatch": 3,
-                "dispatch_source_mode": "verified",
+                "dispatch_source_mode": "strict_verified",
                 "dispatch_source_path": "_important/leads_verified.csv",
                 "dispatch_source_exists": True,
                 "dispatch_source_row_count": 1,
@@ -1135,6 +1817,14 @@ class LiveDashboardTests(unittest.TestCase):
             live_dashboard,
             "important_leads_verify_status",
             return_value={"verify": 4},
+        ), patch.object(
+            live_dashboard,
+            "_find_active_important_check_job",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_find_active_dashboard_job",
+            return_value=None,
         ):
             response = live_dashboard.leads_status()
 
@@ -1153,7 +1843,7 @@ class LiveDashboardTests(unittest.TestCase):
                 "check": 2,
                 "dispatch": 3,
                 "verify": 4,
-                "dispatch_source_mode": "verified",
+                "dispatch_source_mode": "strict_verified",
                 "dispatch_source_path": "_important/leads_verified.csv",
                 "dispatch_source_exists": True,
                 "dispatch_source_row_count": 1,
@@ -1161,6 +1851,9 @@ class LiveDashboardTests(unittest.TestCase):
                 "dispatch_block_reason": "",
                 "verification_required": True,
                 "verification_file_mtime": "2026-04-09T00:00:00+00:00",
+                "active_important_check_job": None,
+                "active_important_verify_job": None,
+                "active_important_dispatch_job": None,
             },
             body["status"],
         )

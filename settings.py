@@ -92,6 +92,7 @@ SENDGRID_NORMALIZE_REPORT_PATH = STATE_DIR / "sendgrid_shard_normalize_report.js
 WEBHOOK_EVENTS_PATH = LOGS_DIR / "sendgrid_events.jsonl"
 WEBHOOK_DEDUPE_PATH = STATE_DIR / "sendgrid_webhook_dedupe.sqlite3"
 SENDGRID_WEBHOOK_RECEIVER_DB_PATH = STATE_DIR / "sendgrid_webhook_receiver.sqlite3"
+LEAD_LEDGER_DB_PATH = STATE_DIR / "lead_ledger.sqlite3"
 SENDGRID_SUPPRESSIONS_PATH = STATE_DIR / "sendgrid_suppressions.csv"
 SUPPRESSED_PATH = STATE_DIR / "suppressed.csv"
 UNSUBSCRIBED_PATH = STATE_DIR / "unsubscribed.csv"

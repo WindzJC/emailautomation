@@ -8,6 +8,7 @@ const els = {
   wsLabel: document.getElementById("ws-label"),
   healthBanner: document.getElementById("health-banner"),
   alertsGrid: document.getElementById("alerts-grid"),
+  alertsProgress: document.getElementById("alerts-progress"),
   alertsCaption: document.getElementById("alerts-caption"),
   summaryGrid: document.getElementById("summary-grid"),
   trendsGrid: document.getElementById("trends-grid"),
@@ -53,11 +54,27 @@ const els = {
   leadsImportantVerifyRejectedPath: document.getElementById("leads-verify-rejected-path"),
   leadsImportantVerifyQuarantinePath: document.getElementById("leads-verify-quarantine-path"),
   leadsImportantVerifyBtn: document.getElementById("leads-verify-btn"),
+  leadsImportantVerifyStrictBtn: document.getElementById("leads-verify-strict-btn"),
+  leadsImportantVerifyStopBtn: document.getElementById("leads-verify-stop-btn"),
   leadsImportantVerifyMeta: document.getElementById("leads-verify-meta"),
   leadsImportantVerifyResults: document.getElementById("leads-verify-results"),
+  leadsQuarantineReasonCode: document.getElementById("leads-quarantine-reason-code"),
+  leadsQuarantineStage: document.getElementById("leads-quarantine-stage"),
+  leadsQuarantineStatus: document.getElementById("leads-quarantine-status"),
+  leadsQuarantineSort: document.getElementById("leads-quarantine-sort"),
+  leadsQuarantineRefreshBtn: document.getElementById("leads-quarantine-refresh-btn"),
+  leadsQuarantineOperatorNote: document.getElementById("leads-quarantine-operator-note"),
+  leadsQuarantinePromoteBtn: document.getElementById("leads-quarantine-promote-btn"),
+  leadsQuarantineRejectBtn: document.getElementById("leads-quarantine-reject-btn"),
+  leadsQuarantineStrictBtn: document.getElementById("leads-quarantine-strict-btn"),
+  leadsQuarantineNoteBtn: document.getElementById("leads-quarantine-note-btn"),
+  leadsQuarantineMeta: document.getElementById("leads-quarantine-meta"),
+  leadsQuarantineResults: document.getElementById("leads-quarantine-results"),
   leadsImportantDispatchSourceMode: document.getElementById("leads-dispatch-source-mode"),
+  leadsImportantDispatchCap: document.getElementById("leads-dispatch-cap"),
   leadsImportantDispatchSourceNote: document.getElementById("leads-dispatch-source-note"),
-  leadsImportantDispatchBtn: document.getElementById("leads-important-dispatch-btn"),
+  leadsImportantDispatchPreviewBtn: document.getElementById("leads-important-dispatch-preview-btn"),
+  leadsImportantDispatchConfirmBtn: document.getElementById("leads-important-dispatch-confirm-btn"),
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsUploadInput: document.getElementById("leads-upload-input"),
@@ -104,9 +121,24 @@ let lastShardPreview = null;
 let lastImportantLeadCheck = null;
 let lastImportantLeadCheckJob = null;
 let importantLeadCheckJobTimer = null;
+let importantLeadCheckJobPollId = "";
 let lastImportantVerify = null;
+let lastImportantVerifyJob = null;
+let importantLeadVerifyJobTimer = null;
+let importantLeadVerifyJobPollId = "";
 let lastImportantDispatch = null;
+let lastImportantDispatchJob = null;
+let importantLeadDispatchJobTimer = null;
+let importantLeadDispatchJobPollId = "";
 let lastImportantDispatchSource = null;
+let lastImportantDispatchPreview = null;
+let lastQuarantineReview = null;
+let lastQuarantineReviewLead = null;
+const selectedQuarantineLeadIds = new Set();
+const excludedQuarantineLeadIds = new Set();
+let allFilteredQuarantineSelected = false;
+let quarantinePageSize = 25;
+let quarantinePageIndex = 0;
 let didHydrate = false;
 let selectedProfileName = "";
 let displayTimeZone = "America/Los_Angeles";
@@ -118,6 +150,22 @@ let authState = {
   username: "",
 };
 const profileActionState = new Map();
+const IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY = "emailautomation.activeImportantCheckJobId";
+const IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY = "emailautomation.activeImportantVerifyJobId";
+const IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY = "emailautomation.activeImportantDispatchJobId";
+const VERIFY_MODE_FAST_TRIAGE = "FAST_TRIAGE";
+const VERIFY_MODE_STRICT_PUBLIC_PROOF = "STRICT_PUBLIC_PROOF";
+const QUARANTINE_PAGE_SIZE_OPTIONS = [25, 50, 100];
+const VERIFY_FAST_DEFAULT_PATHS = {
+  verified_path: "_important/leads_triaged_keep.csv",
+  rejected_path: "_important/leads_triaged_reject.csv",
+  quarantine_path: "_important/leads_triaged_quarantine.csv",
+};
+const VERIFY_STRICT_DEFAULT_PATHS = {
+  verified_path: "_important/leads_verified.csv",
+  rejected_path: "_important/leads_verify_rejected.csv",
+  quarantine_path: "_important/leads_quarantine.csv",
+};
 const pendingProfileActions = new Map();
 
 function currentActivityHours() {
@@ -306,19 +354,27 @@ function syncLocationState() {
 
 function applyDashboardTab() {
   const leadsActive = activeDashboardTab === "leads" && !wallboardMode;
+
   if (els.opsView) {
     els.opsView.classList.toggle("hidden", leadsActive);
+    els.opsView.hidden = leadsActive;
   }
+
   if (els.leadsView) {
     els.leadsView.classList.toggle("hidden", !leadsActive);
+    els.leadsView.hidden = !leadsActive;
   }
+
   if (els.opsTabBtn) {
     els.opsTabBtn.classList.toggle("is-active", !leadsActive);
-    els.opsTabBtn.setAttribute("aria-pressed", String(!leadsActive));
+    els.opsTabBtn.setAttribute("aria-selected", String(!leadsActive));
+    els.opsTabBtn.tabIndex = !leadsActive ? 0 : -1;
   }
+
   if (els.leadsTabBtn) {
     els.leadsTabBtn.classList.toggle("is-active", leadsActive);
-    els.leadsTabBtn.setAttribute("aria-pressed", String(leadsActive));
+    els.leadsTabBtn.setAttribute("aria-selected", String(leadsActive));
+    els.leadsTabBtn.tabIndex = leadsActive ? 0 : -1;
   }
 }
 
@@ -419,6 +475,24 @@ function profileCooldownRemaining(profile) {
   return Math.max(0, Math.round(remaining));
 }
 
+function profileCooldownDisplay(profile, options = {}) {
+  const remaining = profileCooldownRemaining(profile);
+  if (remaining > 0) {
+    return {
+      text: humanizeCooldownRemaining(remaining),
+      title: `Cooldown: ${remaining}s remaining`,
+      countdown: remaining,
+      active: true,
+    };
+  }
+  return {
+    text: "Ready",
+    title: "No active cooldown",
+    countdown: null,
+    active: false,
+  };
+}
+
 function profileLastUpdateText(profile) {
   const remaining = profileCooldownRemaining(profile);
   if ((profile?.runtime_state || "") === "paused" && remaining > 0) {
@@ -441,6 +515,22 @@ function profileLastAgeText(profile) {
   return profile?.last_age ? `Age ${profile.last_age}` : "No recent sender log line";
 }
 
+function profileRunSentDisplay(profile) {
+  const displayValue = Number(profile?.run_sent_display);
+  if (Number.isFinite(displayValue)) return displayValue;
+  const canonicalValue = Number(profile?.run_sent);
+  if (Number.isFinite(canonicalValue)) return canonicalValue;
+  return 0;
+}
+
+// Backwards-compatible alias: prefer the UI-only display value when present.
+// Use this helper in rendering code when the displayed "Accepted" count
+// should reflect server-provided `run_sent_display` (fallback to canonical
+// `run_sent` when the display value is absent).
+function profileRunSentPrefer(profile) {
+  return profileRunSentDisplay(profile);
+}
+
 function formatPercent(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "-";
@@ -450,11 +540,63 @@ function formatPercent(value) {
 function renderSummaryDetails(details = []) {
   if (!Array.isArray(details) || !details.length) return "";
   return `
-    <div class="summary-details">
-      ${details.map((item) => `
-        <div class="summary-detail">
-          <span class="summary-detail-label">${escapeHtml(item.label || "")}</span>
-          <span class="summary-detail-value">${escapeHtml(item.value ?? "")}</span>
+    <div class="summary-insight-list">
+      ${details
+        .filter((item) => String(item?.label || "").trim() || String(item?.value ?? "").trim())
+        .slice(0, 3)
+        .map((item) => `
+          <div class="summary-insight-row">
+            <span class="summary-insight-label">${escapeHtml(item?.label || "")}</span>
+            <span class="summary-insight-value">${escapeHtml(item?.value ?? "")}</span>
+          </div>
+        `)
+        .join("")}
+    </div>
+  `;
+}
+
+function fleetProfileStatus(profile) {
+  const state = String(profile?.runtime_state || "").trim();
+  const name = formatProfileName(profile?.name || "");
+  if (["running", "starting", "sleeping"].includes(state)) {
+    return { name, label: "Live", tone: "good" };
+  }
+  if (["cooldown", "paused"].includes(state)) {
+    return { name, label: state === "paused" ? "Paused" : "Cooldown", tone: "warn" };
+  }
+  return { name, label: "Stopped", tone: "bad" };
+}
+
+function renderFleetProfileStrip(profiles = []) {
+  if (!Array.isArray(profiles) || !profiles.length) return "";
+  return `
+    <div class="summary-fleet-matrix">
+      ${profiles.map((profile) => {
+        const status = fleetProfileStatus(profile);
+        return `
+          <div class="summary-fleet-row summary-fleet-row-${escapeHtml(status.tone || "neutral")}">
+            <span class="summary-fleet-name">${escapeHtml(status.name)}</span>
+            <span class="summary-fleet-state">
+              <span class="summary-fleet-dot"></span>
+              <span>${escapeHtml(status.label)}</span>
+            </span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderSummaryInsightList(items = [], emptyText = "") {
+  if (!Array.isArray(items) || !items.length) {
+    return emptyText ? `<div class="summary-note">${escapeHtml(emptyText)}</div>` : "";
+  }
+  return `
+    <div class="summary-insight-list">
+      ${items.slice(0, 3).map((item) => `
+        <div class="summary-insight-row">
+          <span class="summary-insight-label">${escapeHtml(item.label || "")}</span>
+          <span class="summary-insight-value">${escapeHtml(item.value ?? "")}</span>
         </div>
       `).join("")}
     </div>
@@ -466,18 +608,34 @@ function isSummaryTextValue(value) {
   return /[A-Za-z]/.test(text) || text.length >= 8;
 }
 
+function compactSummaryNote(note = "", details = []) {
+  const plainNote = String(note || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (plainNote) return plainNote;
+  if (Array.isArray(details) && details.length) {
+    const first = details[0] || {};
+    return [String(first.label || "").trim(), String(first.value ?? "").trim()].filter(Boolean).join(" · ");
+  }
+  return "";
+}
+
 function summaryCard(label, value, note = "", details = []) {
   const valueClass = isSummaryTextValue(value) ? "summary-value summary-value-text" : "summary-value";
+  const compactNote = compactSummaryNote(note, details);
   return `
-    <div class="summary-card summary-card-neutral">
-      <div class="summary-head">
+    <article class="summary-card summary-card-neutral summary-card-compact fleet-module">
+      <div class="summary-head fleet-module-head">
         <div class="summary-label">${label}</div>
         <span class="summary-spark summary-spark-neutral"></span>
       </div>
-      <div class="${valueClass}">${value}</div>
-      <div class="summary-note">${note}</div>
-      ${renderSummaryDetails(details)}
-    </div>
+      <div class="fleet-module-body">
+        <div class="${valueClass}">${value}</div>
+        <div class="summary-note">${escapeHtml(compactNote)}</div>
+      </div>
+      <div class="summary-details-slot"></div>
+    </article>
   `;
 }
 
@@ -527,6 +685,17 @@ function previewMatchesCurrentSelection() {
   return Boolean(lastShardPreview && lastShardPreview._preview_key === currentShardPlanKey());
 }
 
+function currentDispatchPlanKey() {
+  return [
+    els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
+    els.leadsImportantDispatchCap?.value || "all",
+  ].join("|");
+}
+
+function dispatchPreviewMatchesCurrentSelection() {
+  return Boolean(lastImportantDispatchPreview && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey());
+}
+
 function selectedLeadsMapping() {
   return {
     email: els.leadsEmailColumn?.value || "",
@@ -540,9 +709,23 @@ function importantLeadPathsPayload() {
     input_path: els.leadsImportantInputPath?.value?.trim() || "",
     output_path: els.leadsImportantOutputPath?.value?.trim() || "",
     rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
-    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "verified",
+    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
     input_text: els.leadsImportantInputText?.value || "",
   };
+}
+
+function importantLeadDispatchPayload(includePreviewId = false) {
+  const payload = {
+    input_path: els.leadsImportantInputPath?.value?.trim() || "",
+    output_path: els.leadsImportantOutputPath?.value?.trim() || "",
+    rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
+    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
+    dispatch_cap: els.leadsImportantDispatchCap?.value || "all",
+  };
+  if (includePreviewId) {
+    payload.preview_id = lastImportantDispatchPreview?.preview_id || "";
+  }
+  return payload;
 }
 
 function importantLeadPastePolicy() {
@@ -661,16 +844,113 @@ function updateImportantLeadUploadNote(extra = "") {
   return { filename, size, extension };
 }
 
+function importantLeadCheckJobStatus(job) {
+  return String(job?.status || job?.stage || "queued").toLowerCase();
+}
+
+function isTerminalImportantLeadCheckJob(job) {
+  return ["completed", "failed", "canceled", "cancelled"].includes(importantLeadCheckJobStatus(job));
+}
+
+function isActiveImportantLeadCheckJob(job) {
+  return Boolean(job?.job_id) && !isTerminalImportantLeadCheckJob(job);
+}
+
+function readSavedImportantLeadCheckJobId() {
+  try {
+    return String(localStorage.getItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY) || "").trim();
+  } catch (err) {
+    return "";
+  }
+}
+
+function saveImportantLeadCheckJobId(jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return;
+  try {
+    localStorage.setItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY, cleanJobId);
+  } catch (err) {
+    // localStorage may be unavailable in private or restricted browser contexts.
+  }
+}
+
+function clearSavedImportantLeadCheckJobId(jobId = "") {
+  const cleanJobId = String(jobId || "").trim();
+  try {
+    const savedJobId = readSavedImportantLeadCheckJobId();
+    if (!cleanJobId || !savedJobId || savedJobId === cleanJobId) {
+      localStorage.removeItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY);
+    }
+  } catch (err) {
+    // no-op
+  }
+}
+
+function readSavedJobId(storageKey) {
+  try {
+    return String(localStorage.getItem(storageKey) || "").trim();
+  } catch (err) {
+    return "";
+  }
+}
+
+function saveJobId(storageKey, jobId) {
+  const cleanJobId = String(jobId || "").trim();
+  if (!cleanJobId) return;
+  try {
+    localStorage.setItem(storageKey, cleanJobId);
+  } catch (err) {
+    // no-op
+  }
+}
+
+function clearSavedJobId(storageKey, jobId = "") {
+  const cleanJobId = String(jobId || "").trim();
+  try {
+    const savedJobId = readSavedJobId(storageKey);
+    if (!cleanJobId || !savedJobId || savedJobId === cleanJobId) {
+      localStorage.removeItem(storageKey);
+    }
+  } catch (err) {
+    // no-op
+  }
+}
+
+function accessibleProgressBar(progressPercent, etaText, label = "Progress") {
+  const progress = Math.min(100, Math.max(0, Number(progressPercent) || 0));
+  const percentLabel = `${progress.toFixed(progress % 1 ? 1 : 0)}%`;
+  const valueText = `${percentLabel}${etaText && etaText !== "n/a" ? `, ETA ${etaText}` : ""}`;
+  return `
+    <div class="progress-wrap">
+      <div class="progress-label">
+        <span>${escapeHtml(label)}</span>
+        <span>${escapeHtml(percentLabel)}</span>
+      </div>
+      <div
+        class="progress-bar"
+        role="progressbar"
+        aria-valuenow="${progress.toFixed(1)}"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuetext="${escapeHtml(valueText)}"
+      >
+        <div class="progress-fill" style="width: ${progress}%;"></div>
+      </div>
+    </div>
+  `;
+}
+
 function stopImportantLeadCheckJobPolling() {
   if (importantLeadCheckJobTimer) {
     clearTimeout(importantLeadCheckJobTimer);
     importantLeadCheckJobTimer = null;
   }
+  importantLeadCheckJobPollId = "";
 }
 
 function renderImportantLeadCheckJob(job) {
   if (!job || !job.job_id) return;
-  const status = String(job.status || job.stage || "queued").toLowerCase();
+  const status = importantLeadCheckJobStatus(job);
   const label = status === "completed"
     ? "Upload check complete"
     : status === "failed"
@@ -680,6 +960,11 @@ function renderImportantLeadCheckJob(job) {
   lastImportantLeadCheckJob = job;
   const selectedFilename = job.selected_filename || job.original_uploaded_filename || job.source_label || "-";
   const serverFilename = job.server_received_filename || job.original_uploaded_filename || job.source_label || "-";
+  if (isActiveImportantLeadCheckJob(job)) {
+    saveImportantLeadCheckJobId(job.job_id);
+  } else if (isTerminalImportantLeadCheckJob(job)) {
+    clearSavedImportantLeadCheckJobId(job.job_id);
+  }
   if (els.leadsImportantCheckMeta) {
     setNodeText(
       els.leadsImportantCheckMeta,
@@ -691,25 +976,34 @@ function renderImportantLeadCheckJob(job) {
     const totalRows = Number(job.total_input_rows || 0);
     const processedRows = Number(job.processed_rows || 0);
     const remainingRows = Number(job.remaining_rows || Math.max(0, totalRows - processedRows));
+    const explicitProgress = Number(job.progress_percent);
+    const progressPercent = Number.isFinite(explicitProgress)
+      ? Math.min(100, Math.max(0, explicitProgress))
+      : (totalRows > 0 ? Math.min(100, Math.max(0, (processedRows / totalRows) * 100)) : 0);
     const etaSeconds = Number(job.eta_seconds);
     const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? humanizeDurationCompact(etaSeconds) : "n/a";
+    const updatedText = job.updated_at_utc ? formatGeneratedAt(job.updated_at_utc) : "-";
+    const sheetName = job.current_sheet || job.source_sheet || job.sheet_name || "";
     setNodeHtml(
       els.leadsImportantCheckResults,
       `
         <article class="leads-result-card">
           <h3>Upload Job</h3>
+          ${accessibleProgressBar(progressPercent, etaText, "Check progress")}
           <div class="leads-kpis">
             <div class="leads-kpi"><div class="label">Stage</div><div class="value">${escapeHtml(stage)}</div></div>
             <div class="leads-kpi"><div class="label">Rows</div><div class="value">${totalRows}</div></div>
             <div class="leads-kpi"><div class="label">Processed</div><div class="value">${processedRows}</div></div>
             <div class="leads-kpi"><div class="label">Remaining</div><div class="value">${remainingRows}</div></div>
             <div class="leads-kpi"><div class="label">ETA</div><div class="value">${escapeHtml(etaText)}</div></div>
+            <div class="leads-kpi"><div class="label">Updated</div><div class="value">${escapeHtml(updatedText)}</div></div>
           </div>
           <div class="pill-row">
             <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
             <span class="mini-pill">Mode ${escapeHtml(job.source_mode || "uploaded_file")}</span>
             <span class="mini-pill">Selected ${escapeHtml(selectedFilename)}</span>
             <span class="mini-pill">Server ${escapeHtml(serverFilename)}</span>
+            ${sheetName ? `<span class="mini-pill">Sheet ${escapeHtml(sheetName)}</span>` : ""}
           </div>
         </article>
       `,
@@ -720,11 +1014,14 @@ function renderImportantLeadCheckJob(job) {
 async function pollImportantLeadCheckJob(jobId) {
   if (!jobId) return;
   stopImportantLeadCheckJobPolling();
+  importantLeadCheckJobPollId = String(jobId);
   try {
     const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(jobId)}`);
     const job = data.job || {};
     renderImportantLeadCheckJob(job);
     if (job.status === "completed") {
+      stopImportantLeadCheckJobPolling();
+      clearSavedImportantLeadCheckJobId(job.job_id || jobId);
       lastImportantLeadCheck = job.check || null;
       if (data.status) {
         renderLeadsStatus(data.status || {});
@@ -734,14 +1031,382 @@ async function pollImportantLeadCheckJob(jobId) {
       showMessage(job.message || "Upload check complete.", "success");
       return;
     }
-    if (job.status === "failed") {
+    if (job.status === "failed" || job.status === "canceled" || job.status === "cancelled") {
+      stopImportantLeadCheckJobPolling();
+      clearSavedImportantLeadCheckJobId(job.job_id || jobId);
       showMessage(job.error || "Upload check failed.", "error");
       return;
     }
     importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 1500);
   } catch (err) {
+    if (String(err || "").includes("not found")) {
+      clearSavedImportantLeadCheckJobId(jobId);
+      stopImportantLeadCheckJobPolling();
+      return;
+    }
     showMessage(`Upload job poll failed: ${err}`, "error");
     importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 2500);
+  }
+}
+
+function resumeImportantLeadCheckJob(job) {
+  if (!isActiveImportantLeadCheckJob(job)) {
+    if (isTerminalImportantLeadCheckJob(job)) {
+      clearSavedImportantLeadCheckJobId(job?.job_id || "");
+    }
+    return false;
+  }
+  renderImportantLeadCheckJob(job);
+  const jobId = String(job.job_id || "");
+  if (importantLeadCheckJobPollId !== jobId) {
+    void pollImportantLeadCheckJob(jobId);
+  }
+  return true;
+}
+
+async function hydrateImportantLeadCheckJobOnLoad() {
+  const savedJobId = readSavedImportantLeadCheckJobId();
+  if (savedJobId) {
+    try {
+      const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(savedJobId)}`);
+      const job = data.job || null;
+      if (resumeImportantLeadCheckJob(job)) return;
+      if (job && isTerminalImportantLeadCheckJob(job)) {
+        renderImportantLeadCheckJob(job);
+        if (job.status === "completed" && job.check) {
+          lastImportantLeadCheck = job.check;
+          renderImportantLeadCheck(lastImportantLeadCheck);
+        }
+      }
+    } catch (err) {
+      clearSavedImportantLeadCheckJobId(savedJobId);
+    }
+  }
+  try {
+    const data = await fetchJson("/api/leads/check-important/active");
+    resumeImportantLeadCheckJob(data.job || null);
+  } catch (err) {
+    // Leads status still renders normally if active-job hydration is unavailable.
+  }
+}
+
+function stopImportantLeadVerifyJobPolling() {
+  if (importantLeadVerifyJobTimer) {
+    clearTimeout(importantLeadVerifyJobTimer);
+    importantLeadVerifyJobTimer = null;
+  }
+  importantLeadVerifyJobPollId = "";
+}
+
+function renderImportantLeadVerifyJob(job) {
+  if (!job || !job.job_id) return;
+  lastImportantVerifyJob = job;
+  const status = importantLeadCheckJobStatus(job);
+  const active = isActiveImportantLeadCheckJob(job);
+  const mode = String(job.mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase();
+  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : "Fast Triage";
+  if (active) {
+    saveJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job.job_id);
+  } else if (isTerminalImportantLeadCheckJob(job)) {
+    clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job.job_id);
+  }
+  const stage = job.phase || job.stage || status || "queued";
+  const totalRows = Number(job.total_rows || job.total_input_rows || 0);
+  const processedRows = Number(job.processed_rows || 0);
+  const remainingRows = Number(job.remaining_rows || Math.max(0, totalRows - processedRows));
+  const progressPercent = Number.isFinite(Number(job.progress_percent))
+    ? Math.min(100, Math.max(0, Number(job.progress_percent)))
+    : (totalRows > 0 ? Math.min(100, Math.max(0, (processedRows / totalRows) * 100)) : 0);
+  const etaSeconds = Number(job.eta_seconds);
+  const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? humanizeDurationCompact(etaSeconds) : "n/a";
+  const updatedText = job.updated_at_utc ? formatGeneratedAt(job.updated_at_utc) : "-";
+  if (els.leadsImportantVerifyMeta) {
+    setNodeText(els.leadsImportantVerifyMeta, `Verify job ${status}: ${job.message || job.error || stage}.`);
+  }
+  if (els.leadsImportantVerifyBtn) {
+    els.leadsImportantVerifyBtn.disabled = active;
+    setNodeText(els.leadsImportantVerifyBtn, active ? "Verifying..." : "Fast Triage");
+  }
+  if (els.leadsImportantVerifyStrictBtn) {
+    els.leadsImportantVerifyStrictBtn.disabled = active;
+    setNodeText(els.leadsImportantVerifyStrictBtn, active ? "Verifying..." : "Strict Public Proof");
+  }
+  if (els.leadsImportantVerifyStopBtn) {
+    els.leadsImportantVerifyStopBtn.disabled = !active || Boolean(job.cancel_requested);
+    setNodeText(els.leadsImportantVerifyStopBtn, job.cancel_requested ? "Stopping..." : "Stop Verify");
+  }
+  if (els.leadsImportantVerifyResults && active) {
+    setNodeHtml(
+      els.leadsImportantVerifyResults,
+      `
+        <article class="leads-result-card">
+          <h3>Verify Job</h3>
+          ${accessibleProgressBar(progressPercent, etaText, "Verify progress")}
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">Phase</div><div class="value">${escapeHtml(stage)}</div></div>
+            <div class="leads-kpi"><div class="label">Mode</div><div class="value">${escapeHtml(modeLabel)}</div></div>
+            <div class="leads-kpi"><div class="label">Rows</div><div class="value">${totalRows}</div></div>
+            <div class="leads-kpi"><div class="label">Processed</div><div class="value">${processedRows}</div></div>
+            <div class="leads-kpi"><div class="label">Remaining</div><div class="value">${remainingRows}</div></div>
+            <div class="leads-kpi"><div class="label">ETA</div><div class="value">${escapeHtml(etaText)}</div></div>
+            <div class="leads-kpi"><div class="label">Updated</div><div class="value">${escapeHtml(updatedText)}</div></div>
+          </div>
+          <div class="pill-row">
+            <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
+            <span class="mini-pill">Input ${escapeHtml(job.input_path || "-")}</span>
+            <span class="mini-pill">Keep ${escapeHtml(job.verified_path || "-")}</span>
+          </div>
+        </article>
+      `,
+    );
+  }
+}
+
+async function stopImportantLeadVerify() {
+  const jobId = String(lastImportantVerifyJob?.job_id || readSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY) || "").trim();
+  if (!jobId) {
+    showMessage("No active Verify job to stop.", "error");
+    return;
+  }
+  if (els.leadsImportantVerifyStopBtn) {
+    els.leadsImportantVerifyStopBtn.disabled = true;
+    setNodeText(els.leadsImportantVerifyStopBtn, "Stopping...");
+  }
+  try {
+    const data = await fetchJson(`/api/leads/verify-important/job/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    if (data.job) {
+      renderImportantLeadVerifyJob(data.job);
+    }
+    showMessage(data.message || "Stop requested for Verify Leads.", "success");
+  } catch (err) {
+    showMessage(`Stop Verify failed: ${err}`, "error");
+    if (els.leadsImportantVerifyStopBtn) {
+      els.leadsImportantVerifyStopBtn.disabled = false;
+      setNodeText(els.leadsImportantVerifyStopBtn, "Stop Verify");
+    }
+  }
+}
+
+async function pollImportantLeadVerifyJob(jobId) {
+  if (!jobId) return;
+  stopImportantLeadVerifyJobPolling();
+  importantLeadVerifyJobPollId = String(jobId);
+  try {
+    const data = await fetchJson(`/api/leads/verify-important/job/${encodeURIComponent(jobId)}`);
+    const job = data.job || {};
+    renderImportantLeadVerifyJob(job);
+    if (job.status === "completed") {
+      stopImportantLeadVerifyJobPolling();
+      clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job.job_id || jobId);
+      lastImportantVerify = job.verify || null;
+      if (data.status) renderLeadsStatus(data.status || {});
+      else renderImportantLeadVerify(lastImportantVerify);
+      showMessage(job.message || "Lead verification complete.", "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "canceled" || job.status === "cancelled") {
+      stopImportantLeadVerifyJobPolling();
+      clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job.job_id || jobId);
+      showMessage(job.error || "Lead verification failed.", "error");
+      return;
+    }
+    importantLeadVerifyJobTimer = setTimeout(() => pollImportantLeadVerifyJob(jobId), 1500);
+  } catch (err) {
+    if (String(err || "").includes("not found")) {
+      clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, jobId);
+      stopImportantLeadVerifyJobPolling();
+      return;
+    }
+    showMessage(`Verify job poll failed: ${err}`, "error");
+    importantLeadVerifyJobTimer = setTimeout(() => pollImportantLeadVerifyJob(jobId), 2500);
+  }
+}
+
+function resumeImportantLeadVerifyJob(job) {
+  if (!isActiveImportantLeadCheckJob(job)) {
+    if (isTerminalImportantLeadCheckJob(job)) {
+      clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job?.job_id || "");
+    }
+    return false;
+  }
+  renderImportantLeadVerifyJob(job);
+  const jobId = String(job.job_id || "");
+  if (importantLeadVerifyJobPollId !== jobId) {
+    void pollImportantLeadVerifyJob(jobId);
+  }
+  return true;
+}
+
+async function hydrateImportantLeadVerifyJobOnLoad() {
+  const savedJobId = readSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY);
+  if (savedJobId) {
+    try {
+      const data = await fetchJson(`/api/leads/verify-important/job/${encodeURIComponent(savedJobId)}`);
+      if (resumeImportantLeadVerifyJob(data.job || null)) return;
+    } catch (err) {
+      clearSavedJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, savedJobId);
+    }
+  }
+  try {
+    const data = await fetchJson("/api/leads/verify-important/active");
+    resumeImportantLeadVerifyJob(data.job || null);
+  } catch (err) {
+    // no-op
+  }
+}
+
+function stopImportantLeadDispatchJobPolling() {
+  if (importantLeadDispatchJobTimer) {
+    clearTimeout(importantLeadDispatchJobTimer);
+    importantLeadDispatchJobTimer = null;
+  }
+  importantLeadDispatchJobPollId = "";
+}
+
+function renderImportantLeadDispatchJob(job) {
+  if (!job || !job.job_id) return;
+  lastImportantDispatchJob = job;
+  const status = importantLeadCheckJobStatus(job);
+  const active = isActiveImportantLeadCheckJob(job);
+  if (active) {
+    saveJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id);
+  } else if (isTerminalImportantLeadCheckJob(job)) {
+    clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id);
+  }
+  const stage = job.phase || job.stage || status || "queued";
+  const totalRows = Number(job.total_rows || 0);
+  const processedRows = Number(job.processed_rows || 0);
+  const assignedRows = Number(job.assigned_rows || 0);
+  const skippedRows = Number(job.skipped_rows || 0);
+  const remainingRows = Number(job.remaining_rows || Math.max(0, totalRows - processedRows));
+  const progressPercent = Number.isFinite(Number(job.progress_percent))
+    ? Math.min(100, Math.max(0, Number(job.progress_percent)))
+    : (totalRows > 0 ? Math.min(100, Math.max(0, (processedRows / totalRows) * 100)) : 0);
+  const etaSeconds = Number(job.eta_seconds);
+  const etaText = Number.isFinite(etaSeconds) && etaSeconds > 0 ? humanizeDurationCompact(etaSeconds) : "n/a";
+  const updatedText = job.updated_at_utc ? formatGeneratedAt(job.updated_at_utc) : "-";
+  const mode = job.dispatch_source_mode || "triaged_keep";
+  if (els.leadsImportantDispatchMeta) {
+    setNodeText(els.leadsImportantDispatchMeta, `Dispatch job ${status}: ${job.message || job.error || stage}.`);
+  }
+  if (els.leadsImportantDispatchPreviewBtn) {
+    els.leadsImportantDispatchPreviewBtn.disabled = active;
+    setNodeText(els.leadsImportantDispatchPreviewBtn, "Preview Dispatch");
+  }
+  if (els.leadsImportantDispatchConfirmBtn) {
+    els.leadsImportantDispatchConfirmBtn.disabled = true;
+    setNodeText(els.leadsImportantDispatchConfirmBtn, active ? "Dispatching..." : "Confirm Dispatch");
+  }
+  if (els.leadsImportantDispatchResults && active) {
+    setNodeHtml(
+      els.leadsImportantDispatchResults,
+      `
+        <article class="leads-result-card">
+          <h3>Dispatch Job</h3>
+          ${accessibleProgressBar(progressPercent, etaText, "Dispatch progress")}
+          <div class="leads-kpis">
+            <div class="leads-kpi"><div class="label">Phase</div><div class="value">${escapeHtml(stage)}</div></div>
+            <div class="leads-kpi"><div class="label">Rows</div><div class="value">${totalRows}</div></div>
+            <div class="leads-kpi"><div class="label">Assigned</div><div class="value">${assignedRows}</div></div>
+            <div class="leads-kpi"><div class="label">Skipped</div><div class="value">${skippedRows}</div></div>
+            <div class="leads-kpi"><div class="label">Remaining</div><div class="value">${remainingRows}</div></div>
+            <div class="leads-kpi"><div class="label">ETA</div><div class="value">${escapeHtml(etaText)}</div></div>
+            <div class="leads-kpi"><div class="label">Updated</div><div class="value">${escapeHtml(updatedText)}</div></div>
+          </div>
+          <div class="pill-row">
+            <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
+            <span class="mini-pill">Mode ${escapeHtml(mode)}</span>
+            <span class="mini-pill">Cap ${escapeHtml(job.dispatch_cap || "all")}</span>
+          </div>
+        </article>
+      `,
+    );
+  }
+}
+
+function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
+  const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
+  const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
+  const liveSenderProfiles = activeSenderProfiles();
+  const sendersActive = liveSenderProfiles.length > 0;
+  const previewReady = dispatchPreviewMatchesCurrentSelection();
+  const previewBlocked = !preview || !previewReady;
+  if (els.leadsImportantDispatchPreviewBtn) {
+    els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive;
+  }
+  if (els.leadsImportantDispatchConfirmBtn) {
+    els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch || sourceBlocked || previewBlocked || sendersActive;
+  }
+}
+
+async function pollImportantLeadDispatchJob(jobId) {
+  if (!jobId) return;
+  stopImportantLeadDispatchJobPolling();
+  importantLeadDispatchJobPollId = String(jobId);
+  try {
+    const data = await fetchJson(`/api/leads/dispatch-important/job/${encodeURIComponent(jobId)}`);
+    const job = data.job || {};
+    renderImportantLeadDispatchJob(job);
+    if (job.status === "completed") {
+      stopImportantLeadDispatchJobPolling();
+      clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id || jobId);
+      lastImportantDispatchPreview = null;
+      lastImportantDispatch = job.dispatch || null;
+      if (data.status) renderLeadsStatus(data.status || {});
+      else renderImportantDispatch(lastImportantDispatch);
+      showMessage(job.message || "Lead dispatch complete.", "success");
+      return;
+    }
+    if (job.status === "failed" || job.status === "canceled" || job.status === "cancelled") {
+      stopImportantLeadDispatchJobPolling();
+      clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id || jobId);
+      showMessage(job.error || "Lead dispatch failed.", "error");
+      return;
+    }
+    importantLeadDispatchJobTimer = setTimeout(() => pollImportantLeadDispatchJob(jobId), 1500);
+  } catch (err) {
+    if (String(err || "").includes("not found")) {
+      clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, jobId);
+      stopImportantLeadDispatchJobPolling();
+      return;
+    }
+    showMessage(`Dispatch job poll failed: ${err}`, "error");
+    importantLeadDispatchJobTimer = setTimeout(() => pollImportantLeadDispatchJob(jobId), 2500);
+  }
+}
+
+function resumeImportantLeadDispatchJob(job) {
+  if (!isActiveImportantLeadCheckJob(job)) {
+    if (isTerminalImportantLeadCheckJob(job)) {
+      clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job?.job_id || "");
+    }
+    return false;
+  }
+  renderImportantLeadDispatchJob(job);
+  const jobId = String(job.job_id || "");
+  if (importantLeadDispatchJobPollId !== jobId) {
+    void pollImportantLeadDispatchJob(jobId);
+  }
+  return true;
+}
+
+async function hydrateImportantLeadDispatchJobOnLoad() {
+  const savedJobId = readSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY);
+  if (savedJobId) {
+    try {
+      const data = await fetchJson(`/api/leads/dispatch-important/job/${encodeURIComponent(savedJobId)}`);
+      if (resumeImportantLeadDispatchJob(data.job || null)) return;
+    } catch (err) {
+      clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, savedJobId);
+    }
+  }
+  try {
+    const data = await fetchJson("/api/leads/dispatch-important/active");
+    resumeImportantLeadDispatchJob(data.job || null);
+  } catch (err) {
+    // no-op
   }
 }
 
@@ -754,20 +1419,33 @@ function syncImportantLeadPathInputs(status) {
   if (els.leadsImportantRejectedPath) els.leadsImportantRejectedPath.value = rejectedLabel;
 }
 
-function importantLeadVerifyPayload() {
+function importantLeadVerifyPayload(mode = VERIFY_MODE_FAST_TRIAGE) {
+  const normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
+    ? VERIFY_MODE_STRICT_PUBLIC_PROOF
+    : VERIFY_MODE_FAST_TRIAGE;
+  const modeDefaults = normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF
+    ? VERIFY_STRICT_DEFAULT_PATHS
+    : VERIFY_FAST_DEFAULT_PATHS;
   return {
+    mode: normalizedMode,
     input_path: els.leadsImportantVerifyInputPath?.value?.trim() || "",
-    verified_path: els.leadsImportantVerifyOutputPath?.value?.trim() || "",
-    rejected_path: els.leadsImportantVerifyRejectedPath?.value?.trim() || "",
-    quarantine_path: els.leadsImportantVerifyQuarantinePath?.value?.trim() || "",
+    verified_path: normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF
+      ? modeDefaults.verified_path
+      : (els.leadsImportantVerifyOutputPath?.value?.trim() || modeDefaults.verified_path),
+    rejected_path: normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF
+      ? modeDefaults.rejected_path
+      : (els.leadsImportantVerifyRejectedPath?.value?.trim() || modeDefaults.rejected_path),
+    quarantine_path: normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF
+      ? modeDefaults.quarantine_path
+      : (els.leadsImportantVerifyQuarantinePath?.value?.trim() || modeDefaults.quarantine_path),
   };
 }
 
 function syncImportantVerifyPathInputs(status) {
-  const inputLabel = status?.important_verify_input_label || "_important/leads.csv";
-  const verifiedLabel = status?.important_verify_keep_label || "_important/leads_verified.csv";
-  const rejectedLabel = status?.important_verify_rejected_label || "_important/leads_verify_rejected.csv";
-  const quarantineLabel = status?.important_verify_quarantine_label || "_important/leads_quarantine.csv";
+  const inputLabel = status?.important_triage_input_label || status?.important_verify_input_label || "_important/leads.csv";
+  const verifiedLabel = status?.important_triage_keep_label || VERIFY_FAST_DEFAULT_PATHS.verified_path;
+  const rejectedLabel = status?.important_triage_rejected_label || VERIFY_FAST_DEFAULT_PATHS.rejected_path;
+  const quarantineLabel = status?.important_triage_quarantine_label || VERIFY_FAST_DEFAULT_PATHS.quarantine_path;
   if (els.leadsImportantVerifyInputPath) els.leadsImportantVerifyInputPath.value = inputLabel;
   if (els.leadsImportantVerifyOutputPath) els.leadsImportantVerifyOutputPath.value = verifiedLabel;
   if (els.leadsImportantVerifyRejectedPath) els.leadsImportantVerifyRejectedPath.value = rejectedLabel;
@@ -775,20 +1453,516 @@ function syncImportantVerifyPathInputs(status) {
 }
 
 function syncImportantDispatchSourceMode(status) {
-  const mode = status?.dispatch_source_mode || lastImportantDispatchSource?.dispatch_source_mode || "verified";
+  const mode = status?.dispatch_source_mode || lastImportantDispatchSource?.dispatch_source_mode || "triaged_keep";
   if (els.leadsImportantDispatchSourceMode) {
-    els.leadsImportantDispatchSourceMode.value = mode === "cleaned" ? "cleaned" : "verified";
+    els.leadsImportantDispatchSourceMode.value = mode === "strict_verified" ? "strict_verified" : "triaged_keep";
+  }
+  if (els.leadsImportantDispatchCap && !els.leadsImportantDispatchCap.value) {
+    els.leadsImportantDispatchCap.value = "all";
   }
 }
 
 function dispatchSourceForSelectedMode() {
   const status = lastLeadsStatus || {};
-  const selectedMode = els.leadsImportantDispatchSourceMode?.value || status.dispatch_source_mode || "verified";
+  const selectedMode = els.leadsImportantDispatchSourceMode?.value || status.dispatch_source_mode || "triaged_keep";
   const options = status.dispatch_source_options || {};
+  const mode = selectedMode === "strict_verified" ? "strict_verified" : "triaged_keep";
   return {
-    mode: selectedMode === "cleaned" ? "cleaned" : "verified",
-    source: options[selectedMode] || status.dispatch_source || {},
+    mode,
+    source: options[mode] || status.dispatch_source || {},
   };
+}
+
+function quarantineReviewFiltersPayload() {
+  return {
+    reason_code: String(els.leadsQuarantineReasonCode?.value || "").trim(),
+    stage: String(els.leadsQuarantineStage?.value || "").trim(),
+    status: String(els.leadsQuarantineStatus?.value || "QUARANTINE").trim() || "QUARANTINE",
+    sort: String(els.leadsQuarantineSort?.value || "score_desc").trim() || "score_desc",
+  };
+}
+
+function quarantineReviewQueryString() {
+  const params = new URLSearchParams();
+  const payload = quarantineReviewFiltersPayload();
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== "") params.set(key, value);
+  });
+  const normalizedPageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(Number(quarantinePageSize)) ? Number(quarantinePageSize) : 25;
+  const normalizedPageIndex = Math.max(0, Number(quarantinePageIndex || 0));
+  params.set("limit", String(normalizedPageSize));
+  params.set("offset", String(normalizedPageIndex * normalizedPageSize));
+  return params.toString();
+}
+
+function quarantineCountLabel(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function visibleQuarantineLeads(review = lastQuarantineReview) {
+  return Array.isArray(review?.leads) ? review.leads : [];
+}
+
+function visibleQuarantineLeadIds(review = lastQuarantineReview) {
+  return visibleQuarantineLeads(review)
+    .map((lead) => String(lead?.lead_id || "").trim())
+    .filter(Boolean);
+}
+
+function quarantineFilteredCount(review = lastQuarantineReview) {
+  return Number(review?.counts?.filtered || visibleQuarantineLeads(review).length || 0);
+}
+
+function quarantineRowsPerPage(review = lastQuarantineReview) {
+  const value = Number(review?.filters?.limit || quarantinePageSize || 25);
+  return QUARANTINE_PAGE_SIZE_OPTIONS.includes(value) ? value : 25;
+}
+
+function quarantineCurrentOffset(review = lastQuarantineReview) {
+  return Math.max(0, Number(review?.filters?.offset || quarantinePageIndex * quarantineRowsPerPage(review) || 0));
+}
+
+function quarantineTotalPages(review = lastQuarantineReview) {
+  const filtered = quarantineFilteredCount(review);
+  const pageSize = quarantineRowsPerPage(review);
+  return Math.max(1, Math.ceil(filtered / Math.max(1, pageSize)));
+}
+
+function quarantineCurrentPage(review = lastQuarantineReview) {
+  const pageSize = quarantineRowsPerPage(review);
+  return Math.min(quarantineTotalPages(review), Math.floor(quarantineCurrentOffset(review) / Math.max(1, pageSize)) + 1);
+}
+
+function quarantineVisibleRange(review = lastQuarantineReview) {
+  const filtered = quarantineFilteredCount(review);
+  if (!filtered) {
+    return { start: 0, end: 0 };
+  }
+  const start = quarantineCurrentOffset(review) + 1;
+  const end = Math.min(filtered, quarantineCurrentOffset(review) + visibleQuarantineLeads(review).length);
+  return { start, end };
+}
+
+function isQuarantineLeadSelected(leadId) {
+  const normalizedLeadId = String(leadId || "").trim();
+  if (!normalizedLeadId) return false;
+  if (allFilteredQuarantineSelected) {
+    return !excludedQuarantineLeadIds.has(normalizedLeadId);
+  }
+  return selectedQuarantineLeadIds.has(normalizedLeadId);
+}
+
+function selectedQuarantineLeadCount(review = lastQuarantineReview) {
+  if (allFilteredQuarantineSelected) {
+    return Math.max(0, quarantineFilteredCount(review) - excludedQuarantineLeadIds.size);
+  }
+  return selectedQuarantineLeadIds.size;
+}
+
+function selectedQuarantineLeadIdsList(review = lastQuarantineReview) {
+  if (allFilteredQuarantineSelected) {
+    return visibleQuarantineLeadIds(review).filter((leadId) => !excludedQuarantineLeadIds.has(leadId));
+  }
+  return Array.from(selectedQuarantineLeadIds.values());
+}
+
+function clearQuarantineSelection() {
+  allFilteredQuarantineSelected = false;
+  selectedQuarantineLeadIds.clear();
+  excludedQuarantineLeadIds.clear();
+}
+
+function quarantineHeaderCheckboxState(review = lastQuarantineReview) {
+  const visibleIds = visibleQuarantineLeadIds(review);
+  const visibleSelectedCount = visibleIds.filter((leadId) => isQuarantineLeadSelected(leadId)).length;
+  return {
+    visibleIds,
+    visibleSelectedCount,
+    visibleCount: visibleIds.length,
+    checked: visibleIds.length > 0 && visibleSelectedCount === visibleIds.length,
+    indeterminate: visibleSelectedCount > 0 && visibleSelectedCount < visibleIds.length,
+  };
+}
+
+function focusedQuarantineLeadId(review = lastQuarantineReview) {
+  const visibleIds = visibleQuarantineLeadIds(review);
+  const currentFocusedLeadId = String(lastQuarantineReviewLead?.lead_id || "").trim();
+  if (currentFocusedLeadId && visibleIds.includes(currentFocusedLeadId)) {
+    return currentFocusedLeadId;
+  }
+  return visibleIds[0] || "";
+}
+
+function quarantineSelectionSummary(review = lastQuarantineReview) {
+  const headerState = quarantineHeaderCheckboxState(review);
+  const filteredCount = quarantineFilteredCount(review);
+  const selectedCount = selectedQuarantineLeadCount(review);
+  const unselectedFilteredCount = Math.max(0, filteredCount - selectedCount);
+  return {
+    ...headerState,
+    filteredCount,
+    selectedCount,
+    unselectedFilteredCount,
+    scopeLabel: allFilteredQuarantineSelected
+      ? `Bulk actions apply to all ${quarantineCountLabel(selectedCount)} selected filtered leads.`
+      : `Bulk actions apply to ${quarantineCountLabel(selectedCount)} explicitly selected lead${selectedCount === 1 ? "" : "s"}.`,
+    pageStatus: headerState.visibleSelectedCount
+      ? `${quarantineCountLabel(headerState.visibleSelectedCount)} selected on this page`
+      : "No rows selected on this page",
+    filteredStatus: `${quarantineCountLabel(filteredCount)} filtered result${filteredCount === 1 ? "" : "s"}`,
+  };
+}
+
+function applyQuarantineHeaderCheckboxState(review = lastQuarantineReview) {
+  const checkbox = els.leadsQuarantineResults?.querySelector?.("[data-quarantine-page-toggle]");
+  if (!(checkbox instanceof HTMLInputElement)) return;
+  const state = quarantineHeaderCheckboxState(review);
+  checkbox.checked = state.checked;
+  checkbox.indeterminate = state.indeterminate;
+  checkbox.setAttribute("aria-checked", state.indeterminate ? "mixed" : state.checked ? "true" : "false");
+}
+
+function updateQuarantineSelectionForVisiblePage(nextChecked, review = lastQuarantineReview) {
+  const visibleIds = visibleQuarantineLeadIds(review);
+  if (!visibleIds.length) return;
+  if (allFilteredQuarantineSelected) {
+    visibleIds.forEach((leadId) => {
+      if (nextChecked) excludedQuarantineLeadIds.delete(leadId);
+      else excludedQuarantineLeadIds.add(leadId);
+    });
+  } else {
+    visibleIds.forEach((leadId) => {
+      if (nextChecked) selectedQuarantineLeadIds.add(leadId);
+      else selectedQuarantineLeadIds.delete(leadId);
+    });
+  }
+  renderQuarantineReview(lastQuarantineReview);
+}
+
+function selectAllFilteredQuarantineLeads() {
+  allFilteredQuarantineSelected = true;
+  selectedQuarantineLeadIds.clear();
+  excludedQuarantineLeadIds.clear();
+  renderQuarantineReview(lastQuarantineReview);
+}
+
+function setQuarantineRowsPerPage(value) {
+  const next = Number(value);
+  quarantinePageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(next) ? next : 25;
+  quarantinePageIndex = 0;
+  void refreshQuarantineReview(true, false);
+}
+
+function moveQuarantinePage(direction) {
+  const totalPages = quarantineTotalPages(lastQuarantineReview);
+  quarantinePageIndex = Math.max(0, Math.min(totalPages - 1, quarantinePageIndex + direction));
+  void refreshQuarantineReview(true, false);
+}
+
+function applyQuarantineFilterOptions(review) {
+  const filters = review?.filters || {};
+  const reasonOptions = Array.isArray(review?.reason_code_options) ? review.reason_code_options : [];
+  const stageOptions = Array.isArray(review?.stage_options) ? review.stage_options : [];
+  const statusOptions = Array.isArray(review?.status_options) ? review.status_options : [];
+  if (els.leadsQuarantineReasonCode) {
+    setNodeHtml(
+      els.leadsQuarantineReasonCode,
+      [`<option value="">All reason codes</option>`, ...reasonOptions.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)].join(""),
+    );
+    els.leadsQuarantineReasonCode.value = String(filters.reason_code || "");
+  }
+  if (els.leadsQuarantineStage) {
+    setNodeHtml(
+      els.leadsQuarantineStage,
+      [`<option value="">All stages</option>`, ...stageOptions.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)].join(""),
+    );
+    els.leadsQuarantineStage.value = String(filters.stage || "");
+  }
+  if (els.leadsQuarantineStatus) {
+    const normalized = Array.from(new Set(["QUARANTINE", ...statusOptions]));
+    setNodeHtml(
+      els.leadsQuarantineStatus,
+      normalized.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join(""),
+    );
+    els.leadsQuarantineStatus.value = String(filters.status || "QUARANTINE") || "QUARANTINE";
+  }
+  if (els.leadsQuarantineSort) {
+    els.leadsQuarantineSort.value = String(filters.sort || "score_desc");
+  }
+}
+
+function renderQuarantineReview(review) {
+  lastQuarantineReview = review || lastQuarantineReview;
+  const activeReview = lastQuarantineReview || {};
+  const leads = Array.isArray(activeReview.leads) ? activeReview.leads : [];
+  const counts = activeReview.counts || {};
+  const selection = quarantineSelectionSummary(activeReview);
+  const pageSize = quarantineRowsPerPage(activeReview);
+  const currentPage = quarantineCurrentPage(activeReview);
+  const totalPages = quarantineTotalPages(activeReview);
+  const range = quarantineVisibleRange(activeReview);
+  if (els.leadsQuarantineMeta) {
+    setNodeText(
+      els.leadsQuarantineMeta,
+      `Open quarantine ${quarantineCountLabel(counts.total_quarantined || 0)}. Showing ${range.start ? `${quarantineCountLabel(range.start)}-${quarantineCountLabel(range.end)}` : "0"} of ${quarantineCountLabel(counts.filtered || leads.length || 0)} filtered leads. ${selection.scopeLabel}`,
+    );
+  }
+  applyQuarantineFilterOptions(activeReview);
+  if (!leads.length) {
+    setNodeHtml(
+      els.leadsQuarantineResults,
+      `
+        <section class="operator-empty-state operator-empty-state-inbox">
+          <strong>Inbox is clear.</strong>
+          <span>No quarantined leads matched the current filters.</span>
+        </section>
+      `,
+    );
+    return;
+  }
+  const reasonRows = Object.entries(activeReview.reason_code_counts || {}).sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0)).slice(0, 8);
+  const recentActions = Array.isArray(activeReview.recent_actions) ? activeReview.recent_actions : [];
+  const detail = lastQuarantineReviewLead || null;
+  const focusedLeadLabel = detail?.email || leads[0]?.email || "-";
+  const selectionSentence = `${quarantineCountLabel(selection.selectedCount)} selected · ${range.start ? `${quarantineCountLabel(range.start)}-${quarantineCountLabel(range.end)}` : "0"} of ${quarantineCountLabel(selection.filteredCount)} shown · Page ${quarantineCountLabel(currentPage)} of ${quarantineCountLabel(totalPages)}`;
+  const dominantReasons = reasonRows.length
+    ? reasonRows.slice(0, 4).map(([reason, count]) => `${reason} ${Number(count || 0)}`)
+    : ["No reason codes"];
+  const detailHistoryRows = Array.isArray(detail?.lead_events)
+    ? detail.lead_events.slice(-6).reverse().map((event) => ({
+      Event: event.event_type || "-",
+      "Reason / Note": event.reason_code || event.note || "-",
+      When: formatGeneratedAt(event.created_at || ""),
+    }))
+    : [];
+  const recentReviewRows = recentActions.slice(0, 8).map((event) => ({
+    Action: event.event_type || "-",
+    Lead: event.email || event.full_name || event.lead_id || "-",
+    When: formatGeneratedAt(event.created_at || ""),
+  }));
+  setNodeHtml(
+    els.leadsQuarantineResults,
+    `
+      <div class="quarantine-shell inbox-shell">
+        <section class="quarantine-inbox-panel inbox-panel">
+          <div class="quarantine-inbox-sticky inbox-sticky">
+            <div class="inbox-toolbar">
+              <div class="inbox-toolbar-copy">
+                <span class="inbox-title">Quarantine Inbox</span>
+                <strong>${escapeHtml(selectionSentence)}</strong>
+                <span class="muted">${escapeHtml(selection.scopeLabel)}</span>
+              </div>
+              <div class="inbox-toolbar-actions">
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-check-page>Check page</button>
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-uncheck-page>Uncheck page</button>
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-select-all-filtered>Select all filtered</button>
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-clear-selection>Clear</button>
+              </div>
+            </div>
+            <div class="inbox-strip">
+              ${renderOperatorPillStrip(dominantReasons, "inbox-pill-strip")}
+              <div class="quarantine-pagination-actions inbox-pagination-actions">
+                <label class="quarantine-page-size">
+                  <span>Rows</span>
+                  <select data-quarantine-page-size>
+                    ${QUARANTINE_PAGE_SIZE_OPTIONS.map((value) => `<option value="${value}"${value === pageSize ? " selected" : ""}>${value}</option>`).join("")}
+                  </select>
+                </label>
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-prev-page ${currentPage <= 1 ? "disabled" : ""}>Prev</button>
+                <button class="btn btn-secondary btn-sm" type="button" data-quarantine-next-page ${currentPage >= totalPages ? "disabled" : ""}>Next</button>
+              </div>
+            </div>
+          </div>
+          <div class="quarantine-list-shell inbox-list-shell">
+            <div class="quarantine-list-head inbox-list-head">
+              <div class="quarantine-list-col-select">
+                <label class="quarantine-header-checkbox">
+                  <input
+                    type="checkbox"
+                    data-quarantine-page-toggle
+                    aria-label="Select all visible quarantine leads"
+                    aria-checked="false"
+                  />
+                  <span>Select</span>
+                </label>
+              </div>
+              <div class="quarantine-list-col-lead">Lead</div>
+              <div class="quarantine-list-col-review">Review</div>
+              <div class="quarantine-list-col-signals">Signals</div>
+              <div class="quarantine-list-col-open">Open</div>
+            </div>
+            <div class="quarantine-list-scroll">
+              ${leads.map((lead) => {
+                const leadId = String(lead.lead_id || "");
+                const isSelected = isQuarantineLeadSelected(leadId);
+                const reasons = Array.isArray(lead.reason_codes) ? lead.reason_codes : [];
+                const dominantReason = String(reasons[0] || "No reason code");
+                return `
+                  <div class="quarantine-list-row inbox-list-row ${isSelected ? "is-selected" : ""}" data-quarantine-row="${escapeHtml(leadId)}">
+                    <div class="quarantine-row-select">
+                      <input type="checkbox" data-quarantine-select="${escapeHtml(leadId)}" ${isSelected ? "checked" : ""} />
+                    </div>
+                    <div class="quarantine-row-identity">
+                      <strong>${escapeHtml(lead.full_name || lead.first_name || lead.email || "-")}</strong>
+                      <span class="quarantine-lead-secondary">${escapeHtml(lead.email || "-")}</span>
+                    </div>
+                    <div class="quarantine-row-review">
+                      <div class="quarantine-pill-row quarantine-pill-row-compact">
+                        <span class="quarantine-pill">${escapeHtml(lead.current_status || "-")}</span>
+                        <span class="quarantine-pill quarantine-pill-muted">${escapeHtml(lead.current_stage || "-")}</span>
+                        <span class="quarantine-pill quarantine-pill-warn">Score ${Number(lead.score || 0).toFixed(1)}</span>
+                      </div>
+                      <span class="quarantine-lead-secondary">${escapeHtml(dominantReason)}</span>
+                    </div>
+                    <div class="quarantine-row-signals">
+                      ${lead.suppressed
+                        ? `<span class="quarantine-pill quarantine-pill-alert">${escapeHtml(lead.suppression_reason || "suppressed")}</span>`
+                        : `<span class="quarantine-pill quarantine-pill-muted">Not suppressed</span>`}
+                      <span class="quarantine-lead-secondary">Dispatch ${Number(lead.dispatch_summary?.dispatch_count || 0)} · ${escapeHtml(lead.dispatch_summary?.last_outcome || "none")}</span>
+                    </div>
+                    <div class="quarantine-row-open">
+                      <button class="btn btn-secondary btn-sm" type="button" data-quarantine-inspect="${escapeHtml(leadId)}">Inspect</button>
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        </section>
+
+        <aside class="quarantine-inspector inbox-inspector">
+          <div class="inspector-head">
+            <div>
+              <h3>Lead Inspector</h3>
+              <p class="quarantine-selection-note">${detail?.lead_id ? `Focused lead: ${escapeHtml(focusedLeadLabel)}` : "Select a lead to inspect history, provenance, and dispatch context."}</p>
+            </div>
+          </div>
+          ${
+            detail?.lead_id
+              ? `
+                ${renderOperatorMetricStrip([
+                  { label: "Stage", value: detail.current_stage || "-" },
+                  { label: "Status", value: detail.current_status || "-" },
+                  { label: "Score", value: Number(detail.score || 0).toFixed(1), tone: "warn" },
+                  { label: "Suppression", value: detail.suppressed ? "Suppressed" : "Clear", tone: detail.suppressed ? "warn" : "good" },
+                ], "inspector-metrics")}
+                ${renderOperatorPillStrip(Array.isArray(detail.reason_codes) && detail.reason_codes.length ? detail.reason_codes : ["No reason codes"], "inspector-reason-strip")}
+                <div class="inspector-facts">
+                  <section class="inspector-fact">
+                    <span class="inspector-fact-label">Source</span>
+                    <strong>${escapeHtml(detail.source_provenance?.source_file || "-")}</strong>
+                  </section>
+                  <section class="inspector-fact">
+                    <span class="inspector-fact-label">Row hash</span>
+                    <strong>${escapeHtml(detail.source_provenance?.source_row_hash || "-")}</strong>
+                  </section>
+                  <section class="inspector-fact">
+                    <span class="inspector-fact-label">Seen</span>
+                    <strong>${escapeHtml(formatGeneratedAt(detail.source_provenance?.last_seen_at || ""))}</strong>
+                  </section>
+                  <section class="inspector-fact">
+                    <span class="inspector-fact-label">Dispatch</span>
+                    <strong>${Number(detail.dispatch_summary?.dispatch_count || 0)} · ${escapeHtml(detail.dispatch_summary?.last_outcome || "-")}</strong>
+                  </section>
+                </div>
+                <section class="operator-note-block">
+                  <span class="inspector-fact-label">Operator Note</span>
+                  <p class="muted">${escapeHtml(detail.operator_note || "No operator note yet.")}</p>
+                </section>
+                ${renderOperatorTableBlock("Recent Lead History", "Most recent ledger activity for the selected lead.", ["Event", "Reason / Note", "When"], detailHistoryRows, "No lead history yet.")}
+                ${renderOperatorTableBlock("Recent Review Actions", "Latest actions across this quarantine inbox.", ["Action", "Lead", "When"], recentReviewRows, "No recent review actions yet.")}
+              `
+              : `
+                <section class="operator-empty-state operator-empty-state-inline">
+                  <strong>Inspector is waiting.</strong>
+                  <span>Select a quarantined lead to inspect history, provenance, suppression state, and dispatch context.</span>
+                </section>
+                ${renderOperatorTableBlock("Recent Review Actions", "Latest actions across this quarantine inbox.", ["Action", "Lead", "When"], recentReviewRows, "No recent review actions yet.")}
+              `
+          }
+        </aside>
+      </div>
+    `,
+  );
+  applyQuarantineHeaderCheckboxState(activeReview);
+}
+
+async function loadQuarantineReviewLeadDetail(leadId) {
+  if (!leadId) return;
+  try {
+    const data = await fetchJson(`/api/leads/quarantine-review/${encodeURIComponent(leadId)}`);
+    lastQuarantineReviewLead = data.lead || null;
+    renderQuarantineReview(lastQuarantineReview);
+  } catch (err) {
+    showMessage(`Quarantine detail failed: ${err}`, "error");
+  }
+}
+
+async function refreshQuarantineReview(preserveSelection = true, resetPage = false) {
+  try {
+    if (resetPage) {
+      quarantinePageIndex = 0;
+    }
+    let data = await fetchJson(`/api/leads/quarantine-review?${quarantineReviewQueryString()}`);
+    let review = data.review || {};
+    if (!Array.isArray(review.leads) || (!review.leads.length && quarantineFilteredCount(review) > 0 && quarantineCurrentOffset(review) > 0)) {
+      quarantinePageSize = quarantineRowsPerPage(review);
+      quarantinePageIndex = Math.max(0, quarantineTotalPages(review) - 1);
+      data = await fetchJson(`/api/leads/quarantine-review?${quarantineReviewQueryString()}`);
+      review = data.review || {};
+    }
+    quarantinePageSize = quarantineRowsPerPage(review);
+    quarantinePageIndex = Math.max(0, quarantineCurrentPage(review) - 1);
+    if (!preserveSelection) {
+      clearQuarantineSelection();
+    }
+    lastQuarantineReview = review;
+    const leadIdToFocus = focusedQuarantineLeadId(review);
+    if (leadIdToFocus) {
+      await loadQuarantineReviewLeadDetail(leadIdToFocus);
+    } else {
+      lastQuarantineReviewLead = null;
+      renderQuarantineReview(lastQuarantineReview);
+    }
+  } catch (err) {
+    showMessage(`Quarantine review load failed: ${err}`, "error");
+  }
+}
+
+async function runQuarantineReviewAction(action) {
+  const selection = quarantineSelectionSummary(lastQuarantineReview);
+  if (!selection.selectedCount) {
+    showMessage("Select at least one quarantined lead first.", "error");
+    return;
+  }
+  const usingFilteredSelection = allFilteredQuarantineSelected;
+  const payload = {
+    action,
+    operator_note: String(els.leadsQuarantineOperatorNote?.value || "").trim(),
+    lead_ids: usingFilteredSelection ? [] : selectedQuarantineLeadIdsList(lastQuarantineReview),
+    excluded_lead_ids: usingFilteredSelection ? Array.from(excludedQuarantineLeadIds.values()) : [],
+    select_all_filtered: usingFilteredSelection,
+    ...quarantineReviewFiltersPayload(),
+  };
+  try {
+    const data = await fetchJson("/api/leads/quarantine-review/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    lastQuarantineReview = data.review || null;
+    if (action !== "update_operator_note" && els.leadsQuarantineOperatorNote) {
+      els.leadsQuarantineOperatorNote.value = "";
+    }
+    clearQuarantineSelection();
+    showMessage(
+      data.message || (usingFilteredSelection ? "Quarantine review action applied to filtered selection." : "Quarantine review action applied to selected rows."),
+      "success",
+    );
+    await refreshQuarantineReview(false);
+  } catch (err) {
+    showMessage(`Quarantine review action failed: ${err}`, "error");
+  }
 }
 
 async function fetchJson(path, options = {}) {
@@ -901,6 +2075,65 @@ function renderLeadsCleanResults(cleaned) {
   );
 }
 
+function renderOperatorMetricStrip(items = [], className = "") {
+  const metrics = Array.isArray(items) ? items.filter((item) => item && item.label) : [];
+  if (!metrics.length) return "";
+  return `
+    <div class="operator-metric-strip${className ? ` ${className}` : ""}">
+      ${metrics.map((item) => `
+        <div class="operator-metric${item.tone ? ` operator-metric-${item.tone}` : ""}">
+          <span class="operator-metric-label">${escapeHtml(item.label)}</span>
+          <span class="operator-metric-value">${escapeHtml(item.value ?? "-")}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderOperatorPillStrip(items = [], className = "") {
+  const pills = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!pills.length) return "";
+  return `
+    <div class="operator-pill-strip${className ? ` ${className}` : ""}">
+      ${pills.map((item) => `<span class="operator-pill">${escapeHtml(item)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function renderOperatorTable(headers = [], rows = [], emptyText = "No rows available.", className = "") {
+  if (!Array.isArray(headers) || !headers.length || !Array.isArray(rows) || !rows.length) {
+    return `<div class="operator-empty">${escapeHtml(emptyText)}</div>`;
+  }
+  return `
+    <div class="table-shell operator-table-shell${className ? ` ${className}` : ""}">
+      <table>
+        <thead>
+          <tr>${headers.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>${headers.map((field) => `<td>${escapeHtml(row?.[field] ?? "")}</td>`).join("")}</tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderOperatorTableBlock(title, caption, headers, rows, emptyText = "No rows available.", className = "") {
+  return `
+    <section class="operator-table-block${className ? ` ${className}` : ""}">
+      <div class="operator-table-head">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          ${caption ? `<p class="muted">${escapeHtml(caption)}</p>` : ""}
+        </div>
+      </div>
+      ${renderOperatorTable(headers, rows, emptyText)}
+    </section>
+  `;
+}
+
 function renderImportantLeadCheck(result) {
   if (els.leadsImportantCheckMeta) {
     if (result?.generated_at_utc) {
@@ -919,84 +2152,61 @@ function renderImportantLeadCheck(result) {
   if (!result?.generated_at_utc) {
     setNodeHtml(
       els.leadsImportantCheckResults,
-      `<p class="muted">Simple path: email-first intake goes in <strong>_important/leadschecker.csv</strong>, checked output lands in <strong>_important/leads.csv</strong>, and rejected rows land in <strong>_important/leads_rejected.csv</strong>.</p>`,
+      `
+        <div class="operator-empty-state">
+          <strong>Intake rail is ready.</strong>
+          <span>Email-first intake goes in <code>_important/leadschecker.csv</code>, checked output lands in <code>_important/leads.csv</code>, and rejected rows land in <code>_important/leads_rejected.csv</code>.</span>
+        </div>
+      `,
     );
     return;
   }
 
   const fieldnames = Array.isArray(result.output_fieldnames) ? result.output_fieldnames : [];
   const rows = Array.isArray(result.output_preview_rows) ? result.output_preview_rows : [];
+  const reasonRows = Object.entries(result.reason_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) }));
   setNodeHtml(
     els.leadsImportantCheckResults,
     `
-      <article class="leads-result-card">
-        <h3>Check Result</h3>
-        <div class="leads-kpis">
-          <div class="leads-kpi"><div class="label">Input</div><div class="value">${Number(result.input_rows || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Cleaned</div><div class="value">${Number(result.cleaned_rows || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Duplicates</div><div class="value">${Number(result.duplicates_removed || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Invalid</div><div class="value">${Number(result.invalid_removed || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_removed || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Suspicious</div><div class="value">${Number(result.suspicious_flagged || 0)}</div></div>
+      <div class="operator-result-shell operator-check-shell">
+        ${renderOperatorMetricStrip([
+          { label: "Input", value: Number(result.input_rows || 0) },
+          { label: "Cleaned", value: Number(result.cleaned_rows || 0), tone: "good" },
+          { label: "Duplicates", value: Number(result.duplicates_removed || 0) },
+          { label: "Invalid", value: Number(result.invalid_removed || 0), tone: "warn" },
+          { label: "Suppressed", value: Number(result.suppressed_removed || 0), tone: "warn" },
+          { label: "Suspicious", value: Number(result.suspicious_flagged || 0), tone: "warn" },
+        ])}
+        ${renderOperatorPillStrip([
+          `Input ${result.input_label || "-"}`,
+          `Output ${result.output_label || "-"}`,
+          `Rejected ${result.rejected_label || "-"}`,
+          `Safe fixes ${Number(result.safe_fixes_applied || 0)}`,
+        ])}
+        <div class="operator-result-grid operator-result-grid-wide">
+          ${reasonRows.length
+            ? renderOperatorTableBlock("Removal Ledger", "What changed during hygiene.", ["Reason", "Count"], reasonRows, "No rows were removed.")
+            : `<section class="operator-table-block"><div class="operator-table-head"><div><h3>Removal Ledger</h3><p class="muted">No removal reasons were recorded for this run.</p></div></div></section>`}
+          ${renderOperatorTableBlock("Clean Output Preview", "The working rows that move into Verify.", fieldnames, rows, "No checked rows were written.")}
         </div>
-        <div class="pill-row">
-          <span class="mini-pill">Input ${escapeHtml(result.input_label || "-")}</span>
-          <span class="mini-pill">Output ${escapeHtml(result.output_label || "-")}</span>
-          <span class="mini-pill">Rejected ${escapeHtml(result.rejected_label || "-")}</span>
-          <span class="mini-pill">Safe Fixes ${Number(result.safe_fixes_applied || 0)}</span>
-        </div>
-        ${
-          Object.keys(result.reason_counts || {}).length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr><th>Reason</th><th>Count</th></tr>
-                  </thead>
-                  <tbody>
-                    ${Object.entries(result.reason_counts || {}).map(([reason, count]) => `
-                      <tr><td>${escapeHtml(reason)}</td><td>${Number(count || 0)}</td></tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : ""
-        }
-        ${
-          fieldnames.length && rows.length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr>${fieldnames.map((fieldname) => `<th>${escapeHtml(fieldname)}</th>`).join("")}</tr>
-                  </thead>
-                  <tbody>
-                    ${rows.map((row) => `
-                      <tr>${fieldnames.map((fieldname) => `<td>${escapeHtml(row[fieldname] || "")}</td>`).join("")}</tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : `<p class="muted">No checked rows were written.</p>`
-        }
-      </article>
+      </div>
     `,
   );
 }
 
 function renderImportantLeadVerify(result) {
+  const mode = String(result?.mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase();
+  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : "Fast Triage";
   if (els.leadsImportantVerifyMeta) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantVerifyMeta,
-        `${result.input_label} verified into ${result.verified_label}. KEEP ${Number(result.keep_count || 0)}, REJECT ${Number(result.reject_count || 0)}, QUARANTINE ${Number(result.quarantine_count || 0)}.`,
+        `${modeLabel}: ${result.input_label} processed into ${result.verified_label}. KEEP ${Number(result.keep_count || 0)}, REJECT ${Number(result.reject_count || 0)}, QUARANTINE ${Number(result.quarantine_count || 0)}.`,
       );
     } else {
       setNodeText(
         els.leadsImportantVerifyMeta,
-        "Ready. Verify the cleaned leads file against public evidence before dispatching. FullName + Email is the strongest proof input; FirstName alone is weak.",
+        "Ready. Fast Triage uses local checks only and is the default. Strict Public Proof is slower and optional.",
       );
     }
   }
@@ -1004,7 +2214,12 @@ function renderImportantLeadVerify(result) {
   if (!result?.generated_at_utc) {
     setNodeHtml(
       els.leadsImportantVerifyResults,
-      `<p class="muted">Verify runs from <strong>_important/leads.csv</strong> by default, prefers <strong>FullName</strong> + <strong>Email</strong>, and writes verified, rejected, and quarantine outputs separately.</p>`,
+      `
+        <div class="operator-empty-state">
+          <strong>Verification rail is ready.</strong>
+          <span>Fast Triage runs from <code>_important/leads.csv</code> by default and writes keep / reject / quarantine files. Strict Public Proof keeps using the existing strict output files.</span>
+        </div>
+      `,
     );
     return;
   }
@@ -1012,96 +2227,36 @@ function renderImportantLeadVerify(result) {
   const keepRows = Array.isArray(result.keep_preview_rows) ? result.keep_preview_rows : [];
   const rejectRows = Array.isArray(result.reject_preview_rows) ? result.reject_preview_rows : [];
   const quarantineRows = Array.isArray(result.quarantine_preview_rows) ? result.quarantine_preview_rows : [];
+  const keepHeaders = keepRows.length ? Object.keys(keepRows[0] || {}) : [];
+  const rejectHeaders = rejectRows.length ? Object.keys(rejectRows[0] || {}) : [];
+  const quarantineHeaders = quarantineRows.length ? Object.keys(quarantineRows[0] || {}) : [];
+  const reasonRows = Object.entries(result.reason_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) }));
   setNodeHtml(
     els.leadsImportantVerifyResults,
     `
-      <article class="leads-result-card">
-        <h3>Verify Result</h3>
-        <div class="leads-kpis">
-          <div class="leads-kpi"><div class="label">Input</div><div class="value">${Number(result.total_input_rows || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Keep</div><div class="value">${Number(result.keep_count || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Reject</div><div class="value">${Number(result.reject_count || 0)}</div></div>
-          <div class="leads-kpi"><div class="label">Quarantine</div><div class="value">${Number(result.quarantine_count || 0)}</div></div>
+      <div class="operator-result-shell operator-verify-shell">
+        ${renderOperatorMetricStrip([
+          { label: "Mode", value: modeLabel },
+          { label: "Input", value: Number(result.total_input_rows || 0) },
+          { label: "Keep", value: Number(result.keep_count || 0), tone: "good" },
+          { label: "Reject", value: Number(result.reject_count || 0), tone: "warn" },
+          { label: "Quarantine", value: Number(result.quarantine_count || 0), tone: "warn" },
+        ])}
+        ${renderOperatorPillStrip([
+          `Input ${result.input_label || "-"}`,
+          `Keep ${result.verified_label || "-"}`,
+          `Reject ${result.rejected_label || "-"}`,
+          `Quarantine ${result.quarantine_label || "-"}`,
+        ])}
+        <div class="operator-result-grid">
+          ${reasonRows.length
+            ? renderOperatorTableBlock("Reason Ledger", "Local triage evidence for the current pass.", ["Reason", "Count"], reasonRows, "No verification reasons were recorded.")
+            : ""}
+          ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward.`, keepHeaders, keepRows, "No rows moved to keep.")}
+          ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed.", rejectHeaders, rejectRows, "No rows were rejected.")}
+          ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review.", quarantineHeaders, quarantineRows, "No rows were quarantined.")}
         </div>
-        <div class="pill-row">
-          <span class="mini-pill">Input ${escapeHtml(result.input_label || "-")}</span>
-          <span class="mini-pill">Keep ${escapeHtml(result.verified_label || "-")}</span>
-          <span class="mini-pill">Reject ${escapeHtml(result.rejected_label || "-")}</span>
-          <span class="mini-pill">Quarantine ${escapeHtml(result.quarantine_label || "-")}</span>
-        </div>
-        ${
-          Object.keys(result.reason_counts || {}).length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr><th>Reason</th><th>Count</th></tr>
-                  </thead>
-                  <tbody>
-                    ${Object.entries(result.reason_counts || {}).map(([reason, count]) => `
-                      <tr><td>${escapeHtml(reason)}</td><td>${Number(count || 0)}</td></tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : ""
-        }
-        ${
-          keepRows.length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr>${Object.keys(keepRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                  </thead>
-                  <tbody>
-                    ${keepRows.map((row) => `
-                      <tr>${Object.keys(keepRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : ""
-        }
-        ${
-          rejectRows.length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr>${Object.keys(rejectRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                  </thead>
-                  <tbody>
-                    ${rejectRows.map((row) => `
-                      <tr>${Object.keys(rejectRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : ""
-        }
-        ${
-          quarantineRows.length
-            ? `
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr>${Object.keys(quarantineRows[0] || {}).map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                  </thead>
-                  <tbody>
-                    ${quarantineRows.map((row) => `
-                      <tr>${Object.keys(quarantineRows[0] || {}).map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : ""
-        }
-      </article>
+      </div>
     `,
   );
 }
@@ -1109,6 +2264,9 @@ function renderImportantLeadVerify(result) {
 function renderImportantDispatch(result) {
   const selectedDispatchSource = dispatchSourceForSelectedMode();
   const dispatchSource = selectedDispatchSource.source || {};
+  const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
+  const liveSenderProfiles = activeSenderProfiles();
+  const sendersActive = liveSenderProfiles.length > 0;
   const liveQueues = Array.isArray(lastLeadsStatus?.sendgrid_queues) ? lastLeadsStatus.sendgrid_queues : [];
   const liveQueueMap = new Map(liveQueues.map((item) => [String(item.name || ""), Number(item.count || 0)]));
   const liveJcCount = Number(lastLeadsStatus?.jc_queue?.count || 0);
@@ -1124,215 +2282,265 @@ function renderImportantDispatch(result) {
     + Number(result?.assigned_sg3 || 0)
     + Number(result?.assigned_sg4 || 0)
     + Number(result?.assigned_sg5 || 0);
+  const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
+  const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
+  const sourceName = dispatchSource.dispatch_source_name || result?.dispatch_source_name || dispatchSource.dispatch_source_mode || result?.dispatch_source_mode || "triaged_keep";
+  const sourcePath = dispatchSource.dispatch_source_path || result?.dispatch_source_path || "-";
+  const preflightAllowed = !sendersActive;
+  const preflightLabel = preflightAllowed ? "Allowed" : "Blocked";
+  const activeSenderSummary = liveSenderProfiles.length
+    ? liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")
+    : "None";
+  const selectedCap = els.leadsImportantDispatchCap?.value || (dispatchPreview?.dispatch_cap ?? "all");
+
+  renderDispatchConfirmGuard(dispatchSource, dispatchPreview);
   if (els.leadsImportantDispatchMeta) {
-    if (result?.generated_at_utc) {
+    if (dispatchPreview && !result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_mode || "verified")} from ${escapeHtml(result.dispatch_source_path || "-")}. Verify-first is the default. The queue sends Email + FirstName only. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
+        sendersActive
+          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch is blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+          : `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
+      );
+    } else if (result?.generated_at_utc) {
+      setNodeText(
+        els.leadsImportantDispatchMeta,
+        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_name || result.dispatch_source_mode || "triaged_keep")} from ${escapeHtml(result.dispatch_source_path || "-")}. The queue sends Email + FirstName only. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
       );
     } else {
       const sourceMode = selectedDispatchSource.mode;
-      const sourcePath = dispatchSource?.dispatch_source_path || (sourceMode === "cleaned" ? "_important/leads.csv" : "_important/leads_verified.csv");
-      setNodeText(els.leadsImportantDispatchMeta, `Dispatch is idle. Source mode ${sourceMode} from ${sourcePath}. Verify-first is the default; cleaned stays available. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`);
+      const idlePath = dispatchSource?.dispatch_source_path || (sourceMode === "strict_verified" ? "_important/leads_verified.csv" : "_important/leads_triaged_keep.csv");
+      const idleName = dispatchSource?.dispatch_source_name || (sourceMode === "strict_verified" ? "Strict Public Proof Verified" : "Fast Triage Keep");
+      setNodeText(
+        els.leadsImportantDispatchMeta,
+        sendersActive
+          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview is still available, but confirm is blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+          : `Dispatch is idle. Source ${idleName} from ${idlePath}. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`,
+      );
     }
   }
 
   if (!result?.generated_at_utc) {
-    const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
-    const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
-    const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
-    if (els.leadsImportantDispatchBtn) {
-      els.leadsImportantDispatchBtn.disabled = sourceBlocked;
-    }
+    const previewRows = Array.isArray(dispatchPreview?.assigned_preview_rows) ? dispatchPreview.assigned_preview_rows : [];
+    const previewFields = Array.isArray(dispatchPreview?.queue_headers) ? dispatchPreview.queue_headers : [];
     setNodeHtml(
       els.leadsImportantDispatchResults,
       `
-        <div class="leads-split-grid">
-          <article class="leads-result-card">
-            <h3>Dispatch Source</h3>
-            <div class="leads-kpis">
-              <div class="leads-kpi"><div class="label">Mode</div><div class="value">${escapeHtml(dispatchSource.dispatch_source_mode || "verified")}</div></div>
-              <div class="leads-kpi"><div class="label">Rows</div><div class="value">${Number(dispatchSource.dispatch_source_row_count || 0)}</div></div>
-              <div class="leads-kpi"><div class="label">Eligible</div><div class="value">${Number(dispatchSource.dispatch_eligible_row_count || 0)}</div></div>
-              <div class="leads-kpi"><div class="label">Exists</div><div class="value">${dispatchSource.dispatch_source_exists ? "Yes" : "No"}</div></div>
+        <div class="dispatch-shell dispatch-shell-preview">
+          ${renderOperatorPillStrip([
+            preflightLabel,
+            sourceName,
+            `Cap ${selectedCap}`,
+            `Active ${Number(liveSenderProfiles.length || 0)}`,
+            dispatchSource.dispatch_block_reason || "",
+          ].filter(Boolean), "dispatch-preflight-strip")}
+          ${renderOperatorMetricStrip([
+            { label: "Preflight", value: preflightLabel, tone: preflightAllowed ? "good" : "warn" },
+            { label: "Eligible", value: Number(dispatchPreview?.dispatch_eligible_row_count || dispatchSource.dispatch_eligible_row_count || 0) },
+            { label: "Selected", value: Number(dispatchPreview?.dispatch_selected_row_count || 0) },
+            { label: "Would Write", value: Number(dispatchPreview?.total_rows_would_write || 0), tone: dispatchPreview ? "good" : "" },
+            { label: "Live SG", value: liveSendgridTotal },
+          ], "dispatch-metrics")}
+          <section class="dispatch-runbook">
+            <div class="operator-table-head">
+              <div>
+                <h3>Dispatch Checklist</h3>
+                <p class="muted">Move top to bottom. Confirm only after this surface is clean.</p>
+              </div>
             </div>
-            <div class="pill-row">
-              <span class="mini-pill">Path ${escapeHtml(dispatchSource.dispatch_source_path || "-")}</span>
-              <span class="mini-pill">Verification ${dispatchSource.verification_required ? "required" : "off"}</span>
-              ${dispatchSource.verification_file_mtime ? `<span class="mini-pill">Verified ${escapeHtml(dispatchSource.verification_file_mtime)}</span>` : ""}
-              ${dispatchSource.dispatch_block_reason ? `<span class="mini-pill">Blocked ${escapeHtml(dispatchSource.dispatch_block_reason)}</span>` : `<span class="mini-pill">Ready</span>`}
+            <div class="op-checklist-items dispatch-runbook-items">
+              <div class="op-checklist-item ${preflightAllowed ? "is-ready" : "is-blocked"}">
+                <div class="op-checklist-step">1</div>
+                <div class="op-checklist-copy">
+                  <strong>Preflight</strong>
+                  <span>${preflightAllowed ? "All senders are stopped. Dispatch is allowed." : `Blocked until active senders stop: ${escapeHtml(activeSenderSummary)}`}</span>
+                </div>
+              </div>
+              <div class="op-checklist-item ${dispatchSource.dispatch_source_path ? "is-ready" : "is-warn"}">
+                <div class="op-checklist-step">2</div>
+                <div class="op-checklist-copy">
+                  <strong>Source</strong>
+                  <span>${escapeHtml(sourceName)} · ${Number(dispatchSource.dispatch_source_row_count || 0)} rows · ${Number(dispatchSource.dispatch_eligible_row_count || 0)} eligible</span>
+                </div>
+              </div>
+              <div class="op-checklist-item ${dispatchPreview ? "is-ready" : "is-warn"}">
+                <div class="op-checklist-step">3</div>
+                <div class="op-checklist-copy">
+                  <strong>Preview</strong>
+                  <span>${dispatchPreview ? `${Number(dispatchPreview.dispatch_selected_row_count || 0)} selected · ${Number(dispatchPreview.total_rows_would_write || 0)} would write` : "Run Preview Dispatch to compute the exact write set."}</span>
+                </div>
+              </div>
+              <div class="op-checklist-item ${dispatchPreview && preflightAllowed ? "is-ready" : "is-warn"}">
+                <div class="op-checklist-step">4</div>
+                <div class="op-checklist-copy">
+                  <strong>Confirm</strong>
+                  <span>${dispatchPreview && preflightAllowed ? "Ready to confirm the exact previewed set." : "Confirm stays disabled until preview is current and preflight passes."}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="dispatch-decision-surface">
+            <div class="operator-table-head">
+              <div>
+                <h3>Preview Surface</h3>
+                <p class="muted">The exact write set lives here. Review this before confirm.</p>
+              </div>
             </div>
             ${
-              sourceHeaders.length && sourcePreviewRows.length
+              dispatchPreview
                 ? `
-                  <div class="table-shell">
-                    <table>
-                      <thead>
-                        <tr>${sourceHeaders.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                      </thead>
-                      <tbody>
-                        ${sourcePreviewRows.map((row) => `
-                          <tr>${sourceHeaders.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                        `).join("")}
-                      </tbody>
-                    </table>
+                  ${renderOperatorMetricStrip([
+                    { label: "Cap", value: dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all" },
+                    { label: "Eligible", value: Number(dispatchPreview.dispatch_eligible_row_count || 0) },
+                    { label: "Selected", value: Number(dispatchPreview.dispatch_selected_row_count || 0), tone: "good" },
+                    { label: "Would Write", value: Number(dispatchPreview.total_rows_would_write || 0), tone: "good" },
+                  ], "dispatch-selection-strip")}
+                  ${renderOperatorMetricStrip([
+                    { label: "JC", value: Number(dispatchPreview.rows_to_add_private_jc || 0) },
+                    { label: "SG1", value: Number(dispatchPreview.rows_to_add_sendgrid_1 || 0) },
+                    { label: "SG2", value: Number(dispatchPreview.rows_to_add_sendgrid_2 || 0) },
+                    { label: "SG3", value: Number(dispatchPreview.rows_to_add_sendgrid_3 || 0) },
+                    { label: "SG4", value: Number(dispatchPreview.rows_to_add_sendgrid_4 || 0) },
+                    { label: "SG5", value: Number(dispatchPreview.rows_to_add_sendgrid_5 || 0) },
+                  ], "dispatch-allocation-strip")}
+                  ${renderOperatorPillStrip([
+                    `Already sent ${Number(dispatchPreview.skipped_already_sent || 0)}`,
+                    `Already queued ${Number(dispatchPreview.skipped_already_queued || 0)}`,
+                    `Suppressed ${Number(dispatchPreview.skipped_suppressed || 0)}`,
+                    `Invalid ${Number(dispatchPreview.skipped_invalid_malformed || 0)}`,
+                    `Path ${sourcePath}`,
+                    `Active senders ${activeSenderSummary}`,
+                  ], "dispatch-preview-pills")}
+                  <div class="operator-result-grid">
+                    ${renderOperatorTableBlock("Source Preview", "The eligible source rows behind this run.", sourceHeaders, sourcePreviewRows, "No source preview available yet.")}
+                    ${renderOperatorTableBlock("Assigned Preview", "The exact rows that would be written on confirm.", previewFields, previewRows, "No assigned preview rows were produced.")}
                   </div>
                 `
-                : `<p class="muted">No source preview available yet.</p>`
+                : `
+                  <section class="operator-empty-state operator-empty-state-inline">
+                    <strong>Preview is waiting.</strong>
+                    <span>Run Preview Dispatch first. Preview is read-only and computes the exact rows that would be written.</span>
+                  </section>
+                `
             }
-          </article>
-          <article class="leads-result-card">
-            <h3>Current Live Queues</h3>
-            <div class="leads-kpis">
-              <div class="leads-kpi"><div class="label">JC Live</div><div class="value">${liveJcCount}</div></div>
-              <div class="leads-kpi"><div class="label">SG Live</div><div class="value">${liveSendgridTotal}</div></div>
+          </section>
+          <details class="dispatch-drawer" open>
+            <summary>Live queue comparison</summary>
+            <div class="dispatch-disclosure-body">
+              <p class="dispatch-support-note">Use live queue counts as a final sanity check before confirm.</p>
+              ${renderOperatorTable(
+                ["Queue", "Current Live"],
+                [
+                  { Queue: "Astra / JC", "Current Live": liveJcCount },
+                  { Queue: "SG1", "Current Live": liveSg1 },
+                  { Queue: "SG2", "Current Live": liveSg2 },
+                  { Queue: "SG3", "Current Live": liveSg3 },
+                  { Queue: "SG4", "Current Live": liveSg4 },
+                  { Queue: "SG5", "Current Live": liveSg5 },
+                ],
+                "No live queue counts available.",
+                "dispatch-live-table",
+              )}
             </div>
-            <div class="table-shell">
-              <table>
-                <thead>
-                  <tr><th>Queue</th><th>Current Live</th></tr>
-                </thead>
-                <tbody>
-                  <tr><td>Astra / JC</td><td>${liveJcCount}</td></tr>
-                  <tr><td>SG1</td><td>${liveSg1}</td></tr>
-                  <tr><td>SG2</td><td>${liveSg2}</td></tr>
-                  <tr><td>SG3</td><td>${liveSg3}</td></tr>
-                  <tr><td>SG4</td><td>${liveSg4}</td></tr>
-                  <tr><td>SG5</td><td>${liveSg5}</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </article>
+          </details>
         </div>
       `,
     );
     return;
   }
 
-  const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
-  const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
-  const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
-  if (els.leadsImportantDispatchBtn) {
-    els.leadsImportantDispatchBtn.disabled = sourceBlocked;
-  }
   const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows : [];
   const previewFields = Array.isArray(result.queue_headers) ? result.queue_headers : [];
   setNodeHtml(
     els.leadsImportantDispatchResults,
     `
-      <div class="leads-split-grid">
-        <article class="leads-result-card">
-          <h3>Dispatch Source</h3>
-          <div class="leads-kpis">
-            <div class="leads-kpi"><div class="label">Mode</div><div class="value">${escapeHtml(dispatchSource.dispatch_source_mode || result.dispatch_source_mode || "verified")}</div></div>
-            <div class="leads-kpi"><div class="label">Rows</div><div class="value">${Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Eligible</div><div class="value">${Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Exists</div><div class="value">${dispatchSource.dispatch_source_exists ? "Yes" : "No"}</div></div>
+      <div class="dispatch-shell dispatch-shell-confirmed">
+        ${renderOperatorPillStrip([
+          sourceName,
+          `Last dispatch ${lastDispatchGeneratedAt}`,
+          `Live SG ${liveSendgridTotal}`,
+          `Path ${sourcePath}`,
+          `Backup ${result.backup_dir || "-"}`,
+        ], "dispatch-preflight-strip")}
+        ${renderOperatorMetricStrip([
+          { label: "Last dispatch", value: lastDispatchGeneratedAt },
+          { label: "Astra added", value: Number(result.added_astra || 0), tone: "good" },
+          { label: "SendGrid added", value: Number(result.added_sendgrid || 0), tone: "good" },
+          { label: "Skipped both", value: Number(result.skipped_both || 0), tone: "warn" },
+          { label: "Live SG", value: liveSendgridTotal },
+        ], "dispatch-metrics")}
+        <section class="dispatch-decision-surface">
+          <div class="operator-table-head">
+            <div>
+              <h3>Last Confirmed Dispatch</h3>
+              <p class="muted">Compact summary of the last confirmed write for this source.</p>
+            </div>
           </div>
-          <div class="pill-row">
-            <span class="mini-pill">Path ${escapeHtml(dispatchSource.dispatch_source_path || result.dispatch_source_path || "-")}</span>
-            <span class="mini-pill">Verification ${dispatchSource.verification_required || result.verification_required ? "required" : "off"}</span>
-            ${dispatchSource.verification_file_mtime || result.verification_file_mtime ? `<span class="mini-pill">Verified ${escapeHtml(dispatchSource.verification_file_mtime || result.verification_file_mtime || "")}</span>` : ""}
-            ${dispatchSource.dispatch_block_reason || result.dispatch_block_reason ? `<span class="mini-pill">Blocked ${escapeHtml(dispatchSource.dispatch_block_reason || result.dispatch_block_reason || "")}</span>` : `<span class="mini-pill">Ready</span>`}
+          ${renderOperatorMetricStrip([
+            { label: "Source rows", value: Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0) },
+            { label: "Eligible", value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0) },
+            { label: "Astra", value: Number(result.added_astra || 0), tone: "good" },
+            { label: "SendGrid", value: Number(result.added_sendgrid || 0), tone: "good" },
+            { label: "Suppressed", value: Number(result.suppressed_skipped || 0), tone: "warn" },
+          ], "dispatch-selection-strip")}
+          <div class="operator-result-grid">
+            ${sourceHeaders.length && sourcePreviewRows.length
+              ? renderOperatorTableBlock("Source Snapshot", "Source rows used for the last confirmed run.", sourceHeaders, sourcePreviewRows, "No source preview available.")
+              : ""}
+            ${renderOperatorTableBlock(
+              "Channel Decisions",
+              "How this dispatch wrote or skipped rows by channel.",
+              ["Channel", "Decision", "Count"],
+              [
+                { Channel: "Astra", Decision: "Added", Count: Number(result.added_astra || 0) },
+                { Channel: "Astra", Decision: "Already Sent", Count: Number(result.skipped_astra_already_sent || 0) },
+                { Channel: "Astra", Decision: "Already Queued", Count: Number(result.skipped_astra_already_queued || 0) },
+                { Channel: "SendGrid", Decision: "Added", Count: Number(result.added_sendgrid || 0) },
+                { Channel: "SendGrid", Decision: "Already Sent", Count: Number(result.skipped_sendgrid_already_sent || 0) },
+                { Channel: "SendGrid", Decision: "Already Queued", Count: Number(result.skipped_sendgrid_already_queued || 0) },
+                { Channel: "Both", Decision: "Skipped Both", Count: Number(result.skipped_both || 0) },
+              ],
+              "No channel decisions were recorded.",
+            )}
           </div>
-          ${
-            sourceHeaders.length && sourcePreviewRows.length
-              ? `
-                <div class="table-shell">
-                  <table>
-                    <thead>
-                      <tr>${sourceHeaders.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                    </thead>
-                    <tbody>
-                      ${sourcePreviewRows.map((row) => `
-                        <tr>${sourceHeaders.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                      `).join("")}
-                    </tbody>
-                  </table>
+        </section>
+        <details class="dispatch-drawer" open>
+          <summary>Live queue comparison</summary>
+          <div class="dispatch-disclosure-body">
+            <p class="dispatch-support-note">Live queues can already be lower than the last write once sending drains files.</p>
+            ${renderOperatorTable(
+              ["Queue", "Current Live", "At Last Dispatch"],
+              [
+                { Queue: "Astra / JC", "Current Live": liveJcCount, "At Last Dispatch": Number(result.final_queue_counts?.jc || 0) },
+                { Queue: "SG1", "Current Live": liveSg1, "At Last Dispatch": Number(result.final_queue_counts?.sg1 || 0) },
+                { Queue: "SG2", "Current Live": liveSg2, "At Last Dispatch": Number(result.final_queue_counts?.sg2 || 0) },
+                { Queue: "SG3", "Current Live": liveSg3, "At Last Dispatch": Number(result.final_queue_counts?.sg3 || 0) },
+                { Queue: "SG4", "Current Live": liveSg4, "At Last Dispatch": Number(result.final_queue_counts?.sg4 || 0) },
+                { Queue: "SG5", "Current Live": liveSg5, "At Last Dispatch": Number(result.final_queue_counts?.sg5 || 0) },
+              ],
+              "No live queue comparison is available.",
+              "dispatch-live-table",
+            )}
+          </div>
+        </details>
+        ${
+          previewFields.length && previewRows.length
+            ? `
+              <details class="dispatch-drawer">
+                <summary>Last assigned preview</summary>
+                <div class="dispatch-disclosure-body">
+                  ${renderOperatorTable(previewFields, previewRows, "No assigned preview rows were stored for the last dispatch.")}
                 </div>
-              `
-              : ""
-          }
-        </article>
-        <article class="leads-result-card">
-          <h3>Last Dispatch Result</h3>
-          <div class="leads-kpis">
-            <div class="leads-kpi"><div class="label">Master Read</div><div class="value">${Number(result.master_read || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Added Astra</div><div class="value">${Number(result.added_astra || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Added SendGrid</div><div class="value">${Number(result.added_sendgrid || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Suppressed</div><div class="value">${Number(result.suppressed_skipped || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Skipped Both</div><div class="value">${Number(result.skipped_both || 0)}</div></div>
-            <div class="leads-kpi"><div class="label">Master Duplicates</div><div class="value">${Number(result.duplicate_master_skipped || 0)}</div></div>
-          </div>
-          <div class="table-shell">
-            <table>
-              <thead>
-                <tr><th>Channel</th><th>Decision</th><th>Count</th></tr>
-              </thead>
-              <tbody>
-                <tr><td>Astra</td><td>Added</td><td>${Number(result.added_astra || 0)}</td></tr>
-                <tr><td>Astra</td><td>Already Sent</td><td>${Number(result.skipped_astra_already_sent || 0)}</td></tr>
-                <tr><td>Astra</td><td>Already Queued</td><td>${Number(result.skipped_astra_already_queued || 0)}</td></tr>
-                <tr><td>SendGrid</td><td>Added</td><td>${Number(result.added_sendgrid || 0)}</td></tr>
-                <tr><td>SendGrid</td><td>Already Sent</td><td>${Number(result.skipped_sendgrid_already_sent || 0)}</td></tr>
-                <tr><td>SendGrid</td><td>Already Queued</td><td>${Number(result.skipped_sendgrid_already_queued || 0)}</td></tr>
-                <tr><td>Both</td><td>Skipped Both</td><td>${Number(result.skipped_both || 0)}</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="pill-row">
-            <span class="mini-pill">Generated ${escapeHtml(lastDispatchGeneratedAt)}</span>
-            <span class="mini-pill">Source ${escapeHtml(result.dispatch_source_mode || "verified")}</span>
-            <span class="mini-pill">Astra + SendGrid allowed</span>
-            <span class="mini-pill">Exactly one SG shard per lead</span>
-            <span class="mini-pill">Backup ${escapeHtml(result.backup_dir || "-")}</span>
-          </div>
-        </article>
-        <article class="leads-result-card">
-          <h3>Current Live Queues</h3>
-          <div class="leads-kpis">
-            <div class="leads-kpi"><div class="label">JC Live</div><div class="value">${liveJcCount}</div></div>
-            <div class="leads-kpi"><div class="label">SG Live</div><div class="value">${liveSendgridTotal}</div></div>
-          </div>
-          <p class="muted">These counts come from the live queue files, so they can be lower than the last dispatch report after sending drains the queues.</p>
-          <div class="table-shell">
-            <table>
-              <thead>
-                <tr><th>Queue</th><th>Current Live</th><th>At Last Dispatch</th></tr>
-              </thead>
-              <tbody>
-                <tr><td>Astra / JC</td><td>${liveJcCount}</td><td>${Number(result.final_queue_counts?.jc || 0)}</td></tr>
-                <tr><td>SG1</td><td>${liveSg1}</td><td>${Number(result.final_queue_counts?.sg1 || 0)}</td></tr>
-                <tr><td>SG2</td><td>${liveSg2}</td><td>${Number(result.final_queue_counts?.sg2 || 0)}</td></tr>
-                <tr><td>SG3</td><td>${liveSg3}</td><td>${Number(result.final_queue_counts?.sg3 || 0)}</td></tr>
-                <tr><td>SG4</td><td>${liveSg4}</td><td>${Number(result.final_queue_counts?.sg4 || 0)}</td></tr>
-                <tr><td>SG5</td><td>${liveSg5}</td><td>${Number(result.final_queue_counts?.sg5 || 0)}</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </article>
+              </details>
+            `
+            : `
+              <section class="operator-empty-state operator-empty-state-inline">
+                <strong>No stored assigned preview.</strong>
+                <span>No assigned preview rows were stored for the last dispatch.</span>
+              </section>
+            `
+        }
       </div>
-      ${
-        previewFields.length && previewRows.length
-          ? `
-            <article class="leads-result-card">
-              <h3>Last Assigned Preview</h3>
-              <div class="table-shell">
-                <table>
-                  <thead>
-                    <tr>${previewFields.map((field) => `<th>${escapeHtml(field)}</th>`).join("")}</tr>
-                  </thead>
-                  <tbody>
-                    ${previewRows.map((row) => `
-                      <tr>${previewFields.map((field) => `<td>${escapeHtml(row[field] || "")}</td>`).join("")}</tr>
-                    `).join("")}
-                  </tbody>
-                </table>
-              </div>
-            </article>
-          `
-          : ""
-      }
     `,
   );
 }
@@ -1417,17 +2625,26 @@ function renderShardWriteGuard() {
 
 function renderLeadsStatus(status) {
   lastLeadsStatus = status || lastLeadsStatus;
+  const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
+  const activeVerifyJob = lastLeadsStatus?.active_important_verify_job || null;
+  const activeDispatchJob = lastLeadsStatus?.active_important_dispatch_job || null;
   syncImportantLeadPathInputs(lastLeadsStatus);
   syncImportantVerifyPathInputs(lastLeadsStatus);
   syncImportantDispatchSourceMode(lastLeadsStatus);
   updateImportantLeadPasteGuardrails();
   lastImportantLeadCheck = lastLeadsStatus?.latest_master_check || lastImportantLeadCheck;
-  lastImportantVerify = lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
+  lastImportantVerify = lastLeadsStatus?.latest_lead_triage || lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
-  renderImportantLeadCheck(lastImportantLeadCheck);
-  renderImportantLeadVerify(lastImportantVerify);
-  renderImportantDispatch(lastImportantDispatch);
+  if (!resumeImportantLeadCheckJob(activeCheckJob)) {
+    renderImportantLeadCheck(lastImportantLeadCheck);
+  }
+  if (!resumeImportantLeadVerifyJob(activeVerifyJob)) {
+    renderImportantLeadVerify(lastImportantVerify);
+  }
+  if (!resumeImportantLeadDispatchJob(activeDispatchJob)) {
+    renderImportantDispatch(lastImportantDispatch);
+  }
 
   const latestUpload = lastLeadsStatus?.latest_upload || null;
   const latestCleaned = lastLeadsStatus?.latest_cleaned || null;
@@ -1512,6 +2729,7 @@ async function fetchLeadsStatus() {
   try {
     const data = await fetchJson("/api/leads/status");
     renderLeadsStatus(data.status || {});
+    await refreshQuarantineReview(true);
   } catch (err) {
     if (activeDashboardTab === "leads") {
       showMessage(`Leads status failed: ${err}`, "error");
@@ -1609,62 +2827,136 @@ async function runImportantLeadUploadCheck() {
   }
 }
 
-async function runImportantLeadVerify() {
+async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
+  const normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
+    ? VERIFY_MODE_STRICT_PUBLIC_PROOF
+    : VERIFY_MODE_FAST_TRIAGE;
+  const activeLabel = normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict verifying..." : "Triaging...";
   if (els.leadsImportantVerifyBtn) {
     els.leadsImportantVerifyBtn.disabled = true;
-    setNodeText(els.leadsImportantVerifyBtn, "Verifying...");
+    setNodeText(els.leadsImportantVerifyBtn, activeLabel);
+  }
+  if (els.leadsImportantVerifyStrictBtn) {
+    els.leadsImportantVerifyStrictBtn.disabled = true;
+    setNodeText(els.leadsImportantVerifyStrictBtn, activeLabel);
   }
   try {
     const data = await fetchJson("/api/leads/verify-important", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(importantLeadVerifyPayload()),
+      body: JSON.stringify(importantLeadVerifyPayload(normalizedMode)),
     });
-    lastImportantVerify = data.verify || null;
-    if (data.status) {
-      renderLeadsStatus(data.status || {});
+    if (data.job?.job_id) {
+      renderImportantLeadVerifyJob(data.job);
+      void pollImportantLeadVerifyJob(data.job.job_id);
+      showMessage(data.message || "Lead verification queued.", "success");
     } else {
-      renderImportantLeadVerify(lastImportantVerify);
+      lastImportantVerify = data.verify || null;
+      if (data.status) {
+        renderLeadsStatus(data.status || {});
+      } else {
+        renderImportantLeadVerify(lastImportantVerify);
+      }
+      showMessage(data.message || "Lead verification complete.", "success");
     }
-    showMessage(data.message || "Lead verification complete.", "success");
   } catch (err) {
     showMessage(`Lead verification failed: ${err}`, "error");
   } finally {
     if (els.leadsImportantVerifyBtn) {
-      els.leadsImportantVerifyBtn.disabled = false;
-      setNodeText(els.leadsImportantVerifyBtn, "Verify Leads");
+      const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
+      els.leadsImportantVerifyBtn.disabled = activeVerify;
+      setNodeText(els.leadsImportantVerifyBtn, activeVerify ? "Verifying..." : "Fast Triage");
+    }
+    if (els.leadsImportantVerifyStrictBtn) {
+      const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
+      els.leadsImportantVerifyStrictBtn.disabled = activeVerify;
+      setNodeText(els.leadsImportantVerifyStrictBtn, activeVerify ? "Verifying..." : "Strict Public Proof");
+    }
+    if (els.leadsImportantVerifyStopBtn) {
+      const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
+      els.leadsImportantVerifyStopBtn.disabled = !activeVerify || Boolean(lastImportantVerifyJob?.cancel_requested);
+      setNodeText(els.leadsImportantVerifyStopBtn, lastImportantVerifyJob?.cancel_requested ? "Stopping..." : "Stop Verify");
     }
   }
 }
 
-async function runImportantLeadDispatch() {
-  if (els.leadsImportantDispatchBtn) {
-    els.leadsImportantDispatchBtn.disabled = true;
-    setNodeText(els.leadsImportantDispatchBtn, "Dispatching...");
+async function previewImportantLeadDispatch() {
+  if (activeSenderProfiles().length) {
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
+    return;
+  }
+  if (els.leadsImportantDispatchPreviewBtn) {
+    els.leadsImportantDispatchPreviewBtn.disabled = true;
+    setNodeText(els.leadsImportantDispatchPreviewBtn, "Previewing...");
   }
   try {
-    const data = await fetchJson("/api/leads/dispatch-important", {
+    const data = await fetchJson("/api/leads/dispatch-important/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(importantLeadPathsPayload()),
+      body: JSON.stringify(importantLeadDispatchPayload(false)),
     });
-    lastImportantDispatch = data.dispatch || null;
-    renderImportantLeadCheck(lastImportantLeadCheck);
-    if (data.status) {
-      renderLeadsStatus(data.status || {});
+    if (data.preview?.preview_id) {
+      lastImportantDispatchPreview = {
+        ...(data.preview || {}),
+        _preview_key: currentDispatchPlanKey(),
+      };
+      if (data.status) {
+        renderLeadsStatus(data.status || {});
+      } else {
+        renderImportantDispatch(lastImportantDispatch);
+      }
+      showMessage(data.message || "Dispatch preview ready.", "success");
     } else {
-      renderImportantDispatch(lastImportantDispatch);
+      showMessage("Dispatch preview did not return a preview id.", "error");
     }
-    if (data.snapshot) {
-      renderSnapshot(data.snapshot);
+  } catch (err) {
+    showMessage(`Dispatch preview failed: ${err}`, "error");
+  } finally {
+    if (els.leadsImportantDispatchPreviewBtn) {
+      const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
+      els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch;
+      setNodeText(els.leadsImportantDispatchPreviewBtn, "Preview Dispatch");
+      renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
-    showMessage(data.message || "Lead dispatch complete.", "success");
+  }
+}
+
+async function confirmImportantLeadDispatch() {
+  if (activeSenderProfiles().length) {
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
+    return;
+  }
+  if (!dispatchPreviewMatchesCurrentSelection() || !lastImportantDispatchPreview?.preview_id) {
+    showMessage("Run Preview Dispatch first for the current source and cap.", "error");
+    return;
+  }
+  if (els.leadsImportantDispatchConfirmBtn) {
+    els.leadsImportantDispatchConfirmBtn.disabled = true;
+    setNodeText(els.leadsImportantDispatchConfirmBtn, "Dispatching...");
+  }
+  try {
+    const data = await fetchJson("/api/leads/dispatch-important/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(importantLeadDispatchPayload(true)),
+    });
+    if (data.job?.job_id) {
+      renderImportantLeadDispatchJob(data.job);
+      void pollImportantLeadDispatchJob(data.job.job_id);
+      showMessage(data.message || "Lead dispatch queued.", "success");
+    } else {
+      showMessage("Dispatch confirm did not return a job.", "error");
+    }
   } catch (err) {
     showMessage(`Lead dispatch failed: ${err}`, "error");
   } finally {
-    if (els.leadsImportantDispatchBtn) {
-      els.leadsImportantDispatchBtn.disabled = false;
-      setNodeText(els.leadsImportantDispatchBtn, "Dispatch Leads");
+    if (els.leadsImportantDispatchConfirmBtn) {
+      const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
+      els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch;
+      setNodeText(els.leadsImportantDispatchConfirmBtn, activeDispatch ? "Dispatching..." : "Confirm Dispatch");
+      renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
   }
 }
@@ -1917,22 +3209,64 @@ function updateSelectOptionNode(node, value, label) {
 
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
+  const alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
+  const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
+  const fleetOrder = ["private_jc", "sendgrid_annette", "sendgrid_jordan", "sendgrid_jodi", "sendgrid_alison", "sendgrid_fiorela"];
+  const fleetProfiles = fleetOrder
+    .map((name) => profiles.find((profile) => profile.name === name))
+    .filter(Boolean);
+  const awaitingProfiles = profiles
+    .filter((profile) => Number(profile.awaiting_outcome || 0) > 0)
+    .sort((left, right) => Number(right.awaiting_outcome || 0) - Number(left.awaiting_outcome || 0))
+    .slice(0, 3);
   const cards = [
-    { key: "session", label: "Session", value: snapshot.session_label.toUpperCase(), note: "tmux session state" },
-    { key: "active_profiles", label: "Active Profiles", value: summary.active_profiles, note: "currently sending" },
+    {
+      key: "active_profiles",
+      label: "Active Profiles",
+      value: summary.active_profiles,
+      note: "live senders",
+      tone: Number(summary.active_profiles || 0) > 0 ? "good" : "neutral",
+      detailsHtml: renderFleetProfileStrip(fleetProfiles),
+    },
     {
       key: "pending",
       label: "Pending",
       value: summary.total_pending,
-      note: "queued recipients across Astra + SendGrid",
+      note: `Astra ${Number(summary.astra_pending || 0).toLocaleString()} · SendGrid ${Number(summary.sendgrid_pending || 0).toLocaleString()}`,
+      tone: Number(summary.total_pending || 0) > 0 ? "warn" : "neutral",
       details: [
         { label: "Astra", value: Number(summary.astra_pending || 0).toLocaleString() },
         { label: "SendGrid", value: Number(summary.sendgrid_pending || 0).toLocaleString() },
       ],
     },
-    { key: "accepted", label: "Accepted", value: summary.total_run_sent, note: "API accepted this run" },
-    { key: "alerts", label: "Alerts", value: summary.active_alerts || 0, note: "needs attention" },
-    { key: "api_errors", label: "API Errors", value: summary.total_run_errors, note: "sender-side issues" },
+    {
+      key: "awaiting",
+      label: "Awaiting Outcome",
+      value: summary.total_awaiting_outcome || 0,
+      note: "accepted without final result",
+      tone: Number(summary.total_awaiting_outcome || 0) > 0 ? "warn" : "good",
+      detailsHtml: renderSummaryInsightList(
+        awaitingProfiles.map((profile) => ({
+          label: formatProfileName(profile.name),
+          value: Number(profile.awaiting_outcome || 0).toLocaleString(),
+        })),
+        "No profiles are currently waiting on final outcomes.",
+      ),
+    },
+    {
+      key: "alerts",
+      label: "Critical Alerts",
+      value: summary.active_alerts || 0,
+      note: "needs attention now",
+      tone: Number(summary.active_alerts || 0) > 0 ? "bad" : "good",
+      detailsHtml: renderSummaryInsightList(
+        alerts.slice(0, 3).map((alert) => ({
+          label: alert.title || "Alert",
+          value: alert.severity === "critical" ? "Critical" : alert.severity === "warn" ? "Watch" : "Healthy",
+        })),
+        "No active threshold alerts right now.",
+      ),
+    },
   ];
   syncKeyedChildren(
     els.summaryGrid,
@@ -1944,7 +3278,7 @@ function renderSummary(snapshot) {
         label: node.querySelector(".summary-label"),
         value: node.querySelector(".summary-value"),
         note: node.querySelector(".summary-note"),
-        details: node.querySelector(".summary-details"),
+        details: node.querySelector(".summary-details-slot"),
         spark: node.querySelector(".summary-spark"),
       };
       return node;
@@ -1957,19 +3291,23 @@ function renderSummary(snapshot) {
       setNodeText(refs.value, card.value);
       setNodeText(refs.note, card.note);
       refs.value.classList.toggle("summary-value-text", isSummaryTextValue(card.value));
-      setNodeHtml(refs.details, renderSummaryDetails(card.details || []));
+      setNodeHtml(refs.details, card.detailsHtml || renderSummaryDetails(card.details || []));
     },
   );
 }
 
 function createAlertCardNode() {
   const node = elementFromHTML(`
-    <article class="alert-card alert-warn">
-      <div class="alert-head">
+    <article class="alert-card alert-card-compact alert-row alert-warn">
+      <div class="alert-row-state">
         <span class="alert-pill"></span>
-        <h3></h3>
       </div>
-      <p class="alert-message"></p>
+      <div class="alert-row-body">
+        <div class="alert-row-main">
+          <h3></h3>
+          <p class="alert-message"></p>
+        </div>
+      </div>
     </article>
   `);
   node._refs = {
@@ -1988,18 +3326,88 @@ function updateAlertCardNode(node, alert) {
   };
   node._refs = refs;
   const severity = alert?.severity || "warn";
-  node.className = `alert-card alert-${severity}`;
+  const alertProfile = String(alert?.profile || alert?.profile_name || "").trim();
+  const alertMessage = String(alert?.message || "").trim();
+  const messageWithProfile = alertProfile
+    ? `${alertMessage}${alertMessage ? " " : ""}Profile: ${formatProfileName(alertProfile)}.`
+    : alertMessage;
+  node.className = `alert-card alert-card-compact alert-row alert-${severity}`;
   refs.pill.className = `alert-pill alert-pill-${severity}`;
   setNodeText(refs.pill, severity === "critical" ? "Critical" : severity === "ok" ? "Healthy" : "Watch");
   setNodeText(refs.title, alert?.title || "Alert");
-  setNodeText(refs.message, alert?.message || "");
+  setNodeText(refs.message, messageWithProfile);
+}
+
+function summarizeAlertProgress(snapshot) {
+  const totals = {
+    sendgrid: { key: "sendgrid", label: "SendGrid", sent: 0, active: 0 },
+    private: { key: "private", label: "Private Email", sent: 0, active: 0 },
+  };
+
+  const activeStates = new Set(["running", "starting", "sleeping", "cooldown", "paused"]);
+  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
+
+  profiles.forEach((profile) => {
+    const channel = profileTelemetryChannel(profile);
+    if (!totals[channel]) return;
+
+    totals[channel].sent += profileRunSentDisplay(profile);
+
+    if (activeStates.has(String(profile?.runtime_state || ""))) {
+      totals[channel].active += 1;
+    }
+  });
+
+  return Object.values(totals);
+}
+
+function renderAlertsProgress(snapshot) {
+  if (!els.alertsProgress) return;
+  const items = summarizeAlertProgress(snapshot);
+  setNodeHtml(
+    els.alertsProgress,
+    `
+      <div class="alerts-progress-head">
+        <span class="alerts-progress-kicker">Run Progress</span>
+      </div>
+      <div class="alerts-progress-list">
+        ${items.map((item) => `
+          <article class="alerts-progress-item alerts-progress-row alerts-progress-item-${item.key}">
+            <div class="alerts-progress-main">
+              <div class="alerts-progress-label-row">
+                <span class="alerts-progress-dot"></span>
+                <span class="alerts-progress-label">${escapeHtml(item.label)}</span>
+              </div>
+              <div class="alerts-progress-value-row">
+                <span class="alerts-progress-value">${Number(item.sent || 0).toLocaleString()}</span>
+                <span class="alerts-progress-unit muted">sent</span>
+              </div>
+            </div>
+            <span class="alerts-progress-meta muted">${item.active} active</span>
+          </article>
+        `).join("")}
+      </div>
+    `,
+  );
 }
 
 function renderAlerts(snapshot) {
   if (!els.alertsGrid) return;
   const activeAlerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
+  const visibleAlerts = activeAlerts.slice(0, 2);
+  const hiddenAlertCount = Math.max(0, activeAlerts.length - visibleAlerts.length);
   const cards = activeAlerts.length
-    ? activeAlerts
+    ? [
+        ...visibleAlerts,
+        ...(hiddenAlertCount > 0
+          ? [{
+              key: "alerts-overflow",
+              severity: "ok",
+              title: "More alerts",
+              message: `+${hiddenAlertCount} more alert${hiddenAlertCount === 1 ? "" : "s"}`,
+            }]
+          : []),
+      ]
     : [{ key: "ok", severity: "ok", title: "No active threshold alerts", message: "Current metrics are below the configured alert thresholds." }];
   syncKeyedChildren(
     els.alertsGrid,
@@ -2012,10 +3420,11 @@ function renderAlerts(snapshot) {
     setNodeText(
       els.alertsCaption,
       activeAlerts.length
-        ? `${activeAlerts.length} threshold alert${activeAlerts.length === 1 ? "" : "s"} active.`
-        : "Operational thresholds for failures, backlog, webhook intake, and attribution.",
+        ? `${activeAlerts.length} active now`
+        : "No active threshold alerts right now.",
     );
   }
+  renderAlertsProgress(snapshot);
 }
 
 function sparklineSvg(points, tone = "neutral") {
@@ -2144,8 +3553,8 @@ function resolveSelectedProfile(snapshot) {
 function overviewTone(profile) {
   const webhook = profile.webhook || {};
   const summary = webhook.summary || {};
-  if (profile.tmux_dead || profile.runtime_state === "error" || profile.run_errors > 0 || (summary.failed || 0) > 0) return "bad";
-  if (["starting", "running", "cooldown", "sleeping"].includes(profile.runtime_state || "")) return "good";
+  if ((profile.health_tone || "") === "bad" || (summary.failed || 0) > 0) return "bad";
+  if ((profile.health_label || "") === "Healthy" && ["starting", "running", "cooldown", "sleeping"].includes(profile.runtime_state || "")) return "good";
   return "idle";
 }
 
@@ -2155,80 +3564,172 @@ function overviewGlowState(profile) {
     : "stopped";
 }
 
+function profileActivityState(profile) {
+  const runtimeState = String(profile?.runtime_state || "").trim();
+  if (["starting", "running", "cooldown", "sleeping"].includes(runtimeState)) {
+    return { label: "Running", tone: "good" };
+  }
+  if (runtimeState === "paused") {
+    return { label: "Paused", tone: "paused" };
+  }
+  if (runtimeState === "stalled") {
+    return { label: "Stalled", tone: "warn" };
+  }
+  return { label: "Stopped", tone: "bad" };
+}
+
+function overviewStateIndicator(profile) {
+  const runtimeState = String(profile?.runtime_state || "").trim();
+  if (["running", "starting", "sleeping"].includes(runtimeState)) {
+    return { label: "Live", tone: "good" };
+  }
+  if (["cooldown", "paused"].includes(runtimeState)) {
+    return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
+  }
+  if (runtimeState === "stalled") {
+    return { label: "Stalled", tone: "warn" };
+  }
+  return { label: "Stopped", tone: "bad" };
+}
+
 function createOverviewCardNode() {
   const node = elementFromHTML(`
-    <article class="overview-card overview-idle" data-profile="">
-      <div class="overview-head">
-        <div>
-          <h3></h3>
-          <div class="overview-subline">
-            <span class="badge stopped"></span>
-            <span class="health-pill health-pill-neutral"></span>
+    <article class="overview-card overview-row overview-idle" data-profile="">
+      <div class="overview-row-main">
+        <div class="overview-name-row">
+          <div class="overview-title-block">
+            <h3></h3>
+            <span class="overview-warning-text muted"></span>
           </div>
-        </div>
-        <div class="overview-signal">
-          <span class="overview-dot overview-dot-stopped"></span>
-        </div>
-      </div>
-
-      <div class="overview-stats"></div>
-
-      <div class="overview-track">
-        <div class="overview-track-row">
-          <span>Run progress</span>
-          <span class="overview-progress-value"></span>
-        </div>
-        <div class="overview-bar">
-          <div class="overview-fill"></div>
+          <span class="overview-state-line">
+            <span class="overview-state-dot overview-state-dot-neutral"></span>
+            <span class="overview-state-text"></span>
+          </span>
+          <span class="overview-badges">
+            <span class="overview-badge overview-provider-badge hidden"></span>
+            <span class="overview-badge overview-cooldown-badge hidden"></span>
+          </span>
         </div>
       </div>
-
-      <div class="overview-footer"></div>
+      <div class="overview-metrics overview-stats"></div>
     </article>
   `);
   node._refs = {
     title: node.querySelector("h3"),
-    badge: node.querySelector(".badge"),
-    health: node.querySelector(".health-pill"),
-    dot: node.querySelector(".overview-dot"),
+    stateLine: node.querySelector(".overview-state-line"),
+    stateDot: node.querySelector(".overview-state-dot"),
+    stateText: node.querySelector(".overview-state-text"),
     stats: node.querySelector(".overview-stats"),
-    progressValue: node.querySelector(".overview-progress-value"),
-    progressFill: node.querySelector(".overview-fill"),
-    footer: node.querySelector(".overview-footer"),
+    warningText: node.querySelector(".overview-warning-text"),
+    providerBadge: node.querySelector(".overview-provider-badge"),
+    cooldownBadge: node.querySelector(".overview-cooldown-badge"),
   };
   return node;
+}
+
+function strongestProfileWarning(profile) {
+  const failed = Number(profile?.webhook?.summary?.failed || 0);
+  const awaiting = Number(profile?.awaiting_outcome || 0);
+  const errors = Number(profile?.run_errors || 0);
+  const pending = Number(profile?.pending_count || 0);
+  const reasonCode = String(profile?.reason_code || "").trim() || "READY";
+  const reasonNote = String(profile?.reason_note || profile?.health_note || "").trim() || "No dominant sender issue is active right now.";
+  const healthLabel = String(profile?.health_label || "").trim() || "Healthy";
+  const healthTone = String(profile?.health_tone || "").trim() || "neutral";
+  const readiness = String(profile?.readiness_label || "").trim() || "Ready";
+  const telemetry = String(profile?.telemetry_quality_label || "").trim();
+  if (profile?.tmux_dead || (profile?.runtime_state || "") === "error") {
+    return { tone: "bad", label: reasonCode, message: reasonNote || profile?.runtime_note || "Sender process is not healthy." };
+  }
+  if (failed > 0) {
+    return { tone: "bad", label: "Failures", message: `${failed} delivery failure${failed === 1 ? "" : "s"} in the selected window.` };
+  }
+  if (healthLabel !== "Healthy" || readiness !== "Ready") {
+    const extra = [];
+    if (readiness && readiness !== "Ready") extra.push(readiness);
+    if (telemetry && (readiness === "Telemetry Degraded" || healthLabel === "Watch")) extra.push(`Confidence ${telemetry}`);
+    return {
+      tone: healthTone === "bad" ? "bad" : healthTone === "warn" || healthTone === "paused" ? "warn" : "neutral",
+      label: reasonCode,
+      message: `${reasonNote}${extra.length ? ` (${extra.join(" • ")})` : ""}`,
+    };
+  }
+  if (pending > 0 && !isProfileActive(profile)) {
+    return { tone: "neutral", label: "Ready", message: `${pending} queued recipient${pending === 1 ? "" : "s"} ready when this sender starts.` };
+  }
+  if (awaiting > 0) {
+    return { tone: "warn", label: "Awaiting", message: `${awaiting} accepted recipient${awaiting === 1 ? "" : "s"} still awaiting final outcome.` };
+  }
+  if (errors > 0) {
+    return { tone: "neutral", label: reasonCode, message: reasonNote };
+  }
+  return { tone: "neutral", label: "Clear", message: "No immediate warning on this sender." };
 }
 
 function updateOverviewCardNode(node, profile, selectedProfile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
-    badge: node.querySelector(".badge"),
-    health: node.querySelector(".health-pill"),
-    dot: node.querySelector(".overview-dot"),
+    stateLine: node.querySelector(".overview-state-line"),
+    stateDot: node.querySelector(".overview-state-dot"),
+    stateText: node.querySelector(".overview-state-text"),
     stats: node.querySelector(".overview-stats"),
-    progressValue: node.querySelector(".overview-progress-value"),
-    progressFill: node.querySelector(".overview-fill"),
-    footer: node.querySelector(".overview-footer"),
+    warningText: node.querySelector(".overview-warning-text"),
   };
   node._refs = refs;
   const tone = overviewTone(profile);
-  const glowState = overviewGlowState(profile);
-  const statusClass = profileStatusClass(profile);
   const isSelected = selectedProfile && selectedProfile.name === profile.name;
-  const progress = profile.max_total > 0 ? Math.min(100, Math.round((profile.run_sent / profile.max_total) * 100)) : 0;
+  const warning = strongestProfileWarning(profile);
+  const stateIndicator = overviewStateIndicator(profile);
   const stats = [
-    { key: "pending", label: "Pending", value: profile.pending_count },
-    { key: "accepted", label: "Accepted", value: profile.run_sent },
+    { key: "pending", label: "Pending", value: Number(profile.pending_count || 0).toLocaleString() },
+    { key: "accepted", label: "Accepted", value: profileRunSentDisplay(profile).toLocaleString() },
   ];
 
   node.dataset.profile = profile.name || "";
-  node.className = `overview-card overview-${tone} overview-glow-${glowState}${isSelected ? " is-selected" : ""}`;
+  const runtimeClass = stateIndicator.tone === "good" ? "overview-runtime-running" : stateIndicator.tone === "bad" ? "overview-runtime-stopped" : "overview-runtime-paused";
+  node.className = `overview-card overview-${tone} ${runtimeClass}${isSelected ? " is-selected" : ""}`;
   setNodeText(refs.title, formatProfileName(profile.name));
-  refs.badge.className = `badge ${statusClass}`;
-  setNodeText(refs.badge, profile.runtime_label || "Stopped");
-  refs.health.className = `health-pill health-pill-${profile.health_tone || "neutral"}`;
-  setNodeText(refs.health, profile.health_label || "Healthy");
-  refs.dot.className = `overview-dot overview-dot-${glowState}`;
+  refs.stateLine.className = `overview-state-line overview-state-line-${stateIndicator.tone || "neutral"}`;
+  refs.stateDot.className = `overview-state-dot overview-state-dot-${stateIndicator.tone || "neutral"}`;
+  setNodeText(refs.stateText, stateIndicator.label || "Stopped");
+
+  // Cooldown / provider badges (compact)
+  try {
+    const profileRemaining = Number(profile?.cooldown_remaining_seconds || 0);
+    const providerRemaining = Number(profile?.provider_cooldown_remaining_seconds || 0);
+    // store numeric values on refs for the live ticker to use
+    if (refs.cooldownBadge) refs.cooldownBadge._remaining = profileRemaining;
+    if (refs.providerBadge) refs.providerBadge._remaining = providerRemaining;
+
+    if (refs.providerBadge) {
+      if (providerRemaining > 0) {
+        refs.providerBadge.classList.remove("hidden");
+        refs.providerBadge.textContent = `P: ${humanizeCooldownRemaining(providerRemaining)}`;
+        refs.providerBadge.title = `Provider cooldown: ${providerRemaining}s remaining`;
+      } else {
+        refs.providerBadge.classList.add("hidden");
+        refs.providerBadge.textContent = "";
+        refs.providerBadge.title = "";
+      }
+    }
+
+    if (refs.cooldownBadge) {
+      const cooldownDisplay = profileCooldownDisplay(profile, { compact: true });
+      refs.cooldownBadge._remaining = typeof cooldownDisplay.countdown === "number" ? cooldownDisplay.countdown : null;
+      if (cooldownDisplay.active) {
+        refs.cooldownBadge.classList.remove("hidden");
+        refs.cooldownBadge.textContent = `C: ${cooldownDisplay.text}`;
+        refs.cooldownBadge.title = cooldownDisplay.title;
+      } else {
+        refs.cooldownBadge.classList.add("hidden");
+        refs.cooldownBadge.textContent = "";
+        refs.cooldownBadge.title = "";
+      }
+    }
+  } catch (e) {
+    // non-fatal: protect overview rendering
+    console.error("Error updating cooldown badges", e);
+  }
 
   syncKeyedChildren(
     refs.stats,
@@ -2237,10 +3738,13 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
     () => createOverviewStatNode(),
     (statNode, stat) => updateOverviewStatNode(statNode, stat.label, stat.value),
   );
-
-  setNodeText(refs.progressValue, `${profile.run_sent}/${profile.max_total || "∞"}`);
-  refs.progressFill.style.width = `${progress}%`;
-  setNodeText(refs.footer, profileLastUpdateText(profile));
+  const warningText = warning.tone === "neutral"
+    ? String(profile.health_note || profile.reason_note || "").trim()
+    : `${warning.label || "Watch"}: ${warning.message || ""}`;
+  setNodeText(refs.warningText, warningText || "No immediate warning.");
+  refs.warningText.classList.toggle("muted", warning.tone === "neutral");
+  refs.warningText.classList.toggle("overview-warning-inline-bad", warning.tone === "bad");
+  refs.warningText.classList.toggle("overview-warning-inline-warn", warning.tone === "warn");
 }
 
 function renderOverview(snapshot, selectedProfile) {
@@ -2320,6 +3824,47 @@ function renderAwaitingAging(snapshot, selectedProfile) {
     `).join(""),
   );
 }
+
+// Live ticker for overview cooldown/provider badges
+let _cooldownBadgeTickerId = null;
+function startCooldownBadgeTicker() {
+  if (_cooldownBadgeTickerId) return;
+  _cooldownBadgeTickerId = setInterval(() => {
+    try {
+      if (!els.overviewGrid) return;
+      for (const card of Array.from(els.overviewGrid.children || [])) {
+        const refs = card._refs || {};
+        // provider badge
+        if (refs.providerBadge && typeof refs.providerBadge._remaining === "number") {
+          if (refs.providerBadge._remaining > 0) {
+            refs.providerBadge._remaining = Math.max(0, refs.providerBadge._remaining - 1);
+            refs.providerBadge.textContent = `P: ${humanizeCooldownRemaining(refs.providerBadge._remaining)}`;
+            refs.providerBadge.title = `Provider cooldown: ${refs.providerBadge._remaining}s remaining`;
+            refs.providerBadge.classList.remove("hidden");
+          } else {
+            refs.providerBadge.classList.add("hidden");
+          }
+        }
+        // profile cooldown badge
+        if (refs.cooldownBadge && typeof refs.cooldownBadge._remaining === "number") {
+          if (refs.cooldownBadge._remaining > 0) {
+            refs.cooldownBadge._remaining = Math.max(0, refs.cooldownBadge._remaining - 1);
+            refs.cooldownBadge.textContent = `C: ${humanizeCooldownRemaining(refs.cooldownBadge._remaining)}`;
+            refs.cooldownBadge.title = `Cooldown: ${refs.cooldownBadge._remaining}s remaining`;
+            refs.cooldownBadge.classList.remove("hidden");
+          } else {
+            refs.cooldownBadge.classList.add("hidden");
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Cooldown badge ticker error", e);
+    }
+  }, 1000);
+}
+
+// Start the ticker immediately so badges feel live between snapshots
+startCooldownBadgeTicker();
 
 function renderDomainBreakdown(snapshot) {
   if (!els.domainBreakdown) return;
@@ -2546,7 +4091,7 @@ function renderFailures(snapshot) {
 function profileStatusClass(profile) {
   const state = String(profile.runtime_state || "").trim().replaceAll("_", "-");
   if (!state) return "stopped";
-  if (["starting", "running", "cooldown", "sleeping", "finished", "scheduled-stop", "paused", "error", "dead"].includes(state)) {
+  if (["starting", "running", "cooldown", "sleeping", "finished", "scheduled-stop", "paused", "stalled", "error", "dead"].includes(state)) {
     return state;
   }
   return "stopped";
@@ -2597,40 +4142,27 @@ function profileTelemetryChannel(profile) {
   return "other";
 }
 
-function renderDeliveryFunnel(profile, hours) {
-  const summary = profile.webhook?.summary || {};
-  const accepted = profile.accepted_recent || 0;
-  const stages = [
-    { label: "Accepted", value: accepted, note: "handed to SendGrid" },
-    { label: "Processed", value: summary.processed || 0, note: "entered pipeline" },
-    { label: "Delivered", value: summary.delivered || 0, note: "confirmed delivered" },
-    { label: "Opened (uniq)", value: summary.open_unique || 0, note: "distinct tracked opens" },
-    { label: "Clicked (uniq)", value: summary.click_unique || 0, note: "distinct tracked clicks" },
-  ];
-  const sideStats = [
-    { label: "Awaiting", value: profile.awaiting_outcome || 0, tone: (profile.awaiting_outcome || 0) > 0 ? "warn" : "neutral" },
-    { label: "Failures", value: summary.failed || 0, tone: (summary.failed || 0) > 0 ? "bad" : "neutral" },
-    { label: "Mapped", value: profile.webhook?.total || 0, tone: "good" },
-  ];
+function renderDiagnosticRows(items = []) {
   return `
-    <section class="funnel-panel">
-      <div class="funnel-head">
-        <strong>Delivery Funnel</strong>
-        <span class="muted">Accepted recipients in ${hours}h, excluding shared canary sends</span>
-      </div>
-      <div class="funnel-grid">
-        ${stages.map((stage) => `
-          <div class="funnel-stage">
-            <div class="funnel-label">${stage.label}</div>
-            <div class="funnel-value">${stage.value}</div>
-            <div class="funnel-note">${stage.note}</div>
-          </div>
-        `).join("")}
-      </div>
-      <div class="funnel-meta">
-        ${sideStats.map((stat) => `<span class="event-chip chip-${stat.tone}">${stat.label}: ${stat.value}</span>`).join("")}
-      </div>
-    </section>
+    <div class="diagnostic-row-list">
+      ${items.map((item) => `
+        <div class="diagnostic-row">
+          <span class="diagnostic-key">${escapeHtml(item.label || "-")}</span>
+          <span class="diagnostic-value"${item.title ? ` title="${escapeHtml(item.title)}"` : ""}>${escapeHtml(item.value ?? "-")}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDetailPrimaryWarning(profile) {
+  const warning = strongestProfileWarning(profile);
+  if (!warning || warning.tone === "neutral") return "";
+  return `
+    <div class="detail-primary-warning detail-primary-warning-${escapeHtml(warning.tone || "warn")}">
+      <span class="detail-primary-warning-label">${escapeHtml(warning.label || "Warning")}</span>
+      <span>${escapeHtml(warning.message || "")}</span>
+    </div>
   `;
 }
 
@@ -2638,36 +4170,32 @@ function renderLiveDelivery(profile, hours) {
   const channel = profileTelemetryChannel(profile);
   if (channel !== "sendgrid") {
     const cooldownSeconds = Number(profile.cooldown_remaining_seconds || 0);
-    const cooldownTone = cooldownSeconds > 0 ? "warn" : "good";
-    const lastStatus = senderLogStatusLabel(profile.last_status || "-");
-    const lastStatusTone = String(profile.last_status || "").toUpperCase() === "ERROR"
-      ? "bad"
-      : (String(profile.last_status || "").toUpperCase() === "SENT" ? "good" : "neutral");
     const headLabel = channel === "private" ? "Private Mailbox" : "Sender Mailbox";
     const headNote = channel === "private"
       ? "SMTP delivery plus mailbox bounce handling for this sender"
       : "Direct sender telemetry for this mailbox";
-    const lastActivityNote = profile.last_timestamp
-      ? `Last logged activity ${profile.last_timestamp}${profile.last_email ? ` for ${profile.last_email}` : ""}.`
-      : "No recent sender log activity.";
+    const lastActivityValue = profile.last_timestamp
+      ? `${profile.last_timestamp}${profile.last_email ? ` • ${truncateMiddle(profile.last_email, 52)}` : ""}`
+      : "No recent sender log activity";
+    const rows = [
+      { label: "Sent Today", value: Number(profile.sent_today || 0).toLocaleString() },
+      { label: "Errors Today", value: Number(profile.errors_today || 0).toLocaleString() },
+      { label: "Skipped Today", value: Number(profile.skipped_today || 0).toLocaleString() },
+      { label: "Cooldown", value: cooldownSeconds > 0 ? humanizeCooldownRemaining(cooldownSeconds) : "Ready" },
+      { label: "Last Status", value: senderLogStatusLabel(profile.last_status || "-") },
+      { label: "Last Recipient", value: truncateMiddle(profile.last_email || "-", 52), title: String(profile.last_email || "-") },
+      { label: "Last Activity", value: lastActivityValue, title: `${profile.last_timestamp || ""} ${profile.last_email || ""}`.trim() },
+    ];
     return `
-      <section class="live-delivery">
+      <section class="live-delivery detail-inspector-section">
         <div class="live-delivery-head">
           <strong>${headLabel}</strong>
           <span class="muted">${headNote}</span>
         </div>
-        <div class="live-metrics-grid">
-          ${liveMetric("Sent Today", Number(profile.sent_today || 0).toLocaleString(), Number(profile.sent_today || 0) > 0 ? "good" : "neutral")}
-          ${liveMetric("Errors Today", Number(profile.errors_today || 0).toLocaleString(), Number(profile.errors_today || 0) > 0 ? "bad" : "neutral")}
-          ${liveMetric("Skipped Today", Number(profile.skipped_today || 0).toLocaleString(), Number(profile.skipped_today || 0) > 0 ? "warn" : "neutral")}
-          ${liveMetric("Cooldown", escapeHtml(cooldownSeconds > 0 ? humanizeCooldownRemaining(cooldownSeconds) : "Ready"), cooldownTone)}
-          ${liveMetric("Last Status", escapeHtml(lastStatus), lastStatusTone)}
-          ${liveMetric("Last Recipient", escapeHtml(profile.last_email || "-"), "neutral")}
-        </div>
+        ${renderDiagnosticRows(rows)}
         <div class="live-delivery-note">
           <span>No SendGrid webhook telemetry for this sender.</span>
           <span>Delivery feedback comes from SMTP responses, sender logs, and mailbox bounce handling.</span>
-          <span>${escapeHtml(lastActivityNote)}</span>
         </div>
       </section>
     `;
@@ -2679,6 +4207,21 @@ function renderLiveDelivery(profile, hours) {
   const mapped24h = Number(webhook.mapped_events_24h || webhook.total || 0);
   const unmapped24h = Number(webhook.unmapped_events_24h || 0);
   const lastWebhookText = webhook.last_received_at || (webhook.last_received_iso ? formatGeneratedAt(webhook.last_received_iso) : "No webhook yet");
+  const latestText = latest.time
+    ? `${statusLabel(latest.status)} at ${formatGeneratedAt(latest.time)}${latest.email ? ` • ${truncateMiddle(latest.email, 40)}` : ""}`
+    : `No mapped webhook events in the last ${hours}h`;
+  const rows = [
+    { label: `Mapped ${hours}h`, value: mapped24h },
+    { label: `Unmapped ${hours}h`, value: unmapped24h },
+    { label: "Processed", value: summary.processed || 0 },
+    { label: "Delivered", value: summary.delivered || 0 },
+    { label: "Deferred", value: summary.deferred || 0 },
+    { label: "Bounced", value: summary.bounce || 0 },
+    { label: "Dropped", value: summary.dropped || 0 },
+    { label: "Awaiting", value: profile.awaiting_outcome || 0 },
+    { label: "Last Webhook", value: lastWebhookText },
+    { label: "Latest Event", value: latestText, title: latest.email || "" },
+  ];
   const failureBits = [];
   if (summary.bounce) failureBits.push(`Bounced ${summary.bounce}`);
   if (summary.blocked) failureBits.push(`Blocked ${summary.blocked}`);
@@ -2686,31 +4229,15 @@ function renderLiveDelivery(profile, hours) {
   if (summary.spamreport) failureBits.push(`Spam ${summary.spamreport}`);
   if (summary.unsubscribe) failureBits.push(`Unsubscribed ${summary.unsubscribe}`);
 
-  let latestText = `No mapped webhook events in the last ${hours}h.`;
-  if (latest.time) {
-    latestText = `Last webhook: ${statusLabel(latest.status)} at ${formatGeneratedAt(latest.time)}${latest.email ? ` for ${latest.email}` : ""}`;
-  }
-
   return `
-    <section class="live-delivery">
+    <section class="live-delivery detail-inspector-section">
       <div class="live-delivery-head">
         <strong>Live SendGrid</strong>
-        <span class="muted">Last webhook ${lastWebhookText}</span>
+        <span class="muted">Compact delivery state for ${hours}h</span>
       </div>
-      <div class="live-metrics-grid">
-        ${liveMetric(`Mapped ${hours}h`, mapped24h, mapped24h > 0 ? "good" : "neutral")}
-        ${liveMetric(`Unmapped ${hours}h`, unmapped24h, unmapped24h > 0 ? "warn" : "neutral")}
-        ${liveMetric("Processed", summary.processed || 0, (summary.processed || 0) > 0 ? "good" : "neutral")}
-        ${liveMetric("Delivered", summary.delivered || 0, "good")}
-        ${liveMetric("Deferred", summary.deferred || 0, summary.deferred ? "warn" : "neutral")}
-        ${liveMetric("Bounced", summary.bounce || 0, summary.bounce ? "bad" : "neutral")}
-        ${liveMetric("Dropped", summary.dropped || 0, summary.dropped ? "bad" : "neutral")}
-      </div>
-      ${renderDeliveryFunnel(profile, hours)}
+      ${renderDiagnosticRows(rows)}
       <div class="live-delivery-note">
         <span>${failureBits.length ? failureBits.join(" | ") : "No bounce, block, drop, or spam events in the selected window."}</span>
-        <span>Awaiting outcome: ${profile.awaiting_outcome || 0} accepted recipient(s) in ${hours}h.</span>
-        <span>${latestText}</span>
       </div>
     </section>
   `;
@@ -2718,28 +4245,28 @@ function renderLiveDelivery(profile, hours) {
 
 function renderWebhookSummary(profile, snapshot = {}) {
   const channel = profileTelemetryChannel(profile);
-  const detailHours = Number(snapshot.activity_hours || 24);
+  const guard = snapshot.private_bounce_guard || {};
   if (channel !== "sendgrid") {
-    const guard = profile.name === "private_jc" ? (snapshot.private_bounce_guard || {}) : {};
     const guardLabel = profile.name === "private_jc" ? (guard.status_label || "Idle") : "N/A";
     const cooldownText = profile.name === "private_jc"
       ? (guard.cooldown_active
         ? (guard.cooldown_until_utc ? formatGeneratedAt(guard.cooldown_until_utc) : humanizeCooldownRemaining(guard.cooldown_remaining_seconds || 0))
         : "Off")
       : "Off";
+    const rows = [
+      { label: "Last Status", value: senderLogStatusLabel(profile.last_status || "-") },
+      { label: "Errors Today", value: Number(profile.errors_today || 0) },
+      { label: "Sent Today", value: Number(profile.sent_today || 0) },
+      { label: "Guard", value: guardLabel },
+      { label: "Cooldown", value: cooldownText },
+    ];
     return `
-      <section class="webhook-panel">
+      <section class="webhook-panel detail-inspector-section">
         <div class="webhook-head">
           <strong>Mailbox Feedback</strong>
           <span class="muted">No webhook event stream for this sender</span>
         </div>
-        <div class="event-chip-row">
-          <span class="event-chip chip-neutral">Last status: ${escapeHtml(senderLogStatusLabel(profile.last_status || "-"))}</span>
-          <span class="event-chip ${String(profile.last_status || "").toUpperCase() === "ERROR" ? "chip-bad" : "chip-good"}">Errors today: ${Number(profile.errors_today || 0)}</span>
-          <span class="event-chip chip-neutral">Sent today: ${Number(profile.sent_today || 0)}</span>
-          ${profile.name === "private_jc" ? `<span class="event-chip chip-good">JC guard: ${escapeHtml(guardLabel)}</span>` : ""}
-          ${profile.name === "private_jc" ? `<span class="event-chip ${guard?.cooldown_active ? "chip-warn" : "chip-neutral"}">Cooldown: ${escapeHtml(cooldownText)}</span>` : ""}
-        </div>
+        ${renderDiagnosticRows(rows)}
         <p class="muted">
           Private delivery confirmation comes from SMTP responses, sender logs, and bounce mail processing rather than SendGrid webhooks.
         </p>
@@ -2771,14 +4298,10 @@ function renderWebhookSummary(profile, snapshot = {}) {
   `).join("");
 
   return `
-    <section class="webhook-panel">
+    <section class="webhook-panel detail-inspector-section">
       <div class="webhook-head">
         <strong>Webhook Events</strong>
         <span class="muted">${webhook.last_received_at ? `Last received ${webhook.last_received_at}` : `Total ${webhook.total || 0}`}</span>
-      </div>
-      <div class="event-chip-row">
-        <span class="event-chip chip-good">Mapped ${detailHours}h: ${Number(webhook.mapped_events_24h || webhook.total || 0)}</span>
-        <span class="event-chip ${Number(webhook.unmapped_events_24h || 0) > 0 ? "chip-warn" : "chip-neutral"}">Unmapped ${detailHours}h: ${Number(webhook.unmapped_events_24h || 0)}</span>
       </div>
       <details class="webhook-details-panel"${shouldOpen ? " open" : ""}>
         <summary>
@@ -2810,19 +4333,35 @@ function renderWebhookSummary(profile, snapshot = {}) {
 
 function buildDetailKicker(profile) {
   const pending = Number(profile.pending_count || 0);
-  const accepted = Number(profile.run_sent || 0);
+  const accepted = profileRunSentDisplay(profile);
   const awaiting = Number(profile.awaiting_outcome || 0);
   const errors = Number(profile.run_errors || 0);
+  const readiness = String(profile.readiness_label || "").trim() || "Ready";
+  const reasonNote = String(profile.reason_note || profile.health_note || "").trim();
+  const runIssueState = String(profile.run_issue_state || "").trim() || "none";
+  const reasonCode = String(profile.reason_code || "").trim() || "READY";
   if ((profile?.runtime_state || "") === "paused") {
-    return `${pending} pending in this queue. ${profile?.restart_block_reason || profile?.health_note || "Provider cooldown is active before the next safe restart."}`;
+    return `${readiness}. ${reasonNote || profile?.restart_block_reason || "Provider cooldown is active before the next safe restart."}`;
   }
   if (isProfileActive(profile)) {
-    return `${accepted} accepted, ${awaiting} awaiting outcome, and ${pending} still pending in this queue.`;
+    const base = `${accepted} accepted, ${awaiting} awaiting outcome, and ${pending} still pending in this queue.`;
+    if ((profile.health_label || "") === "Healthy") return base;
+    return `${base} ${reasonNote}`;
   }
   if (accepted || errors || Number(profile.run_skipped || 0)) {
-    return `${accepted} accepted in this run, ${errors} API errors, and ${pending} still pending in the queue.`;
+    const base = `${accepted} accepted in this run and ${pending} still pending in the queue.`;
+    if (runIssueState === "recovered") {
+      if (reasonCode && reasonCode !== "READY") {
+        return `${base} Recovered from an earlier run issue; current watch reason: ${reasonCode}. ${reasonNote || ""}`.trim();
+      }
+      return `${base} Recovered from an earlier run issue.`.trim();
+    }
+    if (errors > 0) {
+      return `${base} Active sender failure needs review. ${reasonNote || ""}`.trim();
+    }
+    return `${base} ${reasonNote || ""}`.trim();
   }
-  return `${pending} pending in this queue. Start this sender when you want it live.`;
+  return `${pending} pending in this queue. ${reasonNote || "Start this sender when you want it live."}`;
 }
 
 function buildProfileActionNote(profile) {
@@ -2838,21 +4377,80 @@ function buildProfileActionNote(profile) {
   return `Queue is idle. Start runs only this sender using a dashboard cap of ${profile.max_total || "∞"}.`;
 }
 
+function truncateMiddle(value, maxLength = 56) {
+  const text = String(value || "");
+  if (!text || text.length <= maxLength) return text || "-";
+  const head = Math.max(12, Math.floor((maxLength - 1) * 0.65));
+  const tail = Math.max(8, maxLength - head - 1);
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+function renderDetailCoreRuntime(profile) {
+  const cooldownSeconds = profileCooldownRemaining(profile);
+  const lastStatus = senderLogStatusLabel(profile.last_status || "-");
+  const lastActivity = profile.last_timestamp
+    ? `${profile.last_timestamp}${profile.last_email ? ` • ${truncateMiddle(profile.last_email, 44)}` : ""}`
+    : "No recent sender log line";
+  const acceptedCount = profileRunSentDisplay(profile);
+  const cooldownDisplay = profileCooldownDisplay(profile);
+  const items = [
+    { label: "Pending", value: profile.pending_count, tone: Number(profile.pending_count || 0) > 0 ? "warn" : "neutral" },
+    { label: "Accepted", value: acceptedCount, tone: acceptedCount > 0 ? "good" : "neutral" },
+    { label: "Awaiting", value: profile.awaiting_outcome || 0, tone: Number(profile.awaiting_outcome || 0) > 0 ? "warn" : "neutral" },
+    { label: "Cooldown", value: cooldownDisplay.text, tone: cooldownDisplay.active ? "warn" : "good" },
+  ];
+  return `
+    <div class="detail-core-grid">
+      ${items.map((item) => `
+        <div class="detail-core-item detail-core-item-${escapeHtml(item.tone || "neutral")}">
+          <span class="detail-core-label">${escapeHtml(item.label)}</span>
+          <span class="detail-core-value">${escapeHtml(item.value)}</span>
+        </div>
+      `).join("")}
+    </div>
+    <div class="detail-core-activity">
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Last status</span>
+        <span class="detail-compact-value">${escapeHtml(lastStatus)}</span>
+      </div>
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Readiness</span>
+        <span class="detail-compact-value">${escapeHtml(profile.readiness_label || "Ready")}</span>
+      </div>
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Reason</span>
+        <span class="detail-compact-value" title="${escapeHtml(profile.reason_note || profile.health_note || "")}">${escapeHtml(profile.reason_code || "READY")}</span>
+      </div>
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Confidence</span>
+        <span class="detail-compact-value" title="${escapeHtml(profile.telemetry_quality_note || "")}">${escapeHtml(profile.telemetry_quality_label || "High")}</span>
+      </div>
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Last activity</span>
+        <span class="detail-compact-value" title="${escapeHtml(profile.last_email || profile.last_timestamp || "")}">${escapeHtml(lastActivity)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function createProfileDetailNode() {
   const node = elementFromHTML(`
     <article class="detail-card">
-      <div class="detail-head">
-        <div>
-          <p class="eyebrow">Focused Detail</p>
-          <h3></h3>
-          <div class="detail-subline">
-            <span class="health-pill health-pill-neutral detail-health-pill"></span>
+      <div class="detail-command-bar">
+        <div class="detail-head">
+          <div>
+            <h3></h3>
+            <div class="detail-subline">
+              <span class="detail-state-line">
+                <span class="detail-state-dot detail-state-dot-neutral"></span>
+                <span class="detail-state-text"></span>
+              </span>
+            </div>
+            <p class="detail-kicker muted"></p>
           </div>
-          <p class="detail-kicker muted"></p>
         </div>
-        <section class="detail-action-card">
+        <section class="detail-action-card detail-command-actions">
           <div class="detail-action-head">
-            <span class="badge stopped"></span>
             <span class="muted detail-last-update"></span>
           </div>
           <div class="profile-actions">
@@ -2862,88 +4460,102 @@ function createProfileDetailNode() {
           <div class="detail-action-note muted"></div>
         </section>
       </div>
+
       <div class="detail-feedback-slot"></div>
 
-      <div class="detail-layout">
-        <div class="detail-main">
-          <section class="detail-section">
-            <div class="detail-section-head">
-              <strong>Run Snapshot</strong>
-              <span class="muted detail-progress-note"></span>
-            </div>
-            <div class="metrics detail-metrics"></div>
-            <div class="progress-wrap">
-              <div class="progress-label">
-                <span>Run progress</span>
-                <span class="detail-progress-value"></span>
-              </div>
-              <div class="progress-bar">
-                <div class="progress-fill"></div>
-              </div>
-            </div>
-          </section>
-
-          <div class="detail-live-slot"></div>
-          <div class="detail-guard-slot"></div>
-          <div class="detail-webhook-slot"></div>
+      <section class="detail-section detail-core-section">
+        <div class="detail-section-head">
+          <strong>Core Runtime</strong>
+          <span class="muted detail-progress-note"></span>
         </div>
+        <div class="detail-primary-warning-slot"></div>
+        <div class="detail-core-runtime"></div>
+        <div class="detail-core-meta">
+          <div class="detail-core-meta-row">
+            <span class="detail-compact-label">Runtime</span>
+            <span class="detail-compact-value detail-runtime-note"></span>
+          </div>
+          <div class="detail-core-meta-row">
+            <span class="detail-compact-label">Session</span>
+            <span class="detail-compact-value detail-pane-label"></span>
+          </div>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress-label">
+            <span>Run progress</span>
+            <span class="detail-progress-value"></span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill"></div>
+          </div>
+        </div>
+      </section>
 
-        <aside class="detail-side">
-          <section class="detail-status-card">
-            <div class="detail-side-head">
-              <strong>Runtime</strong>
-              <span class="muted detail-pane-label"></span>
-            </div>
-            <div class="detail-status-copy detail-runtime-note"></div>
-          </section>
+      <details class="detail-disclosure detail-live-disclosure">
+        <summary>
+          <span>Mailbox Detail</span>
+          <span class="muted">Live counters and mailbox-specific feedback</span>
+        </summary>
+        <div class="detail-live-slot"></div>
+      </details>
 
-          <section class="detail-status-card">
-            <div class="detail-side-head">
-              <strong>Latest Sender Activity</strong>
-              <span class="muted detail-last-age"></span>
-            </div>
-            <div class="last-line"></div>
-          </section>
+      <details class="detail-disclosure detail-webhook-disclosure">
+        <summary>
+          <span>Delivery / Webhook Detail</span>
+          <span class="muted">Delivery funnel, events, and webhook evidence</span>
+        </summary>
+        <div class="detail-webhook-slot"></div>
+      </details>
 
-          <section class="detail-side-card">
-            <div class="detail-side-head">
-              <strong>Queue Context</strong>
-              <span class="muted">Files and tmux pane</span>
-            </div>
-            <div class="profile-meta detail-meta"></div>
-          </section>
+      <details class="detail-disclosure detail-queue-disclosure">
+        <summary>
+          <span>Queue Context</span>
+          <span class="muted">Files, pacing, and tmux pane</span>
+        </summary>
+        <div class="profile-meta detail-meta"></div>
+      </details>
 
-          <details class="detail-pane detail-side-card">
-            <summary>Pane tail</summary>
-            <pre></pre>
-          </details>
-        </aside>
-      </div>
+      <details class="detail-disclosure detail-guard-disclosure">
+        <summary>
+          <span>Bounce Guard Detail</span>
+          <span class="muted">Suppression sync and recovery safeguards</span>
+        </summary>
+        <div class="detail-guard-slot"></div>
+      </details>
+
+      <details class="detail-pane detail-runtime-output">
+        <summary>Pane Tail / Runtime Output</summary>
+        <pre></pre>
+      </details>
     </article>
   `);
   node._refs = {
     title: node.querySelector("h3"),
-    health: node.querySelector(".detail-health-pill"),
+    stateLine: node.querySelector(".detail-state-line"),
+    stateDot: node.querySelector(".detail-state-dot"),
+    stateText: node.querySelector(".detail-state-text"),
     kicker: node.querySelector(".detail-kicker"),
-    badge: node.querySelector(".badge"),
     paneLabel: node.querySelector(".detail-pane-label"),
     runtimeNote: node.querySelector(".detail-runtime-note"),
     lastUpdate: node.querySelector(".detail-last-update"),
-    lastAge: node.querySelector(".detail-last-age"),
     actionNote: node.querySelector(".detail-action-note"),
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
-    metrics: node.querySelector(".detail-metrics"),
+    primaryWarning: node.querySelector(".detail-primary-warning-slot"),
+    coreRuntime: node.querySelector(".detail-core-runtime"),
     live: node.querySelector(".detail-live-slot"),
+    liveDisclosure: node.querySelector(".detail-live-disclosure"),
     guard: node.querySelector(".detail-guard-slot"),
+    guardDisclosure: node.querySelector(".detail-guard-disclosure"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
     webhook: node.querySelector(".detail-webhook-slot"),
+    webhookDisclosure: node.querySelector(".detail-webhook-disclosure"),
+    queueDisclosure: node.querySelector(".detail-queue-disclosure"),
     meta: node.querySelector(".detail-meta"),
-    lastLine: node.querySelector(".last-line"),
-    paneTail: node.querySelector(".detail-pane pre"),
+    paneTail: node.querySelector(".detail-runtime-output pre"),
   };
   return node;
 }
@@ -2951,43 +4563,49 @@ function createProfileDetailNode() {
 function updateProfileDetailNode(node, snapshot, profile) {
   const refs = node._refs || {
     title: node.querySelector("h3"),
-    health: node.querySelector(".detail-health-pill"),
+    stateLine: node.querySelector(".detail-state-line"),
+    stateDot: node.querySelector(".detail-state-dot"),
+    stateText: node.querySelector(".detail-state-text"),
     kicker: node.querySelector(".detail-kicker"),
-    badge: node.querySelector(".badge"),
     paneLabel: node.querySelector(".detail-pane-label"),
     runtimeNote: node.querySelector(".detail-runtime-note"),
     lastUpdate: node.querySelector(".detail-last-update"),
-    lastAge: node.querySelector(".detail-last-age"),
     actionNote: node.querySelector(".detail-action-note"),
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
-    metrics: node.querySelector(".detail-metrics"),
+    primaryWarning: node.querySelector(".detail-primary-warning-slot"),
+    coreRuntime: node.querySelector(".detail-core-runtime"),
     live: node.querySelector(".detail-live-slot"),
+    liveDisclosure: node.querySelector(".detail-live-disclosure"),
     guard: node.querySelector(".detail-guard-slot"),
+    guardDisclosure: node.querySelector(".detail-guard-disclosure"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
     webhook: node.querySelector(".detail-webhook-slot"),
+    webhookDisclosure: node.querySelector(".detail-webhook-disclosure"),
+    queueDisclosure: node.querySelector(".detail-queue-disclosure"),
     meta: node.querySelector(".detail-meta"),
-    lastLine: node.querySelector(".last-line"),
-    paneTail: node.querySelector(".detail-pane pre"),
+    paneTail: node.querySelector(".detail-runtime-output pre"),
   };
   node._refs = refs;
 
-  const statusClass = profileStatusClass(profile);
-  const progress = profile.max_total > 0 ? Math.min(100, Math.round((profile.run_sent / profile.max_total) * 100)) : 0;
+  node._refs = refs;
+
+  const activity = profileActivityState(profile);
+  const runtimeClass = `detail-runtime-${activity.tone || "neutral"}`;
   const pendingAction = pendingProfileActions.get(profile.name) || "";
   const startDisabled = Boolean(pendingAction) || !canStartProfile(profile);
   const stopDisabled = Boolean(pendingAction) || !canStopProfile(profile);
-  const metrics = [
-    { key: "pending", label: "Pending", value: profile.pending_count },
-    { key: "accepted", label: "Accepted", value: profile.run_sent },
-    { key: "awaiting", label: "Awaiting Outcome", value: profile.awaiting_outcome || 0 },
-    { key: "errors", label: "API Errors", value: profile.run_errors },
-    { key: "skipped", label: "Skipped", value: profile.run_skipped },
-  ];
+  const effectiveSpacing = Number(profile.effective_spacing_seconds || 0);
+  const effectivePace = Number(profile.effective_pace_per_hour || 0);
+  const paceDisplay = effectiveSpacing > 0 ? `${effectiveSpacing}s${effectivePace > 0 ? ` (~${effectivePace}/h)` : ""}` : "-";
+  const maxTotalRaw = Number(profile.max_total || 0);
+  const acceptedRaw = profileRunSentDisplay(profile);
+  const progress = maxTotalRaw > 0 ? Math.max(0, Math.min(100, (acceptedRaw / maxTotalRaw) * 100)) : 0;
   const metaBoxes = [
+    { label: "Effective Pace", value: paceDisplay },
     { label: "Queue File", value: profile.csv_path },
     { label: "Sender Log", value: profile.log_path },
     { label: "Configured Cap", value: profile.configured_max_total || "∞" },
@@ -2995,17 +4613,16 @@ function updateProfileDetailNode(node, snapshot, profile) {
     { label: "Session Pane", value: `${profile.pane_index} / ${profile.tmux_command || "-"}` },
   ];
 
+  node.className = `detail-card ${runtimeClass}`;
   node.dataset.profile = profile.name || "";
   setNodeText(refs.title, formatProfileName(profile.name));
-  refs.health.className = `health-pill health-pill-${profile.health_tone || "neutral"} detail-health-pill`;
-  setNodeText(refs.health, profile.health_label || "Healthy");
+  refs.stateLine.className = `detail-state-line detail-state-line-${activity.tone || "neutral"}`;
+  refs.stateDot.className = `detail-state-dot detail-state-dot-${activity.tone || "neutral"}`;
+  setNodeText(refs.stateText, profile.runtime_label || activity.label || "Stopped");
   setNodeText(refs.kicker, buildDetailKicker(profile));
-  refs.badge.className = `badge ${statusClass}`;
-  setNodeText(refs.badge, profile.runtime_label || "Stopped");
   setNodeText(refs.paneLabel, `Pane ${profile.pane_index} / ${profile.tmux_command || "-"}`);
   setNodeText(refs.runtimeNote, profile.runtime_note || "Pane is idle.");
   setNodeText(refs.lastUpdate, profileLastUpdateText(profile));
-  setNodeText(refs.lastAge, profileLastAgeText(profile));
   setNodeText(refs.actionNote, buildProfileActionNote(profile));
 
   refs.startButton.dataset.profile = profile.name || "";
@@ -3017,22 +4634,20 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.stopButton, pendingAction === "stop" ? "Stopping..." : "Stop");
 
   setNodeHtml(refs.feedback, renderProfileActionFeedback(profile));
-
-  syncKeyedChildren(
-    refs.metrics,
-    metrics,
-    (metric) => metric.key,
-    () => createMetricNode(),
-    (metricNode, metric) => updateMetricNode(metricNode, metric.label, metric.value),
-  );
+  setNodeHtml(refs.primaryWarning, renderDetailPrimaryWarning(profile));
+  setNodeHtml(refs.coreRuntime, renderDetailCoreRuntime(profile));
 
   setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
   setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}, snapshot.automation || {}));
+  if (refs.guardDisclosure) {
+    const showGuard = Boolean(profile.name === "private_jc" && String(refs.guard.innerHTML || "").trim());
+    refs.guardDisclosure.classList.toggle("hidden", !showGuard);
+  }
   setNodeText(
     refs.progressNote,
     `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.`,
   );
-  setNodeText(refs.progressValue, `${profile.run_sent}/${profile.max_total || "∞"}`);
+  setNodeText(refs.progressValue, `${acceptedRaw}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
   setNodeHtml(refs.webhook, renderWebhookSummary(profile, snapshot));
   setNodeHtml(
@@ -3043,37 +4658,6 @@ function updateProfileDetailNode(node, snapshot, profile) {
         <code class="detail-meta-value">${escapeHtml(item.value || "-")}</code>
       </div>
     `).join(""),
-  );
-  setNodeHtml(
-    refs.lastLine,
-    `
-      <div class="detail-activity-list">
-        <div class="detail-activity-row">
-          <span class="detail-activity-key">Status</span>
-          <span>${escapeHtml(senderLogStatusLabel(profile.last_status || "-"))}</span>
-        </div>
-        <div class="detail-activity-row">
-          <span class="detail-activity-key">Recipient</span>
-          <span>${escapeHtml(profile.last_email || "-")}</span>
-        </div>
-        <div class="detail-activity-row">
-          <span class="detail-activity-key">Logged</span>
-          <span>${escapeHtml(profile.last_timestamp || "-")}</span>
-        </div>
-        ${profile.run_started_at ? `
-          <div class="detail-activity-row">
-            <span class="detail-activity-key">Run anchor</span>
-            <span>${escapeHtml(profile.run_started_at)}</span>
-          </div>
-        ` : ""}
-        ${profile.last_info ? `
-          <div class="detail-activity-row detail-activity-row-info">
-            <span class="detail-activity-key">Info</span>
-            <code>${escapeHtml(profile.last_info)}</code>
-          </div>
-        ` : ""}
-      </div>
-    `,
   );
   setNodeText(refs.paneTail, profile.tmux_tail || "(no pane output)");
 }
@@ -3111,6 +4695,11 @@ function renderSnapshot(snapshot) {
   renderDetailSwitcher(snapshot, selectedProfile);
   renderProfileDetail(snapshot, selectedProfile);
   renderShardWriteGuard();
+  if (isActiveImportantLeadCheckJob(lastImportantDispatchJob)) {
+    renderImportantLeadDispatchJob(lastImportantDispatchJob);
+  } else {
+    renderImportantDispatch(lastImportantDispatch);
+  }
   if (!didHydrate && els.page) {
     didHydrate = true;
     requestAnimationFrame(() => {
@@ -3438,6 +5027,11 @@ function stopSocket() {
 
 async function bootstrapAuthenticatedDashboard() {
   await Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]);
+  await Promise.allSettled([
+    hydrateImportantLeadCheckJobOnLoad(),
+    hydrateImportantLeadVerifyJobOnLoad(),
+    hydrateImportantLeadDispatchJobOnLoad(),
+  ]);
   connectSocket();
 }
 
@@ -3472,8 +5066,11 @@ if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
-if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify());
-if (els.leadsImportantDispatchBtn) els.leadsImportantDispatchBtn.addEventListener("click", () => runImportantLeadDispatch());
+if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE));
+if (els.leadsImportantVerifyStrictBtn) els.leadsImportantVerifyStrictBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_STRICT_PUBLIC_PROOF));
+if (els.leadsImportantVerifyStopBtn) els.leadsImportantVerifyStopBtn.addEventListener("click", () => stopImportantLeadVerify());
+if (els.leadsImportantDispatchPreviewBtn) els.leadsImportantDispatchPreviewBtn.addEventListener("click", () => previewImportantLeadDispatch());
+if (els.leadsImportantDispatchConfirmBtn) els.leadsImportantDispatchConfirmBtn.addEventListener("click", () => confirmImportantLeadDispatch());
 if (els.leadsImportantInputText) {
   els.leadsImportantInputText.addEventListener("input", () => updateImportantLeadPasteGuardrails());
   els.leadsImportantInputText.addEventListener("change", () => updateImportantLeadPasteGuardrails());
@@ -3484,11 +5081,96 @@ if (els.leadsImportantUploadFile) {
 if (els.leadsImportantDispatchSourceMode) {
   els.leadsImportantDispatchSourceMode.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
 }
+if (els.leadsImportantDispatchCap) {
+  els.leadsImportantDispatchCap.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+}
 if (els.leadsUploadBtn) els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
 if (els.leadsCleanBtn) els.leadsCleanBtn.addEventListener("click", () => runLeadClean());
 if (els.leadsPreviewBtn) els.leadsPreviewBtn.addEventListener("click", () => previewLeadShard());
 if (els.leadsShardBtn) els.leadsShardBtn.addEventListener("click", () => runLeadShard());
 if (els.leadsRefreshBtn) els.leadsRefreshBtn.addEventListener("click", () => fetchLeadsStatus());
+if (els.leadsQuarantineRefreshBtn) els.leadsQuarantineRefreshBtn.addEventListener("click", () => refreshQuarantineReview(false, false));
+if (els.leadsQuarantinePromoteBtn) els.leadsQuarantinePromoteBtn.addEventListener("click", () => runQuarantineReviewAction("promote_dispatch_ready"));
+if (els.leadsQuarantineRejectBtn) els.leadsQuarantineRejectBtn.addEventListener("click", () => runQuarantineReviewAction("reject_permanently"));
+if (els.leadsQuarantineStrictBtn) els.leadsQuarantineStrictBtn.addEventListener("click", () => runQuarantineReviewAction("send_to_strict_verify"));
+if (els.leadsQuarantineNoteBtn) els.leadsQuarantineNoteBtn.addEventListener("click", () => runQuarantineReviewAction("update_operator_note"));
+if (els.leadsQuarantineReasonCode) els.leadsQuarantineReasonCode.addEventListener("change", () => refreshQuarantineReview(false, true));
+if (els.leadsQuarantineStage) els.leadsQuarantineStage.addEventListener("change", () => refreshQuarantineReview(false, true));
+if (els.leadsQuarantineStatus) els.leadsQuarantineStatus.addEventListener("change", () => refreshQuarantineReview(false, true));
+if (els.leadsQuarantineSort) els.leadsQuarantineSort.addEventListener("change", () => refreshQuarantineReview(false, true));
+if (els.leadsQuarantineResults) {
+  els.leadsQuarantineResults.addEventListener("click", (event) => {
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest?.("[data-quarantine-select]")) {
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-check-page]")) {
+      updateQuarantineSelectionForVisiblePage(true, lastQuarantineReview);
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-uncheck-page]")) {
+      updateQuarantineSelectionForVisiblePage(false, lastQuarantineReview);
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-select-all-filtered]")) {
+      selectAllFilteredQuarantineLeads();
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-clear-selection]")) {
+      clearQuarantineSelection();
+      renderQuarantineReview(lastQuarantineReview);
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-prev-page]")) {
+      moveQuarantinePage(-1);
+      return;
+    }
+    if (target?.closest?.("[data-quarantine-next-page]")) {
+      moveQuarantinePage(1);
+      return;
+    }
+    const inspectButton = target?.closest?.("[data-quarantine-inspect]");
+    if (inspectButton) {
+      const leadId = String(inspectButton.getAttribute("data-quarantine-inspect") || "");
+      if (leadId) {
+        void loadQuarantineReviewLeadDetail(leadId);
+      }
+      return;
+    }
+    const row = target?.closest?.("[data-quarantine-row]");
+    if (row) {
+      const leadId = String(row.getAttribute("data-quarantine-row") || "");
+      if (leadId) {
+        void loadQuarantineReviewLeadDetail(leadId);
+      }
+    }
+  });
+  els.leadsQuarantineResults.addEventListener("change", (event) => {
+    const inputTarget = event.target instanceof HTMLInputElement ? event.target : null;
+    const selectTarget = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (selectTarget?.hasAttribute("data-quarantine-page-size")) {
+      setQuarantineRowsPerPage(selectTarget.value);
+      return;
+    }
+    const target = inputTarget;
+    if (!target) return;
+    if (target.hasAttribute("data-quarantine-page-toggle")) {
+      updateQuarantineSelectionForVisiblePage(Boolean(target.checked), lastQuarantineReview);
+      return;
+    }
+    const leadId = String(target.getAttribute("data-quarantine-select") || "");
+    if (!leadId) return;
+    if (allFilteredQuarantineSelected) {
+      if (target.checked) excludedQuarantineLeadIds.delete(leadId);
+      else excludedQuarantineLeadIds.add(leadId);
+    } else if (target.checked) {
+      selectedQuarantineLeadIds.add(leadId);
+    } else {
+      selectedQuarantineLeadIds.delete(leadId);
+    }
+    renderQuarantineReview(lastQuarantineReview);
+  });
+}
 if (els.leadsShardConfirm) {
   els.leadsShardConfirm.addEventListener("input", () => renderShardWriteGuard());
   els.leadsShardConfirm.addEventListener("keydown", (event) => {

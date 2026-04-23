@@ -78,6 +78,35 @@ Delivered
         self.assertEqual("evt-123", events[0]["event_id"])
         self.assertEqual("sg_event_id:evt-123", events[0]["dedupe_key"])
 
+    def test_normalize_webhook_events_preserves_send_metadata_for_ledger_correlation(self) -> None:
+        received_at = datetime(2026, 3, 13, 12, 5, 0, tzinfo=timezone.utc)
+        events = normalize_webhook_events(
+            [
+                {
+                    "email": "User@Example.com",
+                    "event": "delivered",
+                    "timestamp": 1773403200,
+                    "sg_message_id": "abc123.recvd-1",
+                    "custom_args": {
+                        "profile": "sendgrid_annette",
+                        "shard": "recipients_sendgrid_1.csv",
+                        "provider": "sendgrid",
+                        "astra_run_id": "dispatch_run_1",
+                        "astra_recipient_id": "recipient-1",
+                        "astra_message_key": "message-1",
+                    },
+                }
+            ],
+            received_at_utc=received_at,
+        )
+
+        self.assertEqual("sendgrid_annette", events[0]["profile"])
+        self.assertEqual("recipients_sendgrid_1.csv", events[0]["shard"])
+        self.assertEqual("sendgrid", events[0]["provider"])
+        self.assertEqual("dispatch_run_1", events[0]["astra_run_id"])
+        self.assertEqual("recipient-1", events[0]["astra_recipient_id"])
+        self.assertEqual("message-1", events[0]["astra_message_key"])
+
     def test_dedupe_webhook_events_filters_retries_and_records_duplicate_stats(self) -> None:
         received_at = datetime(2026, 3, 13, 12, 5, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -23,7 +23,7 @@ from private_bounce_hygiene import private_bounce_guard_status
 from provider_pacing import provider_pacing_status
 from send_shard import PROFILES
 from sendgrid_hygiene import (
-    WEBHOOK_DEDUPE_DB,
+    WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
     domain_from_email,
     load_events_jsonl,
@@ -32,17 +32,19 @@ from sendgrid_hygiene import (
     parse_activity_file,
     parse_iso_utc,
 )
-
+from sendgrid_launch_auth import resolve_sendgrid_api_key
 
 ROOT = settings.APP_ROOT
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
 SHARDS_DIR = settings.SHARDS_DIR
 LOGS_DIR = settings.LOGS_DIR
 STATE_DIR = settings.STATE_DIR
+AUTO_STOP_EVENTS_PATH = STATE_DIR / "auto_stop_events.jsonl"
 ACTIVITY_LOG_PATH = settings.ACTIVITY_LOG_PATH
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 NORMALIZE_REPORT_PATH = settings.SENDGRID_NORMALIZE_REPORT_PATH
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
+WEBHOOK_DEDUPE_DB = SENDGRID_WEBHOOK_DEDUPE_DB
 WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
 SENDGRID_WEBHOOK_RECEIVER_URL = settings.SENDGRID_WEBHOOK_RECEIVER_URL
 SENDGRID_WEBHOOK_RECEIVER_API_TOKEN = settings.SENDGRID_WEBHOOK_RECEIVER_API_TOKEN
@@ -143,8 +145,9 @@ ALERT_TOTAL_AWAITING_THRESHOLD = _env_int("DASHBOARD_ALERT_TOTAL_AWAITING", 10)
 ALERT_PROFILE_AWAITING_THRESHOLD = _env_int("DASHBOARD_ALERT_PROFILE_AWAITING", 5)
 ALERT_UNMAPPED_THRESHOLD = _env_int("DASHBOARD_ALERT_UNMAPPED", 10)
 ALERT_WEBHOOK_STALE_MINUTES = _env_int("DASHBOARD_ALERT_WEBHOOK_STALE_MINUTES", 20)
+RUNTIME_STALLED_MIN_SECONDS = _env_int("DASHBOARD_RUNTIME_STALLED_SECONDS", 300)
 PROFILE_GUARD_ENABLED = _env_bool("DASHBOARD_PROFILE_GUARD_ENABLED", True)
-PROFILE_GUARD_BOUNCE_THRESHOLD = _env_int("DASHBOARD_PROFILE_GUARD_BOUNCES", 3)
+PROFILE_GUARD_BOUNCE_THRESHOLD = _env_int("DASHBOARD_PROFILE_GUARD_BOUNCES", 4)
 PROFILE_GUARD_RECENT_ACCEPT_WINDOW = _env_int("DASHBOARD_PROFILE_GUARD_RECENT_ACCEPT_WINDOW", 10)
 PROFILE_GUARD_NOTICE_HOURS = _env_int("DASHBOARD_PROFILE_GUARD_NOTICE_HOURS", 12)
 PROFILE_GUARD_SPAMREPORT_ENABLED = _env_bool("DASHBOARD_PROFILE_GUARD_SPAMREPORT", True)
@@ -181,6 +184,7 @@ class ProfileSnapshot:
     last_email: str
     last_info: str
     last_timestamp: str
+    last_timestamp_utc: str
     last_age: str
     tmux_running: bool
     tmux_dead: bool
@@ -198,6 +202,10 @@ class ProfileSnapshot:
     health_label: str = ""
     health_tone: str = ""
     health_note: str = ""
+    interval_seconds: int = 0
+    effective_spacing_seconds: int = 0
+    effective_pace_per_hour: int = 0
+    last_sent_timestamp_utc: str = ""
 
 
 @dataclass(frozen=True)
@@ -507,6 +515,32 @@ def infer_runtime_state(current_cmd: str, pane_dead: bool, tail: str) -> Tuple[s
     return "stopped", "Stopped", "Pane is idle."
 
 
+def _runtime_stalled_threshold_seconds(effective_cooldown_seconds: int) -> int:
+    return max(RUNTIME_STALLED_MIN_SECONDS, max(0, int(effective_cooldown_seconds or 0)) * 3)
+
+
+def _runtime_looks_stalled(
+    *,
+    runtime_state: str,
+    pane_dead: bool,
+    current_cmd: str,
+    last_timestamp: Optional[datetime],
+    cooldown_remaining_seconds: int,
+    provider_cooldown_remaining_seconds: int,
+    effective_cooldown_seconds: int,
+) -> bool:
+    if runtime_state != "cooldown" or pane_dead:
+        return False
+    if (current_cmd or "").strip() in SHELL_COMMANDS:
+        return False
+    if cooldown_remaining_seconds > 0 or provider_cooldown_remaining_seconds > 0:
+        return False
+    if last_timestamp is None:
+        return False
+    elapsed_seconds = max(0, int((datetime.now(timezone.utc) - last_timestamp).total_seconds()))
+    return elapsed_seconds >= _runtime_stalled_threshold_seconds(effective_cooldown_seconds)
+
+
 def profile_is_active(snapshot: ProfileSnapshot) -> bool:
     return snapshot.runtime_state in ACTIVE_RUNTIME_STATES and not snapshot.tmux_dead
 
@@ -667,7 +701,7 @@ def tmux_capture_tail(pane_index: int, session: str = "sendgrid", lines: int = 1
 
 def load_sendgrid_profile_snapshots(session: str = "sendgrid", tail_lines: int = 12) -> List[ProfileSnapshot]:
     pane_info = tmux_pane_map(session)
-    return [load_profile_snapshot(name, idx, pane_info, tail_lines=tail_lines) for idx, name in enumerate(SENDGRID_PROFILES)]
+    return [load_profile_snapshot(name, idx, pane_info, tail_lines=tail_lines, session=session) for idx, name in enumerate(SENDGRID_PROFILES)]
 
 
 def active_sendgrid_profile_snapshots(session: str = "sendgrid", tail_lines: int = 12) -> List[ProfileSnapshot]:
@@ -683,12 +717,50 @@ def load_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapsh
         if pane_info is None:
             pane_info = tmux_pane_map(session)
             pane_maps[session] = pane_info
-        snapshots.append(load_profile_snapshot(profile_name, profile_pane_index(profile_name), pane_info, tail_lines=tail_lines))
+        snapshots.append(load_profile_snapshot(profile_name, profile_pane_index(profile_name), pane_info, tail_lines=tail_lines, session=session))
     return snapshots
+
+
+def _detect_running_send_shard_profiles() -> set:
+    """Return a set of profile names that have a running send_shard.py process.
+
+    This is a best-effort fallback for cases where senders were started
+    outside the tmux session the dashboard manages.
+    """
+    out = set()
+    try:
+        ps = subprocess.check_output(["ps", "aux"], text=True)
+    except Exception:
+        return out
+    for line in ps.splitlines():
+        if "send_shard.py" not in line:
+            continue
+        m = re.search(r"--profile\s+(\S+)", line)
+        if m:
+            out.add(m.group(1))
+    return out
 
 
 def active_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapshot]:
     return [snapshot for snapshot in load_dashboard_profile_snapshots(tail_lines=tail_lines) if profile_is_active(snapshot)]
+
+
+def _apply_process_runtime_fallback(snapshot: ProfileSnapshot) -> None:
+    snapshot.tmux_running = True
+    snapshot.tmux_dead = False
+    last_send_timestamp = parse_log_timestamp(snapshot.last_sent_timestamp_utc)
+    if last_send_timestamp and snapshot.effective_spacing_seconds > 0:
+        elapsed_seconds = max(0, int((datetime.now(timezone.utc) - last_send_timestamp).total_seconds()))
+        remaining_seconds = max(0, int(snapshot.effective_spacing_seconds) - elapsed_seconds)
+        if remaining_seconds > 0:
+            snapshot.runtime_state = "cooldown"
+            snapshot.runtime_label = "Cooldown"
+            snapshot.cooldown_remaining_seconds = remaining_seconds
+            snapshot.runtime_note = f"Cooling down between sends: {remaining_seconds}s remaining."
+            return
+    snapshot.runtime_state = "running"
+    snapshot.runtime_label = "Running"
+    snapshot.runtime_note = "Sender is actively processing recipients."
 
 
 def run_sendgrid_launcher() -> tuple[bool, str]:
@@ -838,9 +910,10 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     if not PYTHON_BIN.exists():
         return False, f"Missing Python venv at {PYTHON_BIN}"
 
-    api_key = _load_env_value("SENDGRID_API_KEY")
-    if not api_key:
-        return False, "SENDGRID_API_KEY is not available in the dashboard environment."
+    key_resolution = resolve_sendgrid_api_key(env=os.environ, env_files=SENDGRID_ENV_FILES)
+    if not key_resolution.ok:
+        return False, key_resolution.error
+    api_key = key_resolution.key
 
     ok, message = ensure_sendgrid_session_layout(session)
     if not ok:
@@ -937,13 +1010,21 @@ def archive_reset_sender_logs(session: str = "sendgrid") -> tuple[bool, str]:
     return True, f"Archived and reset {reset_count} sender log(s) to {backup_root}."
 
 
-def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[str, Dict[str, str]], tail_lines: int = 16) -> ProfileSnapshot:
+def load_profile_snapshot(
+    profile_name: str,
+    pane_index: int,
+    pane_info: Dict[str, Dict[str, str]],
+    tail_lines: int = 16,
+    session: str = TMUX_SESSION_NAME,
+) -> ProfileSnapshot:
     cfg = PROFILES[profile_name]
     csv_path = _profile_csv_path(cfg)
     log_path = _profile_log_path(cfg)
     configured_max_total = int(cfg.get("max_total") or 0)
     effective_max_total = dashboard_send_cap_per_profile() if profile_name in SENDGRID_PROFILES else configured_max_total
+    interval_seconds = max(0, int(cfg.get("interval") or 0))
     cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
+    effective_spacing_seconds = cooldown_seconds if bool(cfg.get("repeat")) and cooldown_seconds > 0 else interval_seconds
     provider_name = str(cfg.get("provider") or "").strip().lower()
     pacing = provider_pacing_status(profile_name, provider_name, cooldown_seconds)
     effective_cooldown_seconds = max(cooldown_seconds, int(pacing.get("recommended_cooldown_seconds") or 0))
@@ -961,6 +1042,7 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
     last_email = ""
     last_info = ""
     last_timestamp: Optional[datetime] = None
+    last_sent_timestamp: Optional[datetime] = None
     run_started_at: Optional[datetime] = None
 
     for row in rows:
@@ -982,6 +1064,8 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
             last_status = status
             last_email = (row.get("Email") or "").strip()
             last_info = (row.get("Info") or "").strip()
+        if ts and status == "SENT" and (last_sent_timestamp is None or ts >= last_sent_timestamp):
+            last_sent_timestamp = ts
 
     if run_started_at is not None:
         for row in rows:
@@ -999,7 +1083,7 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
     pane = pane_info.get(str(pane_index), {})
     current_cmd = (pane.get("cmd") or "").strip()
     pane_dead = pane.get("dead") == "1"
-    tmux_tail = tmux_capture_tail(pane_index, lines=tail_lines) if pane else ""
+    tmux_tail = tmux_capture_tail(pane_index, session=session, lines=tail_lines) if pane else ""
     runtime_state, runtime_label, runtime_note = infer_runtime_state(current_cmd, pane_dead, tmux_tail)
     cooldown_remaining_seconds = 0
     provider_cooldown_remaining_seconds = max(0, int(pacing.get("cooldown_remaining_seconds") or 0))
@@ -1017,15 +1101,33 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
             f"Provider cooldown active for about {max(1, int((provider_cooldown_remaining_seconds + 59) / 60))} minute(s). "
             f"Next safe start {format_when(parse_iso_utc(provider_cooldown_until)) or provider_cooldown_until}."
         )
-    if runtime_state == "cooldown" and effective_cooldown_seconds > 0 and last_timestamp is not None:
-        elapsed = max(0, int((datetime.now(timezone.utc) - last_timestamp).total_seconds()))
-        cooldown_remaining_seconds = max(0, effective_cooldown_seconds - elapsed)
+    if runtime_state == "cooldown":
+        cooldown_remaining_seconds = latest_batch_sleep_seconds(tmux_tail)
+        if cooldown_remaining_seconds <= 0 and effective_spacing_seconds > 0 and last_sent_timestamp is not None:
+            elapsed = max(0, int((datetime.now(timezone.utc) - last_sent_timestamp).total_seconds()))
+            cooldown_remaining_seconds = max(0, effective_spacing_seconds - elapsed)
         runtime_note = f"Cooling down between sends: {cooldown_remaining_seconds}s remaining."
     elif restart_blocked and runtime_state not in ACTIVE_RUNTIME_STATES:
         runtime_state = "paused"
         runtime_label = "Paused"
         runtime_note = restart_block_reason
+    if _runtime_looks_stalled(
+        runtime_state=runtime_state,
+        pane_dead=pane_dead,
+        current_cmd=current_cmd,
+        last_timestamp=last_timestamp,
+        cooldown_remaining_seconds=cooldown_remaining_seconds,
+        provider_cooldown_remaining_seconds=provider_cooldown_remaining_seconds,
+        effective_cooldown_seconds=effective_cooldown_seconds,
+    ):
+        runtime_state = "stalled"
+        runtime_label = "Stalled"
+        runtime_note = (
+            f"No fresh sender activity for {format_age(last_timestamp)} after the last cooldown marker. "
+            "Process is still alive, but this sender appears idle-stale."
+        )
     running = runtime_state in ACTIVE_RUNTIME_STATES and not pane_dead
+    effective_pace_per_hour = max(1, round(3600 / effective_spacing_seconds)) if effective_spacing_seconds > 0 else 0
     return ProfileSnapshot(
         name=profile_name,
         pane_index=pane_index,
@@ -1033,6 +1135,7 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
         log_path=log_path.name,
         configured_max_total=configured_max_total,
         max_total=effective_max_total,
+        interval_seconds=interval_seconds,
         cooldown_seconds=cooldown_seconds,
         cooldown_remaining_seconds=cooldown_remaining_seconds,
         pending_count=count_pending(csv_path),
@@ -1047,6 +1150,8 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
         last_email=last_email,
         last_info=last_info,
         last_timestamp=format_when(last_timestamp),
+        last_timestamp_utc=last_timestamp.astimezone(timezone.utc).isoformat() if last_timestamp else "",
+        last_sent_timestamp_utc=last_sent_timestamp.astimezone(timezone.utc).isoformat() if last_sent_timestamp else "",
         last_age=format_age(last_timestamp),
         tmux_running=running,
         tmux_dead=pane_dead,
@@ -1056,6 +1161,8 @@ def load_profile_snapshot(profile_name: str, pane_index: int, pane_info: Dict[st
         runtime_label=runtime_label,
         runtime_note=runtime_note,
         effective_cooldown_seconds=effective_cooldown_seconds,
+        effective_spacing_seconds=effective_spacing_seconds,
+        effective_pace_per_hour=effective_pace_per_hour,
         provider_cooldown_remaining_seconds=provider_cooldown_remaining_seconds,
         provider_cooldown_until=provider_cooldown_until,
         restart_blocked=restart_blocked,
@@ -1553,18 +1660,32 @@ def recent_failure_count(activity: Dict[str, object]) -> int:
 
 def build_run_status_items(
     session_label: str,
-    snapshots: List[ProfileSnapshot],
+    snapshots: Sequence[object],
     recent_failures: int,
     historical_errors_today: int,
     auto_stop_events: Optional[Sequence[Dict[str, object]]] = None,
 ) -> List[str]:
+    def profile_value(profile: object, key: str, default: object = "") -> object:
+        if isinstance(profile, dict):
+            return profile.get(key, default)
+        return getattr(profile, key, default)
+
     items: List[str] = []
     auto_stop_events = list(auto_stop_events or [])
-    dead = [s.name.replace("sendgrid_", "") for s in snapshots if s.tmux_dead]
-    errored = [s.name.replace("sendgrid_", "") for s in snapshots if s.runtime_state == "error"]
-    scheduled = [s.name.replace("sendgrid_", "") for s in snapshots if s.runtime_state == "scheduled_stop"]
-    finished = [s.name.replace("sendgrid_", "") for s in snapshots if s.runtime_state == "finished"]
-    live_errors = [s.name.replace("sendgrid_", "") for s in snapshots if s.run_errors > 0]
+    dead = [str(profile_value(s, "name", "")).replace("sendgrid_", "") for s in snapshots if bool(profile_value(s, "tmux_dead", False))]
+    errored = [str(profile_value(s, "name", "")).replace("sendgrid_", "") for s in snapshots if str(profile_value(s, "runtime_state", "")) == "error"]
+    scheduled = [str(profile_value(s, "name", "")).replace("sendgrid_", "") for s in snapshots if str(profile_value(s, "runtime_state", "")) == "scheduled_stop"]
+    finished = [str(profile_value(s, "name", "")).replace("sendgrid_", "") for s in snapshots if str(profile_value(s, "runtime_state", "")) == "finished"]
+    active_issues = [
+        str(profile_value(s, "name", "")).replace("sendgrid_", "")
+        for s in snapshots
+        if str(profile_value(s, "run_issue_state", "")) == "active"
+    ]
+    recovered_issues = [
+        str(profile_value(s, "name", "")).replace("sendgrid_", "")
+        for s in snapshots
+        if str(profile_value(s, "run_issue_state", "")) == "recovered"
+    ]
     for event in auto_stop_events:
         if not event.get("ok"):
             continue
@@ -1581,8 +1702,10 @@ def build_run_status_items(
         items.append(f"Stopped by schedule: {', '.join(scheduled)}.")
     if finished:
         items.append(f"Finished current run target: {', '.join(finished)}.")
-    if live_errors:
-        items.append(f"Current run errors on: {', '.join(live_errors)}.")
+    if active_issues:
+        items.append(f"Active sender issues now: {', '.join(active_issues)}.")
+    if recovered_issues:
+        items.append(f"Recovered earlier in this run: {', '.join(recovered_issues)}.")
     if recent_failures > 0:
         items.append(f"Recent SendGrid failures in selected window: {recent_failures}.")
     if historical_errors_today > 0:
@@ -1604,6 +1727,91 @@ def build_telemetry_notes(unmapped_events: int) -> List[str]:
     return items
 
 
+def _profile_evidence_text(profile: Dict[str, object]) -> str:
+    parts = [
+        profile.get("runtime_note"),
+        profile.get("last_info"),
+        profile.get("last_status"),
+        profile.get("tmux_tail"),
+        profile.get("restart_block_reason"),
+    ]
+    return "\n".join(str(part or "") for part in parts).lower()
+
+
+def _looks_like_auth_401(evidence: str) -> bool:
+    return "401" in evidence and "unauthorized" in evidence
+
+
+def _looks_like_auth_403(evidence: str) -> bool:
+    return "403" in evidence or "forbidden" in evidence
+
+
+def _looks_like_account_block(evidence: str) -> bool:
+    return any(token in evidence for token in ("account-level error", "credits/region", "account_error"))
+
+
+def _looks_like_transient_smtp_auth(evidence: str) -> bool:
+    return any(
+        token in evidence
+        for token in (
+            "temporary authentication failure",
+            "connection lost to authentication server",
+            "454",
+            "4.7.0",
+        )
+    )
+
+
+def _looks_like_dns_error(evidence: str) -> bool:
+    return any(
+        token in evidence
+        for token in (
+            "nodename nor servname provided",
+            "[errno 8]",
+            "temporary failure in name resolution",
+        )
+    )
+
+
+def _webhook_is_stale(webhook_health: Dict[str, object]) -> bool:
+    if str(webhook_health.get("last_received_age") or "").strip() == "never":
+        return True
+    last_received = parse_iso_utc(webhook_health.get("last_received_iso"))
+    if not last_received:
+        return True
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=ALERT_WEBHOOK_STALE_MINUTES)
+    return ALERT_WEBHOOK_STALE_MINUTES > 0 and last_received < stale_cutoff
+
+
+def _profile_uses_sendgrid(profile: Dict[str, object]) -> bool:
+    name = str(profile.get("name") or "").strip().lower()
+    csv_path = str(profile.get("csv_path") or "").strip().lower()
+    log_path = str(profile.get("log_path") or "").strip().lower()
+    return name in SENDGRID_PROFILES or name.startswith("sendgrid_") or "sendgrid" in csv_path or "sendgrid" in log_path
+
+
+def _profile_uses_private(profile: Dict[str, object]) -> bool:
+    name = str(profile.get("name") or "").strip().lower()
+    csv_path = str(profile.get("csv_path") or "").strip().lower()
+    log_path = str(profile.get("log_path") or "").strip().lower()
+    return name.startswith("private_") or "private" in csv_path or "private" in log_path
+
+
+def _run_issue_state(profile: Dict[str, object]) -> str:
+    run_errors = int(profile.get("run_errors", 0) or 0)
+    if run_errors <= 0:
+        return "none"
+    runtime_state = str(profile.get("runtime_state") or "")
+    last_status = str(profile.get("last_status") or "").strip().upper()
+    if runtime_state in {"error", "dead"}:
+        return "active"
+    if runtime_state in ACTIVE_RUNTIME_STATES and last_status not in {"SENT", "SKIP"}:
+        return "active"
+    if last_status == "SENT" or runtime_state in {"finished", "stopped", "scheduled_stop"}:
+        return "recovered"
+    return "historical"
+
+
 def build_profile_health_status(
     profile: Dict[str, object],
     *,
@@ -1614,12 +1822,60 @@ def build_profile_health_status(
     runtime_state = str(profile.get("runtime_state") or "")
     run_errors = int(profile.get("run_errors", 0) or 0)
     provider_cooldown = max(0, int(profile.get("provider_cooldown_remaining_seconds", 0) or 0))
+    evidence = _profile_evidence_text(profile)
+    run_issue_state = _run_issue_state(profile)
+    is_sendgrid = _profile_uses_sendgrid(profile)
+    is_private = _profile_uses_private(profile)
+
+    if is_sendgrid and (_looks_like_auth_401(evidence) or ("auth_error" in evidence and "sendgrid" in evidence)):
+        return {
+            "label": "Blocked",
+            "tone": "bad",
+            "note": "SendGrid auth failed with 401 Unauthorized.",
+            "reason_code": "AUTH_401",
+            "reason_note": "SendGrid auth failed with 401 Unauthorized.",
+            "readiness_label": "Blocked",
+            "readiness_tone": "bad",
+            "readiness_note": "Cannot send until the SendGrid key/account context is fixed.",
+            "telemetry_label": "Low",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Runtime status is current, but delivery telemetry is not trustworthy until auth is fixed.",
+            "run_issue_state": "active",
+        }
+
+    if is_sendgrid and (_looks_like_auth_403(evidence) or _looks_like_account_block(evidence)):
+        return {
+            "label": "Blocked",
+            "tone": "bad",
+            "note": "SendGrid account access is blocked or forbidden for this sender.",
+            "reason_code": "ACCOUNT_BLOCKED",
+            "reason_note": "SendGrid account access is blocked or forbidden for this sender.",
+            "readiness_label": "Blocked",
+            "readiness_tone": "bad",
+            "readiness_note": "Cannot send until the provider account issue is resolved.",
+            "telemetry_label": "Low",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Runtime status is current, but account-level failures block useful delivery telemetry.",
+            "run_issue_state": "active",
+        }
+
     if provider_cooldown > 0 or bool(profile.get("restart_blocked")) or runtime_state == "paused":
-        remaining_minutes = max(1, int((provider_cooldown + 59) / 60))
+        remaining_minutes = max(1, int((provider_cooldown + 59) / 60)) if provider_cooldown else 0
+        paused_note = str(profile.get("restart_block_reason") or f"Provider cooldown active for about {remaining_minutes} minute(s).")
+        reason_code = "THROTTLE_COOLDOWN" if "throttle" in evidence else "PROVIDER_COOLDOWN"
         return {
             "label": "Paused",
             "tone": "paused",
-            "note": str(profile.get("restart_block_reason") or f"Provider cooldown active for about {remaining_minutes} minute(s)."),
+            "note": paused_note,
+            "reason_code": reason_code,
+            "reason_note": paused_note,
+            "readiness_label": "Cooling Down",
+            "readiness_tone": "warn",
+            "readiness_note": paused_note,
+            "telemetry_label": "Medium",
+            "telemetry_tone": "neutral",
+            "telemetry_note": "Runtime state is current; sender is paused by a provider cooldown.",
+            "run_issue_state": run_issue_state,
         }
 
     if name == "private_jc" and bool(private_bounce_guard.get("cooldown_active")):
@@ -1629,13 +1885,46 @@ def build_profile_health_status(
             "label": "Paused",
             "tone": "paused",
             "note": f"Bounce guard cooldown active for about {remaining_minutes} minute(s).",
+            "reason_code": "BOUNCE_GUARD",
+            "reason_note": f"Bounce guard cooldown active for about {remaining_minutes} minute(s).",
+            "readiness_label": "Paused",
+            "readiness_tone": "warn",
+            "readiness_note": "Resume after the private bounce guard cooldown ends.",
+            "telemetry_label": "Medium",
+            "telemetry_tone": "neutral",
+            "telemetry_note": "Private sender telemetry is current, but JC is paused by bounce guard protection.",
+            "run_issue_state": run_issue_state,
         }
 
-    if runtime_state in {"error", "dead"} or run_errors > 0:
+    if runtime_state in {"error", "dead"}:
+        if is_private and _looks_like_transient_smtp_auth(evidence):
+            return {
+                "label": "Watch",
+                "tone": "warn",
+                "note": "Temporary SMTP authentication trouble needs operator review.",
+                "reason_code": "TRANSIENT_SMTP_AUTH",
+                "reason_note": "Temporary SMTP authentication trouble needs operator review.",
+                "readiness_label": "Not Ready",
+                "readiness_tone": "warn",
+                "readiness_note": "Wait for the temporary auth condition to clear before restarting.",
+                "telemetry_label": "Medium",
+                "telemetry_tone": "neutral",
+                "telemetry_note": "Runtime state is current; delivery telemetry still depends on sender logs.",
+                "run_issue_state": "active",
+            }
         return {
-            "label": "Risk",
-            "tone": "bad",
-            "note": "Sender has current-run errors and needs review.",
+            "label": "Watch",
+            "tone": "warn",
+            "note": str(profile.get("runtime_note") or "Sender is currently failing and needs review."),
+            "reason_code": "ACTIVE_RUNTIME_ERROR",
+            "reason_note": str(profile.get("runtime_note") or "Sender is currently failing and needs review."),
+            "readiness_label": "Not Ready",
+            "readiness_tone": "bad",
+            "readiness_note": "Sender is not ready until the current runtime issue is cleared.",
+            "telemetry_label": "Low",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Status is inferred mostly from pane output while the sender is failing.",
+            "run_issue_state": "active",
         }
 
     if name == "private_jc" and bool(private_bounce_guard.get("sync_error_active")):
@@ -1643,6 +1932,32 @@ def build_profile_health_status(
             "label": "Watch",
             "tone": "warn",
             "note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
+            "reason_code": "BOUNCE_SYNC_ERROR",
+            "reason_note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
+            "readiness_label": "Telemetry Degraded",
+            "readiness_tone": "warn",
+            "readiness_note": "Sender can run, but private bounce telemetry needs attention.",
+            "telemetry_label": "Low",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Private bounce sync is currently failing.",
+            "run_issue_state": run_issue_state,
+        }
+
+    if runtime_state == "stalled":
+        stalled_note = str(profile.get("runtime_note") or "Sender process is alive, but no fresh send/log activity has arrived.")
+        return {
+            "label": "Watch",
+            "tone": "warn",
+            "note": stalled_note,
+            "reason_code": "RUNTIME_STALLED",
+            "reason_note": stalled_note,
+            "readiness_label": "Needs Review",
+            "readiness_tone": "warn",
+            "readiness_note": "Process is still alive, but this sender has gone idle beyond its expected cooldown window.",
+            "telemetry_label": "Medium",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Pane output still shows a cooldown marker, but sender activity appears stale.",
+            "run_issue_state": run_issue_state,
         }
 
     if name == "private_jc" and bool(private_bounce_guard.get("sync_stale")) and bool(private_bounce_guard.get("profile_active")):
@@ -1650,36 +1965,145 @@ def build_profile_health_status(
             "label": "Watch",
             "tone": "warn",
             "note": "Private bounce sync is stale while JC is active.",
+            "reason_code": "BOUNCE_SYNC_STALE",
+            "reason_note": "Private bounce sync is stale while JC is active.",
+            "readiness_label": "Telemetry Degraded",
+            "readiness_tone": "warn",
+            "readiness_note": "Sender can run, but private bounce telemetry is stale.",
+            "telemetry_label": "Low",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Private bounce sync is stale while JC is active.",
+            "run_issue_state": run_issue_state,
         }
 
-    if name in SENDGRID_PROFILES and str(webhook_health.get("last_received_age") or "").strip() == "never":
+    if is_sendgrid and _webhook_is_stale(webhook_health):
         return {
             "label": "Watch",
             "tone": "warn",
-            "note": "No recent webhook intake; delivery outcomes may lag or be stale.",
+            "note": "Webhook intake is stale for the current active window.",
+            "reason_code": "WEBHOOK_STALE",
+            "reason_note": "Webhook intake is stale for the current active window.",
+            "readiness_label": "Telemetry Degraded",
+            "readiness_tone": "warn",
+            "readiness_note": "Sending can continue, but delivery outcomes are stale or missing.",
+            "telemetry_label": str("Low" if str(webhook_health.get("last_received_age") or "").strip() == "never" else "Medium"),
+            "telemetry_tone": "warn",
+            "telemetry_note": (
+                "No recent SendGrid webhook intake detected."
+                if str(webhook_health.get("last_received_age") or "").strip() == "never"
+                else "SendGrid webhook intake is stale for the current active window."
+            ),
+            "run_issue_state": run_issue_state,
         }
 
-    if name in SENDGRID_PROFILES:
-        last_received = parse_iso_utc(webhook_health.get("last_received_iso"))
-        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=ALERT_WEBHOOK_STALE_MINUTES)
-        if ALERT_WEBHOOK_STALE_MINUTES > 0 and last_received and last_received < stale_cutoff:
-            return {
-                "label": "Watch",
-                "tone": "warn",
-                "note": "Webhook intake is stale for the current active window.",
-            }
-
-    if name in SENDGRID_PROFILES and int(profile.get("awaiting_outcome", 0) or 0) >= ALERT_PROFILE_AWAITING_THRESHOLD > 0:
+    if is_sendgrid and int(profile.get("awaiting_outcome", 0) or 0) >= ALERT_PROFILE_AWAITING_THRESHOLD > 0:
         return {
             "label": "Watch",
             "tone": "warn",
             "note": "Accepted recipients are backing up without final outcomes.",
+            "reason_code": "BACKLOG_HIGH",
+            "reason_note": "Accepted recipients are backing up without final outcomes.",
+            "readiness_label": "Ready",
+            "readiness_tone": "good",
+            "readiness_note": "Sender can still send, but delivery follow-through needs attention.",
+            "telemetry_label": "Medium",
+            "telemetry_tone": "warn",
+            "telemetry_note": "Runtime is current, but delivery outcomes are lagging behind accepted sends.",
+            "run_issue_state": run_issue_state,
+        }
+
+    if run_errors > 0:
+        if run_issue_state == "recovered":
+            if is_private and _looks_like_dns_error(evidence):
+                reason_code = "RECOVERED_DNS_ERROR"
+                reason_note = "Recovered from a transient DNS/network resolution failure earlier in this run."
+            elif is_private and _looks_like_transient_smtp_auth(evidence):
+                reason_code = "TRANSIENT_SMTP_AUTH"
+                reason_note = "Recovered from a temporary SMTP authentication issue earlier in this run."
+            else:
+                reason_code = "RECOVERED_RUN_ERROR"
+                reason_note = "Recovered from an earlier sender error in this run."
+            return {
+                "label": "Recovered",
+                "tone": "neutral",
+                "note": reason_note,
+                "reason_code": reason_code,
+                "reason_note": reason_note,
+                "readiness_label": "Ready",
+                "readiness_tone": "good",
+                "readiness_note": "Sender is currently able to send, but this run had a recovered issue.",
+                "telemetry_label": "Medium" if is_private else "High",
+                "telemetry_tone": "neutral",
+                "telemetry_note": (
+                    "Current sender state looks stable, but this run already recorded a recovered issue."
+                ),
+                "run_issue_state": run_issue_state,
+            }
+        if run_issue_state == "historical":
+            return {
+                "label": "Watch",
+                "tone": "warn",
+                "note": "This run recorded an earlier issue, but it is not the dominant live condition now.",
+                "reason_code": "RUN_ERROR_HISTORY",
+                "reason_note": "This run recorded an earlier issue, but it is not the dominant live condition now.",
+                "readiness_label": "Ready",
+                "readiness_tone": "good",
+                "readiness_note": "Sender appears ready, with earlier current-run error history retained for review.",
+                "telemetry_label": "Medium" if is_private else "High",
+                "telemetry_tone": "neutral",
+                "telemetry_note": "Runtime is current; review the run history if the sender degrades again.",
+                "run_issue_state": run_issue_state,
+            }
+
+    if runtime_state == "stopped" and str(profile.get("runtime_note") or "").lower().startswith("stop:"):
+        return {
+            "label": "Healthy",
+            "tone": "good",
+            "note": str(profile.get("runtime_note") or "Stopped manually."),
+            "reason_code": "MANUAL_STOP",
+            "reason_note": "Sender is idle after a manual stop.",
+            "readiness_label": "Ready",
+            "readiness_tone": "good",
+            "readiness_note": "Safe to start again when you want this sender live.",
+            "telemetry_label": "Medium" if is_private else "High",
+            "telemetry_tone": "neutral",
+            "telemetry_note": "No meaningful current issue is active for this sender.",
+            "run_issue_state": run_issue_state,
+        }
+
+    if runtime_state == "finished":
+        return {
+            "label": "Healthy",
+            "tone": "good",
+            "note": str(profile.get("runtime_note") or "Sender finished cleanly."),
+            "reason_code": "FINISHED_CLEAN",
+            "reason_note": "Sender finished the current run target cleanly.",
+            "readiness_label": "Ready",
+            "readiness_tone": "good",
+            "readiness_note": "Safe to start again when more recipients are queued.",
+            "telemetry_label": "Medium" if is_private else "High",
+            "telemetry_tone": "neutral",
+            "telemetry_note": "No meaningful current issue is active for this sender.",
+            "run_issue_state": run_issue_state,
         }
 
     return {
         "label": "Healthy",
         "tone": "good",
         "note": "No live sender risk detected right now.",
+        "reason_code": "READY",
+        "reason_note": "No dominant sender issue is active right now.",
+        "readiness_label": "Ready",
+        "readiness_tone": "good",
+        "readiness_note": "Sender is clear to run with current controls.",
+        "telemetry_label": "Medium" if is_private else "High",
+        "telemetry_tone": "neutral",
+        "telemetry_note": (
+            "Private sender state is inferred from sender logs and mailbox-side signals."
+            if is_private
+            else "Runtime state and delivery telemetry are aligned."
+        ),
+        "run_issue_state": run_issue_state,
     }
 
 
@@ -1784,8 +2208,12 @@ def build_threshold_alerts(
     active_error_profiles = [
         str(profile.get("name", "")).replace("sendgrid_", "")
         for profile in profile_dicts
-        if int(profile.get("run_errors", 0) or 0) > 0
-        and str(profile.get("runtime_state") or "").strip() in ACTIVE_RUNTIME_STATES
+        if str(profile.get("run_issue_state") or "").strip() == "active"
+        or (
+            not str(profile.get("run_issue_state") or "").strip()
+            and int(profile.get("run_errors", 0) or 0) > 0
+            and str(profile.get("runtime_state") or "").strip() in ACTIVE_RUNTIME_STATES
+        )
     ]
     if active_error_profiles:
         alerts.append(
@@ -2344,6 +2772,16 @@ def evaluate_profile_delivery_guards(
                         f"{attempt.email} in the current run."
                     ),
                     "fingerprint": fingerprint,
+                    # debug fields for instrumentation
+                    "spamreport_count": len(spamreports),
+                    "bounce_count": len(bounced),
+                    "accepted_recent_count": len(window_attempts),
+                    "recent_emails": ", ".join(a.email for a in window_attempts),
+                    "awaiting_count": sum(
+                        1
+                        for a in attempts_by_profile.get(snapshot.name, [])
+                        if not attempt_has_final_outcome(a, final_by_message_id, final_by_profile_email)
+                    ),
                 }
             )
             continue
@@ -2366,6 +2804,16 @@ def evaluate_profile_delivery_guards(
                         f"matched the last {len(window_attempts)} accepted recipients. Recent bounced address(es): {recent_emails}."
                     ),
                     "fingerprint": fingerprint,
+                    # debug fields for instrumentation
+                    "spamreport_count": len(spamreports),
+                    "bounce_count": len(bounced),
+                    "accepted_recent_count": len(window_attempts),
+                    "recent_emails": recent_emails,
+                    "awaiting_count": sum(
+                        1
+                        for a in attempts_by_profile.get(snapshot.name, [])
+                        if not attempt_has_final_outcome(a, final_by_message_id, final_by_profile_email)
+                    ),
                 }
             )
     return decisions
@@ -2399,6 +2847,18 @@ def apply_profile_delivery_guards(
             "fingerprint": fingerprint,
             "stopped_at_iso": datetime.now(timezone.utc).isoformat(),
         }
+        # include any debug fields from the decision for persistent instrumentation
+        for key in ("bounce_count", "spamreport_count", "accepted_recent_count", "recent_emails", "awaiting_count"):
+            if key in decision:
+                event_payload[key] = decision.get(key)
+        # persist a record of the applied auto-stop for post-mortem proof
+        try:
+            AUTO_STOP_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with AUTO_STOP_EVENTS_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event_payload, sort_keys=True, ensure_ascii=False) + "\n")
+        except Exception:
+            # best-effort instrumentation; don't interrupt normal flow if write fails
+            pass
         with AUTO_STOP_EVENT_LOCK:
             AUTO_STOP_EVENTS[profile] = event_payload
         applied.append(event_payload)
@@ -2430,6 +2890,19 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     normalize_report_path = NORMALIZE_REPORT_PATH
 
     snapshots = load_dashboard_profile_snapshots(tail_lines=tail_lines)
+    # Fallback: if send_shard processes were started outside the dashboard's
+    # tmux session, detect them via the process table and mark the matching
+    # snapshots as running so the UI reflects actual live senders.
+    try:
+        running_profiles = _detect_running_send_shard_profiles()
+        if running_profiles:
+            for s in snapshots:
+                if s.name in SENDGRID_PROFILES and s.name in running_profiles:
+                    if not profile_is_active(s):
+                        _apply_process_runtime_fallback(s)
+    except Exception:
+        # best-effort only; don't let detection failures break snapshot build
+        pass
     controls = load_dashboard_run_settings()
     send_cap_per_profile = dashboard_send_cap_per_profile()
     attempts = collect_send_attempts(SENDGRID_PROFILES)
@@ -2507,10 +2980,45 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         profile["health_label"] = str(health.get("label") or "")
         profile["health_tone"] = str(health.get("tone") or "")
         profile["health_note"] = str(health.get("note") or "")
+        profile["reason_code"] = str(health.get("reason_code") or "")
+        profile["reason_note"] = str(health.get("reason_note") or profile["health_note"])
+        profile["readiness_label"] = str(health.get("readiness_label") or "")
+        profile["readiness_tone"] = str(health.get("readiness_tone") or "neutral")
+        profile["readiness_note"] = str(health.get("readiness_note") or "")
+        profile["telemetry_quality_label"] = str(health.get("telemetry_label") or "")
+        profile["telemetry_quality_tone"] = str(health.get("telemetry_tone") or "neutral")
+        profile["telemetry_quality_note"] = str(health.get("telemetry_note") or "")
+        profile["run_issue_state"] = str(health.get("run_issue_state") or "")
+
+    # Expose a UI-only display fallback when webhook intake is stale.
+    # Keep canonical `run_sent` unchanged; provide `run_sent_display` for the client.
+    try:
+        webhook_stale = _webhook_is_stale(webhook_health)
+    except Exception:
+        webhook_stale = False
+
+    for profile in profile_dicts:
+        try:
+            accepted_recent = int(profile.get("accepted_recent", 0) or 0)
+            run_sent = int(profile.get("run_sent", 0) or 0)
+            # Default display value is the canonical run_sent.
+            display_val = run_sent
+            # When webhook intake is stale, prefer the attempts-derived accepted_recent
+            # if it is larger than the anchored run_sent. This is strictly a display
+            # fallback and does not mutate the canonical `run_sent` field.
+            if webhook_stale and accepted_recent > display_val:
+                display_val = accepted_recent
+            profile["run_sent_display"] = display_val
+        except Exception:
+            # best-effort fallback to canonical run_sent
+            try:
+                profile["run_sent_display"] = int(profile.get("run_sent", 0) or 0)
+            except Exception:
+                profile["run_sent_display"] = 0
 
     run_status_items = build_run_status_items(
         session_label,
-        snapshots,
+        profile_dicts,
         recent_failures,
         historical_errors_today,
         auto_stop_events=auto_stop_events,

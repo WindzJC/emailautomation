@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +36,25 @@ from send_shard import (
 
 
 class SendShardTests(unittest.TestCase):
+    def test_sendgrid_profile_defaults_use_35s_pacing_and_keep_noon_stop(self) -> None:
+        for profile_name in [
+            "sendgrid_annette",
+            "sendgrid_jordan",
+            "sendgrid_jodi",
+            "sendgrid_alison",
+            "sendgrid_fiorela",
+        ]:
+            profile = send_shard.PROFILES[profile_name]
+            self.assertEqual(35, profile["interval"])
+            self.assertEqual(35, profile["cooldown_seconds"])
+            self.assertEqual("12:00", profile["stop_at_local"])
+
+    def test_private_jc_pacing_remains_unchanged(self) -> None:
+        profile = send_shard.PROFILES["private_jc"]
+        self.assertEqual(120, profile["interval"])
+        self.assertEqual(120, profile["cooldown_seconds"])
+        self.assertEqual("12:00", profile["stop_at_local"])
+
     def _build_sendgrid_runtime_fixture(self, tmpdir: str) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path, dict[str, object]]:
         base = Path(tmpdir)
         shards = base / "data" / "shards"
@@ -90,6 +111,9 @@ class SendShardTests(unittest.TestCase):
     def test_preflight_reports_prune_without_mutating_shard_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+            profile["interval"] = 35
+            profile["cooldown_seconds"] = 35
+            profile["repeat"] = True
             original_csv = csv_path.read_text(encoding="utf-8")
 
             stdout = io.StringIO()
@@ -120,6 +144,8 @@ class SendShardTests(unittest.TestCase):
 
             self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
             self.assertIn("PRUNE: would remove 1 from recipients_sendgrid_1.csv (preflight only)", stdout.getvalue())
+            self.assertIn("PACE RESOLVED: profile=sendgrid_annette", stdout.getvalue())
+            self.assertIn("effective_spacing=35s", stdout.getvalue())
             self.assertIn("PREFLIGHT: ok (no sending).", stdout.getvalue())
 
     def test_startup_guard_skips_initial_prune_without_mutating_shard_csv(self) -> None:
@@ -199,6 +225,153 @@ class SendShardTests(unittest.TestCase):
             )
             self.assertIn("PRUNE: removed 1 from recipients_sendgrid_1.csv", stdout.getvalue())
             self.assertIn("DRY RUN: no emails will be sent.", stdout.getvalue())
+
+    def test_repeat_worker_refreshes_after_suppression_only_initial_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+            profile.update(
+                {
+                    "repeat": True,
+                    "batch_size": 1,
+                    "interval": 0,
+                    "cooldown_seconds": 0,
+                    "max_messages_1h": 0,
+                    "stop_at_local": "",
+                }
+            )
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "hold@example.com,Hold,Book A\n",
+                encoding="utf-8",
+            )
+            log_path = logs / profile["log"]
+            log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            worker_log = send_shard.worker_log_path(log_path)
+
+            refreshed_rows = [
+                {"Email": "hold@example.com", "FirstName": "Hold", "BookTitle": "Book A"},
+                {"Email": "fresh@example.com", "FirstName": "Fresh", "BookTitle": "Book B"},
+            ]
+            original_read_rows = send_shard.read_rows
+            csv_reads = {"count": 0}
+
+            def fake_read_rows(path: Path):
+                if Path(path).resolve() == csv_path.resolve():
+                    csv_reads["count"] += 1
+                    return original_read_rows(path) if csv_reads["count"] == 1 else refreshed_rows
+                return original_read_rows(path)
+
+            stdout = io.StringIO()
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "APP_ROOT", base))
+                stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+                stack.enter_context(patch.object(send_shard, "ROOT", base))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppress))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress))
+                stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
+                stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
+                stack.enter_context(patch.object(send_shard, "read_rows", side_effect=fake_read_rows))
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "load_active_suppressed_emails",
+                        return_value=(
+                            {"hold@example.com"},
+                            {"total_perm": 1, "total_temp_active": 0},
+                        ),
+                    )
+                )
+                stack.enter_context(patch.object(send_shard, "send_via_sendgrid", return_value={"message_id": "msg-1"}))
+                stack.enter_context(patch.object(send_shard, "domain_wait_for_slot", return_value=""))
+                stack.enter_context(patch.object(send_shard, "domain_finalize_attempt"))
+                stack.enter_context(patch.object(send_shard, "remove_email_from_csv", return_value=True))
+                stack.enter_context(patch.object(send_shard.time, "sleep", return_value=None))
+                stack.enter_context(patch.object(send_shard, "sleep_with_jitter", return_value=None))
+                stack.enter_context(patch.dict(send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False))
+                stack.enter_context(patch.dict(send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False))
+                stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette"]))
+                stack.enter_context(redirect_stdout(stdout))
+                send_shard.main()
+
+            with log_path.open(newline="", encoding="utf-8-sig") as handle:
+                log_rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                ["SKIP", "SENT"],
+                [row["Status"] for row in log_rows[-2:]],
+            )
+            self.assertEqual(
+                ["hold@example.com", "fresh@example.com"],
+                [row["Email"] for row in log_rows[-2:]],
+            )
+            events = [json.loads(line) for line in worker_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual("REFRESH", events[0]["event_type"])
+            self.assertEqual("START", events[1]["event_type"])
+            self.assertEqual("DONE", events[-1]["event_type"])
+            self.assertEqual("queue_refreshed_after_empty_start", events[0]["reason"])
+            self.assertEqual("worker_start", events[1]["reason"])
+            self.assertEqual("queue_exhausted", events[-1]["reason"])
+            self.assertIn("SENT fresh@example.com", stdout.getvalue())
+
+    def test_worker_logs_top_level_exception_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+            profile.update(
+                {
+                    "repeat": True,
+                    "batch_size": 1,
+                    "interval": 0,
+                    "cooldown_seconds": 0,
+                    "max_messages_1h": 0,
+                    "stop_at_local": "",
+                }
+            )
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "fresh@example.com,Fresh,Book C\n",
+                encoding="utf-8",
+            )
+            log_path = logs / profile["log"]
+            worker_log = send_shard.worker_log_path(log_path)
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "APP_ROOT", base))
+                stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+                stack.enter_context(patch.object(send_shard, "ROOT", base))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppress))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress))
+                stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
+                stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "load_active_suppressed_emails",
+                        return_value=(set(), {"total_perm": 0, "total_temp_active": 0}),
+                    )
+                )
+                stack.enter_context(patch.object(send_shard, "build_message", side_effect=RuntimeError("boom from build_message")))
+                stack.enter_context(patch.dict(send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False))
+                stack.enter_context(patch.dict(send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False))
+                stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette"]))
+                with self.assertRaises(RuntimeError):
+                    send_shard.main()
+
+            events = [json.loads(line) for line in worker_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual("START", events[0]["event_type"])
+            self.assertEqual("ERROR", events[-1]["event_type"])
+            self.assertEqual("RuntimeError", events[-1]["reason"])
+            self.assertIn("boom from build_message", events[-1]["traceback"])
 
     def test_prune_sent_from_csv_mutates_during_normal_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -391,6 +391,10 @@ def normalize_webhook_event(
     from_email = ""
     shard = ""
     provider = ""
+    astra_run_id = ""
+    astra_recipient_id = ""
+    astra_message_key = ""
+    lead_id = ""
     arg_sources = [source for source in (event.get("custom_args"), event.get("unique_args"), event) if isinstance(source, dict)]
     for source in arg_sources:
         if not profile:
@@ -401,6 +405,14 @@ def normalize_webhook_event(
             shard = str(source.get("shard") or "").strip()
         if not provider:
             provider = str(source.get("provider") or "").strip()
+        if not astra_run_id:
+            astra_run_id = str(source.get("astra_run_id") or source.get("run_id") or "").strip()
+        if not astra_recipient_id:
+            astra_recipient_id = str(source.get("astra_recipient_id") or "").strip()
+        if not astra_message_key:
+            astra_message_key = str(source.get("astra_message_key") or "").strip()
+        if not lead_id:
+            lead_id = str(source.get("lead_id") or "").strip()
     if profile:
         record["profile"] = profile
     if from_email:
@@ -409,6 +421,14 @@ def normalize_webhook_event(
         record["shard"] = shard
     if provider:
         record["provider"] = provider
+    if astra_run_id:
+        record["astra_run_id"] = astra_run_id
+    if astra_recipient_id:
+        record["astra_recipient_id"] = astra_recipient_id
+    if astra_message_key:
+        record["astra_message_key"] = astra_message_key
+    if lead_id:
+        record["lead_id"] = lead_id
     record["dedupe_key"] = compute_webhook_dedupe_key(record)
     return record
 

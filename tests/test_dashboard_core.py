@@ -12,6 +12,7 @@ from unittest.mock import patch
 import dashboard_core
 import provider_pacing
 import sendgrid_hygiene
+from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
@@ -34,6 +35,207 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("scheduled_stop", state)
         self.assertEqual("Scheduled Stop", label)
         self.assertIn("schedule", note.lower())
+
+    def test_private_recovered_dns_error_maps_to_recovered_ready(self) -> None:
+        health = dashboard_core.build_profile_health_status(
+            {
+                "name": "private_jc",
+                "runtime_state": "running",
+                "run_errors": 1,
+                "last_status": "SENT",
+                "runtime_note": "Sender is actively processing recipients.",
+                "last_info": "[Errno 8] nodename nor servname provided, or not known",
+                "tmux_tail": "[9/100] SENT reader@example.com",
+            },
+            webhook_health={},
+            private_bounce_guard={},
+        )
+
+        self.assertEqual("Recovered", health["label"])
+        self.assertEqual("RECOVERED_DNS_ERROR", health["reason_code"])
+        self.assertEqual("Ready", health["readiness_label"])
+        self.assertEqual("recovered", health["run_issue_state"])
+
+    def test_sendgrid_auth_failure_maps_to_blocked_with_auth_401_reason(self) -> None:
+        health = dashboard_core.build_profile_health_status(
+            {
+                "name": "sendgrid_alpha",
+                "runtime_state": "error",
+                "run_errors": 1,
+                "last_status": "ERROR",
+                "runtime_note": "STOP: sendgrid account-level error (auth/credits/region).",
+                "last_info": "HTTP Error 401 Unauthorized",
+                "tmux_tail": "HTTP Error 401 Unauthorized",
+            },
+            webhook_health={},
+            private_bounce_guard={},
+        )
+
+        self.assertEqual("Blocked", health["label"])
+        self.assertEqual("AUTH_401", health["reason_code"])
+        self.assertEqual("Blocked", health["readiness_label"])
+        self.assertEqual("active", health["run_issue_state"])
+
+    def test_webhook_stale_maps_to_watch_and_telemetry_degraded(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 4, 11, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime):
+            health = dashboard_core.build_profile_health_status(
+                {
+                    "name": "sendgrid_alpha",
+                    "runtime_state": "running",
+                    "run_errors": 0,
+                    "last_status": "SENT",
+                    "runtime_note": "Sender is actively processing recipients.",
+                },
+                webhook_health={
+                    "last_received_iso": "2026-04-11T11:00:00+00:00",
+                    "last_received_age": "60m ago",
+                },
+                private_bounce_guard={},
+            )
+
+        self.assertEqual("Watch", health["label"])
+        self.assertEqual("WEBHOOK_STALE", health["reason_code"])
+        self.assertEqual("Telemetry Degraded", health["readiness_label"])
+
+    def test_provider_cooldown_maps_to_paused_and_cooling_down(self) -> None:
+        health = dashboard_core.build_profile_health_status(
+            {
+                "name": "private_jc",
+                "runtime_state": "paused",
+                "run_errors": 0,
+                "provider_cooldown_remaining_seconds": 900,
+                "restart_blocked": True,
+                "restart_block_reason": "Provider cooldown active for about 15 minute(s).",
+            },
+            webhook_health={},
+            private_bounce_guard={},
+        )
+
+        self.assertEqual("Paused", health["label"])
+        self.assertIn(health["reason_code"], {"PROVIDER_COOLDOWN", "THROTTLE_COOLDOWN"})
+        self.assertEqual("Cooling Down", health["readiness_label"])
+
+    def test_active_sender_with_no_issue_maps_to_healthy_ready(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 4, 11, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime):
+            health = dashboard_core.build_profile_health_status(
+                {
+                    "name": "sendgrid_alpha",
+                    "runtime_state": "running",
+                    "run_errors": 0,
+                    "last_status": "SENT",
+                    "runtime_note": "Sender is actively processing recipients.",
+                },
+                webhook_health={
+                    "last_received_iso": "2026-04-11T11:58:00+00:00",
+                    "last_received_age": "2m ago",
+                },
+                private_bounce_guard={},
+            )
+
+        self.assertEqual("Healthy", health["label"])
+        self.assertEqual("Ready", health["readiness_label"])
+        self.assertEqual("READY", health["reason_code"])
+
+    def test_process_runtime_fallback_uses_last_successful_send_timestamp(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 4, 11, 12, 5, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        snapshot = dashboard_core.ProfileSnapshot(
+            name="sendgrid_alpha",
+            pane_index=0,
+            csv_path="recipients_alpha.csv",
+            log_path="sendgrid_alpha_log.csv",
+            max_total=100,
+            cooldown_seconds=35,
+            cooldown_remaining_seconds=0,
+            pending_count=12,
+            run_started_at="",
+            run_sent=1,
+            run_errors=1,
+            run_skipped=0,
+            sent_today=1,
+            errors_today=1,
+            skipped_today=0,
+            last_status="ERROR",
+            last_email="reader@example.com",
+            last_info="temporary failure",
+            last_timestamp="2026-04-11 05:04:55 PDT",
+            last_timestamp_utc="2026-04-11T12:04:55+00:00",
+            last_age="5s ago",
+            tmux_running=False,
+            tmux_dead=False,
+            tmux_command="bash",
+            tmux_tail="repo$",
+            runtime_state="stopped",
+            runtime_label="Stopped",
+            runtime_note="Pane is idle.",
+            effective_cooldown_seconds=35,
+            effective_spacing_seconds=35,
+            last_sent_timestamp_utc="2026-04-11T12:04:45+00:00",
+        )
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime):
+            dashboard_core._apply_process_runtime_fallback(snapshot)
+
+        self.assertTrue(snapshot.tmux_running)
+        self.assertEqual("cooldown", snapshot.runtime_state)
+        self.assertEqual(20, snapshot.cooldown_remaining_seconds)
+        self.assertEqual("Cooling down between sends: 20s remaining.", snapshot.runtime_note)
+
+    def test_historical_current_run_error_does_not_dominate_after_recovery(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 4, 11, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime):
+            health = dashboard_core.build_profile_health_status(
+                {
+                    "name": "sendgrid_alpha",
+                    "runtime_state": "running",
+                    "run_errors": 2,
+                    "last_status": "SENT",
+                    "runtime_note": "Sender is actively processing recipients.",
+                    "last_info": "Recovered after one transient request error.",
+                },
+                webhook_health={
+                    "last_received_iso": "2026-04-11T11:58:00+00:00",
+                    "last_received_age": "2m ago",
+                },
+                private_bounce_guard={},
+            )
+
+        self.assertEqual("Recovered", health["label"])
+        self.assertEqual("Ready", health["readiness_label"])
+        self.assertEqual("recovered", health["run_issue_state"])
 
     def test_build_snapshot_uses_timestamp_fallback_for_nonunique_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,6 +396,10 @@ class DashboardCoreTests(unittest.TestCase):
                     "log": "sendgrid_alpha_log.csv",
                     "from_email": "alpha@example.com",
                     "always_send": "probe@example.com",
+                    "interval": 35,
+                    "cooldown_seconds": 35,
+                    "repeat": True,
+                    "stop_at_local": "12:00",
                     "max_total": 100,
                 }
             }
@@ -211,6 +417,142 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(25, snapshot["controls"]["estimated_total_if_start_all"])
         self.assertEqual(25, snapshot["profiles"][0]["max_total"])
         self.assertEqual(100, snapshot["profiles"][0]["configured_max_total"])
+        self.assertEqual(35, snapshot["profiles"][0]["interval_seconds"])
+        self.assertEqual(35, snapshot["profiles"][0]["effective_spacing_seconds"])
+        self.assertEqual(103, snapshot["profiles"][0]["effective_pace_per_hour"])
+
+    def test_build_snapshot_applies_outside_tmux_sendgrid_cooldown_from_last_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            profiles = {
+                "sendgrid_alpha": {
+                    "provider": "sendgrid",
+                    "csv": "recipients_alpha.csv",
+                    "log": "sendgrid_alpha_log.csv",
+                    "from_email": "alpha@example.com",
+                    "always_send": "probe@example.com",
+                    "interval": 35,
+                    "cooldown_seconds": 35,
+                    "repeat": True,
+                    "max_total": 100,
+                }
+            }
+            self._write_recipients(base / "recipients_alpha.csv", "reader@example.com")
+            self._write_log(
+                base / "sendgrid_alpha_log.csv",
+                [
+                    ("2026-03-13T12:00:00+00:00", "probe@example.com", "SENT", ""),
+                    ("2026-03-13T12:04:45+00:00", "reader@example.com", "SENT", "sg_message_id=abc123"),
+                    ("2026-03-13T12:04:55+00:00", "reader@example.com", "ERROR", "temporary failure"),
+                ],
+            )
+            fake_now = dashboard_core.datetime(2026, 3, 13, 12, 5, 0, tzinfo=dashboard_core.timezone.utc)
+
+            with self._patched_dashboard_context(base, profiles), patch.object(
+                dashboard_core,
+                "dashboard_now",
+                return_value=fake_now.astimezone(dashboard_core.DASHBOARD_TIMEZONE),
+            ):
+                class FrozenDateTime(dashboard_core.datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        if tz is None:
+                            return fake_now.replace(tzinfo=None)
+                        return fake_now.astimezone(tz)
+
+                with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.multiple(
+                    dashboard_core,
+                    tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "bash", "dead": "0"}},
+                    tmux_capture_tail=lambda pane_index, session="sendgrid", lines=16: "repo$",
+                    _detect_running_send_shard_profiles=lambda: {"sendgrid_alpha"},
+                    fetch_sendgrid_receiver_summary=lambda hours: None,
+                ):
+                    snapshot = dashboard_core.build_dashboard_snapshot(activity_hours=24, tail_lines=8)
+
+        profile = snapshot["profiles"][0]
+        self.assertEqual("ERROR", profile["last_status"])
+        self.assertEqual("cooldown", profile["runtime_state"])
+        self.assertEqual(20, profile["cooldown_remaining_seconds"])
+        self.assertTrue(profile["tmux_running"])
+        self.assertEqual("2026-03-13T12:04:45+00:00", profile["last_sent_timestamp_utc"])
+
+    def test_build_snapshot_reads_private_jc_tail_from_private_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": "recipients_private_jc.csv",
+                    "log": "private_jc_log.csv",
+                    "from_email": "jc@astraproductions.co",
+                    "always_send": "astraproductionsbyjc@gmail.com",
+                    "interval": 120,
+                    "cooldown_seconds": 120,
+                    "repeat": True,
+                    "max_total": 0,
+                    "dashboard_enabled": True,
+                    "dashboard_manual_only": True,
+                    "tmux_session": "private_jc",
+                },
+                "sendgrid_alpha": {
+                    "provider": "sendgrid",
+                    "csv": "recipients_alpha.csv",
+                    "log": "sendgrid_alpha_log.csv",
+                    "from_email": "alpha@example.com",
+                    "always_send": "probe@example.com",
+                    "interval": 35,
+                    "cooldown_seconds": 35,
+                    "repeat": True,
+                    "max_total": 100,
+                },
+            }
+            self._write_recipients(base / "recipients_private_jc.csv", "reader@example.com")
+            self._write_recipients(base / "recipients_alpha.csv", "reader@example.com")
+            self._write_log(
+                base / "private_jc_log.csv",
+                [
+                    ("2026-03-13T12:03:00+00:00", "astraproductionsbyjc@gmail.com", "SENT", ""),
+                    ("2026-03-13T12:04:00+00:00", "reader@example.com", "SENT", ""),
+                ],
+            )
+            self._write_log(
+                base / "sendgrid_alpha_log.csv",
+                [
+                    ("2026-03-13T12:04:40+00:00", "probe@example.com", "SENT", ""),
+                    ("2026-03-13T12:04:50+00:00", "reader@example.com", "SENT", ""),
+                ],
+            )
+            fake_now = dashboard_core.datetime(2026, 3, 13, 12, 5, 0, tzinfo=dashboard_core.timezone.utc)
+
+            def fake_tmux_capture_tail(pane_index: int, session: str = "sendgrid", lines: int = 16) -> str:
+                if session == "private_jc":
+                    return "[1/100] SENT reader@example.com\nBATCH: sent=1 total=2 remaining_estimate=98 next_sleep_seconds=120"
+                return "[1/100] SENT reader@example.com\nBATCH: sent=1 total=2 remaining_estimate=98 next_sleep_seconds=35"
+
+            with self._patched_dashboard_context(base, profiles), patch.object(
+                dashboard_core,
+                "dashboard_now",
+                return_value=fake_now.astimezone(dashboard_core.DASHBOARD_TIMEZONE),
+            ):
+                class FrozenDateTime(dashboard_core.datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        if tz is None:
+                            return fake_now.replace(tzinfo=None)
+                        return fake_now.astimezone(tz)
+
+                with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.multiple(
+                    dashboard_core,
+                    tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "python", "dead": "0"}},
+                    tmux_capture_tail=fake_tmux_capture_tail,
+                    fetch_sendgrid_receiver_summary=lambda hours: None,
+                ):
+                    snapshot = dashboard_core.build_dashboard_snapshot(activity_hours=24, tail_lines=8)
+
+        jc = next(profile for profile in snapshot["profiles"] if profile["name"] == "private_jc")
+        self.assertEqual("cooldown", jc["runtime_state"])
+        self.assertEqual(120, jc["cooldown_remaining_seconds"])
+        self.assertEqual("Cooling down between sends: 120s remaining.", jc["runtime_note"])
 
     def test_build_snapshot_prefers_receiver_summary_for_sendgrid_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -409,6 +751,54 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("provider cooldown", message.lower())
 
+    def test_start_sendgrid_profile_rejects_placeholder_key_resolution(self) -> None:
+        profiles = {
+            "sendgrid_alpha": {
+                "provider": "sendgrid",
+                "csv": "recipients_alpha.csv",
+                "log": "sendgrid_alpha_log.csv",
+                "from_email": "alpha@example.com",
+                "always_send": "probe@example.com",
+                "max_total": 100,
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+            python_bin.chmod(0o755)
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=base,
+                LOGS_DIR=base,
+                STATE_DIR=base,
+                ACTIVITY_LOG_PATH=base / "sendgridlogs",
+                SUPPRESSION_CSV=base / "sendgrid_suppressions.csv",
+                NORMALIZE_REPORT_PATH=base / "sendgrid_shard_normalize_report.json",
+                WEBHOOK_EVENTS_PATH=base / dashboard_core.WEBHOOK_EVENTS_JSONL,
+                WEBHOOK_DEDUPE_PATH=base / dashboard_core.WEBHOOK_DEDUPE_DB,
+                LOG_RESET_BACKUP_ROOT=base / "backups",
+                PROFILES=profiles,
+                SENDGRID_PROFILES=["sendgrid_alpha"],
+                DASHBOARD_PROFILES=["sendgrid_alpha"],
+                START_ALL_PROFILES=["sendgrid_alpha"],
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="",
+                    source_label="inherited environment",
+                    masked_key="(invalid)",
+                    warning="",
+                    error="SENDGRID_API_KEY from the inherited environment is a placeholder or blank value.",
+                ),
+            ):
+                ok, message = dashboard_core.start_sendgrid_profile("sendgrid_alpha", 0)
+
+        self.assertFalse(ok)
+        self.assertIn("placeholder or blank value", message)
+
     def test_build_run_status_items_ignores_idle_profiles_during_partial_run(self) -> None:
         base_fields = {
             "csv_path": "recipients.csv",
@@ -428,6 +818,7 @@ class DashboardCoreTests(unittest.TestCase):
             "last_email": "",
             "last_info": "",
             "last_timestamp": "",
+            "last_timestamp_utc": "",
             "last_age": "-",
             "tmux_dead": False,
             "tmux_command": "bash",
@@ -738,6 +1129,23 @@ class DashboardCoreTests(unittest.TestCase):
         titles = {alert["title"] for alert in alerts}
         self.assertNotIn("Sender API errors", titles)
 
+    def test_build_threshold_alerts_ignores_recovered_run_issue_for_sender_api_alert(self) -> None:
+        alerts = dashboard_core.build_threshold_alerts(
+            session_label="running",
+            active_profiles=1,
+            recent_failures=0,
+            recent_unmapped=0,
+            total_awaiting_outcome=0,
+            webhook_health={},
+            profile_dicts=[
+                {"name": "sendgrid_annette", "run_errors": 1, "runtime_state": "cooldown", "run_issue_state": "recovered"},
+                {"name": "sendgrid_jodi", "run_errors": 1, "runtime_state": "stopped", "run_issue_state": "recovered"},
+            ],
+        )
+
+        titles = {alert["title"] for alert in alerts}
+        self.assertNotIn("Sender API errors", titles)
+
     def test_evaluate_profile_delivery_guards_flags_hard_bounce_cluster(self) -> None:
         profiles = {
             "sendgrid_alpha": {
@@ -769,6 +1177,7 @@ class DashboardCoreTests(unittest.TestCase):
             last_email="reader5@example.com",
             last_info="sg_message_id=msg-5",
             last_timestamp="2026-03-13 05:10:00 PDT",
+            last_timestamp_utc="2026-03-13T12:10:00+00:00",
             last_age="1m ago",
             tmux_running=True,
             tmux_dead=False,
@@ -799,6 +1208,7 @@ class DashboardCoreTests(unittest.TestCase):
             SENDGRID_PROFILES=list(profiles.keys()),
             DASHBOARD_PROFILES=list(profiles.keys()),
             START_ALL_PROFILES=list(profiles.keys()),
+            PROFILE_GUARD_BOUNCE_THRESHOLD=3,
         ):
             decisions = dashboard_core.evaluate_profile_delivery_guards([snapshot], attempts, events)
 
@@ -837,6 +1247,7 @@ class DashboardCoreTests(unittest.TestCase):
             last_email="reader5@example.com",
             last_info="sg_message_id=msg-5",
             last_timestamp="2026-03-13 05:10:00 PDT",
+            last_timestamp_utc="2026-03-13T12:10:00+00:00",
             last_age="1m ago",
             tmux_running=True,
             tmux_dead=False,
@@ -869,6 +1280,7 @@ class DashboardCoreTests(unittest.TestCase):
                 SENDGRID_PROFILES=list(profiles.keys()),
                 DASHBOARD_PROFILES=list(profiles.keys()),
                 START_ALL_PROFILES=list(profiles.keys()),
+                PROFILE_GUARD_BOUNCE_THRESHOLD=3,
             ), patch.object(
                 dashboard_core,
                 "stop_sendgrid_profile",

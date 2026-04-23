@@ -1,11 +1,12 @@
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
 from __future__ import annotations
 
 import asyncio
 import base64
 import csv
+import io
 import json
 import os
-import io
 import re
 import secrets
 import threading
@@ -16,41 +17,87 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from cryptography.exceptions import InvalidSignature
+try:
+    from cryptography.exceptions import InvalidSignature
+except Exception:  # pragma: no cover - dependency fallback
+    class InvalidSignature(Exception):
+        pass
+
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
+from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 try:
-    from defusedxml import defuse_stdlib
+    import importlib
+    defuse_stdlib = importlib.import_module("defusedxml").defuse_stdlib
 except Exception:  # pragma: no cover - dependency fallback
     defuse_stdlib = None
 
-import settings
 import runtime_control
+import settings
 from dashboard_core import (
     SENDGRID_PROFILES,
     build_dashboard_snapshot,
     load_dashboard_run_settings,
     save_dashboard_send_cap_per_profile,
 )
-from important_leads_workflow import (
-    ImportantLeadsCheckError,
-    check_master_leads,
-    dispatch_master_leads,
-    important_leads_status,
-    important_leads_path_state,
-)
 from important_leads_verify import (
+    TRIAGE_MODE_FAST,
+    TRIAGE_MODE_STRICT,
+    fast_triage_master_leads,
+    important_leads_triage_path_state,
     important_leads_verify_path_state,
     important_leads_verify_status,
     verify_master_leads,
+)
+from important_leads_workflow import (
+    DISPATCH_CAP_ALL,
+    DISPATCH_SOURCE_CLEANED,
+    DISPATCH_SOURCE_STRICT_VERIFIED,
+    DISPATCH_SOURCE_TRIAGED_KEEP,
+    STRICT_VERIFIED_PATH,
+    TRIAGED_KEEP_PATH,
+    ImportantLeadsCheckError,
+    check_master_leads,
+    confirm_dispatch_preview,
+    important_leads_path_state,
+    important_leads_status,
+    preview_dispatch_master_leads,
+    validate_dispatch_preview,
+)
+from lead_ledger import (
+    apply_quarantine_review_action,
+    connect_lead_ledger,
+    ingest_send_outcome_events,
+    list_quarantine_review_lead_ids,
+    list_quarantine_review_leads,
+    load_quarantine_review_lead,
+    load_recent_quarantine_review_actions,
+)
+from leads_workflow import (
+    clean_uploaded_leads,
+    iso_utc,
+    preview_shard_cleaned_leads,
+    save_state,
+    save_uploaded_csv,
+    shard_cleaned_leads,
+    shard_status,
+    timestamp_slug,
 )
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
@@ -58,26 +105,14 @@ from private_bounce_hygiene import (
     run_private_bounce_monitor_cycle,
 )
 from provider_pacing import mark_recovery_started, provider_pacing_status
+from send_shard import PROFILES
 from sendgrid_hygiene import (
-    WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
     append_events_jsonl,
     dedupe_webhook_events,
     normalize_webhook_events,
     update_suppressions_from_events,
 )
-from leads_workflow import (
-    clean_uploaded_leads,
-    iso_utc,
-    save_state,
-    preview_shard_cleaned_leads,
-    save_uploaded_csv,
-    shard_cleaned_leads,
-    shard_status,
-    timestamp_slug,
-)
-from send_shard import PROFILES
-
 
 if defuse_stdlib is not None:
     try:
@@ -95,6 +130,10 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     except Exception:
         return max(minimum, int(default))
 
+
+def _lead_ledger_db_path() -> Path:
+    return Path(getattr(settings, "LEAD_LEDGER_DB_PATH", settings.STATE_DIR / "lead_ledger.sqlite3"))
+
 STATIC_DIR = settings.STATIC_DIR
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
@@ -104,6 +143,9 @@ IMPORTANT_LEADS_OUTPUT = settings.APP_ROOT / "_important" / "leads.csv"
 IMPORTANT_LEADS_REJECTED = settings.APP_ROOT / "_important" / "leads_rejected.csv"
 IMPORTANT_LEADS_CHECK_RUNS = settings.APP_ROOT / "_important" / "check_runs"
 IMPORTANT_LEADS_CHECK_JOBS = IMPORTANT_LEADS_CHECK_RUNS / "jobs"
+IMPORTANT_LEADS_VERIFY_JOBS = settings.APP_ROOT / "_important" / "verify_jobs"
+IMPORTANT_LEADS_DISPATCH_JOBS = settings.APP_ROOT / "_important" / "dispatch_jobs"
+IMPORTANT_LEADS_DISPATCH_PREVIEWS = IMPORTANT_LEADS_DISPATCH_JOBS / "previews"
 IMPORTANT_LEADS_PASTE_WARNING_ROWS = _int_env("IMPORTANT_LEADS_PASTE_WARNING_ROWS", 250)
 IMPORTANT_LEADS_PASTE_MAX_ROWS = max(IMPORTANT_LEADS_PASTE_WARNING_ROWS, _int_env("IMPORTANT_LEADS_PASTE_MAX_ROWS", 1000))
 app = FastAPI(title="Email Automation Live Dashboard")
@@ -191,7 +233,7 @@ class ImportantLeadPathsPayload(BaseModel):
     input_path: str = ""
     output_path: str = ""
     rejected_path: str = ""
-    dispatch_source_mode: str = "verified"
+    dispatch_source_mode: str = DISPATCH_SOURCE_TRIAGED_KEEP
     input_text: str = ""
 
 
@@ -200,6 +242,28 @@ class ImportantLeadVerifyPayload(BaseModel):
     verified_path: str = ""
     rejected_path: str = ""
     quarantine_path: str = ""
+    mode: str = TRIAGE_MODE_FAST
+
+
+class ImportantLeadDispatchPayload(BaseModel):
+    input_path: str = ""
+    output_path: str = ""
+    rejected_path: str = ""
+    dispatch_source_mode: str = DISPATCH_SOURCE_TRIAGED_KEEP
+    dispatch_cap: str = DISPATCH_CAP_ALL
+    preview_id: str = ""
+
+
+class QuarantineReviewActionPayload(BaseModel):
+    lead_ids: list[str] = Field(default_factory=list)
+    excluded_lead_ids: list[str] = Field(default_factory=list)
+    action: str = ""
+    operator_note: str = ""
+    select_all_filtered: bool = False
+    reason_code: str = ""
+    stage: str = ""
+    status: str = "QUARANTINE"
+    sort: str = "score_desc"
 
 
 class DashboardAuthPayload(BaseModel):
@@ -226,6 +290,10 @@ def _resolve_dashboard_csv_path(raw_value: str, default_path: Path) -> Path:
     candidate = str(raw_value or "").strip()
     if not candidate:
         return default_path
+    if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", candidate):
+        raise ValueError("Leads paths must stay inside this workspace.")
+    if os.name != "nt" and re.match(r"^/mnt/[A-Za-z]/", candidate):
+        raise ValueError("Leads paths must stay inside this workspace.")
     path = Path(candidate)
     if not path.is_absolute():
         path = settings.APP_ROOT / path
@@ -236,6 +304,13 @@ def _resolve_dashboard_csv_path(raw_value: str, default_path: Path) -> Path:
     if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
         raise ValueError("Leads paths must stay inside this workspace.")
     return resolved_path
+
+
+def _resolve_dashboard_csv_path_or_default(raw_value: str, default_path: Path) -> Path:
+    try:
+        return _resolve_dashboard_csv_path(raw_value, default_path)
+    except ValueError:
+        return default_path.resolve(strict=False)
 
 
 def _important_path_labels_for_state(input_path: Path, output_path: Path, rejected_path: Path) -> dict[str, str]:
@@ -271,10 +346,35 @@ def _important_verify_path_labels_for_state(input_path: Path, verified_path: Pat
     }
 
 
+def _important_triage_path_labels_for_state(input_path: Path, keep_path: Path, rejected_path: Path, quarantine_path: Path) -> dict[str, str]:
+    root = settings.APP_ROOT.resolve()
+
+    def label(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(root))
+        except Exception:
+            return str(path)
+
+    return {
+        "input_path": label(input_path),
+        "keep_path": label(keep_path),
+        "rejected_path": label(rejected_path),
+        "quarantine_path": label(quarantine_path),
+    }
+
+
 def _important_dispatch_source_labels_for_state(mode: str) -> dict[str, str]:
-    normalized = str(mode or "").strip().lower() or "verified"
-    if normalized not in {"verified", "cleaned"}:
-        normalized = "verified"
+    normalized = str(mode or "").strip().lower() or DISPATCH_SOURCE_TRIAGED_KEEP
+    aliases = {
+        "verified": DISPATCH_SOURCE_TRIAGED_KEEP,
+        "fast_triage": DISPATCH_SOURCE_TRIAGED_KEEP,
+        "fast_triage_keep": DISPATCH_SOURCE_TRIAGED_KEEP,
+        "strict": DISPATCH_SOURCE_STRICT_VERIFIED,
+        "strict_public_proof": DISPATCH_SOURCE_STRICT_VERIFIED,
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_STRICT_VERIFIED, DISPATCH_SOURCE_CLEANED}:
+        normalized = DISPATCH_SOURCE_TRIAGED_KEEP
     return {"dispatch_source_mode": normalized}
 
 
@@ -314,6 +414,121 @@ def _save_important_check_job(job: dict[str, object]) -> None:
     settings.secure_private_file(write_path)
 
 
+def _important_check_job_with_progress(job: dict[str, object]) -> dict[str, object]:
+    payload = dict(job)
+    total_rows = max(0, int(payload.get("total_input_rows") or 0))
+    processed_rows = max(0, int(payload.get("processed_rows") or 0))
+    remaining_rows = max(0, int(payload.get("remaining_rows") or max(0, total_rows - processed_rows)))
+    if "progress_percent" not in payload or payload.get("progress_percent") in {"", None}:
+        if total_rows > 0:
+            payload["progress_percent"] = round(min(100.0, max(0.0, (processed_rows / total_rows) * 100)), 1)
+        elif str(payload.get("status") or "") == "completed":
+            payload["progress_percent"] = 100
+        else:
+            payload["progress_percent"] = 0
+    payload["processed_rows"] = processed_rows
+    payload["remaining_rows"] = remaining_rows
+    if payload.get("source_sheet") and not payload.get("current_sheet"):
+        payload["current_sheet"] = payload.get("source_sheet")
+    return payload
+
+
+def _find_active_important_check_job() -> dict[str, object] | None:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return None
+    active_statuses = {"queued", "running", "checking"}
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status") or job.get("stage") or "").strip().lower()
+        if status not in active_statuses:
+            continue
+        try:
+            sort_key = path.stat().st_mtime
+        except Exception:
+            sort_key = 0.0
+        candidates.append((sort_key, _important_check_job_with_progress(job)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _job_path(directory: Path, job_id: str) -> Path:
+    return directory / f"{job_id}.json"
+
+
+def _load_dashboard_job(directory: Path, job_id: str, label: str) -> dict[str, object]:
+    path = _job_path(directory, job_id)
+    if not path.exists():
+        raise FileNotFoundError(f"{label} job not found: {job_id}")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_dashboard_job(directory: Path, job: dict[str, object]) -> None:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        raise ValueError("Missing job id.")
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = dict(job)
+    payload["updated_at_utc"] = iso_utc()
+    write_path = _job_path(directory, job_id)
+    tmp_path = write_path.with_suffix(f".{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(write_path)
+    settings.secure_private_file(write_path)
+
+
+def _job_progress_payload(job: dict[str, object]) -> dict[str, object]:
+    payload = dict(job)
+    total_rows = max(0, int(payload.get("total_rows") or payload.get("total_input_rows") or 0))
+    processed_rows = max(0, int(payload.get("processed_rows") or 0))
+    remaining_rows = max(0, int(payload.get("remaining_rows") or max(0, total_rows - processed_rows)))
+    if "progress_percent" not in payload or payload.get("progress_percent") in {"", None}:
+        if total_rows > 0:
+            payload["progress_percent"] = round(min(100.0, max(0.0, (processed_rows / total_rows) * 100)), 1)
+        elif str(payload.get("status") or "") == "completed":
+            payload["progress_percent"] = 100
+        else:
+            payload["progress_percent"] = 0
+    payload["total_rows"] = total_rows
+    payload["processed_rows"] = processed_rows
+    payload["remaining_rows"] = remaining_rows
+    return payload
+
+
+def _find_active_dashboard_job(directory: Path) -> dict[str, object] | None:
+    if not directory.exists():
+        return None
+    active_statuses = {"queued", "running", "checking", "verifying", "dispatching"}
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for path in directory.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status") or job.get("stage") or "").strip().lower()
+        if status not in active_statuses:
+            continue
+        try:
+            sort_key = path.stat().st_mtime
+        except Exception:
+            sort_key = 0.0
+        candidates.append((sort_key, _job_progress_payload(job)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 def _count_csv_rows(path: Path) -> int:
     if not path.exists():
         return 0
@@ -326,18 +541,19 @@ def _count_csv_rows(path: Path) -> int:
     return count
 
 
-def _normalize_uploaded_check_file(filename: str, content: bytes) -> tuple[str, str]:
+def _normalize_uploaded_check_file(filename: str, content: bytes) -> tuple[str, str, str]:
     extension = Path(str(filename or "").strip()).suffix.lower()
     if extension == ".csv":
         text = content.decode("utf-8-sig", errors="replace")
-        return ".csv", text if text.endswith("\n") else f"{text}\n"
+        return ".csv", text if text.endswith("\n") else f"{text}\n", ""
     if extension == ".xlsx":
         try:
             workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         except Exception as exc:
             raise ValueError(f"Failed to read XLSX upload: {exc}") from exc
         try:
-            worksheet = workbook[workbook.sheetnames[0]] if workbook.sheetnames else None
+            source_sheet = str(workbook.sheetnames[0]) if workbook.sheetnames else ""
+            worksheet = workbook[source_sheet] if source_sheet else None
             if worksheet is None:
                 raise ValueError("Uploaded XLSX file has no worksheets.")
             rows = []
@@ -354,7 +570,7 @@ def _normalize_uploaded_check_file(filename: str, content: bytes) -> tuple[str, 
             text = buffer.getvalue()
             if text and not text.endswith("\n"):
                 text += "\n"
-            return ".xlsx", text
+            return ".xlsx", text, source_sheet
         finally:
             workbook.close()
     raise ValueError(f"Unsupported upload file type: {extension or '[none]'}")
@@ -366,12 +582,14 @@ def _execute_important_check(
     output_path: Path,
     rejected_path: Path,
     effective_input_path: Path,
+    progress_callback=None,
 ) -> dict[str, object]:
     save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
     return check_master_leads(
         input_path=effective_input_path,
         output_path=output_path,
         rejected_path=rejected_path,
+        progress_callback=progress_callback,
     )
 
 
@@ -435,12 +653,40 @@ def _run_important_check_job(job_id: str) -> None:
         job["processed_rows"] = 0
         job["remaining_rows"] = int(job.get("total_input_rows") or 0)
         job["eta_seconds"] = ""
+        job["progress_percent"] = 0
         _save_important_check_job(job)
+        started_at = time.monotonic()
+        last_progress_save_at = 0.0
+
+        def save_progress(processed_rows: int, total_rows: int) -> None:
+            nonlocal job, last_progress_save_at
+            try:
+                latest_job = _load_important_verify_job(job_id)
+                if latest_job.get("cancel_requested"):
+                    job["cancel_requested"] = True
+            except Exception:
+                pass
+            now = time.monotonic()
+            if processed_rows < total_rows and now - last_progress_save_at < 0.75:
+                return
+            last_progress_save_at = now
+            total = max(0, int(total_rows or 0))
+            processed = min(total, max(0, int(processed_rows or 0)))
+            elapsed = max(0.001, now - started_at)
+            rate = processed / elapsed if processed > 0 else 0.0
+            remaining = max(0, total - processed)
+            job["processed_rows"] = processed
+            job["remaining_rows"] = remaining
+            job["progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
+            job["eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
+            _save_important_check_job(job)
+
         report = _execute_important_check(
             input_path=Path(str(job.get("input_path") or "")),
             output_path=Path(str(job.get("output_path") or "")),
             rejected_path=Path(str(job.get("rejected_path") or "")),
             effective_input_path=Path(str(job.get("effective_input_path") or "")),
+            progress_callback=save_progress,
         )
         job["status"] = "completed"
         job["stage"] = "done"
@@ -449,6 +695,7 @@ def _run_important_check_job(job_id: str) -> None:
         job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
         job["remaining_rows"] = 0
         job["eta_seconds"] = 0
+        job["progress_percent"] = 100
         job["message"] = (
             f"Checked {report['input_label']} into {report['output_label']}. "
             f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
@@ -461,6 +708,7 @@ def _run_important_check_job(job_id: str) -> None:
         job["completed_at_utc"] = iso_utc()
         job["processed_rows"] = 0
         job["remaining_rows"] = int(job.get("total_input_rows") or 0)
+        job["progress_percent"] = 0
         job["error"] = str(exc)
         _save_important_check_job(job)
 
@@ -478,6 +726,7 @@ def _start_important_check_job(
     selected_filename: str = "",
     selected_size_bytes: int = 0,
     selected_extension: str = "",
+    source_sheet: str = "",
     total_input_rows: int,
 ) -> dict[str, object]:
     job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
@@ -494,6 +743,8 @@ def _start_important_check_job(
         "selected_filename": str(selected_filename or "").strip() or source_label,
         "selected_size_bytes": int(selected_size_bytes or 0),
         "selected_extension": str(selected_extension or "").strip(),
+        "source_sheet": str(source_sheet or "").strip(),
+        "current_sheet": str(source_sheet or "").strip(),
         "input_path": str(input_path),
         "saved_input_path": str(effective_input_path),
         "output_path": str(output_path),
@@ -503,6 +754,7 @@ def _start_important_check_job(
         "processed_rows": 0,
         "remaining_rows": int(total_input_rows or 0),
         "eta_seconds": "",
+        "progress_percent": 0,
     }
     _save_important_check_job(job)
     thread = threading.Thread(target=_run_important_check_job, args=(job_id,), daemon=True)
@@ -527,6 +779,259 @@ def _resume_pending_important_check_jobs() -> None:
             continue
         thread = threading.Thread(target=_run_important_check_job, args=(job_id,), daemon=True)
         thread.start()
+
+
+def _load_important_verify_job(job_id: str) -> dict[str, object]:
+    return _load_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS, job_id, "Verify")
+
+
+def _save_important_verify_job(job: dict[str, object]) -> None:
+    _save_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS, job)
+
+
+def _load_important_dispatch_job(job_id: str) -> dict[str, object]:
+    return _load_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS, job_id, "Dispatch")
+
+
+def _save_important_dispatch_job(job: dict[str, object]) -> None:
+    _save_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS, job)
+
+
+def _run_important_verify_job(job_id: str) -> None:
+    try:
+        job = _load_important_verify_job(job_id)
+    except Exception:
+        return
+    if str(job.get("status") or "") in {"completed", "failed", "canceled", "cancelled"}:
+        return
+    try:
+        mode = str(job.get("mode") or TRIAGE_MODE_FAST).strip().upper()
+        is_fast_triage = mode != TRIAGE_MODE_STRICT
+        job["status"] = "running"
+        job["mode"] = TRIAGE_MODE_FAST if is_fast_triage else TRIAGE_MODE_STRICT
+        job["stage"] = "fast_triage" if is_fast_triage else "strict_public_proof"
+        job["phase"] = "fast_triage" if is_fast_triage else "strict_public_proof"
+        job["eta_seconds"] = ""
+        job["progress_percent"] = float(job.get("progress_percent") or 0)
+        _save_important_verify_job(job)
+        started_at = time.monotonic()
+        last_progress_save_at = 0.0
+
+        def save_progress(processed_rows: int, total_rows: int) -> None:
+            nonlocal job, last_progress_save_at
+            now = time.monotonic()
+            if processed_rows < total_rows and now - last_progress_save_at < 0.75:
+                return
+            last_progress_save_at = now
+            total = max(0, int(total_rows or 0))
+            processed = min(total, max(0, int(processed_rows or 0)))
+            remaining = max(0, total - processed)
+            elapsed = max(0.001, now - started_at)
+            rate = processed / elapsed if processed > 0 else 0.0
+            job["total_rows"] = total
+            job["total_input_rows"] = total
+            job["processed_rows"] = processed
+            job["remaining_rows"] = remaining
+            job["progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
+            job["eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
+            _save_important_verify_job(job)
+
+        def should_cancel() -> bool:
+            try:
+                latest_job = _load_important_verify_job(job_id)
+            except Exception:
+                return bool(job.get("cancel_requested"))
+            if latest_job.get("cancel_requested"):
+                job["cancel_requested"] = True
+                return True
+            return bool(job.get("cancel_requested"))
+
+        if is_fast_triage:
+            report = fast_triage_master_leads(
+                input_path=Path(str(job.get("input_path") or "")),
+                keep_path=Path(str(job.get("verified_path") or "")),
+                rejected_path=Path(str(job.get("rejected_path") or "")),
+                quarantine_path=Path(str(job.get("quarantine_path") or "")),
+                progress_callback=save_progress,
+                should_cancel=should_cancel,
+            )
+        else:
+            report = verify_master_leads(
+                input_path=Path(str(job.get("input_path") or "")),
+                verified_path=Path(str(job.get("verified_path") or "")),
+                rejected_path=Path(str(job.get("rejected_path") or "")),
+                quarantine_path=Path(str(job.get("quarantine_path") or "")),
+                progress_callback=save_progress,
+                should_cancel=should_cancel,
+            )
+        total = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_rows") or 0)
+        processed = int(report.get("processed_rows") or total)
+        canceled = should_cancel() and processed < total
+        job["status"] = "canceled" if canceled else "completed"
+        job["stage"] = "canceled" if canceled else "done"
+        job["phase"] = "canceled" if canceled else "done"
+        job["completed_at_utc"] = iso_utc()
+        job["verify"] = report
+        job["total_rows"] = total
+        job["total_input_rows"] = total
+        job["processed_rows"] = processed
+        job["remaining_rows"] = max(0, total - processed) if canceled else 0
+        job["eta_seconds"] = 0
+        job["progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
+        if canceled:
+            job["message"] = f"Verify stopped safely at row {processed} of {total}. Checkpoint/output files were preserved."
+        else:
+            job["progress_percent"] = 100
+            mode_label = "Fast triaged" if is_fast_triage else "Strict verified"
+            job["message"] = (
+                f"{mode_label} {report['input_label']} into {report['verified_label']}. "
+                f"KEEP {int(report['keep_count'] or 0)}, REJECT {int(report['reject_count'] or 0)}, "
+                f"QUARANTINE {int(report['quarantine_count'] or 0)}."
+            )
+        _save_important_verify_job(job)
+    except Exception as exc:
+        job["status"] = "failed"
+        job["stage"] = "failed"
+        job["phase"] = "failed"
+        job["completed_at_utc"] = iso_utc()
+        job["error"] = str(exc)
+        _save_important_verify_job(job)
+
+
+def _start_important_verify_job(
+    *,
+    input_path: Path,
+    verified_path: Path,
+    rejected_path: Path,
+    quarantine_path: Path,
+    mode: str = TRIAGE_MODE_FAST,
+) -> dict[str, object]:
+    job_id = f"verify_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    total_rows = _count_csv_rows(input_path)
+    mode = TRIAGE_MODE_STRICT if str(mode or "").strip().upper() == TRIAGE_MODE_STRICT else TRIAGE_MODE_FAST
+    job = {
+        "job_id": job_id,
+        "mode": mode,
+        "status": "queued",
+        "stage": "queued",
+        "phase": "queued",
+        "created_at_utc": iso_utc(),
+        "updated_at_utc": iso_utc(),
+        "input_path": str(input_path),
+        "verified_path": str(verified_path),
+        "rejected_path": str(rejected_path),
+        "quarantine_path": str(quarantine_path),
+        "total_rows": total_rows,
+        "total_input_rows": total_rows,
+        "processed_rows": 0,
+        "remaining_rows": total_rows,
+        "eta_seconds": "",
+        "progress_percent": 0,
+    }
+    _save_important_verify_job(job)
+    thread = threading.Thread(target=_run_important_verify_job, args=(job_id,), daemon=True)
+    thread.start()
+    return _job_progress_payload(job)
+
+
+def _run_important_dispatch_job(job_id: str) -> None:
+    try:
+        job = _load_important_dispatch_job(job_id)
+    except Exception:
+        return
+    if str(job.get("status") or "") in {"completed", "failed", "canceled", "cancelled"}:
+        return
+    try:
+        job["status"] = "running"
+        job["stage"] = "dispatching"
+        job["phase"] = "dispatching"
+        job["eta_seconds"] = ""
+        job["progress_percent"] = float(job.get("progress_percent") or 0)
+        _save_important_dispatch_job(job)
+        report = confirm_dispatch_preview(
+            str(job.get("preview_id") or ""),
+            require_stopped=True,
+            backup_root=settings.BACKUPS_DIR,
+            report_dir=settings.STATE_DIR,
+            persist_state=True,
+            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+        )
+        assigned_rows = int(report.get("added_astra") or 0) + int(report.get("added_sendgrid") or 0)
+        skipped_rows = (
+            int(report.get("suppressed_skipped") or 0)
+            + int(report.get("duplicate_master_skipped") or 0)
+            + int(report.get("skipped_both") or 0)
+            + int(report.get("invalid_malformed_skipped") or 0)
+        )
+        total_rows = int(report.get("dispatch_selected_row_count") or job.get("total_rows") or 0)
+        job["status"] = "completed"
+        job["stage"] = "done"
+        job["phase"] = "done"
+        job["completed_at_utc"] = iso_utc()
+        job["run_id"] = report.get("run_id")
+        job["dispatch"] = report
+        job["total_rows"] = total_rows
+        job["processed_rows"] = total_rows
+        job["assigned_rows"] = assigned_rows
+        job["skipped_rows"] = skipped_rows
+        job["remaining_rows"] = 0
+        job["eta_seconds"] = 0
+        job["progress_percent"] = 100
+        job["message"] = (
+            f"Dispatch complete. Astra added {report['added_astra']} row(s), SendGrid added "
+            f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
+        )
+        _save_important_dispatch_job(job)
+    except Exception as exc:
+        job["status"] = "failed"
+        job["stage"] = "failed"
+        job["phase"] = "failed"
+        job["completed_at_utc"] = iso_utc()
+        job["error"] = str(exc)
+        _save_important_dispatch_job(job)
+
+
+def _start_important_dispatch_job(
+    *,
+    preview_id: str,
+    dispatch_source_mode: str,
+    dispatch_source_name: str,
+    dispatch_source_path: str,
+    dispatch_cap: str,
+    total_source_rows: int,
+    eligible_rows: int,
+    selected_rows: int,
+    total_rows_would_write: int,
+) -> dict[str, object]:
+    job_id = f"dispatch_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "job_id": job_id,
+        "preview_id": preview_id,
+        "status": "queued",
+        "stage": "queued",
+        "phase": "queued",
+        "created_at_utc": iso_utc(),
+        "updated_at_utc": iso_utc(),
+        "dispatch_source_mode": dispatch_source_mode,
+        "dispatch_source_name": dispatch_source_name,
+        "dispatch_source_path": dispatch_source_path,
+        "dispatch_cap": dispatch_cap,
+        "total_source_rows": max(0, int(total_source_rows or 0)),
+        "eligible_rows": max(0, int(eligible_rows or 0)),
+        "selected_rows": max(0, int(selected_rows or 0)),
+        "total_rows_would_write": max(0, int(total_rows_would_write or 0)),
+        "total_rows": max(0, int(selected_rows or 0)),
+        "processed_rows": 0,
+        "assigned_rows": 0,
+        "skipped_rows": 0,
+        "remaining_rows": max(0, int(selected_rows or 0)),
+        "eta_seconds": "",
+        "progress_percent": 0,
+    }
+    _save_important_dispatch_job(job)
+    thread = threading.Thread(target=_run_important_dispatch_job, args=(job_id,), daemon=True)
+    thread.start()
+    return _job_progress_payload(job)
 
 
 def _count_pasted_lead_rows(input_text: str) -> int:
@@ -1225,11 +1730,11 @@ async def check_important_leads_upload(
     rejected_path: str = Form(""),
 ) -> JSONResponse:
     current_paths = important_leads_path_state()
-    resolved_output_path = _resolve_dashboard_csv_path(
+    resolved_output_path = _resolve_dashboard_csv_path_or_default(
         output_path or current_paths["output_path"],
         IMPORTANT_LEADS_OUTPUT,
     )
-    resolved_rejected_path = _resolve_dashboard_csv_path(
+    resolved_rejected_path = _resolve_dashboard_csv_path_or_default(
         rejected_path or current_paths["rejected_path"],
         IMPORTANT_LEADS_REJECTED,
     )
@@ -1337,7 +1842,7 @@ async def check_important_leads_upload(
     IMPORTANT_LEADS_CHECK_RUNS.mkdir(parents=True, exist_ok=True)
     effective_input_path = IMPORTANT_LEADS_CHECK_RUNS / f"leadschecker_{timestamp_slug()}.csv"
     try:
-        normalized_extension, normalized_text = _normalize_uploaded_check_file(filename, content)
+        normalized_extension, normalized_text, source_sheet = _normalize_uploaded_check_file(filename, content)
     except ValueError as exc:
         return JSONResponse(
             {
@@ -1368,6 +1873,7 @@ async def check_important_leads_upload(
         selected_filename=selected_filename or filename,
         selected_size_bytes=selected_size_bytes,
         selected_extension=str(client_selected_extension or normalized_extension or extension or "").strip().lower() or normalized_extension or extension,
+        source_sheet=source_sheet,
         total_input_rows=total_input_rows,
     )
     return JSONResponse(
@@ -1393,7 +1899,18 @@ def get_check_important_leads_job(job_id: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Check job not found: {job_id}"}, status_code=404)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"Failed to load check job: {exc}"}, status_code=500)
-    return JSONResponse({"ok": True, "job": job, "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+    return JSONResponse({"ok": True, "job": _important_check_job_with_progress(job), "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+
+
+@app.get("/api/leads/check-important/active")
+def get_active_check_important_leads_job() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "job": _find_active_important_check_job(),
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        }
+    )
 
 
 @app.post("/api/leads/clean")
@@ -1486,36 +2003,60 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
 @app.post("/api/leads/verify-important")
 def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) -> JSONResponse:
     try:
-        current_paths = important_leads_verify_path_state()
+        mode = str(payload.mode if payload else TRIAGE_MODE_FAST).strip().upper()
+        mode = TRIAGE_MODE_STRICT if mode == TRIAGE_MODE_STRICT else TRIAGE_MODE_FAST
+        if mode == TRIAGE_MODE_FAST:
+            current_paths = important_leads_triage_path_state()
+            default_keep_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_keep.csv")
+            default_rejected_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_reject.csv")
+            default_quarantine_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv")
+            current_keep = current_paths["keep_path"]
+        else:
+            current_paths = important_leads_verify_path_state()
+            default_keep_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_verified.csv")
+            default_rejected_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_verify_rejected.csv")
+            default_quarantine_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_quarantine.csv")
+            current_keep = current_paths["verified_path"]
         input_path = _resolve_dashboard_csv_path(
             payload.input_path if payload else current_paths["input_path"],
             IMPORTANT_LEADS_OUTPUT,
         )
         verified_path = _resolve_dashboard_csv_path(
-            payload.verified_path if payload else current_paths["verified_path"],
-            IMPORTANT_LEADS_OUTPUT.with_name("leads_verified.csv"),
+            payload.verified_path if payload else current_keep,
+            default_keep_path,
         )
         rejected_path = _resolve_dashboard_csv_path(
             payload.rejected_path if payload else current_paths["rejected_path"],
-            IMPORTANT_LEADS_OUTPUT.with_name("leads_verify_rejected.csv"),
+            default_rejected_path,
         )
         quarantine_path = _resolve_dashboard_csv_path(
             payload.quarantine_path if payload else current_paths["quarantine_path"],
-            IMPORTANT_LEADS_OUTPUT.with_name("leads_quarantine.csv"),
+            default_quarantine_path,
         )
-        save_state(
-            important_leads_verify_paths=_important_verify_path_labels_for_state(
-                input_path,
-                verified_path,
-                rejected_path,
-                quarantine_path,
+        if mode == TRIAGE_MODE_STRICT:
+            save_state(
+                important_leads_verify_paths=_important_verify_path_labels_for_state(
+                    input_path,
+                    verified_path,
+                    rejected_path,
+                    quarantine_path,
+                )
             )
-        )
-        report = verify_master_leads(
+        else:
+            save_state(
+                important_leads_triage_paths=_important_triage_path_labels_for_state(
+                    input_path,
+                    verified_path,
+                    rejected_path,
+                    quarantine_path,
+                )
+            )
+        job = _start_important_verify_job(
             input_path=input_path,
             verified_path=verified_path,
             rejected_path=rejected_path,
             quarantine_path=quarantine_path,
+            mode=mode,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
@@ -1527,69 +2068,337 @@ def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) ->
     return JSONResponse(
         {
             "ok": True,
-            "message": (
-                f"Verified {report['input_label']} into {report['verified_label']}. "
-                f"KEEP {int(report['keep_count'] or 0)}, REJECT {int(report['reject_count'] or 0)}, "
-                f"QUARANTINE {int(report['quarantine_count'] or 0)}."
-            ),
-            "verify": report,
+            "message": f"Queued {'fast triage' if mode == TRIAGE_MODE_FAST else 'strict public proof'} job {job['job_id']}.",
+            "job": job,
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        },
+        status_code=202,
+    )
+
+
+@app.get("/api/leads/verify-important/job/{job_id}")
+def get_verify_important_leads_job(job_id: str) -> JSONResponse:
+    try:
+        job = _load_important_verify_job(job_id)
+    except FileNotFoundError:
+        return JSONResponse({"ok": False, "message": f"Verify job not found: {job_id}"}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to load verify job: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, "job": _job_progress_payload(job), "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+
+
+@app.get("/api/leads/verify-important/active")
+def get_active_verify_important_leads_job() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
         }
     )
 
 
-@app.post("/api/leads/dispatch-important")
-def dispatch_important_leads(payload: ImportantLeadPathsPayload | None = None) -> JSONResponse:
+@app.post("/api/leads/verify-important/job/{job_id}/cancel")
+def cancel_verify_important_leads_job(job_id: str) -> JSONResponse:
     try:
+        job = _load_important_verify_job(job_id)
+    except FileNotFoundError:
+        return JSONResponse({"ok": False, "message": f"Verify job not found: {job_id}"}, status_code=404)
+    status = str(job.get("status") or "").lower()
+    if status in {"completed", "failed", "canceled", "cancelled"}:
+        return JSONResponse({"ok": True, "message": f"Verify job already terminal: {status}.", "job": _job_progress_payload(job)})
+    job["cancel_requested"] = True
+    job["stage"] = "cancel_requested"
+    job["phase"] = "cancel_requested"
+    job["message"] = "Stop requested. Verify will stop after the current row/checkpoint is saved."
+    _save_important_verify_job(job)
+    return JSONResponse({"ok": True, "message": "Stop requested for Verify Leads.", "job": _job_progress_payload(job)})
+
+
+@app.post("/api/leads/dispatch-important/preview")
+def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    try:
+        preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
+        if preflight_block is not None:
+            return preflight_block
         current_paths = important_leads_path_state()
         verify_paths = important_leads_verify_path_state()
+        triage_paths = important_leads_triage_path_state()
         input_path = _resolve_dashboard_csv_path(
-            payload.input_path if payload else current_paths["input_path"],
+            getattr(payload, "input_path", current_paths["input_path"]) if payload else current_paths["input_path"],
             IMPORTANT_LEADS_INPUT,
         )
         output_path = _resolve_dashboard_csv_path(
-            payload.output_path if payload else current_paths["output_path"],
+            getattr(payload, "output_path", current_paths["output_path"]) if payload else current_paths["output_path"],
             IMPORTANT_LEADS_OUTPUT,
         )
         rejected_path = _resolve_dashboard_csv_path(
-            payload.rejected_path if payload else current_paths["rejected_path"],
+            getattr(payload, "rejected_path", current_paths["rejected_path"]) if payload else current_paths["rejected_path"],
             IMPORTANT_LEADS_REJECTED,
         )
-        dispatch_source_mode = str(payload.dispatch_source_mode if payload else "verified").strip().lower() or "verified"
-        if dispatch_source_mode not in {"verified", "cleaned"}:
-            raise ValueError("Dispatch source mode must be verified or cleaned.")
+        dispatch_source_mode = str(getattr(payload, "dispatch_source_mode", DISPATCH_SOURCE_TRIAGED_KEEP) if payload else DISPATCH_SOURCE_TRIAGED_KEEP).strip().lower() or DISPATCH_SOURCE_TRIAGED_KEEP
+        dispatch_cap = str(getattr(payload, "dispatch_cap", DISPATCH_CAP_ALL) if payload else DISPATCH_CAP_ALL).strip().lower() or DISPATCH_CAP_ALL
+        aliases = {
+            "verified": DISPATCH_SOURCE_TRIAGED_KEEP,
+            "fast_triage": DISPATCH_SOURCE_TRIAGED_KEEP,
+            "fast_triage_keep": DISPATCH_SOURCE_TRIAGED_KEEP,
+            "strict": DISPATCH_SOURCE_STRICT_VERIFIED,
+            "strict_public_proof": DISPATCH_SOURCE_STRICT_VERIFIED,
+        }
+        dispatch_source_mode = aliases.get(dispatch_source_mode, dispatch_source_mode)
+        if dispatch_source_mode not in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_STRICT_VERIFIED, DISPATCH_SOURCE_CLEANED}:
+            raise ValueError("Dispatch source mode must be triaged_keep, strict_verified, or cleaned.")
         save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         save_state(important_leads_dispatch_source=_important_dispatch_source_labels_for_state(dispatch_source_mode))
+        triaged_keep_source_path = _resolve_dashboard_csv_path(
+            triage_paths["keep_path"],
+            TRIAGED_KEEP_PATH,
+        )
         verified_source_path = _resolve_dashboard_csv_path(
             verify_paths["verified_path"],
-            IMPORTANT_LEADS_OUTPUT.with_name("leads_verified.csv"),
+            STRICT_VERIFIED_PATH,
         )
-        report = dispatch_master_leads(
+        preview = preview_dispatch_master_leads(
             master_path=output_path,
-            verified_path=verified_source_path,
-            dispatch_source_mode=dispatch_source_mode,
             rejected_path=rejected_path,
-            require_stopped=True,
+            verified_path=verified_source_path,
+            triaged_keep_path=triaged_keep_source_path,
+            dispatch_source_mode=dispatch_source_mode,
+            dispatch_cap=dispatch_cap,
+            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
         )
     except FileNotFoundError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+        return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
     except ValueError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        return JSONResponse({"ok": False, "error": "invalid_dispatch_request", "message": str(exc)}, status_code=400)
     except RuntimeError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+        return JSONResponse({"ok": False, "error": "dispatch_preview_blocked", "message": str(exc)}, status_code=409)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Lead dispatch preview failed: {exc}"}, status_code=500)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"Preview ready for {preview['dispatch_source_name']}.",
+            "preview": preview,
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            "snapshot": _build_live_snapshot(),
+        }
+    )
+
+
+def _dispatch_preflight_block_response(*, snapshot: dict[str, object] | None = None) -> JSONResponse | None:
+    active_profiles = runtime_control.list_active_sender_snapshots(tail_lines=12)
+    if not active_profiles:
+        return None
+    states = {str(item.name): str(item.runtime_state) for item in active_profiles}
+    active_names = list(states.keys())
+    return JSONResponse(
+        {
+            "ok": False,
+            "blocked": True,
+            "reason": "senders_active",
+            "error": "senders_active",
+            "active_profiles": active_names,
+            "active_sender_count": len(active_names),
+            "states": states,
+            "message": f"Dispatch blocked: stop active senders first. Active: {', '.join(sorted(states))}",
+            "snapshot": snapshot or _build_live_snapshot(),
+        },
+        status_code=409,
+    )
+
+
+def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    try:
+        preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
+        if preflight_block is not None:
+            return preflight_block
+        preview_id = str(getattr(payload, "preview_id", "") if payload else "").strip()
+        if not preview_id:
+            raise ValueError("Run Preview Dispatch first.")
+        preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+        requested_mode = str(getattr(payload, "dispatch_source_mode", preview.get("dispatch_source_mode") or "") if payload else preview.get("dispatch_source_mode") or "").strip().lower()
+        if requested_mode:
+            aliases = {
+                "verified": DISPATCH_SOURCE_TRIAGED_KEEP,
+                "fast_triage": DISPATCH_SOURCE_TRIAGED_KEEP,
+                "fast_triage_keep": DISPATCH_SOURCE_TRIAGED_KEEP,
+                "strict": DISPATCH_SOURCE_STRICT_VERIFIED,
+                "strict_public_proof": DISPATCH_SOURCE_STRICT_VERIFIED,
+            }
+            requested_mode = aliases.get(requested_mode, requested_mode)
+            if requested_mode != str(preview.get("dispatch_source_mode") or ""):
+                raise RuntimeError("Dispatch preview does not match the selected source. Re-run Preview Dispatch.")
+        requested_cap = str(getattr(payload, "dispatch_cap", preview.get("dispatch_cap") or DISPATCH_CAP_ALL) if payload else preview.get("dispatch_cap") or DISPATCH_CAP_ALL).strip().lower()
+        if requested_cap and requested_cap != str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL):
+            raise RuntimeError("Dispatch preview does not match the selected cap. Re-run Preview Dispatch.")
+        job = _start_important_dispatch_job(
+            preview_id=preview_id,
+            dispatch_source_mode=str(preview.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP),
+            dispatch_source_name=str(preview.get("dispatch_source_name") or ""),
+            dispatch_source_path=str(preview.get("dispatch_source_path") or ""),
+            dispatch_cap=str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL),
+            total_source_rows=int(preview.get("dispatch_source_row_count") or 0),
+            eligible_rows=int(preview.get("dispatch_eligible_row_count") or 0),
+            selected_rows=int(preview.get("dispatch_selected_row_count") or 0),
+            total_rows_would_write=int(preview.get("total_rows_would_write") or 0),
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": "invalid_dispatch_request", "message": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        error_code = "stale_preview" if "stale" in str(exc).lower() else "dispatch_blocked"
+        return JSONResponse({"ok": False, "error": error_code, "message": str(exc)}, status_code=409)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"Lead dispatch failed: {exc}"}, status_code=500)
 
     return JSONResponse(
         {
             "ok": True,
-            "message": (
-                f"Dispatch complete. Astra added {report['added_astra']} row(s), SendGrid added "
-                f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
-            ),
-            "dispatch": report,
+            "message": f"Queued dispatch confirm job {job['job_id']}.",
+            "job": job,
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             "snapshot": _build_live_snapshot(),
+        },
+        status_code=202,
+    )
+
+
+@app.post("/api/leads/dispatch-important/confirm")
+def confirm_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    return _dispatch_confirm_response(payload)
+
+
+@app.post("/api/leads/dispatch-important")
+def dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    return _dispatch_confirm_response(payload)
+
+
+@app.get("/api/leads/dispatch-important/preflight")
+def dispatch_important_leads_preflight() -> JSONResponse:
+    snapshot = _build_live_snapshot()
+    block = _dispatch_preflight_block_response(snapshot=snapshot)
+    if block is not None:
+        return block
+    return JSONResponse(
+        {
+            "ok": True,
+            "blocked": False,
+            "reason": "",
+            "error": "",
+            "active_profiles": [],
+            "active_sender_count": 0,
+            "states": {},
+            "message": "Dispatch preflight clear.",
+            "snapshot": snapshot,
+        }
+    )
+
+
+@app.get("/api/leads/dispatch-important/job/{job_id}")
+def get_dispatch_important_leads_job(job_id: str) -> JSONResponse:
+    try:
+        job = _load_important_dispatch_job(job_id)
+    except FileNotFoundError:
+        return JSONResponse({"ok": False, "message": f"Dispatch job not found: {job_id}"}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to load dispatch job: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, "job": _job_progress_payload(job), "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+
+
+@app.get("/api/leads/dispatch-important/active")
+def get_active_dispatch_important_leads_job() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
+            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        }
+    )
+
+
+@app.get("/api/leads/quarantine-review")
+def quarantine_review_list(
+    reason_code: str = Query(default=""),
+    stage: str = Query(default=""),
+    status: str = Query(default="QUARANTINE"),
+    sort: str = Query(default="score_desc"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> JSONResponse:
+    try:
+        conn = connect_lead_ledger(_lead_ledger_db_path())
+        try:
+            review = list_quarantine_review_leads(
+                conn,
+                reason_code=reason_code,
+                stage=stage,
+                status=status,
+                sort=sort,
+                limit=limit,
+                offset=offset,
+            )
+            review["recent_actions"] = load_recent_quarantine_review_actions(conn, limit=12)
+        finally:
+            conn.close()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to load quarantine review inbox: {exc}"}, status_code=500)
+    return JSONResponse({"ok": True, "review": review})
+
+
+@app.get("/api/leads/quarantine-review/{lead_id}")
+def quarantine_review_detail(lead_id: str) -> JSONResponse:
+    try:
+        conn = connect_lead_ledger(_lead_ledger_db_path())
+        try:
+            lead = load_quarantine_review_lead(conn, lead_id)
+        finally:
+            conn.close()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to load quarantine review lead: {exc}"}, status_code=500)
+    if lead is None:
+        return JSONResponse({"ok": False, "message": f"Lead not found: {lead_id}"}, status_code=404)
+    return JSONResponse({"ok": True, "lead": lead})
+
+
+@app.post("/api/leads/quarantine-review/action")
+def quarantine_review_action(payload: QuarantineReviewActionPayload) -> JSONResponse:
+    try:
+        conn = connect_lead_ledger(_lead_ledger_db_path())
+        try:
+            resolved_lead_ids = payload.lead_ids
+            if payload.select_all_filtered:
+                resolved_lead_ids = list_quarantine_review_lead_ids(
+                    conn,
+                    reason_code=payload.reason_code,
+                    stage=payload.stage,
+                    status=payload.status,
+                    sort=payload.sort,
+                    exclude_lead_ids=payload.excluded_lead_ids,
+                )
+            result = apply_quarantine_review_action(
+                conn,
+                lead_ids=resolved_lead_ids,
+                action=payload.action,
+                operator_note=payload.operator_note,
+                run_id=f"quarantine_review_{timestamp_slug()}",
+            )
+            review = list_quarantine_review_leads(conn)
+            review["recent_actions"] = load_recent_quarantine_review_actions(conn, limit=12)
+        finally:
+            conn.close()
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"Failed to apply quarantine review action: {exc}"}, status_code=500)
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"Applied {result['action']} to {int(result['updated'] or 0)} lead(s).",
+            "result": result,
+            "review": review,
         }
     )
 
@@ -1658,7 +2467,19 @@ def preview_shard(payload: ShardLeadsPayload) -> JSONResponse:
 
 @app.get("/api/leads/status")
 def leads_status() -> JSONResponse:
-    return JSONResponse({"ok": True, "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()}})
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": {
+                **shard_status(),
+                **important_leads_status(),
+                **important_leads_verify_status(),
+                "active_important_check_job": _find_active_important_check_job(),
+                "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
+                "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
+            },
+        }
+    )
 
 
 @app.post("/webhooks/sendgrid/events")
@@ -1693,12 +2514,26 @@ async def sendgrid_event_webhook(request: Request) -> JSONResponse:
     unique_events = list(dedupe_result.get("unique_events", []))
     appended = append_events_jsonl(unique_events, WEBHOOK_EVENTS_PATH)
     suppression_summary = update_suppressions_from_events(unique_events, SUPPRESSION_CSV)
+    ledger_summary = ingest_send_outcome_events(unique_events, db_path=settings.LEAD_LEDGER_DB_PATH)
     auto_stops = runtime_control.apply_delivery_guards()
     json_safe_summary = {
         "updated_events": int(suppression_summary.get("updated_events", 0) or 0),
         "records_total": int(suppression_summary.get("records_total", 0) or 0),
         "total_perm": int(suppression_summary.get("total_perm", 0) or 0),
         "total_temp_active": int(suppression_summary.get("total_temp_active", 0) or 0),
+    }
+    json_safe_ledger_summary = {
+        "processed_events": int(ledger_summary.get("processed_events", 0) or 0),
+        "matched_events": int(ledger_summary.get("matched_events", 0) or 0),
+        "unmatched_events": int(ledger_summary.get("unmatched_events", 0) or 0),
+        "ignored_events": int(ledger_summary.get("ignored_events", 0) or 0),
+        "dispatch_rows_updated": int(ledger_summary.get("dispatch_rows_updated", 0) or 0),
+        "lead_rows_updated": int(ledger_summary.get("lead_rows_updated", 0) or 0),
+        "suppressed_events": int(ledger_summary.get("suppressed_events", 0) or 0),
+        "outcome_counts": {
+            str(key): int(value or 0)
+            for key, value in dict(ledger_summary.get("outcome_counts", {})).items()
+        },
     }
     return JSONResponse(
         {
@@ -1708,6 +2543,7 @@ async def sendgrid_event_webhook(request: Request) -> JSONResponse:
             "stored": appended,
             "duplicates_ignored": int(dedupe_result.get("duplicates", 0) or 0),
             "suppression_summary": json_safe_summary,
+            "ledger_summary": json_safe_ledger_summary,
             "auto_stops": auto_stops,
         }
     )

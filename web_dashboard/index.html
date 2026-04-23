@@ -8,215 +8,611 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      .app-shell {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        max-width: 1460px;
+        margin: 0 auto;
+      }
+
+      .app-rail {
+        position: static;
+        min-height: 0;
+        padding: 10px 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "brand tabs"
+          "status status";
+        gap: 8px 12px;
+        align-items: center;
+        overflow: visible;
+      }
+
+      .app-rail-top {
+        grid-area: brand;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+
+      .app-rail-top .eyebrow {
+        margin: 0;
+      }
+
+      .app-rail-title {
+        font-size: clamp(1.35rem, 1.8vw, 1.7rem);
+        line-height: 1;
+      }
+
+      .app-rail-tabs {
+        grid-area: tabs;
+        display: inline-flex;
+        justify-content: flex-end;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .app-rail-tabs .tab-btn {
+        min-width: 120px;
+        flex: 0 0 auto;
+      }
+
+      .app-rail-status {
+        grid-area: status;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+      }
+
+      .toolbar-status {
+        margin-left: auto;
+        text-align: right;
+        font-size: 12px;
+      }
+
+      .workspace-header {
+        padding: 0;
+        background: transparent;
+        border: 0;
+        box-shadow: none;
+        backdrop-filter: none;
+      }
+
+      .workspace-controls {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas:
+          "window cap"
+          "note note"
+          "actions actions";
+        gap: 8px;
+        align-items: start;
+        padding: 10px;
+      }
+
+      .workspace-controls label {
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .workspace-controls .toolbar-field {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .workspace-controls .toolbar-field-window {
+        grid-area: window;
+      }
+
+      .workspace-controls .toolbar-field-cap {
+        grid-area: cap;
+      }
+
+      .workspace-controls .toolbar-field select,
+      .workspace-controls .toolbar-field input {
+        width: 100%;
+      }
+
+      .workspace-controls .toolbar-field-note {
+        font-size: 11px;
+        line-height: 1.25;
+        max-width: none;
+        grid-area: note;
+        margin: 0;
+      }
+
+      .workspace-controls .toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        justify-content: flex-start;
+        align-items: center;
+        grid-area: actions;
+      }
+
+      .workspace-controls .btn,
+      .workspace-controls select,
+      .workspace-controls input,
+      .detail-switcher .btn,
+      .detail-switcher select {
+        height: 36px;
+      }
+
+      .workspace-controls-card {
+        display: grid;
+        gap: 8px;
+      }
+
+      .workspace-controls-card .workspace-controls {
+        align-self: start;
+      }
+
+      .workspace-view {
+        gap: 10px;
+      }
+
+      .workspace-status-row {
+        display: grid;
+        grid-template-columns: minmax(300px, 348px) minmax(360px, 1fr) minmax(300px, 420px);
+        grid-template-areas: "controls progress alerts";
+        gap: 10px;
+        align-items: start;
+      }
+
+      .workspace-controls-card {
+        grid-area: controls;
+      }
+
+      .ops-progress-shell {
+        grid-area: progress;
+      }
+
+      .ops-alerts-strip {
+        grid-area: alerts;
+      }
+
+      .workspace-primary {
+        grid-template-columns: 1fr;
+      }
+
+      .workspace-summary-strip {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        align-items: stretch;
+      }
+
+      .alerts-grid-compact {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 5px;
+      }
+
+      .alerts-grid-compact .alert-card,
+      .alerts-grid-compact .alert-row {
+        grid-template-columns: 88px minmax(0, 1fr);
+        align-items: start;
+      }
+
+      .alerts-grid-compact .alert-head {
+        display: contents;
+      }
+
+      .alerts-grid-compact .alert-pill,
+      .alerts-grid-compact .alert-row > :first-child {
+        align-self: start;
+      }
+
+      .alerts-grid-compact h3 {
+        margin: 0 0 2px;
+        font-size: 13px;
+      }
+
+      .alerts-grid-compact .alert-message {
+        max-width: none;
+        margin: 0;
+        font-size: 11px;
+        line-height: 1.3;
+      }
+
+      .alerts-grid-compact .alert-row:last-child {
+        opacity: 0.9;
+        border-style: dashed;
+        grid-template-columns: 1fr;
+      }
+
+      .alerts-grid-compact .alert-row:last-child .alert-pill {
+        display: none;
+      }
+
+      .alerts-grid-compact .alert-row:last-child .alert-row-body {
+        padding-left: 0;
+      }
+
+      .alerts-grid-compact .alert-row:last-child h3 {
+        color: #dfe8f6;
+      }
+
+      .summary-card {
+        min-height: 0;
+        overflow: visible;
+      }
+
+      .summary-head {
+        margin-bottom: 2px;
+      }
+
+      .summary-card > :nth-child(n+6),
+      .summary-card ul,
+      .summary-card ol,
+      .summary-card .pill-row,
+      .summary-card .mini-pill,
+      .summary-card .funnel-meta,
+      .summary-card .event-chip-row,
+      .summary-card .funnel-grid,
+      .summary-card .live-metrics-grid,
+      .summary-card .webhook-health-grid,
+      .summary-card .awaiting-cluster-grid,
+      .summary-card .table-shell,
+      .summary-card table,
+      .summary-card .meta-box,
+      .summary-card .metric,
+      .summary-card .last-line {
+        display: none !important;
+      }
+
+      .workspace-card-detail-main {
+        padding: 14px;
+      }
+
+      .detail-stage {
+        min-height: 0;
+      }
+
+      .panel-header-compact {
+        margin-bottom: 10px;
+      }
+
+      .detail-switcher {
+        gap: 8px;
+      }
+
+      .detail-switcher-label {
+        min-width: 240px;
+      }
+
+      /* Profile Detail cleanup */
+      #detail-panel .eyebrow,
+      #detail-panel .detail-kicker,
+      #detail-panel .detail-meta,
+      #detail-panel .detail-guard-panel,
+      #detail-panel .detail-side,
+      #detail-panel .detail-pane summary + *,
+      #detail-panel .detail-meta-row:nth-child(n+6),
+      #detail-panel .detail-activity-row:nth-child(n+5),
+      #detail-panel .detail-status-copy .muted {
+        display: none;
+      }
+
+      #detail-panel .detail-head {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      #detail-panel .detail-layout {
+        grid-template-columns: 1fr;
+      }
+
+      #detail-panel .detail-main {
+        gap: 10px;
+      }
+
+      #detail-panel .detail-side {
+        display: none;
+      }
+
+      @media (max-width: 1280px) {
+        .app-rail {
+          grid-template-columns: 1fr;
+          grid-template-areas:
+            "brand"
+            "tabs"
+            "status";
+        }
+
+        .app-rail-tabs {
+          justify-content: flex-start;
+        }
+
+        .toolbar-status {
+          margin-left: 0;
+          text-align: left;
+        }
+
+        .workspace-status-row {
+          grid-template-columns: 1fr;
+          grid-template-areas:
+            "controls"
+            "progress"
+            "alerts";
+        }
+
+        .workspace-controls {
+          grid-template-columns: 1fr;
+          grid-template-areas:
+            "window"
+            "cap"
+            "note"
+            "actions";
+        }
+
+        .workspace-controls .toolbar-actions {
+          justify-content: flex-start;
+        }
+
+        .workspace-summary-strip {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .alerts-grid-compact .alert-card,
+        .alerts-grid-compact .alert-row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
   </head>
   <body>
     <div class="page booting">
       <div class="ambient ambient-a"></div>
       <div class="ambient ambient-b"></div>
 
-      <header class="topbar panel-shell">
-        <div class="topbar-main">
-          <p class="eyebrow">Email Automation</p>
-          <h1>Dashboard</h1>
-          <p class="subhead">Start, stop, and monitor the sender queues.</p>
-        </div>
-        <div class="topbar-side">
-          <div class="connection">
-            <span id="ws-indicator" class="dot dot-off"></span>
-            <span id="ws-label">Disconnected</span>
+      <div class="app-shell">
+        <aside class="app-rail panel-shell" aria-label="Primary navigation">
+          <div class="app-rail-top">
+            <p class="eyebrow">Email Automation</p>
+            <h1 class="app-rail-title">Dashboard</h1>
           </div>
-          <div class="auth-chip">
-            <span id="auth-status-label" class="auth-status-label">Signed out</span>
-            <button id="logout-btn" class="btn btn-secondary btn-sm" type="button">Log out</button>
+
+          <div class="app-rail-tabs topbar-tabs" role="tablist" aria-label="Dashboard sections" aria-orientation="vertical">
+            <button
+              id="ops-tab-btn"
+              class="tab-btn is-active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="ops-view"
+              tabindex="0"
+            >
+              Dashboard
+            </button>
+            <button
+              id="leads-tab-btn"
+              class="tab-btn"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="leads-view"
+              tabindex="-1"
+            >
+              Leads
+            </button>
           </div>
-          <div class="view-tabs-buttons">
-            <button id="ops-tab-btn" class="tab-btn is-active" type="button" aria-pressed="true">Dashboard</button>
-            <button id="leads-tab-btn" class="tab-btn" type="button" aria-pressed="false">Leads</button>
-          </div>
-        </div>
-        <div class="topbar-controls">
-          <div class="toolbar-header">
-            <div>
-              <p class="eyebrow">Controls</p>
-              <h2>Fleet Controls</h2>
+
+          <div class="app-rail-status panel-shell">
+            <div class="connection">
+              <span id="ws-indicator" class="dot dot-off"></span>
+              <span id="ws-label">Disconnected</span>
+            </div>
+            <div class="auth-chip app-rail-auth">
+              <span id="auth-status-label" class="auth-status-label">Signed out</span>
+              <button id="logout-btn" class="btn btn-secondary btn-sm" type="button">Log out</button>
             </div>
             <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
           </div>
-          <section class="toolbar">
-            <label class="toolbar-field toolbar-field-window">
-              Activity window
-              <select id="hours-select">
-                <option value="6">6h</option>
-                <option value="12">12h</option>
-                <option value="24" selected>24h</option>
-                <option value="72">72h</option>
-                <option value="168">168h</option>
-              </select>
-            </label>
-            <label class="toolbar-field toolbar-field-cap">
-              Emails / sender
-              <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
-            </label>
-            <div id="send-cap-note" class="toolbar-field-note muted">Awaiting first snapshot</div>
-            <div class="toolbar-actions">
-              <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save Cap</button>
-              <button id="refresh-btn" class="btn btn-secondary">Refresh</button>
-              <button id="start-btn" class="btn btn-primary">Start All</button>
-              <button id="stop-btn" class="btn btn-danger">Stop All</button>
-            </div>
-          </section>
-        </div>
-      </header>
+        </aside>
 
-      <section id="message-bar" class="message-bar hidden"></section>
-      <section id="ops-view" class="dashboard-view">
-        <section id="health-banner" class="health-banner health-yellow">Loading…</section>
+        <main class="app-main">
+          
 
-        <section id="summary-grid" class="summary-grid"></section>
+          <section id="ops-view" class="dashboard-view workspace-view" role="tabpanel" aria-labelledby="ops-tab-btn">
+            <section class="workspace-status-row">
+              <header class="workspace-header workspace-controls-card panel-shell">
+                <section class="workspace-controls toolbar" aria-label="Dashboard controls">
+                  <label class="toolbar-field toolbar-field-window">
+                    Window
+                    <select id="hours-select">
+                      <option value="6">6h</option>
+                      <option value="12">12h</option>
+                      <option value="24" selected>24h</option>
+                      <option value="72">72h</option>
+                      <option value="168">168h</option>
+                    </select>
+                  </label>
+                  <label class="toolbar-field toolbar-field-cap">
+                    Cap
+                    <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
+                  </label>
+                  <div id="send-cap-note" class="toolbar-field-note muted">Applies to all active senders</div>
+                  <div class="toolbar-actions">
+                    <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save</button>
+                    <button id="refresh-btn" class="btn btn-secondary" type="button">Refresh</button>
+                    <button id="start-btn" class="btn btn-primary" type="button">Start All</button>
+                    <button id="stop-btn" class="btn btn-danger" type="button">Stop All</button>
+                  </div>
+                </section>
+                <section id="message-bar" class="message-bar hidden"></section>
+              </header>
 
-        <section class="ops-stack">
-          <section id="overview-panel" class="panel panel-shell">
-            <div class="panel-header">
-              <h2>Fleet Overview</h2>
-              <span class="muted">Fleet senders. Click a tile to focus one sender.</span>
-            </div>
-            <div id="overview-grid" class="overview-grid"></div>
-          </section>
-
-          <section id="detail-panel" class="panel panel-shell">
-            <div class="panel-header">
-              <div>
-                <h2>Profile Detail</h2>
-                <span id="detail-caption" class="muted">Focused controls, delivery flow, and live diagnostics for one sender.</span>
+            <section class="panel-shell ops-progress-shell workspace-metric-block">
+              <div class="ops-strip-head">
+                <div>
+                  <p class="eyebrow">Run Progress</p>
+                  <p class="muted">Live send totals by channel</p>
+                </div>
               </div>
-              <div class="detail-switcher">
-                <button id="detail-prev-btn" class="btn btn-secondary" type="button" aria-label="Previous profile">Prev</button>
-                <label class="detail-switcher-label">
-                  <span class="sr-only">Selected profile</span>
-                  <select id="detail-profile-select" aria-label="Selected profile"></select>
-                </label>
-                <button id="detail-next-btn" class="btn btn-secondary" type="button" aria-label="Next profile">Next</button>
+              <div id="alerts-progress" class="alerts-progress"></div>
+            </section>
+
+            <section class="ops-alerts-strip panel-shell workspace-metric-block">
+              <div class="ops-strip-head ops-strip-head-inline">
+                <div>
+                  <p class="eyebrow">Active Alerts</p>
+                  <p id="alerts-caption" class="muted">No active threshold alerts right now.</p>
+                </div>
               </div>
-            </div>
-            <div id="profile-detail" class="detail-stage"></div>
+              <div id="alerts-grid" class="alerts-grid alerts-grid-compact"></div>
+            </section>
           </section>
-        </section>
-      </section>
 
-      <section id="leads-view" class="dashboard-view hidden">
-        <section class="panel panel-shell leads-panel leads-step-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Step 1</p>
-              <h2>Check Leads</h2>
-              <span class="muted">Email-first hygiene. Preserve <strong>FullName</strong> when you have it, keep <strong>FirstName</strong> for sending, and leave proof work for Verify. Large batch imports belong on CSV upload, not the paste box.</span>
-            </div>
-          </div>
-          <div class="leads-quick-grid">
-            <div class="leads-quick-file">
-              <span class="label">Input</span>
-              <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
-            </div>
-            <div class="leads-quick-file">
-              <span class="label">Output</span>
-              <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
-            </div>
-            <div class="leads-action-slot">
-              <button id="leads-important-check-btn" class="btn btn-primary" type="button">Check Leads</button>
-            </div>
-          </div>
-          <div class="leads-quick-grid leads-quick-secondary">
-            <div class="leads-quick-file">
-              <span class="label">Upload CSV/XLSX (file only)</span>
-              <input id="leads-important-upload-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
-              <span id="leads-important-upload-note" class="toolbar-field-note muted">Choose a CSV or XLSX file, then click Upload &amp; Check. Uploads are file-driven and never reuse the stored input path.</span>
-            </div>
-            <div class="leads-action-slot">
-              <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
-            </div>
-          </div>
-          <div class="leads-quick-grid leads-quick-secondary">
-            <div class="leads-quick-file">
-              <span class="label">Rejected</span>
-              <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
-            </div>
-          </div>
-          <div class="leads-quick-grid leads-quick-secondary">
-            <div class="leads-quick-file leads-quick-file-wide">
-              <span class="label">Paste Intake CSV</span>
-              <textarea id="leads-important-input-text" rows="8" placeholder="Small/manual only. Use Upload CSV for 1,000+ rows.&#10;Email,FirstName&#10;info@example.com,Jane&#10;john@example.com,John" spellcheck="false"></textarea>
-              <span id="leads-important-paste-note" class="toolbar-field-note muted">Small/manual only. Use Upload CSV for 1,000+ rows. Paste first, then Check Leads writes the run file and cleans it into Output and Rejected. Use <strong>FullName</strong> upstream when you have it.</span>
-            </div>
-          </div>
-          <div id="leads-important-check-meta" class="leads-meta muted">Ready to clean `_important/leadschecker.csv`.</div>
-          <div id="leads-important-check-results" class="leads-results"></div>
-        </section>
+          <section id="summary-grid" class="summary-grid summary-strip workspace-summary-strip"></section>
 
-        <section class="panel panel-shell leads-panel leads-step-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Step 2</p>
-              <h2>Verify Leads</h2>
-              <span class="muted">Proof-based public verification. Use <strong>FullName + Email</strong> when you want to prove the person. <strong>FirstName</strong> alone is weak and usually quarantines unless proof is explicit. This is the slow bottleneck stage by design.</span>
-            </div>
-          </div>
-          <div class="leads-quick-grid">
-            <div class="leads-quick-file">
-              <span class="label">Input</span>
-              <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
-            </div>
-            <div class="leads-quick-file">
-              <span class="label">Keep</span>
-              <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
-            </div>
-            <div class="leads-action-slot">
-              <button id="leads-verify-btn" class="btn btn-primary" type="button">Verify Leads</button>
-            </div>
-          </div>
-          <div class="leads-quick-grid leads-quick-secondary">
-            <div class="leads-quick-file">
-              <span class="label">Reject</span>
-              <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
-            </div>
-            <div class="leads-quick-file">
-              <span class="label">Quarantine</span>
-              <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
-            </div>
-          </div>
-          <div id="leads-verify-meta" class="leads-meta muted">Verify is idle. Run Check Leads first, then verify the cleaned file against public evidence.</div>
-          <div id="leads-verify-results" class="leads-results"></div>
-        </section>
+            <section class="workspace-primary">
+              <section id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main">
+                <div class="panel-header panel-header-compact">
+                  <div>
+                    <h2>Profile Detail</h2>
+                    <span id="detail-caption" class="muted">Focused controls, delivery flow, and live diagnostics for one sender.</span>
+                  </div>
+                  <div class="detail-switcher">
+                    <button id="detail-prev-btn" class="btn btn-secondary" type="button" aria-label="Previous profile">Prev</button>
+                    <label class="detail-switcher-label">
+                      <span class="sr-only">Selected profile</span>
+                      <select id="detail-profile-select" aria-label="Selected profile"></select>
+                    </label>
+                    <button id="detail-next-btn" class="btn btn-secondary" type="button" aria-label="Next profile">Next</button>
+                  </div>
+                </div>
+                <div id="profile-detail" class="detail-stage"></div>
+              </section>
+            </section>
+          </section>
 
-        <section class="panel panel-shell leads-panel leads-step-panel">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Step 3</p>
-              <h2>Dispatch Leads</h2>
-              <span class="muted">Send from verified keep rows by default. The queue uses <strong>Email</strong> + <strong>FirstName</strong> only, so the email still says <code>Hi {FirstName},</code>. Cleaned mode stays available, and all senders must be stopped first. Dispatch is the fast queue-safety/write stage.</span>
-            </div>
-          </div>
-          <div class="leads-dispatch-grid">
-            <div class="leads-quick-file">
-              <span class="label">Dispatch Source</span>
-              <select id="leads-dispatch-source-mode">
-                <option value="verified">Verified (default)</option>
-                <option value="cleaned">Cleaned</option>
-              </select>
-              <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Verified mode reads <strong>_important/leads_verified.csv</strong>. Cleaned mode keeps the legacy <strong>_important/leads.csv</strong> path.</span>
-            </div>
-            <div class="leads-quick-file">
-              <span class="label">Dispatch Rule</span>
-              <strong>Astra + one SendGrid shard per lead</strong>
-              <span class="toolbar-field-note muted">If Astra has not sent or queued the lead, it goes to <code>recipients_private_jc.csv</code>. If SendGrid has not sent or queued it, it goes to exactly one SendGrid shard.</span>
-            </div>
-            <div class="leads-action-slot">
-              <button id="leads-important-dispatch-btn" class="btn btn-primary" type="button">Dispatch Leads</button>
-            </div>
-          </div>
-          <div id="leads-important-dispatch-meta" class="leads-meta muted">Dispatch is idle. Check the master file first, then dispatch while all senders are stopped.</div>
-          <div id="leads-important-dispatch-results" class="leads-results"></div>
-        </section>
-      </section>
+          <section id="leads-view" class="dashboard-view workspace-view hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
+            <header class="leads-view-header panel-shell">
+              <p class="eyebrow">Leads Workspace</p>
+              <h2>Clean, verify, and dispatch</h2>
+              <p class="subhead">Keep this as a separate workflow surface so it feels distinct from the live sender operations area.</p>
+            </header>
+
+            <section class="panel panel-shell leads-panel leads-step-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Step 1</p>
+                  <h2>Check Leads</h2>
+                  <span class="muted">Email-first hygiene. Preserve <strong>FullName</strong> when you have it, keep <strong>FirstName</strong> for sending, and leave proof work for Verify. Large batch imports belong on CSV upload, not the paste box.</span>
+                </div>
+              </div>
+              <div class="leads-quick-grid">
+                <div class="leads-quick-file">
+                  <span class="label">Input</span>
+                  <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
+                </div>
+                <div class="leads-quick-file">
+                  <span class="label">Output</span>
+                  <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
+                </div>
+                <div class="leads-action-slot">
+                  <button id="leads-important-check-btn" class="btn btn-primary" type="button">Check Leads</button>
+                </div>
+              </div>
+              <div class="leads-quick-grid leads-quick-secondary">
+                <div class="leads-quick-file">
+                  <span class="label">Upload CSV/XLSX (file only)</span>
+                  <input id="leads-important-upload-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                  <span id="leads-important-upload-note" class="toolbar-field-note muted">Choose a CSV or XLSX file, then click Upload &amp; Check. Uploads are file-driven and never reuse the stored input path.</span>
+                </div>
+                <div class="leads-action-slot">
+                  <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
+                </div>
+              </div>
+              <div class="leads-quick-grid leads-quick-secondary">
+                <div class="leads-quick-file">
+                  <span class="label">Rejected</span>
+                  <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
+                </div>
+              </div>
+              <div class="leads-quick-grid leads-quick-secondary">
+                <div class="leads-quick-file leads-quick-file-wide">
+                  <span class="label">Paste Intake CSV</span>
+                  <textarea id="leads-important-input-text" rows="8" placeholder="Small/manual only. Use Upload CSV for 1,000+ rows.&#10;Email,FirstName&#10;info@example.com,Jane&#10;john@example.com,John" spellcheck="false"></textarea>
+                  <span id="leads-important-paste-note" class="toolbar-field-note muted">Small/manual only. Use Upload CSV for 1,000+ rows. Paste first, then Check Leads writes the run file and cleans it into Output and Rejected. Use <strong>FullName</strong> upstream when you have it.</span>
+                </div>
+              </div>
+              <div id="leads-important-check-meta" class="leads-meta muted">Ready to clean `_important/leadschecker.csv`.</div>
+              <div id="leads-important-check-results" class="leads-results"></div>
+            </section>
+
+            <section class="panel panel-shell leads-panel leads-step-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Step 2</p>
+                  <h2>Verify Leads</h2>
+                  <span class="muted">Proof-based public verification. Use <strong>FullName + Email</strong> when you want to prove the person. <strong>FirstName</strong> alone is weak and usually quarantines unless proof is explicit. This is the slow bottleneck stage by design.</span>
+                </div>
+              </div>
+              <div class="leads-quick-grid">
+                <div class="leads-quick-file">
+                  <span class="label">Input</span>
+                  <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
+                </div>
+                <div class="leads-quick-file">
+                  <span class="label">Keep</span>
+                  <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
+                </div>
+                <div class="leads-action-slot">
+                  <button id="leads-verify-btn" class="btn btn-primary" type="button">Verify Leads</button>
+                </div>
+              </div>
+              <div class="leads-quick-grid leads-quick-secondary">
+                <div class="leads-quick-file">
+                  <span class="label">Reject</span>
+                  <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
+                </div>
+                <div class="leads-quick-file">
+                  <span class="label">Quarantine</span>
+                  <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
+                </div>
+              </div>
+              <div id="leads-verify-meta" class="leads-meta muted">Verify is idle. Run Check Leads first, then verify the cleaned file against public evidence.</div>
+              <div id="leads-verify-results" class="leads-results"></div>
+            </section>
+
+            <section class="panel panel-shell leads-panel leads-step-panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Step 3</p>
+                  <h2>Dispatch Leads</h2>
+                  <span class="muted">Send from verified keep rows by default. The queue uses <strong>Email</strong> + <strong>FirstName</strong> only, so the email still says <code>Hi {FirstName},</code>. Cleaned mode stays available, and all senders must be stopped first. Dispatch is the fast queue-safety/write stage.</span>
+                </div>
+              </div>
+              <div class="leads-dispatch-grid">
+                <div class="leads-quick-file">
+                  <span class="label">Dispatch Source</span>
+                  <select id="leads-dispatch-source-mode">
+                    <option value="verified">Verified (default)</option>
+                    <option value="cleaned">Cleaned</option>
+                  </select>
+                  <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Verified mode reads <strong>_important/leads_verified.csv</strong>. Cleaned mode keeps the legacy <strong>_important/leads.csv</strong> path.</span>
+                </div>
+                <div class="leads-quick-file">
+                  <span class="label">Dispatch Rule</span>
+                  <strong>Astra + one SendGrid shard per lead</strong>
+                  <span class="toolbar-field-note muted">If Astra has not sent or queued the lead, it goes to <code>recipients_private_jc.csv</code>. If SendGrid has not sent or queued it, it goes to exactly one SendGrid shard.</span>
+                </div>
+                <div class="leads-action-slot">
+                  <button id="leads-important-dispatch-btn" class="btn btn-primary" type="button">Dispatch Leads</button>
+                </div>
+              </div>
+              <div id="leads-important-dispatch-meta" class="leads-meta muted">Dispatch is idle. Check the master file first, then dispatch while all senders are stopped.</div>
+              <div id="leads-important-dispatch-results" class="leads-results"></div>
+            </section>
+          </section>
+        </main>
+      </div>
     </div>
 
     <div id="auth-overlay" class="auth-overlay hidden" aria-hidden="true">
