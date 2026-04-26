@@ -17,6 +17,138 @@ from important_leads_workflow import ImportantLeadsCheckError
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def test_leads_pipeline_status_summarizes_next_step_and_counts(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            cleaned = tmp / "leads.csv"
+            triaged = tmp / "leads_triaged_keep.csv"
+            quarantine = tmp / "leads_triaged_quarantine.csv"
+            cleaned.write_text("Email,FirstName\none@example.com,One\n", encoding="utf-8")
+            triaged.write_text("Email,FirstName\none@example.com,One\n", encoding="utf-8")
+            quarantine.write_text("Email,FirstName,Status\nhold@example.com,Hold,QUARANTINE\n", encoding="utf-8")
+
+            status = {
+                "important_output_label": str(cleaned),
+                "important_triage_keep_label": str(triaged),
+                "important_triage_quarantine_label": str(quarantine),
+                "dispatch_source": {"dispatch_eligible_row_count": 1},
+            }
+
+            pipeline = live_dashboard._build_leads_pipeline_status(status)
+
+        self.assertEqual(1, pipeline["checked_rows"])
+        self.assertEqual(1, pipeline["triaged_keep_rows"])
+        self.assertEqual(1, pipeline["quarantine_rows"])
+        self.assertEqual("quarantine", pipeline["next_step"])
+        review_step = next(step for step in pipeline["steps"] if step["key"] == "quarantine")
+        self.assertEqual("warn", review_step["state"])
+
+    def test_dispatch_job_creates_pre_dispatch_archive_before_confirm(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs = tmp / "dispatch_jobs"
+            backups = tmp / "backups"
+            report_path = tmp / "dispatch_report.json"
+            job = {
+                "job_id": "dispatch_test",
+                "preview_id": "preview_1",
+                "status": "queued",
+                "stage": "queued",
+                "phase": "queued",
+                "total_rows": 1,
+            }
+            jobs.mkdir()
+            (jobs / "dispatch_test.json").write_text(json.dumps(job), encoding="utf-8")
+            call_order: list[str] = []
+
+            def fake_pack_archive(path: Path, include_check_history: bool = False):
+                call_order.append("archive")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("archive", encoding="utf-8")
+                return {
+                    "file_count": 2,
+                    "created_at_utc": "2026-04-26T00:00:00+00:00",
+                    "queue_counts": {"data/shards/recipients_sendgrid_1.csv": 10},
+                    "state_summaries": {},
+                }
+
+            def fake_confirm(*args, **kwargs):
+                call_order.append("confirm")
+                return {
+                    "run_id": "dispatch_run_test",
+                    "report_path": str(report_path),
+                    "added_astra": 1,
+                    "added_sendgrid": 1,
+                    "skipped_both": 0,
+                    "dispatch_selected_row_count": 1,
+                    "suppressed_skipped": 0,
+                    "duplicate_master_skipped": 0,
+                    "invalid_malformed_skipped": 0,
+                }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs), patch.object(
+                live_dashboard.settings, "BACKUPS_DIR", backups
+            ), patch.object(live_dashboard, "pack_archive", side_effect=fake_pack_archive), patch.object(
+                live_dashboard, "confirm_dispatch_preview", side_effect=fake_confirm
+            ), patch.object(live_dashboard, "save_state") as save_state:
+                live_dashboard._run_important_dispatch_job("dispatch_test")
+
+            saved_job = json.loads((jobs / "dispatch_test.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(["archive", "confirm"], call_order)
+            self.assertEqual("completed", saved_job["status"])
+            self.assertIn("pre_dispatch_archive", saved_job)
+            self.assertTrue(Path(saved_job["pre_dispatch_archive_path"]).exists())
+            self.assertIn("pre_dispatch_archive", json.loads(report_path.read_text(encoding="utf-8")))
+            save_state.assert_called()
+
+    def test_dispatch_job_archive_failure_fails_closed_without_mutating_live_queues(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs = tmp / "dispatch_jobs"
+            queue_path = tmp / "recipients_sendgrid_1.csv"
+            original_queue = "Email,FirstName\nqueued@example.com,Queued\n"
+            queue_path.write_text(original_queue, encoding="utf-8")
+            job = {
+                "job_id": "dispatch_archive_failure",
+                "preview_id": "preview_1",
+                "status": "queued",
+                "stage": "queued",
+                "phase": "queued",
+                "total_rows": 1,
+            }
+            jobs.mkdir()
+            (jobs / "dispatch_archive_failure.json").write_text(json.dumps(job), encoding="utf-8")
+
+            def fail_if_called(*args, **kwargs):
+                queue_path.write_text("Email,FirstName\nmutated@example.com,Mutated\n", encoding="utf-8")
+                raise AssertionError("confirm_dispatch_preview should not run after archive failure")
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs), patch.object(
+                live_dashboard,
+                "_create_pre_dispatch_archive",
+                side_effect=RuntimeError("archive failed"),
+            ), patch.object(
+                live_dashboard,
+                "confirm_dispatch_preview",
+                side_effect=fail_if_called,
+            ) as confirm_dispatch_preview, patch.object(
+                live_dashboard,
+                "save_state",
+            ) as save_state:
+                live_dashboard._run_important_dispatch_job("dispatch_archive_failure")
+
+            saved_job = json.loads((jobs / "dispatch_archive_failure.json").read_text(encoding="utf-8"))
+
+            self.assertEqual("failed", saved_job["status"])
+            self.assertEqual("failed", saved_job["stage"])
+            self.assertEqual("failed", saved_job["phase"])
+            self.assertIn("archive failed", saved_job["error"])
+            self.assertEqual(original_queue, queue_path.read_text(encoding="utf-8"))
+            self.assertNotIn("pre_dispatch_archive", saved_job)
+            confirm_dispatch_preview.assert_not_called()
+            save_state.assert_not_called()
+
     def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
         class RequestStub:
             headers: dict[str, str] = {}

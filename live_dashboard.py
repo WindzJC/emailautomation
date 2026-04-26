@@ -70,6 +70,7 @@ from important_leads_workflow import (
     DISPATCH_SOURCE_CLEANED,
     DISPATCH_SOURCE_STRICT_VERIFIED,
     DISPATCH_SOURCE_TRIAGED_KEEP,
+    MASTER_DISPATCH_STATE_KEY,
     STRICT_VERIFIED_PATH,
     TRIAGED_KEEP_PATH,
     ImportantLeadsCheckError,
@@ -99,6 +100,7 @@ from leads_workflow import (
     shard_status,
     timestamp_slug,
 )
+from tools.package_campaign_handoff import pack_archive
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
     PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS,
@@ -501,6 +503,21 @@ def _job_progress_payload(job: dict[str, object]) -> dict[str, object]:
     payload["processed_rows"] = processed_rows
     payload["remaining_rows"] = remaining_rows
     return payload
+
+
+def _create_pre_dispatch_archive(job_id: str) -> dict[str, object]:
+    safe_job_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(job_id or "dispatch")).strip("_") or "dispatch"
+    archive_dir = settings.BACKUPS_DIR / "pre_dispatch_handoffs"
+    archive_path = archive_dir / f"{safe_job_id}_{timestamp_slug()}.tar.gz"
+    manifest = pack_archive(archive_path, include_check_history=False)
+    return {
+        "archive_path": str(archive_path),
+        "archive_name": archive_path.name,
+        "file_count": int(manifest.get("file_count") or 0),
+        "created_at_utc": str(manifest.get("created_at_utc") or ""),
+        "queue_counts": dict(manifest.get("queue_counts") or {}),
+        "state_summaries": dict(manifest.get("state_summaries") or {}),
+    }
 
 
 def _find_active_dashboard_job(directory: Path) -> dict[str, object] | None:
@@ -947,6 +964,12 @@ def _run_important_dispatch_job(job_id: str) -> None:
         job["phase"] = "dispatching"
         job["eta_seconds"] = ""
         job["progress_percent"] = float(job.get("progress_percent") or 0)
+        job["message"] = "Creating pre-dispatch archive before queue writes."
+        _save_important_dispatch_job(job)
+        archive = _create_pre_dispatch_archive(job_id)
+        job["pre_dispatch_archive"] = archive
+        job["pre_dispatch_archive_path"] = archive["archive_path"]
+        job["message"] = "Pre-dispatch archive created. Confirming queue write."
         _save_important_dispatch_job(job)
         report = confirm_dispatch_preview(
             str(job.get("preview_id") or ""),
@@ -956,6 +979,14 @@ def _run_important_dispatch_job(job_id: str) -> None:
             persist_state=True,
             preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
         )
+        report["pre_dispatch_archive"] = archive
+        report["pre_dispatch_archive_path"] = archive["archive_path"]
+        report_path_text = str(report.get("report_path") or "").strip()
+        if report_path_text:
+            report_path = Path(report_path_text)
+            report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            settings.secure_private_file(report_path)
+        save_state(**{MASTER_DISPATCH_STATE_KEY: report})
         assigned_rows = int(report.get("added_astra") or 0) + int(report.get("added_sendgrid") or 0)
         skipped_rows = (
             int(report.get("suppressed_skipped") or 0)
@@ -1044,6 +1075,99 @@ def _count_pasted_lead_rows(input_text: str) -> int:
         if any(str(value or "").strip() for value in row.values()):
             count += 1
     return count
+
+
+def _csv_count_from_status_label(status: dict[str, object], key: str, default_path: Path) -> int:
+    raw = str(status.get(key) or "").strip()
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = settings.APP_ROOT / path
+        if path.suffix.lower() == ".csv" and path.exists():
+            return _count_csv_rows(path)
+    path = default_path
+    return _count_csv_rows(path)
+
+
+def _build_leads_pipeline_status(status: dict[str, object]) -> dict[str, object]:
+    active_check = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    active_verify = status.get("active_important_verify_job") if isinstance(status.get("active_important_verify_job"), dict) else None
+    active_dispatch = status.get("active_important_dispatch_job") if isinstance(status.get("active_important_dispatch_job"), dict) else None
+    latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
+    latest_triage = status.get("latest_lead_triage") if isinstance(status.get("latest_lead_triage"), dict) else {}
+    latest_verify = status.get("latest_lead_verify") if isinstance(status.get("latest_lead_verify"), dict) else {}
+    latest_dispatch = status.get("latest_dispatch") if isinstance(status.get("latest_dispatch"), dict) else {}
+    dispatch_source = status.get("dispatch_source") if isinstance(status.get("dispatch_source"), dict) else {}
+
+    checked_rows = _csv_count_from_status_label(status, "important_output_label", IMPORTANT_LEADS_OUTPUT)
+    triaged_rows = _csv_count_from_status_label(status, "important_triage_keep_label", TRIAGED_KEEP_PATH)
+    strict_rows = _csv_count_from_status_label(status, "important_verify_keep_label", STRICT_VERIFIED_PATH)
+    quarantine_rows = _csv_count_from_status_label(status, "important_triage_quarantine_label", IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv"))
+    eligible_rows = int(dispatch_source.get("dispatch_eligible_row_count") or status.get("dispatch_eligible_row_count") or 0)
+
+    steps = [
+        {
+            "key": "check",
+            "label": "Check",
+            "state": "active" if active_check else ("done" if checked_rows or latest_check.get("generated_at_utc") else "waiting"),
+            "count": checked_rows or int(latest_check.get("cleaned_rows") or 0),
+            "note": "Cleaning/upload job running." if active_check else "Cleaned leads ready." if checked_rows else "Run Check Leads.",
+        },
+        {
+            "key": "triage",
+            "label": "Triage",
+            "state": "active" if (active_verify and str(active_verify.get("mode") or "").upper() == TRIAGE_MODE_FAST) else ("done" if triaged_rows or latest_triage.get("generated_at_utc") else "waiting"),
+            "count": triaged_rows or int(latest_triage.get("keep_count") or latest_triage.get("verified_count") or 0),
+            "note": "Fast triage running." if active_verify else "Fast triage keep rows ready." if triaged_rows else "Run fast triage.",
+        },
+        {
+            "key": "quarantine",
+            "label": "Review",
+            "state": "warn" if quarantine_rows else ("done" if triaged_rows else "waiting"),
+            "count": quarantine_rows,
+            "note": "Review quarantined rows before dispatch." if quarantine_rows else "No triage quarantine rows detected." if triaged_rows else "Waiting for triage.",
+        },
+        {
+            "key": "preview",
+            "label": "Preview",
+            "state": "done" if eligible_rows else "waiting",
+            "count": eligible_rows,
+            "note": "Dispatch source has eligible rows." if eligible_rows else "Run Preview Dispatch after source is ready.",
+        },
+        {
+            "key": "dispatch",
+            "label": "Dispatch",
+            "state": "active" if active_dispatch else ("done" if latest_dispatch.get("generated_at_utc") else "waiting"),
+            "count": int(latest_dispatch.get("dispatch_selected_row_count") or latest_dispatch.get("total_rows_would_write") or 0),
+            "note": "Dispatch job running." if active_dispatch else "Last dispatch complete." if latest_dispatch.get("generated_at_utc") else "Confirm Dispatch after preview.",
+        },
+    ]
+    active_step = next((step["key"] for step in steps if step["state"] == "active"), "")
+    next_step = next((step["key"] for step in steps if step["state"] in {"waiting", "warn"}), "")
+    return {
+        "steps": steps,
+        "active_step": active_step,
+        "next_step": active_step or next_step,
+        "checked_rows": checked_rows,
+        "triaged_keep_rows": triaged_rows,
+        "strict_verified_rows": strict_rows,
+        "quarantine_rows": quarantine_rows,
+        "dispatch_eligible_rows": eligible_rows,
+        "latest_pre_dispatch_archive_path": str((latest_dispatch.get("pre_dispatch_archive") or {}).get("archive_path") or latest_dispatch.get("pre_dispatch_archive_path") or ""),
+    }
+
+
+def _combined_leads_status() -> dict[str, object]:
+    status = {
+        **shard_status(),
+        **important_leads_status(),
+        **important_leads_verify_status(),
+        "active_important_check_job": _find_active_important_check_job(),
+        "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
+        "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
+    }
+    status["pipeline"] = _build_leads_pipeline_status(status)
+    return status
 
 
 def _normalize_pasted_leads_csv(input_text: str) -> str:
@@ -1681,7 +1805,7 @@ def update_send_cap(payload: SendCapPayload) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "message": f"Dashboard send cap saved: {cap} per sender.",
+            "message": f"Dashboard SendGrid cap saved: {cap} total.",
             "snapshot": _build_live_snapshot(),
         }
     )
@@ -2467,19 +2591,7 @@ def preview_shard(payload: ShardLeadsPayload) -> JSONResponse:
 
 @app.get("/api/leads/status")
 def leads_status() -> JSONResponse:
-    return JSONResponse(
-        {
-            "ok": True,
-            "status": {
-                **shard_status(),
-                **important_leads_status(),
-                **important_leads_verify_status(),
-                "active_important_check_job": _find_active_important_check_job(),
-                "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
-                "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
-            },
-        }
-    )
+    return JSONResponse({"ok": True, "status": _combined_leads_status()})
 
 
 @app.post("/webhooks/sendgrid/events")

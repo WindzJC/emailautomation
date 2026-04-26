@@ -77,6 +77,8 @@ const els = {
   leadsImportantDispatchConfirmBtn: document.getElementById("leads-important-dispatch-confirm-btn"),
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
+  leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsPipelineSteps: document.getElementById("leads-pipeline-steps"),
   leadsUploadInput: document.getElementById("leads-upload-input"),
   leadsUploadBtn: document.getElementById("leads-upload-btn"),
   leadsUploadMeta: document.getElementById("leads-upload-meta"),
@@ -2150,15 +2152,7 @@ function renderImportantLeadCheck(result) {
   }
 
   if (!result?.generated_at_utc) {
-    setNodeHtml(
-      els.leadsImportantCheckResults,
-      `
-        <div class="operator-empty-state">
-          <strong>Intake rail is ready.</strong>
-          <span>Email-first intake goes in <code>_important/leadschecker.csv</code>, checked output lands in <code>_important/leads.csv</code>, and rejected rows land in <code>_important/leads_rejected.csv</code>.</span>
-        </div>
-      `,
-    );
+    setNodeHtml(els.leadsImportantCheckResults, "");
     return;
   }
 
@@ -2212,15 +2206,7 @@ function renderImportantLeadVerify(result) {
   }
 
   if (!result?.generated_at_utc) {
-    setNodeHtml(
-      els.leadsImportantVerifyResults,
-      `
-        <div class="operator-empty-state">
-          <strong>Verification rail is ready.</strong>
-          <span>Fast Triage runs from <code>_important/leads.csv</code> by default and writes keep / reject / quarantine files. Strict Public Proof keeps using the existing strict output files.</span>
-        </div>
-      `,
-    );
+    setNodeHtml(els.leadsImportantVerifyResults, "");
     return;
   }
 
@@ -2299,7 +2285,7 @@ function renderImportantDispatch(result) {
       setNodeText(
         els.leadsImportantDispatchMeta,
         sendersActive
-          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch is blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Dispatch actions are blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
           : `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
       );
     } else if (result?.generated_at_utc) {
@@ -2314,7 +2300,7 @@ function renderImportantDispatch(result) {
       setNodeText(
         els.leadsImportantDispatchMeta,
         sendersActive
-          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview is still available, but confirm is blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview and confirm are blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
           : `Dispatch is idle. Source ${idleName} from ${idlePath}. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`,
       );
     }
@@ -2653,6 +2639,7 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadsPipeline(lastLeadsStatus?.pipeline || {});
 
   if (els.leadsUploadMeta) {
     if (latestUpload?.saved_filename) {
@@ -2723,6 +2710,55 @@ function renderLeadsStatus(status) {
       : `<p class="muted">No shard files detected yet.</p>`,
   );
   renderShardWriteGuard();
+}
+
+function pipelineStateLabel(state) {
+  const normalized = String(state || "").toLowerCase();
+  if (normalized === "done") return "Ready";
+  if (normalized === "active") return "Running";
+  if (normalized === "warn") return "Review";
+  return "Waiting";
+}
+
+function renderLeadsPipeline(pipeline) {
+  const steps = Array.isArray(pipeline?.steps) ? pipeline.steps : [];
+  if (els.leadsPipelineMeta) {
+    const nextStep = pipeline?.next_step
+      ? steps.find((step) => String(step.key || "") === String(pipeline.next_step || ""))
+      : null;
+    const archivePath = String(pipeline?.latest_pre_dispatch_archive_path || "");
+    const summary = [
+      nextStep ? `Next: ${nextStep.label || nextStep.key}` : "No active lead run",
+      `Checked ${Number(pipeline?.checked_rows || 0)}`,
+      `Triage keep ${Number(pipeline?.triaged_keep_rows || 0)}`,
+      `Quarantine ${Number(pipeline?.quarantine_rows || 0)}`,
+      `Eligible ${Number(pipeline?.dispatch_eligible_rows || 0)}`,
+      archivePath ? `Archive ${archivePath.split(/[\\/]/).pop()}` : "",
+    ].filter(Boolean).join(" | ");
+    setNodeText(els.leadsPipelineMeta, summary);
+  }
+  if (!els.leadsPipelineSteps) return;
+  setNodeHtml(
+    els.leadsPipelineSteps,
+    steps.length
+      ? steps.map((step, index) => {
+          const state = String(step.state || "waiting").toLowerCase();
+          return `
+            <article class="leads-pipeline-step leads-pipeline-step-${escapeHtml(state)}">
+              <div class="leads-pipeline-index">${index + 1}</div>
+              <div class="leads-pipeline-copy">
+                <div class="leads-pipeline-title">
+                  <strong>${escapeHtml(step.label || step.key || "-")}</strong>
+                  <span class="mini-pill">${escapeHtml(pipelineStateLabel(state))}</span>
+                </div>
+                <div class="muted">${escapeHtml(step.note || "")}</div>
+              </div>
+              <div class="leads-pipeline-count">${Number(step.count || 0)}</div>
+            </article>
+          `;
+        }).join("")
+      : `<p class="muted">Pipeline status will appear after the first leads status refresh.</p>`,
+  );
 }
 
 async function fetchLeadsStatus() {
@@ -3978,15 +4014,15 @@ function renderSignals(snapshot) {
 function renderControls(snapshot) {
   const controls = snapshot.controls || {};
   const automation = snapshot.automation || {};
-  const sendCap = Number(controls.send_cap_per_profile || 0);
+  const sendCap = Number(controls.send_cap_total || controls.send_cap_per_profile || 0);
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendCap > 0) {
     els.sendCapInput.value = String(sendCap);
   }
   if (els.sendCapNote) {
     const activeSenders = Number(controls.active_sender_count || 0);
-    const activeFleetTotal = Number(controls.fleet_total_for_active_senders || 0);
+    const activeFleetTotal = Number(controls.fleet_total_for_active_senders || sendCap || 0);
     const lines = [
-      `Per-sender cap: ${sendCap || 0} | ${activeSenders} active senders | Fleet target: ~${activeFleetTotal || 0}`,
+      `SendGrid target: ${sendCap || 0} total | ${activeSenders} active senders | Fleet target: ~${activeFleetTotal || 0}`,
     ];
     const scheduleBits = [];
     if (automation?.sendgrid_daily?.enabled) {
@@ -4433,6 +4469,17 @@ function renderDetailCoreRuntime(profile) {
   `;
 }
 
+function profileHasPaneTail(profile) {
+  const text = String(profile?.tmux_tail || "").trim();
+  return Boolean(text) && text !== "(no pane output)";
+}
+
+function paneTailLineCount(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return 0;
+  return normalized.split(/\r?\n/).length;
+}
+
 function createProfileDetailNode() {
   const node = elementFromHTML(`
     <article class="detail-card">
@@ -4493,38 +4540,56 @@ function createProfileDetailNode() {
 
       <details class="detail-disclosure detail-live-disclosure">
         <summary>
-          <span>Mailbox Detail</span>
-          <span class="muted">Live counters and mailbox-specific feedback</span>
+          <span class="detail-summary-copy">
+            <span class="detail-summary-title">Mailbox Detail</span>
+            <span class="muted detail-summary-note">Live counters and mailbox-specific feedback</span>
+          </span>
+          <span class="muted detail-summary-meta detail-live-summary-meta"></span>
         </summary>
         <div class="detail-live-slot"></div>
       </details>
 
       <details class="detail-disclosure detail-webhook-disclosure">
         <summary>
-          <span>Delivery / Webhook Detail</span>
-          <span class="muted">Delivery funnel, events, and webhook evidence</span>
+          <span class="detail-summary-copy">
+            <span class="detail-summary-title">Delivery / Webhook Detail</span>
+            <span class="muted detail-summary-note">Delivery funnel, events, and webhook evidence</span>
+          </span>
+          <span class="muted detail-summary-meta detail-webhook-summary-meta"></span>
         </summary>
         <div class="detail-webhook-slot"></div>
       </details>
 
       <details class="detail-disclosure detail-queue-disclosure">
         <summary>
-          <span>Queue Context</span>
-          <span class="muted">Files, pacing, and tmux pane</span>
+          <span class="detail-summary-copy">
+            <span class="detail-summary-title">Queue Context</span>
+            <span class="muted detail-summary-note">Files, pacing, and tmux pane</span>
+          </span>
+          <span class="muted detail-summary-meta detail-queue-summary-meta"></span>
         </summary>
         <div class="profile-meta detail-meta"></div>
       </details>
 
       <details class="detail-disclosure detail-guard-disclosure">
         <summary>
-          <span>Bounce Guard Detail</span>
-          <span class="muted">Suppression sync and recovery safeguards</span>
+          <span class="detail-summary-copy">
+            <span class="detail-summary-title">Bounce Guard Detail</span>
+            <span class="muted detail-summary-note">Suppression sync and recovery safeguards</span>
+          </span>
+          <span class="muted detail-summary-meta detail-guard-summary-meta"></span>
         </summary>
         <div class="detail-guard-slot"></div>
       </details>
 
       <details class="detail-pane detail-runtime-output">
-        <summary>Pane Tail / Runtime Output</summary>
+        <summary>
+          <span class="detail-summary-copy">
+            <span class="detail-summary-title">Pane Tail / Runtime Output</span>
+            <span class="muted detail-summary-note">Live pane tail from the tmux sender process</span>
+          </span>
+          <span class="muted detail-summary-meta detail-runtime-summary-meta"></span>
+        </summary>
         <pre></pre>
       </details>
     </article>
@@ -4546,15 +4611,21 @@ function createProfileDetailNode() {
     coreRuntime: node.querySelector(".detail-core-runtime"),
     live: node.querySelector(".detail-live-slot"),
     liveDisclosure: node.querySelector(".detail-live-disclosure"),
+    liveSummaryMeta: node.querySelector(".detail-live-summary-meta"),
     guard: node.querySelector(".detail-guard-slot"),
     guardDisclosure: node.querySelector(".detail-guard-disclosure"),
+    guardSummaryMeta: node.querySelector(".detail-guard-summary-meta"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
     webhook: node.querySelector(".detail-webhook-slot"),
     webhookDisclosure: node.querySelector(".detail-webhook-disclosure"),
+    webhookSummaryMeta: node.querySelector(".detail-webhook-summary-meta"),
     queueDisclosure: node.querySelector(".detail-queue-disclosure"),
+    queueSummaryMeta: node.querySelector(".detail-queue-summary-meta"),
     meta: node.querySelector(".detail-meta"),
+    runtimeDisclosure: node.querySelector(".detail-runtime-output"),
+    runtimeSummaryMeta: node.querySelector(".detail-runtime-summary-meta"),
     paneTail: node.querySelector(".detail-runtime-output pre"),
   };
   return node;
@@ -4578,15 +4649,21 @@ function updateProfileDetailNode(node, snapshot, profile) {
     coreRuntime: node.querySelector(".detail-core-runtime"),
     live: node.querySelector(".detail-live-slot"),
     liveDisclosure: node.querySelector(".detail-live-disclosure"),
+    liveSummaryMeta: node.querySelector(".detail-live-summary-meta"),
     guard: node.querySelector(".detail-guard-slot"),
     guardDisclosure: node.querySelector(".detail-guard-disclosure"),
+    guardSummaryMeta: node.querySelector(".detail-guard-summary-meta"),
     progressNote: node.querySelector(".detail-progress-note"),
     progressValue: node.querySelector(".detail-progress-value"),
     progressFill: node.querySelector(".progress-fill"),
     webhook: node.querySelector(".detail-webhook-slot"),
     webhookDisclosure: node.querySelector(".detail-webhook-disclosure"),
+    webhookSummaryMeta: node.querySelector(".detail-webhook-summary-meta"),
     queueDisclosure: node.querySelector(".detail-queue-disclosure"),
+    queueSummaryMeta: node.querySelector(".detail-queue-summary-meta"),
     meta: node.querySelector(".detail-meta"),
+    runtimeDisclosure: node.querySelector(".detail-runtime-output"),
+    runtimeSummaryMeta: node.querySelector(".detail-runtime-summary-meta"),
     paneTail: node.querySelector(".detail-runtime-output pre"),
   };
   node._refs = refs;
@@ -4604,6 +4681,37 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const maxTotalRaw = Number(profile.max_total || 0);
   const acceptedRaw = profileRunSentDisplay(profile);
   const progress = maxTotalRaw > 0 ? Math.max(0, Math.min(100, (acceptedRaw / maxTotalRaw) * 100)) : 0;
+  const channel = profileTelemetryChannel(profile);
+  const webhook = profile.webhook || {};
+  const webhookSummary = webhook.summary || {};
+  const webhookRecent = Array.isArray(webhook.recent) ? webhook.recent : [];
+  const webhookCounts = webhook.counts || {};
+  const hasPaneTail = profileHasPaneTail(profile);
+  const paneTailText = hasPaneTail ? String(profile.tmux_tail || "").trimEnd() : "(no pane output)";
+  const paneTailLines = hasPaneTail ? paneTailLineCount(paneTailText) : 0;
+  const guard = snapshot.private_bounce_guard || {};
+  const hasWebhookDetail = channel !== "sendgrid"
+    ? Boolean(profile.last_status || profile.last_timestamp || Number(profile.sent_today || 0) || Number(profile.errors_today || 0))
+    : Boolean(
+      webhook.last_received_at ||
+      webhook.last_received_iso ||
+      Number(webhook.total || 0) ||
+      webhookRecent.length ||
+      Object.keys(webhookCounts).length ||
+      Object.values(webhookSummary).some((value) => Number(value || 0) > 0) ||
+      Number(profile.awaiting_outcome || 0) > 0,
+    );
+  const liveSummary = channel === "sendgrid"
+    ? `Delivered ${Number(webhookSummary.delivered || 0)} • Awaiting ${Number(profile.awaiting_outcome || 0)}`
+    : `Sent ${Number(profile.sent_today || 0)} • Errors ${Number(profile.errors_today || 0)}`;
+  const webhookSummaryText = channel === "sendgrid"
+    ? (hasWebhookDetail ? `Recent ${webhookRecent.length} • Total ${Number(webhook.total || 0)}` : "No webhook telemetry")
+    : "SMTP responses • sender log";
+  const queueSummary = `Pace ${paceDisplay} • Pane ${profile.pane_index || "-"}`;
+  const guardSummary = profile.name === "private_jc"
+    ? `${guard.status_label || "Idle"} • Cooldown ${guard.cooldown_active ? humanizeCooldownRemaining(guard.cooldown_remaining_seconds || 0) : "Off"}`
+    : "";
+  const runtimeSummary = hasPaneTail ? `${paneTailLines} line${paneTailLines === 1 ? "" : "s"}` : "No pane output";
   const metaBoxes = [
     { label: "Effective Pace", value: paceDisplay },
     { label: "Queue File", value: profile.csv_path },
@@ -4638,10 +4746,18 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeHtml(refs.coreRuntime, renderDetailCoreRuntime(profile));
 
   setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
+  setNodeText(refs.liveSummaryMeta, liveSummary);
+  if (refs.liveDisclosure) {
+    const showLive = Boolean(String(refs.live.innerHTML || "").trim());
+    refs.liveDisclosure.classList.toggle("hidden", !showLive);
+    refs.liveDisclosure.open = showLive && (activity.tone === "bad" || Number(profile.awaiting_outcome || 0) > 0);
+  }
   setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}, snapshot.automation || {}));
   if (refs.guardDisclosure) {
     const showGuard = Boolean(profile.name === "private_jc" && String(refs.guard.innerHTML || "").trim());
+    setNodeText(refs.guardSummaryMeta, showGuard ? guardSummary : "");
     refs.guardDisclosure.classList.toggle("hidden", !showGuard);
+    refs.guardDisclosure.open = showGuard && (guard.status === "error" || guard.cooldown_active);
   }
   setNodeText(
     refs.progressNote,
@@ -4650,6 +4766,11 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.progressValue, `${acceptedRaw}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
   setNodeHtml(refs.webhook, renderWebhookSummary(profile, snapshot));
+  setNodeText(refs.webhookSummaryMeta, webhookSummaryText);
+  if (refs.webhookDisclosure) {
+    refs.webhookDisclosure.classList.toggle("hidden", !hasWebhookDetail);
+    refs.webhookDisclosure.open = hasWebhookDetail && (Number(webhookSummary.failed || 0) > 0 || webhookRecent.length > 0);
+  }
   setNodeHtml(
     refs.meta,
     metaBoxes.map((item) => `
@@ -4659,7 +4780,16 @@ function updateProfileDetailNode(node, snapshot, profile) {
       </div>
     `).join(""),
   );
-  setNodeText(refs.paneTail, profile.tmux_tail || "(no pane output)");
+  setNodeText(refs.queueSummaryMeta, queueSummary);
+  if (refs.queueDisclosure) {
+    refs.queueDisclosure.open = activity.tone !== "good";
+  }
+  setNodeText(refs.runtimeSummaryMeta, runtimeSummary);
+  if (refs.runtimeDisclosure) {
+    refs.runtimeDisclosure.classList.toggle("hidden", !hasPaneTail);
+    refs.runtimeDisclosure.open = hasPaneTail && activity.tone === "bad";
+  }
+  setNodeText(refs.paneTail, paneTailText);
 }
 
 function renderProfileDetail(snapshot, profile) {
@@ -4788,7 +4918,7 @@ async function postAction(path, options = {}) {
 async function saveSendCap() {
   const rawValue = Number(els.sendCapInput?.value || 0);
   if (!Number.isInteger(rawValue) || rawValue < 1) {
-    showMessage("Enter a whole number of at least 1 for the dashboard send cap.", "error");
+    showMessage("Enter a whole number of at least 1 for the SendGrid total cap.", "error");
     return;
   }
   if (els.sendCapSaveBtn) {
