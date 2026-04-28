@@ -74,6 +74,52 @@ TRIAGE_JUNK_NAME_TOKENS = {
     "user",
 }
 TRIAGE_BAD_DOMAINS = {"example.com", "example.org", "example.net", "test.com", "invalid.com", "localhost"}
+TRIAGE_BAD_LOCAL_MARKERS = {
+    "bad",
+    "blacklist",
+    "block",
+    "blocked",
+    "bounce",
+    "bounced",
+    "complaint",
+    "dead",
+    "deceased",
+    "defer",
+    "deferred",
+    "disposable",
+    "do_not_contact",
+    "donotcontact",
+    "dnc",
+    "dropped",
+    "duplicate",
+    "hard_bounce",
+    "hardbounce",
+    "invalid",
+    "opt_out",
+    "optout",
+    "reject",
+    "rejected",
+    "spam",
+    "spamreport",
+    "suppressed",
+    "suppression",
+    "undeliverable",
+    "unsubscribe",
+    "unsubscribed",
+}
+TRIAGE_BAD_LOCAL_HEADER_MARKERS = {
+    "bounce",
+    "complaint",
+    "dead",
+    "do_not_contact",
+    "dnc",
+    "duplicate",
+    "invalid",
+    "suppression",
+    "suppressed",
+    "undeliverable",
+    "unsubscribe",
+}
 TRIAGE_DISPOSABLE_DOMAINS_PATH = settings.APP_ROOT / "data" / "reference" / "disposable_domains.txt"
 FULL_NAME_HEADER_CANDIDATES = (
     "fullname",
@@ -437,6 +483,27 @@ def _is_bad_domain(domain: str) -> bool:
     return False
 
 
+def _row_has_bad_local_indicator(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[bool, str]:
+    for field in fieldnames:
+        header = _normalize_header_key(field)
+        value = _normalize(row.get(field, ""))
+        if not value:
+            continue
+        compact_value = re.sub(r"[^a-z0-9]+", "", value)
+        value_tokens = set(re.findall(r"[a-z0-9]+", value))
+        header_has_bad_marker = any(marker in header for marker in TRIAGE_BAD_LOCAL_HEADER_MARKERS)
+        value_has_bad_marker = (
+            compact_value in TRIAGE_BAD_LOCAL_MARKERS
+            or bool(value_tokens & TRIAGE_BAD_LOCAL_MARKERS)
+            or any(marker in compact_value for marker in TRIAGE_BAD_LOCAL_MARKERS if len(marker) >= 7)
+        )
+        if value_has_bad_marker:
+            return True, f"Local row marker `{field}`={_strip_cell(row.get(field, ''))} indicates bounce/suppression risk."
+        if header_has_bad_marker and value not in {"0", "false", "n", "no", "none", "ok", "valid"}:
+            return True, f"Local row field `{field}` indicates bounce/suppression risk."
+    return False, ""
+
+
 def _classify_fast_triage_row(
     row: dict[str, str],
     fieldnames: Sequence[str],
@@ -463,13 +530,17 @@ def _classify_fast_triage_row(
     if domain in disposable_domain_set:
         return "REJECT", "DISPOSABLE_DOMAIN", "Disposable email domain rejected."
 
+    has_bad_local_indicator, bad_local_evidence = _row_has_bad_local_indicator(row, fieldnames)
+    if has_bad_local_indicator:
+        return "REJECT", "LOCAL_BOUNCE_RISK", bad_local_evidence
+
     full_name = _full_name_value(row, fieldnames)
     if _is_junk_name(full_name):
         return "REJECT", "JUNK_NAME", "Name looks like a test, junk, or placeholder value."
     if not _has_usable_full_name(full_name):
-        return "QUARANTINE", "MISSING_USABLE_NAME", "No usable full name was available for fast triage."
+        return "REJECT", "MISSING_USABLE_NAME", "No usable full name was available for fast triage."
     if is_role_recipient(email, TRIAGE_ROLE_BLOCKLIST):
-        return "QUARANTINE", "ROLE_ACCOUNT", "Role-based inbox requires manual or strict review."
+        return "REJECT", "ROLE_ACCOUNT", "Role-based inbox rejected by fast triage."
 
     return "KEEP", "FAST_TRIAGE_LOCAL_CONFIDENCE", "Valid full name, valid email syntax, and normal-looking domain."
 
@@ -1058,6 +1129,11 @@ def fast_triage_master_leads(
     keep_signatures = {_row_signature(row, base_headers) for row in keep_rows}
     rejected_signatures = {_row_signature(row, base_headers) for row in rejected_rows}
     quarantine_signatures = {_row_signature(row, base_headers) for row in quarantine_rows}
+    seen_triage_emails = {
+        email
+        for row in [*keep_rows, *rejected_rows, *quarantine_rows]
+        if (email := norm_email(_email_value(row, base_headers)))
+    }
 
     if not resume_ok:
         _csv_atomic_write(keep_path, keep_headers, keep_rows)
@@ -1089,6 +1165,37 @@ def fast_triage_master_leads(
                         break
                     row = input_rows[index]
                     signature = _row_signature(row, base_headers)
+                    row_email = norm_email(_email_value(row, base_headers))
+                    is_duplicate_email = bool(row_email and row_email in seen_triage_emails)
+                    if is_duplicate_email:
+                        status, reason, evidence = "REJECT", "DUPLICATE_EMAIL", "Email already appeared earlier in Fast Triage input/output."
+                        output_row = _build_output_row(
+                            row,
+                            base_headers,
+                            status=status,
+                            reason=reason,
+                            evidence=evidence,
+                        )
+                        rejected_rows.append(output_row)
+                        rejected_signatures.add(signature)
+                        _sync_row_to_lead_ledger(
+                            ledger_conn,
+                            row,
+                            base_headers,
+                            input_path=input_path,
+                            stage=TRIAGE_MODE_FAST,
+                            status=status,
+                            reason=reason,
+                            processed_at=str(output_row.get("VerifiedAtUtc") or iso_utc()),
+                            commit=False,
+                        )
+                        chunk_changed = True
+                        if progress_callback:
+                            try:
+                                progress_callback(index + 1, len(input_rows))
+                            except Exception:
+                                pass
+                        continue
                     if signature in keep_signatures or signature in rejected_signatures or signature in quarantine_signatures:
                         if progress_callback:
                             try:
@@ -1117,6 +1224,8 @@ def fast_triage_master_leads(
                     else:
                         quarantine_rows.append(output_row)
                         quarantine_signatures.add(signature)
+                    if row_email:
+                        seen_triage_emails.add(row_email)
                     _sync_row_to_lead_ledger(
                         ledger_conn,
                         row,
