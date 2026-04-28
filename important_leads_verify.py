@@ -102,6 +102,31 @@ TRIAGE_WEAK_FIRST_NAME_TOKENS = TRIAGE_JUNK_NAME_TOKENS | {
     "webmaster",
 }
 TRIAGE_BAD_DOMAINS = {"example.com", "example.org", "example.net", "test.com", "invalid.com", "localhost"}
+TRIAGE_PLACEHOLDER_DOMAINS = {
+    "email.com",
+    "fake.com",
+    "fakeemail.com",
+    "no-email.com",
+    "noemail.com",
+    "none.com",
+    "placeholder.com",
+}
+TRIAGE_FREE_PERSONAL_DOMAINS = {
+    "aol.com",
+    "att.net",
+    "bellsouth.net",
+    "comcast.net",
+    "gmail.com",
+    "hotmail.com",
+    "icloud.com",
+    "live.com",
+    "me.com",
+    "msn.com",
+    "outlook.com",
+    "sbcglobal.net",
+    "verizon.net",
+    "yahoo.com",
+}
 TRIAGE_BAD_LOCAL_MARKERS = {
     "bad",
     "blacklist",
@@ -185,6 +210,20 @@ BOOK_TITLE_HEADER_CANDIDATES = (
     "booktitle",
     "book_title",
     "title",
+)
+LOCAL_QUALITY_SIGNAL_HEADER_CANDIDATES = (
+    "booktitle",
+    "book_title",
+    "company",
+    "company_name",
+    "organization",
+    "organisation",
+    "publisher",
+    "website",
+    "url",
+    "domain",
+    "source",
+    "profile_url",
 )
 
 
@@ -543,6 +582,43 @@ def _is_bad_domain(domain: str) -> bool:
     return False
 
 
+def _is_placeholder_domain(domain: str) -> bool:
+    normalized = str(domain or "").strip().lower().rstrip(".")
+    if not normalized:
+        return False
+    if normalized in TRIAGE_PLACEHOLDER_DOMAINS or normalized in TRIAGE_BAD_DOMAINS:
+        return True
+    first_label = normalized.split(".", 1)[0]
+    return first_label in {"example", "fake", "fakeemail", "invalid", "noemail", "placeholder", "test"}
+
+
+def _local_quality_signal(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[bool, str]:
+    for candidate in LOCAL_QUALITY_SIGNAL_HEADER_CANDIDATES:
+        field = _pick_header(fieldnames, (candidate,))
+        if not field:
+            continue
+        value = _strip_cell(row.get(field, ""))
+        normalized = _normalize(value)
+        if not normalized or normalized in {"0", "false", "n", "na", "no", "none", "null", "unknown"}:
+            continue
+        if candidate in {"domain", "source"} and normalized in TRIAGE_FREE_PERSONAL_DOMAINS:
+            continue
+        return True, f"Local `{field}` signal is present."
+    return False, ""
+
+
+def _fast_triage_quality_gate(row: dict[str, str], fieldnames: Sequence[str], domain: str) -> tuple[str, str, str]:
+    normalized_domain = str(domain or "").strip().lower().rstrip(".")
+    if _is_placeholder_domain(normalized_domain):
+        return "REJECT", "PLACEHOLDER_EMAIL_DOMAIN", "Email domain is a placeholder or fake domain."
+    has_local_signal, local_signal_evidence = _local_quality_signal(row, fieldnames)
+    if normalized_domain in TRIAGE_FREE_PERSONAL_DOMAINS:
+        if has_local_signal:
+            return "QUARANTINE", "WEAK_LOCAL_CONFIDENCE", f"Free personal email domain with only local context: {local_signal_evidence}"
+        return "REJECT", "WEAK_PERSONAL_EMAIL_ONLY", "Free personal email plus usable name is not enough for dispatch-safe Fast Triage."
+    return "KEEP", "FAST_TRIAGE_BUSINESS_DOMAIN", "Usable person identity with non-personal custom/business email domain."
+
+
 def _row_has_bad_local_indicator(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[bool, str]:
     for field in fieldnames:
         header = _normalize_header_key(field)
@@ -583,6 +659,8 @@ def _classify_fast_triage_row(
         return "REJECT", "INVALID_EMAIL_SYNTAX", "Email failed validation."
 
     local_part, domain = email.split("@", 1) if "@" in email else ("", "")
+    if _is_placeholder_domain(domain):
+        return "REJECT", "PLACEHOLDER_EMAIL_DOMAIN", "Email domain is a placeholder or fake domain."
     if not local_part or _is_bad_domain(domain):
         return "REJECT", "BAD_DOMAIN", "Email domain is malformed or clearly unsafe."
 
@@ -602,7 +680,7 @@ def _classify_fast_triage_row(
         reason, evidence = identity_rejection
         return "REJECT", reason, evidence
 
-    return "KEEP", "FAST_TRIAGE_LOCAL_CONFIDENCE", "Valid full name, valid email syntax, and normal-looking domain."
+    return _fast_triage_quality_gate(row, fieldnames, domain)
 
 
 def _verify_worker_count(max_workers: int | None) -> int:
@@ -1153,6 +1231,15 @@ def fast_triage_master_leads(
     keep_path = Path(keep_path)
     rejected_path = Path(rejected_path)
     quarantine_path = Path(quarantine_path)
+    strict_output_paths = {DEFAULT_VERIFIED_PATH.resolve(strict=False), DEFAULT_REJECTED_PATH.resolve(strict=False), DEFAULT_QUARANTINE_PATH.resolve(strict=False)}
+    if (
+        keep_path.resolve(strict=False) in strict_output_paths
+        or rejected_path.resolve(strict=False) in strict_output_paths
+        or quarantine_path.resolve(strict=False) in strict_output_paths
+    ):
+        keep_path = DEFAULT_TRIAGE_KEEP_PATH
+        rejected_path = DEFAULT_TRIAGE_REJECTED_PATH
+        quarantine_path = DEFAULT_TRIAGE_QUARANTINE_PATH
     input_headers, input_rows = _load_csv_rows(input_path)
     if not input_headers:
         raise ValueError(f"Fast triage input is empty: {input_path}")
@@ -1163,8 +1250,13 @@ def fast_triage_master_leads(
 
     checkpoint = _load_triage_checkpoint_state()
     input_fingerprint = _hash_input_file(input_path)
+    checkpoint_uses_strict_outputs = any(
+        Path(str(checkpoint.get(key) or "")).resolve(strict=False) in strict_output_paths
+        for key in ("keep_path", "rejected_path", "quarantine_path")
+    )
     resume_ok = (
-        str(checkpoint.get("input_fingerprint") or "") == input_fingerprint
+        not checkpoint_uses_strict_outputs
+        and str(checkpoint.get("input_fingerprint") or "") == input_fingerprint
         and str(checkpoint.get("input_path") or "") == str(input_path)
         and str(checkpoint.get("keep_path") or "") == str(keep_path)
         and str(checkpoint.get("rejected_path") or "") == str(rejected_path)

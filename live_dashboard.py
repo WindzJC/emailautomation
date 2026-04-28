@@ -2145,18 +2145,23 @@ def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) ->
             payload.input_path if payload else current_paths["input_path"],
             IMPORTANT_LEADS_OUTPUT,
         )
-        verified_path = _resolve_dashboard_csv_path(
-            payload.verified_path if payload else current_keep,
-            default_keep_path,
-        )
-        rejected_path = _resolve_dashboard_csv_path(
-            payload.rejected_path if payload else current_paths["rejected_path"],
-            default_rejected_path,
-        )
-        quarantine_path = _resolve_dashboard_csv_path(
-            payload.quarantine_path if payload else current_paths["quarantine_path"],
-            default_quarantine_path,
-        )
+        if mode == TRIAGE_MODE_FAST:
+            verified_path = default_keep_path.resolve(strict=False)
+            rejected_path = default_rejected_path.resolve(strict=False)
+            quarantine_path = default_quarantine_path.resolve(strict=False)
+        else:
+            verified_path = _resolve_dashboard_csv_path(
+                payload.verified_path if payload else current_keep,
+                default_keep_path,
+            )
+            rejected_path = _resolve_dashboard_csv_path(
+                payload.rejected_path if payload else current_paths["rejected_path"],
+                default_rejected_path,
+            )
+            quarantine_path = _resolve_dashboard_csv_path(
+                payload.quarantine_path if payload else current_paths["quarantine_path"],
+                default_quarantine_path,
+            )
         if mode == TRIAGE_MODE_STRICT:
             save_state(
                 important_leads_verify_paths=_important_verify_path_labels_for_state(
