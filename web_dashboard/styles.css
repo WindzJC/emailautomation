@@ -2680,7 +2680,8 @@ details summary {
 }
 
 .detail-feedback-slot:empty,
-.detail-primary-warning-slot:empty {
+.detail-primary-warning-slot:empty,
+.detail-action-note:empty {
   display: none;
 }
 
@@ -2720,8 +2721,8 @@ details summary {
 
 .detail-core-section {
   display: grid;
-  gap: 16px;
-  padding: 18px;
+  gap: 12px;
+  padding: 14px;
 }
 
 .detail-core-section .detail-section-head {
@@ -2741,15 +2742,15 @@ details summary {
 
 .detail-core-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
 }
 
 .detail-core-item {
   display: grid;
-  gap: 8px;
-  padding: 14px;
-  border-radius: 18px;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.035);
 }
@@ -2833,6 +2834,11 @@ details summary {
   padding-top: 14px;
 }
 
+.detail-core-meta-row.hidden,
+.detail-core-section .progress-wrap.hidden {
+  display: none;
+}
+
 .detail-disclosure,
 .detail-runtime-output {
   margin-top: 0;
@@ -2883,6 +2889,17 @@ details summary {
 .detail-disclosure > *:not(summary),
 .detail-runtime-output > *:not(summary) {
   margin-top: 14px;
+}
+
+.detail-advanced-disclosure[open] {
+  display: grid;
+  gap: 10px;
+}
+
+.detail-advanced-disclosure > .detail-disclosure,
+.detail-advanced-disclosure > .detail-runtime-output {
+  margin-top: 10px;
+  background: rgba(255, 255, 255, 0.022);
 }
 
 .detail-disclosure .muted,

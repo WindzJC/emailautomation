@@ -3402,7 +3402,6 @@ function updateSelectOptionNode(node, value, label) {
 
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
-  const alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
   const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
   const fleetOrder = ["private_jc", "sendgrid_annette", "sendgrid_jordan", "sendgrid_jodi", "sendgrid_alison", "sendgrid_fiorela"];
   const fleetProfiles = fleetOrder
@@ -3444,20 +3443,6 @@ function renderSummary(snapshot) {
           value: Number(profile.awaiting_outcome || 0).toLocaleString(),
         })),
         "No profiles are currently waiting on final outcomes.",
-      ),
-    },
-    {
-      key: "alerts",
-      label: "Critical Alerts",
-      value: summary.active_alerts || 0,
-      note: "needs attention now",
-      tone: Number(summary.active_alerts || 0) > 0 ? "bad" : "good",
-      detailsHtml: renderSummaryInsightList(
-        alerts.slice(0, 3).map((alert) => ({
-          label: alert.title || "Alert",
-          value: alert.severity === "critical" ? "Critical" : alert.severity === "warn" ? "Watch" : "Healthy",
-        })),
-        "No active threshold alerts right now.",
       ),
     },
   ];
@@ -4585,8 +4570,6 @@ function truncateMiddle(value, maxLength = 56) {
 }
 
 function renderDetailCoreRuntime(profile) {
-  const cooldownSeconds = profileCooldownRemaining(profile);
-  const lastStatus = senderLogStatusLabel(profile.last_status || "-");
   const lastActivity = profile.last_timestamp
     ? `${profile.last_timestamp}${profile.last_email ? ` • ${truncateMiddle(profile.last_email, 44)}` : ""}`
     : "No recent sender log line";
@@ -4595,9 +4578,13 @@ function renderDetailCoreRuntime(profile) {
   const items = [
     { label: "Pending", value: profile.pending_count, tone: Number(profile.pending_count || 0) > 0 ? "warn" : "neutral" },
     { label: "Accepted", value: acceptedCount, tone: acceptedCount > 0 ? "good" : "neutral" },
-    { label: "Awaiting", value: profile.awaiting_outcome || 0, tone: Number(profile.awaiting_outcome || 0) > 0 ? "warn" : "neutral" },
-    { label: "Cooldown", value: cooldownDisplay.text, tone: cooldownDisplay.active ? "warn" : "good" },
-  ];
+    Number(profile.awaiting_outcome || 0) > 0
+      ? { label: "Awaiting", value: profile.awaiting_outcome || 0, tone: "warn" }
+      : null,
+    cooldownDisplay.active
+      ? { label: "Cooldown", value: cooldownDisplay.text, tone: "warn" }
+      : null,
+  ].filter(Boolean);
   return `
     <div class="detail-core-grid">
       ${items.map((item) => `
@@ -4609,20 +4596,8 @@ function renderDetailCoreRuntime(profile) {
     </div>
     <div class="detail-core-activity">
       <div class="detail-compact-row">
-        <span class="detail-compact-label">Last status</span>
-        <span class="detail-compact-value">${escapeHtml(lastStatus)}</span>
-      </div>
-      <div class="detail-compact-row">
         <span class="detail-compact-label">Readiness</span>
         <span class="detail-compact-value">${escapeHtml(profile.readiness_label || "Ready")}</span>
-      </div>
-      <div class="detail-compact-row">
-        <span class="detail-compact-label">Reason</span>
-        <span class="detail-compact-value" title="${escapeHtml(profile.reason_note || profile.health_note || "")}">${escapeHtml(profile.reason_code || "READY")}</span>
-      </div>
-      <div class="detail-compact-row">
-        <span class="detail-compact-label">Confidence</span>
-        <span class="detail-compact-value" title="${escapeHtml(profile.telemetry_quality_note || "")}">${escapeHtml(profile.telemetry_quality_label || "High")}</span>
       </div>
       <div class="detail-compact-row">
         <span class="detail-compact-label">Last activity</span>
@@ -4718,59 +4693,69 @@ function createProfileDetailNode() {
         </div>
       </section>
 
-      <details class="detail-disclosure detail-live-disclosure heavy-panel">
+      <details class="detail-disclosure detail-advanced-disclosure heavy-panel">
         <summary>
           <span class="detail-summary-copy">
-            <span class="detail-summary-title">Mailbox Detail</span>
-            <span class="muted detail-summary-note">Live counters and mailbox-specific feedback</span>
+            <span class="detail-summary-title">Advanced Sender Diagnostics</span>
+            <span class="muted detail-summary-note">Mailbox, delivery, queue, guard, and runtime details</span>
           </span>
-          <span class="muted detail-summary-meta detail-live-summary-meta"></span>
+          <span class="muted detail-summary-meta">Open diagnostics</span>
         </summary>
-        <div class="detail-live-slot"></div>
-      </details>
 
-      <details class="detail-disclosure detail-webhook-disclosure heavy-panel">
-        <summary>
-          <span class="detail-summary-copy">
-            <span class="detail-summary-title">Delivery / Webhook Detail</span>
-            <span class="muted detail-summary-note">Delivery funnel, events, and webhook evidence</span>
-          </span>
-          <span class="muted detail-summary-meta detail-webhook-summary-meta"></span>
-        </summary>
-        <div class="detail-webhook-slot"></div>
-      </details>
+        <details class="detail-disclosure detail-live-disclosure heavy-panel">
+          <summary>
+            <span class="detail-summary-copy">
+              <span class="detail-summary-title">Mailbox Detail</span>
+              <span class="muted detail-summary-note">Live counters and mailbox-specific feedback</span>
+            </span>
+            <span class="muted detail-summary-meta detail-live-summary-meta"></span>
+          </summary>
+          <div class="detail-live-slot"></div>
+        </details>
 
-      <details class="detail-disclosure detail-queue-disclosure heavy-panel">
-        <summary>
-          <span class="detail-summary-copy">
-            <span class="detail-summary-title">Queue Context</span>
-            <span class="muted detail-summary-note">Files, pacing, and tmux pane</span>
-          </span>
-          <span class="muted detail-summary-meta detail-queue-summary-meta"></span>
-        </summary>
-        <div class="profile-meta detail-meta"></div>
-      </details>
+        <details class="detail-disclosure detail-webhook-disclosure heavy-panel">
+          <summary>
+            <span class="detail-summary-copy">
+              <span class="detail-summary-title">Delivery / Webhook Detail</span>
+              <span class="muted detail-summary-note">Delivery funnel, events, and webhook evidence</span>
+            </span>
+            <span class="muted detail-summary-meta detail-webhook-summary-meta"></span>
+          </summary>
+          <div class="detail-webhook-slot"></div>
+        </details>
 
-      <details class="detail-disclosure detail-guard-disclosure heavy-panel">
-        <summary>
-          <span class="detail-summary-copy">
-            <span class="detail-summary-title">Bounce Guard Detail</span>
-            <span class="muted detail-summary-note">Suppression sync and recovery safeguards</span>
-          </span>
-          <span class="muted detail-summary-meta detail-guard-summary-meta"></span>
-        </summary>
-        <div class="detail-guard-slot"></div>
-      </details>
+        <details class="detail-disclosure detail-queue-disclosure heavy-panel">
+          <summary>
+            <span class="detail-summary-copy">
+              <span class="detail-summary-title">Queue Context</span>
+              <span class="muted detail-summary-note">Files, pacing, and tmux pane</span>
+            </span>
+            <span class="muted detail-summary-meta detail-queue-summary-meta"></span>
+          </summary>
+          <div class="profile-meta detail-meta"></div>
+        </details>
 
-      <details class="detail-pane detail-runtime-output heavy-panel">
-        <summary>
-          <span class="detail-summary-copy">
-            <span class="detail-summary-title">Pane Tail / Runtime Output</span>
-            <span class="muted detail-summary-note">Live pane tail from the tmux sender process</span>
-          </span>
-          <span class="muted detail-summary-meta detail-runtime-summary-meta"></span>
-        </summary>
-        <pre></pre>
+        <details class="detail-disclosure detail-guard-disclosure heavy-panel">
+          <summary>
+            <span class="detail-summary-copy">
+              <span class="detail-summary-title">Bounce Guard Detail</span>
+              <span class="muted detail-summary-note">Suppression sync and recovery safeguards</span>
+            </span>
+            <span class="muted detail-summary-meta detail-guard-summary-meta"></span>
+          </summary>
+          <div class="detail-guard-slot"></div>
+        </details>
+
+        <details class="detail-pane detail-runtime-output heavy-panel">
+          <summary>
+            <span class="detail-summary-copy">
+              <span class="detail-summary-title">Pane Tail / Runtime Output</span>
+              <span class="muted detail-summary-note">Live pane tail from the tmux sender process</span>
+            </span>
+            <span class="muted detail-summary-meta detail-runtime-summary-meta"></span>
+          </summary>
+          <pre></pre>
+        </details>
       </details>
     </article>
   `);
@@ -4789,6 +4774,7 @@ function createProfileDetailNode() {
     feedback: node.querySelector(".detail-feedback-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
+    advancedDisclosure: node.querySelector(".detail-advanced-disclosure"),
     live: node.querySelector(".detail-live-slot"),
     liveDisclosure: node.querySelector(".detail-live-disclosure"),
     liveSummaryMeta: node.querySelector(".detail-live-summary-meta"),
@@ -4808,6 +4794,19 @@ function createProfileDetailNode() {
     runtimeSummaryMeta: node.querySelector(".detail-runtime-summary-meta"),
     paneTail: node.querySelector(".detail-runtime-output pre"),
   };
+  const closeAdvancedDiagnostics = () => {
+    [
+      node._refs.liveDisclosure,
+      node._refs.webhookDisclosure,
+      node._refs.queueDisclosure,
+      node._refs.guardDisclosure,
+      node._refs.runtimeDisclosure,
+    ].forEach((disclosure) => {
+      if (!disclosure) return;
+      disclosure.open = false;
+      clearDisclosureContent(disclosure);
+    });
+  };
   const clearDisclosureContent = (disclosure) => {
     if (disclosure === node._refs.liveDisclosure) clearNodeHtml(node._refs.live);
     if (disclosure === node._refs.webhookDisclosure) clearNodeHtml(node._refs.webhook);
@@ -4815,6 +4814,11 @@ function createProfileDetailNode() {
     if (disclosure === node._refs.guardDisclosure) clearNodeHtml(node._refs.guard);
     if (disclosure === node._refs.runtimeDisclosure) setNodeText(node._refs.paneTail, "");
   };
+  if (node._refs.advancedDisclosure) {
+    node._refs.advancedDisclosure.addEventListener("toggle", () => {
+      if (!node._refs.advancedDisclosure.open) closeAdvancedDiagnostics();
+    });
+  }
   [
     node._refs.liveDisclosure,
     node._refs.webhookDisclosure,
@@ -4847,6 +4851,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
     feedback: node.querySelector(".detail-feedback-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
+    advancedDisclosure: node.querySelector(".detail-advanced-disclosure"),
     live: node.querySelector(".detail-live-slot"),
     liveDisclosure: node.querySelector(".detail-live-disclosure"),
     liveSummaryMeta: node.querySelector(".detail-live-summary-meta"),
@@ -4879,6 +4884,8 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const maxTotalRaw = Number(profile.max_total || 0);
   const acceptedRaw = profileRunSentDisplay(profile);
   const progress = maxTotalRaw > 0 ? Math.max(0, Math.min(100, (acceptedRaw / maxTotalRaw) * 100)) : 0;
+  const showProgress = isProfileActive(profile) || acceptedRaw > 0;
+  const showSession = Boolean(profile.pane_index || profile.tmux_command);
   const channel = profileTelemetryChannel(profile);
   const webhook = profile.webhook || {};
   const webhookSummary = webhook.summary || {};
@@ -4929,7 +4936,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.paneLabel, `Pane ${profile.pane_index} / ${profile.tmux_command || "-"}`);
   setNodeText(refs.runtimeNote, profile.runtime_note || "Pane is idle.");
   setNodeText(refs.lastUpdate, profileLastUpdateText(profile));
-  setNodeText(refs.actionNote, buildProfileActionNote(profile));
+  setNodeText(refs.actionNote, (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile) : "");
 
   refs.startButton.dataset.profile = profile.name || "";
   refs.startButton.disabled = startDisabled;
@@ -4964,10 +4971,13 @@ function updateProfileDetailNode(node, snapshot, profile) {
   }
   setNodeText(
     refs.progressNote,
-    `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.`,
+    showProgress ? `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.` : "",
   );
   setNodeText(refs.progressValue, `${acceptedRaw}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
+  refs.progressFill.closest(".progress-wrap")?.classList.toggle("hidden", !showProgress);
+  refs.paneLabel.closest(".detail-core-meta-row")?.classList.toggle("hidden", !showSession);
+  refs.runtimeNote.closest(".detail-core-meta-row")?.classList.toggle("hidden", !showProgress);
   setNodeText(refs.webhookSummaryMeta, webhookSummaryText);
   if (refs.webhookDisclosure) {
     refs.webhookDisclosure.classList.toggle("hidden", !hasWebhookDetail);
