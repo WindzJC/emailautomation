@@ -55,12 +55,20 @@ TRIAGE_MODE_FAST = "FAST_TRIAGE"
 TRIAGE_MODE_STRICT = "STRICT_PUBLIC_PROOF"
 TRIAGE_ROLE_BLOCKLIST = set(ROLE_LOCALPART_BLOCKLIST) | {"admin", "contact", "hello", "info", "sales", "support"}
 TRIAGE_JUNK_NAME_TOKENS = {
+    "admin",
     "asdf",
     "author",
+    "book",
+    "books",
+    "by",
+    "contact",
     "customer",
+    "dr",
     "dummy",
     "fake",
     "firstname",
+    "hello",
+    "info",
     "junk",
     "lastname",
     "na",
@@ -72,6 +80,26 @@ TRIAGE_JUNK_NAME_TOKENS = {
     "testing",
     "unknown",
     "user",
+}
+TRIAGE_WEAK_FIRST_NAME_TOKENS = TRIAGE_JUNK_NAME_TOKENS | {
+    "about",
+    "account",
+    "author",
+    "business",
+    "company",
+    "editor",
+    "enquiry",
+    "guest",
+    "inquiry",
+    "marketing",
+    "media",
+    "newsletter",
+    "office",
+    "press",
+    "service",
+    "team",
+    "the",
+    "webmaster",
 }
 TRIAGE_BAD_DOMAINS = {"example.com", "example.org", "example.net", "test.com", "invalid.com", "localhost"}
 TRIAGE_BAD_LOCAL_MARKERS = {
@@ -466,7 +494,39 @@ def _has_usable_full_name(name: str) -> bool:
         return False
     if any(token in TRIAGE_JUNK_NAME_TOKENS for token in tokens):
         return False
+    if tokens[0] in TRIAGE_WEAK_FIRST_NAME_TOKENS:
+        return False
     return all(len(token) >= 2 for token in tokens[:2])
+
+
+def _fast_triage_identity_rejection(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[str, str] | None:
+    full_header = _pick_header(fieldnames, FULL_NAME_HEADER_CANDIDATES)
+    first_header = _pick_header(fieldnames, FIRST_NAME_HEADER_CANDIDATES)
+    full_name = _full_name_value(row, fieldnames)
+    first_name = _first_name_value(row, fieldnames, full_name)
+    full_tokens = _triage_name_tokens(full_name)
+    first_tokens = _triage_name_tokens(first_name)
+    first_token = first_tokens[0] if first_tokens else (full_tokens[0] if full_tokens else "")
+
+    if not full_header and len(full_tokens) < 2:
+        return "MISSING_FULL_NAME", "No FullName or first/last name pair was available for fast triage."
+    if full_header and not _normalize_row_value(row, full_header):
+        return "MISSING_FULL_NAME", "FullName is missing."
+    if not full_name.strip():
+        return "MISSING_USABLE_PERSON_NAME", "No usable person name was available for fast triage."
+    if first_token in TRIAGE_WEAK_FIRST_NAME_TOKENS:
+        return "WEAK_FIRST_NAME", f"FirstName `{first_name or first_token}` is generic or not a usable person name."
+    if first_header and _normalize_row_value(row, first_header):
+        explicit_first = _triage_name_tokens(_normalize_row_value(row, first_header))
+        if explicit_first and explicit_first[0] in TRIAGE_WEAK_FIRST_NAME_TOKENS:
+            return "WEAK_FIRST_NAME", f"FirstName `{_normalize_row_value(row, first_header)}` is generic or not a usable person name."
+    if _is_junk_name(full_name):
+        return "JUNK_NAME", "Name looks like a test, junk, or placeholder value."
+    if len(full_tokens) < 2:
+        return "WEAK_FULL_NAME", "FullName has fewer than two real name tokens."
+    if not _has_usable_full_name(full_name):
+        return "MISSING_USABLE_PERSON_NAME", "FullName does not contain a strong usable person identity."
+    return None
 
 
 def _is_bad_domain(domain: str) -> bool:
@@ -534,13 +594,13 @@ def _classify_fast_triage_row(
     if has_bad_local_indicator:
         return "REJECT", "LOCAL_BOUNCE_RISK", bad_local_evidence
 
-    full_name = _full_name_value(row, fieldnames)
-    if _is_junk_name(full_name):
-        return "REJECT", "JUNK_NAME", "Name looks like a test, junk, or placeholder value."
-    if not _has_usable_full_name(full_name):
-        return "REJECT", "MISSING_USABLE_NAME", "No usable full name was available for fast triage."
     if is_role_recipient(email, TRIAGE_ROLE_BLOCKLIST):
         return "REJECT", "ROLE_ACCOUNT", "Role-based inbox rejected by fast triage."
+
+    identity_rejection = _fast_triage_identity_rejection(row, fieldnames)
+    if identity_rejection:
+        reason, evidence = identity_rejection
+        return "REJECT", reason, evidence
 
     return "KEEP", "FAST_TRIAGE_LOCAL_CONFIDENCE", "Valid full name, valid email syntax, and normal-looking domain."
 
@@ -1114,6 +1174,14 @@ def fast_triage_master_leads(
     keep_headers, keep_rows = _load_output_rows(keep_path) if resume_ok else ([], [])
     rejected_headers, rejected_rows = _load_output_rows(rejected_path) if resume_ok else ([], [])
     quarantine_headers, quarantine_rows = _load_output_rows(quarantine_path) if resume_ok else ([], [])
+    checkpoint_next_index = int(checkpoint.get("next_row_index") or 0) if resume_ok else 0
+    output_row_count = len(keep_rows) + len(rejected_rows) + len(quarantine_rows)
+    if resume_ok and checkpoint_next_index > 0 and output_row_count == 0:
+        # Output CSVs were likely deleted while the old checkpoint remained; restart instead of resuming at EOF.
+        resume_ok = False
+        keep_headers, keep_rows = [], []
+        rejected_headers, rejected_rows = [], []
+        quarantine_headers, quarantine_rows = [], []
     if not resume_ok:
         keep_rows = []
         rejected_rows = []
@@ -1141,7 +1209,7 @@ def fast_triage_master_leads(
         _csv_atomic_write(quarantine_path, quarantine_headers, quarantine_rows)
 
     disposable_domain_set = disposable_domains if disposable_domains is not None else _load_triage_disposable_domains()
-    start_index = int(checkpoint.get("next_row_index") or 0) if resume_ok else 0
+    start_index = checkpoint_next_index if resume_ok else 0
     start_index = max(0, min(start_index, len(input_rows)))
     checkpoint_rows = FAST_TRIAGE_CHECKPOINT_ROWS
     cancel_poll_rows = FAST_TRIAGE_CANCEL_POLL_ROWS
