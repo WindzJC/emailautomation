@@ -3413,23 +3413,19 @@ function renderSummary(snapshot) {
     .slice(0, 3);
   const cards = [
     {
-      key: "active_profiles",
-      label: "Active Profiles",
-      value: summary.active_profiles,
-      note: "live senders",
-      tone: Number(summary.active_profiles || 0) > 0 ? "good" : "neutral",
-      detailsHtml: renderFleetProfileStrip(fleetProfiles),
-    },
-    {
-      key: "pending",
-      label: "Pending",
-      value: summary.total_pending,
+      key: "pending_total",
+      label: "Pending Total",
+      value: Number(summary.total_pending || 0).toLocaleString(),
       note: `Astra ${Number(summary.astra_pending || 0).toLocaleString()} · SendGrid ${Number(summary.sendgrid_pending || 0).toLocaleString()}`,
       tone: Number(summary.total_pending || 0) > 0 ? "warn" : "neutral",
-      details: [
-        { label: "Astra", value: Number(summary.astra_pending || 0).toLocaleString() },
-        { label: "SendGrid", value: Number(summary.sendgrid_pending || 0).toLocaleString() },
-      ],
+    },
+    {
+      key: "active_senders",
+      label: "Active Profiles",
+      value: summary.active_profiles,
+      note: "active senders",
+      tone: Number(summary.active_profiles || 0) > 0 ? "good" : "neutral",
+      detailsHtml: renderFleetProfileStrip(fleetProfiles),
     },
     {
       key: "awaiting",
@@ -3463,7 +3459,7 @@ function renderSummary(snapshot) {
     },
     (node, card) => {
       const refs = node._refs;
-      node.className = `summary-card summary-card-${card.tone || "neutral"}`;
+      node.className = `summary-card summary-card-${card.tone || "neutral"} summary-card-${card.key || "metric"}`;
       if (refs.spark) refs.spark.className = `summary-spark summary-spark-${card.tone || "neutral"}`;
       setNodeText(refs.label, card.label);
       setNodeText(refs.value, card.value);
@@ -3518,8 +3514,8 @@ function updateAlertCardNode(node, alert) {
 
 function summarizeAlertProgress(snapshot) {
   const totals = {
-    sendgrid: { key: "sendgrid", label: "SendGrid", sent: 0, active: 0 },
-    private: { key: "private", label: "Private Email", sent: 0, active: 0 },
+    sendgrid: { key: "sendgrid", label: "SendGrid", sent: 0, active: 0, cap: 0 },
+    private: { key: "private", label: "Private Email", sent: 0, active: 0, cap: 0 },
   };
 
   const activeStates = new Set(["running", "starting", "sleeping", "cooldown", "paused"]);
@@ -3530,6 +3526,7 @@ function summarizeAlertProgress(snapshot) {
     if (!totals[channel]) return;
 
     totals[channel].sent += profileRunSentDisplay(profile);
+    totals[channel].cap += Number(profile?.max_total || 0);
 
     if (activeStates.has(String(profile?.runtime_state || ""))) {
       totals[channel].active += 1;
@@ -3542,12 +3539,10 @@ function summarizeAlertProgress(snapshot) {
 function renderAlertsProgress(snapshot) {
   if (!els.alertsProgress) return;
   const items = summarizeAlertProgress(snapshot);
+  const windowLabel = `${Number(snapshot?.activity_hours || 24)}h window`;
   setNodeHtml(
     els.alertsProgress,
     `
-      <div class="alerts-progress-head">
-        <span class="alerts-progress-kicker">Run Progress</span>
-      </div>
       <div class="alerts-progress-list">
         ${items.map((item) => `
           <article class="alerts-progress-item alerts-progress-row alerts-progress-item-${item.key}">
@@ -3561,7 +3556,7 @@ function renderAlertsProgress(snapshot) {
                 <span class="alerts-progress-unit muted">sent</span>
               </div>
             </div>
-            <span class="alerts-progress-meta muted">${item.active} active</span>
+            <span class="alerts-progress-meta muted">${item.active} active • ${item.cap ? `cap ${Number(item.cap).toLocaleString()}` : "cap ∞"} • ${escapeHtml(windowLabel)}</span>
           </article>
         `).join("")}
       </div>
@@ -3586,7 +3581,7 @@ function renderAlerts(snapshot) {
             }]
           : []),
       ]
-    : [{ key: "ok", severity: "ok", title: "No active threshold alerts", message: "Current metrics are below the configured alert thresholds." }];
+    : [{ key: "ok", severity: "ok", title: "Thresholds clear", message: "Current metrics are below configured limits." }];
   syncKeyedChildren(
     els.alertsGrid,
     cards,
@@ -3599,7 +3594,7 @@ function renderAlerts(snapshot) {
       els.alertsCaption,
       activeAlerts.length
         ? `${activeAlerts.length} active now`
-        : "No active threshold alerts right now.",
+        : "All thresholds clear",
     );
   }
   renderAlertsProgress(snapshot);
