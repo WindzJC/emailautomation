@@ -523,7 +523,7 @@ def record_transition(
     return event_id
 
 
-def upsert_lead(conn: sqlite3.Connection, **lead: object) -> dict[str, object]:
+def upsert_lead(conn: sqlite3.Connection, *, commit: bool = True, **lead: object) -> dict[str, object]:
     email = norm_email(lead.get("email", ""))
     if not email:
         raise ValueError("Lead email is required.")
@@ -563,7 +563,7 @@ def upsert_lead(conn: sqlite3.Connection, **lead: object) -> dict[str, object]:
         "created_at": existing["created_at"] if existing else (_strip(lead.get("created_at")) or now),
         "updated_at": now,
     }
-    with conn:
+    def write() -> None:
         conn.execute(
             """
             INSERT INTO lead_ledger (
@@ -634,6 +634,11 @@ def upsert_lead(conn: sqlite3.Connection, **lead: object) -> dict[str, object]:
             """,
             payload,
         )
+    if commit:
+        with conn:
+            write()
+    else:
+        write()
     return load_lead_by_id(conn, lead_id) or {}
 
 
@@ -688,6 +693,7 @@ def update_stage_status(
     run_id: str = "",
     event_type: str = "stage_status_updated",
     updated_at: str | None = None,
+    commit: bool = True,
 ) -> dict[str, object]:
     lead = load_lead_by_id(conn, lead_id)
     if lead is None:
@@ -699,7 +705,7 @@ def update_stage_status(
     if stage_before == stage_next and status_before == status_next:
         return lead
     timestamp = updated_at or iso_utc()
-    with conn:
+    def write() -> None:
         conn.execute(
             """
             UPDATE lead_ledger
@@ -721,6 +727,11 @@ def update_stage_status(
             run_id=run_id,
             created_at=timestamp,
         )
+    if commit:
+        with conn:
+            write()
+    else:
+        write()
     return load_lead_by_id(conn, lead_id) or {}
 
 

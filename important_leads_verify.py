@@ -39,6 +39,8 @@ TRIAGE_STATE_KEY = "latest_lead_triage"
 VERIFY_PATHS_STATE_KEY = "important_leads_verify_paths"
 TRIAGE_PATHS_STATE_KEY = "important_leads_triage_paths"
 VERIFY_CHECKPOINT_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_VERIFY_CHECKPOINT_ROWS", "100") or 100))
+FAST_TRIAGE_CHECKPOINT_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_FAST_TRIAGE_CHECKPOINT_ROWS", "5000") or 5000))
+FAST_TRIAGE_CANCEL_POLL_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_FAST_TRIAGE_CANCEL_POLL_ROWS", "1000") or 1000))
 VERIFY_DEFAULT_MAX_WORKERS = max(1, int(os.environ.get("IMPORTANT_LEADS_VERIFY_MAX_WORKERS", "12") or 12))
 VERIFY_HTTP_RETRIES = max(0, int(os.environ.get("IMPORTANT_LEADS_VERIFY_HTTP_RETRIES", "1") or 1))
 VERIFY_CACHE_MAX_ITEMS = max(0, int(os.environ.get("IMPORTANT_LEADS_VERIFY_CACHE_MAX_ITEMS", "5000") or 5000))
@@ -925,6 +927,7 @@ def _sync_row_to_lead_ledger(
     status: str,
     reason: str,
     processed_at: str,
+    commit: bool = True,
 ) -> None:
     email = norm_email(_email_value(row, fieldnames))
     if not email:
@@ -958,10 +961,25 @@ def _sync_row_to_lead_ledger(
         reason_codes=[reason] if reason else [],
         updated_at=processed_at,
         created_at=processed_at,
+        commit=commit,
     )
 
     if existing is None:
-        with conn:
+        if commit:
+            with conn:
+                record_transition(
+                    conn,
+                    lead_id=lead_id,
+                    event_type="lead_observed",
+                    stage_before="",
+                    stage_after=stage,
+                    status_before="",
+                    status_after=status,
+                    reason_code=reason,
+                    note=f"Observed via {_display_path_label(input_path)}",
+                    created_at=processed_at,
+                )
+        else:
             record_transition(
                 conn,
                 lead_id=lead_id,
@@ -985,6 +1003,7 @@ def _sync_row_to_lead_ledger(
         note=f"Processed via {_display_path_label(input_path)}",
         event_type=_ledger_event_type(stage),
         updated_at=processed_at,
+        commit=commit,
     )
 
 
@@ -1048,7 +1067,8 @@ def fast_triage_master_leads(
     disposable_domain_set = disposable_domains if disposable_domains is not None else _load_triage_disposable_domains()
     start_index = int(checkpoint.get("next_row_index") or 0) if resume_ok else 0
     start_index = max(0, min(start_index, len(input_rows)))
-    checkpoint_rows = VERIFY_CHECKPOINT_ROWS
+    checkpoint_rows = FAST_TRIAGE_CHECKPOINT_ROWS
+    cancel_poll_rows = FAST_TRIAGE_CANCEL_POLL_ROWS
     canceled = False
     last_checkpoint_payload: dict[str, object] | None = None
     ledger_conn = connect_lead_ledger(_lead_ledger_db_path())
@@ -1061,57 +1081,59 @@ def fast_triage_master_leads(
             chunk_end = min(chunk_start + checkpoint_rows, len(input_rows))
             chunk_changed = False
             chunk_complete = True
-            for index in range(chunk_start, chunk_end):
-                if should_cancel and should_cancel():
-                    canceled = True
-                    chunk_complete = False
-                    break
-                row = input_rows[index]
-                signature = _row_signature(row, base_headers)
-                if signature in keep_signatures or signature in rejected_signatures or signature in quarantine_signatures:
+            with ledger_conn:
+                for index in range(chunk_start, chunk_end):
+                    if should_cancel and index > chunk_start and (index - chunk_start) % cancel_poll_rows == 0 and should_cancel():
+                        canceled = True
+                        chunk_complete = False
+                        break
+                    row = input_rows[index]
+                    signature = _row_signature(row, base_headers)
+                    if signature in keep_signatures or signature in rejected_signatures or signature in quarantine_signatures:
+                        if progress_callback:
+                            try:
+                                progress_callback(index + 1, len(input_rows))
+                            except Exception:
+                                pass
+                        continue
+                    status, reason, evidence = _classify_fast_triage_row(
+                        row,
+                        base_headers,
+                        disposable_domains=disposable_domain_set,
+                    )
+                    output_row = _build_output_row(
+                        row,
+                        base_headers,
+                        status=status,
+                        reason=reason,
+                        evidence=evidence,
+                    )
+                    if status == "KEEP":
+                        keep_rows.append(output_row)
+                        keep_signatures.add(signature)
+                    elif status == "REJECT":
+                        rejected_rows.append(output_row)
+                        rejected_signatures.add(signature)
+                    else:
+                        quarantine_rows.append(output_row)
+                        quarantine_signatures.add(signature)
+                    _sync_row_to_lead_ledger(
+                        ledger_conn,
+                        row,
+                        base_headers,
+                        input_path=input_path,
+                        stage=TRIAGE_MODE_FAST,
+                        status=status,
+                        reason=reason,
+                        processed_at=str(output_row.get("VerifiedAtUtc") or iso_utc()),
+                        commit=False,
+                    )
+                    chunk_changed = True
                     if progress_callback:
                         try:
                             progress_callback(index + 1, len(input_rows))
                         except Exception:
                             pass
-                    continue
-                status, reason, evidence = _classify_fast_triage_row(
-                    row,
-                    base_headers,
-                    disposable_domains=disposable_domain_set,
-                )
-                output_row = _build_output_row(
-                    row,
-                    base_headers,
-                    status=status,
-                    reason=reason,
-                    evidence=evidence,
-                )
-                if status == "KEEP":
-                    keep_rows.append(output_row)
-                    keep_signatures.add(signature)
-                elif status == "REJECT":
-                    rejected_rows.append(output_row)
-                    rejected_signatures.add(signature)
-                else:
-                    quarantine_rows.append(output_row)
-                    quarantine_signatures.add(signature)
-                _sync_row_to_lead_ledger(
-                    ledger_conn,
-                    row,
-                    base_headers,
-                    input_path=input_path,
-                    stage=TRIAGE_MODE_FAST,
-                    status=status,
-                    reason=reason,
-                    processed_at=str(output_row.get("VerifiedAtUtc") or iso_utc()),
-                )
-                chunk_changed = True
-                if progress_callback:
-                    try:
-                        progress_callback(index + 1, len(input_rows))
-                    except Exception:
-                        pass
 
             _csv_atomic_write(keep_path, keep_headers, keep_rows)
             _csv_atomic_write(rejected_path, rejected_headers, rejected_rows)
