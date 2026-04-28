@@ -2868,15 +2868,27 @@ function pipelineStateLabel(state) {
 function renderLeadsPipeline(pipeline) {
   const steps = Array.isArray(pipeline?.steps) ? pipeline.steps : [];
   if (els.leadsPipelineMeta) {
+    const checkedRows = Number(pipeline?.checked_rows || 0);
+    const triageKeepRows = Number(pipeline?.triaged_keep_rows || 0);
+    const quarantineRows = Number(pipeline?.quarantine_rows || 0);
+    const providedTriageRejectRows = Number(
+      pipeline?.triaged_reject_rows
+      || pipeline?.triaged_rejected_rows
+      || pipeline?.triage_reject_rows
+      || pipeline?.rejected_rows
+      || 0,
+    );
+    const triageRejectRows = providedTriageRejectRows || Math.max(0, checkedRows - triageKeepRows - quarantineRows);
     const nextStep = pipeline?.next_step
       ? steps.find((step) => String(step.key || "") === String(pipeline.next_step || ""))
       : null;
     const archivePath = String(pipeline?.latest_pre_dispatch_archive_path || "");
     const summary = [
       nextStep ? `Next: ${nextStep.label || nextStep.key}` : "No active lead run",
-      `Checked ${Number(pipeline?.checked_rows || 0)}`,
-      `Triage keep ${Number(pipeline?.triaged_keep_rows || 0)}`,
-      `Quarantine ${Number(pipeline?.quarantine_rows || 0)}`,
+      `Checked ${checkedRows}`,
+      `Triage keep ${triageKeepRows}`,
+      `Triage reject ${triageRejectRows}`,
+      `Quarantine ${quarantineRows}`,
       `Eligible ${Number(pipeline?.dispatch_eligible_rows || 0)}`,
       archivePath ? `Archive ${archivePath.split(/[\\/]/).pop()}` : "",
     ].filter(Boolean).join(" | ");
