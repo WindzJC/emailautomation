@@ -148,6 +148,7 @@ let quarantinePageSize = 10;
 let quarantinePageIndex = 0;
 let didHydrate = false;
 let selectedProfileName = "";
+let senderStatusPanel = null;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
 let activeDashboardTab = "ops";
@@ -3288,6 +3289,16 @@ function humanizeDurationCompact(totalSeconds) {
   return `${hours}h ${minutes}m`;
 }
 
+function humanizeDurationClock(totalSeconds) {
+  const seconds = Number(totalSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  const whole = Math.ceil(seconds);
+  const minutes = Math.floor(whole / 60);
+  const remainder = whole % 60;
+  if (minutes <= 0) return `${remainder}s`;
+  return `${minutes}m ${remainder}s`;
+}
+
 function privateBounceTone(guard = {}) {
   const status = String(guard?.status || "idle");
   if (status === "watching") return "good";
@@ -3402,15 +3413,12 @@ function updateSelectOptionNode(node, value, label) {
 
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
+  const alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
   const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
   const fleetOrder = ["private_jc", "sendgrid_annette", "sendgrid_jordan", "sendgrid_jodi", "sendgrid_alison", "sendgrid_fiorela"];
   const fleetProfiles = fleetOrder
     .map((name) => profiles.find((profile) => profile.name === name))
     .filter(Boolean);
-  const awaitingProfiles = profiles
-    .filter((profile) => Number(profile.awaiting_outcome || 0) > 0)
-    .sort((left, right) => Number(right.awaiting_outcome || 0) - Number(left.awaiting_outcome || 0))
-    .slice(0, 3);
   const cards = [
     {
       key: "pending_total",
@@ -3421,25 +3429,17 @@ function renderSummary(snapshot) {
     },
     {
       key: "active_senders",
-      label: "Active Profiles",
+      label: "Senders",
       value: summary.active_profiles,
-      note: "active senders",
+      note: `${profiles.length || fleetProfiles.length} profiles · ${fleetProfiles.map((profile) => fleetProfileStatus(profile).label).join(" / ") || "No status"}`,
       tone: Number(summary.active_profiles || 0) > 0 ? "good" : "neutral",
-      detailsHtml: renderFleetProfileStrip(fleetProfiles),
     },
     {
-      key: "awaiting",
-      label: "Awaiting Outcome",
-      value: summary.total_awaiting_outcome || 0,
-      note: "accepted without final result",
-      tone: Number(summary.total_awaiting_outcome || 0) > 0 ? "warn" : "good",
-      detailsHtml: renderSummaryInsightList(
-        awaitingProfiles.map((profile) => ({
-          label: formatProfileName(profile.name),
-          value: Number(profile.awaiting_outcome || 0).toLocaleString(),
-        })),
-        "No profiles are currently waiting on final outcomes.",
-      ),
+      key: "alerts",
+      label: "Alerts",
+      value: summary.active_alerts || alerts.length || 0,
+      note: Number(summary.active_alerts || alerts.length || 0) > 0 ? "Needs review" : "Clear",
+      tone: Number(summary.active_alerts || alerts.length || 0) > 0 ? "bad" : "good",
     },
   ];
   syncKeyedChildren(
@@ -3467,6 +3467,103 @@ function renderSummary(snapshot) {
       refs.value.classList.toggle("summary-value-text", isSummaryTextValue(card.value));
       setNodeHtml(refs.details, card.detailsHtml || renderSummaryDetails(card.details || []));
     },
+  );
+}
+
+function ensureSenderStatusPanel() {
+  if (senderStatusPanel?.isConnected) return senderStatusPanel;
+  const anchor = els.summaryGrid?.closest(".queue-health-section") || els.summaryGrid;
+  if (!anchor?.parentNode) return null;
+  senderStatusPanel = elementFromHTML(`
+    <section class="sender-status-panel panel-shell">
+      <div class="ops-strip-head sender-status-head">
+        <div>
+          <p class="eyebrow">Sender Status</p>
+          <p class="muted">Current queue, activity, and profile controls</p>
+        </div>
+      </div>
+      <div class="sender-status-table-wrap">
+        <table class="sender-status-table">
+          <thead>
+            <tr>
+              <th>Sender</th>
+              <th>Status</th>
+              <th>Pending</th>
+              <th>Accepted</th>
+              <th>Awaiting</th>
+              <th>Last Activity</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  `);
+  anchor.insertAdjacentElement("afterend", senderStatusPanel);
+  return senderStatusPanel;
+}
+
+function senderStatusBadge(profile) {
+  if (profileTelemetryChannel(profile) === "sendgrid" && profile?.sendgrid_hourly_cap_waiting) {
+    return { label: "Waiting · hourly cap", tone: "warn" };
+  }
+  const runtimeState = String(profile?.runtime_state || "").trim();
+  if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Live", tone: "good" };
+  if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
+  if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
+  if (canStartProfile(profile)) return { label: "Ready", tone: "neutral" };
+  return { label: "Stopped", tone: "bad" };
+}
+
+function renderSenderStatusConsole(snapshot, selectedProfile) {
+  const panel = ensureSenderStatusPanel();
+  if (!panel) return;
+  const tbody = panel.querySelector("tbody");
+  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
+  if (!profiles.length) {
+    setNodeHtml(tbody, `<tr><td colspan="7" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
+    return;
+  }
+  setNodeHtml(
+    tbody,
+    profiles.map((profile) => {
+      const status = senderStatusBadge(profile);
+      const pendingAction = pendingProfileActions.get(profile.name) || "";
+      const stopAvailable = canStopProfile(profile);
+      const startAvailable = canStartProfile(profile);
+      const action = stopAvailable ? "stop" : "start";
+      const actionLabelText = pendingAction
+        ? actionLabel(pendingAction)
+        : stopAvailable ? "Stop" : "Start";
+      const actionDisabled = Boolean(pendingAction) || (!stopAvailable && !startAvailable);
+      const lastActivity = profile.last_timestamp
+        ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
+        : profileLastAgeText(profile);
+      return `
+        <tr class="${selectedProfile?.name === profile.name ? "is-selected" : ""}" data-profile="${escapeHtml(profile.name || "")}">
+          <td>
+            <button class="sender-status-name-btn" type="button" data-profile="${escapeHtml(profile.name || "")}">
+              ${escapeHtml(formatProfileName(profile.name))}
+            </button>
+          </td>
+          <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
+          <td>${Number(profile.pending_count || 0).toLocaleString()}</td>
+          <td>${Number(profileRunSentDisplay(profile) || 0).toLocaleString()}</td>
+          <td>${Number(profile.awaiting_outcome || 0).toLocaleString()}</td>
+          <td class="sender-status-activity" title="${escapeHtml(profile.last_email || profile.last_timestamp || "")}">${escapeHtml(lastActivity)}</td>
+          <td>
+            <button
+              class="btn ${action === "stop" ? "btn-danger" : "btn-secondary"} btn-sm sender-status-action-btn"
+              type="button"
+              data-profile="${escapeHtml(profile.name || "")}"
+              data-action="${escapeHtml(action)}"
+              ${actionDisabled ? "disabled" : ""}
+            >${escapeHtml(actionLabelText)}</button>
+          </td>
+        </tr>
+      `;
+    }).join(""),
   );
 }
 
@@ -3514,7 +3611,7 @@ function updateAlertCardNode(node, alert) {
 
 function summarizeAlertProgress(snapshot) {
   const totals = {
-    sendgrid: { key: "sendgrid", label: "SendGrid", sent: 0, active: 0, cap: 0 },
+    sendgrid: { key: "sendgrid", label: "SendGrid", sent: 0, active: 0, cap: 0, hourly: snapshot?.sendgrid_hourly_cap || null },
     private: { key: "private", label: "Private Email", sent: 0, active: 0, cap: 0 },
   };
 
@@ -3540,6 +3637,23 @@ function renderAlertsProgress(snapshot) {
   if (!els.alertsProgress) return;
   const items = summarizeAlertProgress(snapshot);
   const windowLabel = `${Number(snapshot?.activity_hours || 24)}h window`;
+  const renderHourlyMeta = (item) => {
+    if (item.key !== "sendgrid" || !item.hourly) return "";
+    const cap = Number(item.hourly.cap || 0);
+    const used = Number(item.hourly.used || 0);
+    const remaining = Number(item.hourly.remaining || 0);
+    const waiting = Boolean(item.hourly.waiting);
+    const waitSeconds = Number(item.hourly.next_slot_seconds || 0);
+    const stateText = waiting
+      ? `Waiting for rolling slot in ${humanizeDurationClock(waitSeconds)}`
+      : "Slots available now";
+    return `
+      <span class="alerts-progress-meta alerts-progress-hourly">Hourly cap: ${Number(used || 0).toLocaleString()} / ${Number(cap || 0).toLocaleString()}</span>
+      <span class="alerts-progress-meta alerts-progress-hourly">Remaining this hour: ${Number(remaining || 0).toLocaleString()}</span>
+      <span class="alerts-progress-meta alerts-progress-hourly ${waiting ? "is-waiting" : "is-open"}">${escapeHtml(stateText)}</span>
+      <span class="alerts-progress-helper muted">SendGrid resumes automatically as the rolling 1-hour window frees slots.</span>
+    `;
+  };
   setNodeHtml(
     els.alertsProgress,
     `
@@ -3557,6 +3671,7 @@ function renderAlertsProgress(snapshot) {
               </div>
             </div>
             <span class="alerts-progress-meta muted">${item.active} active • ${item.cap ? `cap ${Number(item.cap).toLocaleString()}` : "cap ∞"} • ${escapeHtml(windowLabel)}</span>
+            ${renderHourlyMeta(item)}
           </article>
         `).join("")}
       </div>
@@ -4152,8 +4267,23 @@ function renderControls(snapshot) {
   const controls = snapshot.controls || {};
   const automation = snapshot.automation || {};
   const sendCap = Number(controls.send_cap_total || controls.send_cap_per_profile || 0);
+  const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
+  const hasActiveSender = profiles.some((profile) => isProfileActive(profile))
+    || Number(controls.active_sendgrid_sender_count || 0) > 0
+    || Number(controls.active_profile_count || controls.active_profiles || 0) > 0;
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendCap > 0) {
     els.sendCapInput.value = String(sendCap);
+  }
+  if (els.startBtn) {
+    els.startBtn.disabled = hasActiveSender;
+    els.startBtn.classList.toggle("btn-start-muted", hasActiveSender);
+    els.startBtn.title = hasActiveSender
+      ? "Some senders are already running. Use per-sender controls or Stop All first."
+      : "Start all available senders.";
+    els.startBtn.setAttribute("aria-describedby", hasActiveSender ? "send-cap-note" : "");
+  }
+  if (els.stopBtn) {
+    els.stopBtn.classList.toggle("btn-danger-active", hasActiveSender);
   }
   if (els.sendCapNote) {
     const activeSenders = Number(controls.active_sendgrid_sender_count || 0);
@@ -4165,6 +4295,9 @@ function renderControls(snapshot) {
     ];
     if (activeSenders > 0) {
       lines.push(`Active SG fleet cap: ~${activeFleetTotal || 0}`);
+    }
+    if (hasActiveSender) {
+      lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
     }
     const scheduleBits = [];
     if (automation?.sendgrid_daily?.enabled) {
@@ -4218,6 +4351,7 @@ function selectProfileByName(profileName) {
   selectedProfileName = next.name;
   const selected = resolveSelectedProfile(lastSnapshot);
   renderOverview(lastSnapshot, selected);
+  renderSenderStatusConsole(lastSnapshot, selected);
   renderDetailSwitcher(lastSnapshot, selected);
   renderProfileDetail(lastSnapshot, selected);
 }
@@ -5028,6 +5162,7 @@ function renderSnapshot(snapshot) {
   renderHealth(snapshot);
   renderAlerts(snapshot);
   renderSummary(snapshot);
+  renderSenderStatusConsole(snapshot, selectedProfile);
   renderTrends(snapshot);
   renderWebhookHealth(snapshot);
   renderAwaitingAging(snapshot, selectedProfile);
@@ -5063,6 +5198,7 @@ function rerenderCurrentSelection() {
   if (!lastSnapshot) return;
   const selected = resolveSelectedProfile(lastSnapshot);
   renderOverview(lastSnapshot, selected);
+  renderSenderStatusConsole(lastSnapshot, selected);
   renderDetailSwitcher(lastSnapshot, selected);
   renderProfileDetail(lastSnapshot, selected);
 }
@@ -5088,6 +5224,22 @@ async function handleProfileDetailClick(event) {
     if (stopButton.disabled) return;
     const profile = stopButton.getAttribute("data-profile") || "";
     await postAction(`/api/stop/${profile}`, { profileName: profile, action: "stop" });
+  }
+}
+
+async function handleSenderStatusClick(event) {
+  const actionButton = event.target.closest(".sender-status-action-btn[data-profile][data-action]");
+  if (actionButton && senderStatusPanel?.contains(actionButton)) {
+    if (actionButton.disabled) return;
+    const profile = actionButton.getAttribute("data-profile") || "";
+    const action = actionButton.getAttribute("data-action") || "";
+    if (!profile || !["start", "stop"].includes(action)) return;
+    await postAction(`/api/${action}/${profile}`, { profileName: profile, action });
+    return;
+  }
+  const profileButton = event.target.closest(".sender-status-name-btn[data-profile]");
+  if (profileButton && senderStatusPanel?.contains(profileButton)) {
+    selectProfileByName(profileButton.getAttribute("data-profile") || "");
   }
 }
 
@@ -5561,6 +5713,7 @@ if (els.sendCapInput) {
 }
 if (els.hoursSelect) els.hoursSelect.addEventListener("change", () => connectSocket(true));
 if (els.tailSelect) els.tailSelect.addEventListener("change", () => connectSocket(true));
+if (els.opsView) els.opsView.addEventListener("click", handleSenderStatusClick);
 if (els.overviewGrid) els.overviewGrid.addEventListener("click", handleOverviewClick);
 if (els.profileDetail) els.profileDetail.addEventListener("click", handleProfileDetailClick);
 if (els.detailProfileSelect) {

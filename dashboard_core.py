@@ -4,10 +4,12 @@ import csv
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,7 +23,7 @@ from zoneinfo import ZoneInfo
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
 from provider_pacing import provider_pacing_status
-from send_shard import PROFILES
+from send_shard import DOMAIN_SLOT_TTL_SECONDS, PROFILES, PROVIDER_LIMIT_DEFAULTS
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -206,6 +208,8 @@ class ProfileSnapshot:
     effective_spacing_seconds: int = 0
     effective_pace_per_hour: int = 0
     last_sent_timestamp_utc: str = ""
+    sendgrid_hourly_cap_waiting: bool = False
+    sendgrid_hourly_cap_remaining_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -358,6 +362,66 @@ def dashboard_send_cap_per_profile() -> int:
         return max(1, int(settings.get("send_cap_per_profile") or default_dashboard_send_cap_per_profile()))
     except Exception:
         return default_dashboard_send_cap_per_profile()
+
+
+def sendgrid_hourly_cap_limit() -> int:
+    for profile_name in SENDGRID_PROFILES:
+        cfg = PROFILES.get(profile_name, {})
+        try:
+            value = int(cfg.get("max_messages_1h") or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            return value
+    try:
+        return max(1, int(PROVIDER_LIMIT_DEFAULTS.get("sendgrid", {}).get("max_messages_1h") or 1000))
+    except Exception:
+        return 1000
+
+
+def build_sendgrid_hourly_cap_status(now: Optional[datetime] = None) -> Dict[str, object]:
+    """Expose the same rolling 1h SendGrid pacing guard used by send_shard."""
+    limit = sendgrid_hourly_cap_limit()
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=1)
+    slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
+    domain_log_name = ""
+    for profile_name in SENDGRID_PROFILES:
+        domain_log_name = str(PROFILES.get(profile_name, {}).get("domain_log") or "").strip()
+        if domain_log_name:
+            break
+    domain_log_name = domain_log_name or "sendgrid_domain_log.csv"
+    domain_log_path = _managed_path(LOGS_DIR, domain_log_name)
+
+    expiry_times: List[datetime] = []
+    if domain_log_path.exists():
+        for row in read_csv_rows(domain_log_path):
+            status = (row.get("Status") or "").strip().upper()
+            if status not in {"ATTEMPT", "SENT", "SLOT"}:
+                continue
+            ts = parse_log_timestamp(row.get("TimestampUTC", ""))
+            if not ts:
+                continue
+            if status in {"ATTEMPT", "SENT"} and ts >= cutoff:
+                expiry_times.append(ts + timedelta(hours=1))
+            elif status == "SLOT" and ts >= slot_cutoff:
+                expiry_times.append(ts + timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS))
+
+    expiry_times.sort()
+    used = len(expiry_times)
+    remaining = max(0, limit - used)
+    waiting = used >= limit and limit > 0
+    next_slot_at = expiry_times[0] if waiting and expiry_times else None
+    next_slot_seconds = max(0, int((next_slot_at - now).total_seconds())) if next_slot_at else 0
+    return {
+        "cap": limit,
+        "used": used,
+        "remaining": remaining,
+        "waiting": waiting,
+        "next_slot_available_at_utc": next_slot_at.isoformat() if next_slot_at else "",
+        "next_slot_seconds": next_slot_seconds,
+        "domain_log": domain_log_path.name,
+    }
 
 
 def parse_log_timestamp(raw: str) -> Optional[datetime]:
@@ -741,6 +805,91 @@ def _detect_running_send_shard_profiles() -> set:
     return out
 
 
+def _running_sender_processes(profile_names: Optional[Iterable[str]] = None) -> List[Dict[str, object]]:
+    allowed_profiles = set(profile_names or DASHBOARD_PROFILES)
+    processes: List[Dict[str, object]] = []
+    try:
+        ps = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    except Exception:
+        return processes
+    current_pid = os.getpid()
+    for line in ps.splitlines():
+        text = line.strip()
+        if not text or "send_shard.py" not in text or "--profile" not in text:
+            continue
+        parts = text.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except Exception:
+            continue
+        if pid == current_pid:
+            continue
+        command = parts[1]
+        match = re.search(r"--profile(?:=|\s+)([^\s]+)", command)
+        profile = match.group(1) if match else ""
+        if profile not in allowed_profiles or profile not in DASHBOARD_PROFILES:
+            continue
+        processes.append({"pid": pid, "profile": profile, "command": command})
+    return processes
+
+
+def stop_sender_processes(
+    profile_names: Optional[Iterable[str]] = None,
+    *,
+    terminate_wait_seconds: float = 2.0,
+) -> Dict[str, object]:
+    """Stop only known dashboard send_shard.py profile processes."""
+    found = _running_sender_processes(profile_names)
+    if not found:
+        return {"found": [], "stopped": [], "killed": [], "still_running": []}
+
+    for proc in found:
+        try:
+            os.kill(int(proc["pid"]), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            proc["term_error"] = str(exc)
+
+    deadline = time.monotonic() + max(0.1, terminate_wait_seconds)
+    remaining = list(found)
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.1)
+        remaining = [proc for proc in remaining if _process_exists(int(proc["pid"]))]
+
+    killed: List[Dict[str, object]] = []
+    for proc in remaining:
+        try:
+            os.kill(int(proc["pid"]), signal.SIGKILL)
+            killed.append(proc)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            proc["kill_error"] = str(exc)
+
+    time.sleep(0.2)
+    still_running = [proc for proc in found if _process_exists(int(proc["pid"]))]
+    stopped = [proc for proc in found if proc not in still_running]
+    return {
+        "found": found,
+        "stopped": stopped,
+        "killed": killed,
+        "still_running": still_running,
+    }
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def active_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapshot]:
     return [snapshot for snapshot in load_dashboard_profile_snapshots(tail_lines=tail_lines) if profile_is_active(snapshot)]
 
@@ -814,6 +963,14 @@ def stop_sendgrid_profile(profile_name: str, pane_index: int, session: str = "se
     if proc.returncode == 0:
         return True, f"Stop signal sent to {profile_name} (pane {pane_index})."
     output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
+    direct = stop_sender_processes([profile_name])
+    found = len(direct.get("found", []))
+    stopped = len(direct.get("stopped", []))
+    still_running = len(direct.get("still_running", []))
+    if stopped and not still_running:
+        return True, f"{output or f'Unable to stop {profile_name} via tmux.'} Direct process stop: found={found}, stopped={stopped}."
+    if found:
+        return False, f"{output or f'Unable to stop {profile_name} via tmux.'} Direct process stop: found={found}, stopped={stopped}, still_running={still_running}."
     return False, output or f"Unable to stop {profile_name}."
 
 
@@ -2941,6 +3098,14 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
             webhook_panels.update(receiver_panels)
         webhook_health = build_webhook_health_from_receiver(receiver_summary, activity_hours)
 
+    sendgrid_hourly_cap = build_sendgrid_hourly_cap_status()
+    if bool(sendgrid_hourly_cap.get("waiting")):
+        remaining_seconds = max(0, int(sendgrid_hourly_cap.get("next_slot_seconds") or 0))
+        for snapshot in snapshots:
+            if snapshot.name in SENDGRID_PROFILES:
+                snapshot.sendgrid_hourly_cap_waiting = profile_is_active(snapshot)
+                snapshot.sendgrid_hourly_cap_remaining_seconds = remaining_seconds
+
     session_label = session_status(snapshots)
     total_pending = sum(s.pending_count for s in snapshots)
     sendgrid_pending = sum(s.pending_count for s in snapshots if s.name in SENDGRID_PROFILES)
@@ -3058,6 +3223,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         },
         "health": {"state": banner_state, "message": banner_message},
         "private_bounce_guard": private_bounce_guard,
+        "sendgrid_hourly_cap": sendgrid_hourly_cap,
         "summary": {
             "active_profiles": active_profiles,
             "total_pending": total_pending,

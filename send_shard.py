@@ -63,10 +63,23 @@ SENDGRID_GLOBAL_COUNTER_KEY = "__global__"
 DOMAIN_SLOT_TTL_SECONDS = max(30, int(os.environ.get("DOMAIN_SLOT_TTL_SECONDS", "300")))
 SENDGRID_SKIP_PRUNE_ON_STARTUP = os.environ.get("SENDGRID_SKIP_PRUNE_ON_STARTUP", "").strip() == "1"
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except Exception:
+        return default
+
+
+SENDGRID_MAX_MESSAGES_1H = max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 1000))
+
 PROVIDER_LIMIT_DEFAULTS = {
     "private": {"max_messages_1h": 80},
     "gmail": {"max_messages_24h": 100, "max_unique_external_24h": 100},
-    "sendgrid": {"max_messages_1h": 180},
+    # App-side SendGrid reputation/pacing guard. This rolling hourly cap is
+    # separate from the dashboard per-run cap/max_total and from SendGrid's
+    # account-level limits.
+    "sendgrid": {"max_messages_1h": SENDGRID_MAX_MESSAGES_1H},
 }
 
 ROLE_LOCALPART_BLOCKLIST = {

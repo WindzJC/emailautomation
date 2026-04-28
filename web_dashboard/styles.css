@@ -274,7 +274,7 @@ h3 {
 }
 
 .workspace-summary-strip.summary-grid {
-  grid-template-columns: minmax(220px, 0.9fr) minmax(360px, 1.6fr) minmax(220px, 0.9fr) !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   align-items: start !important;
 }
 
@@ -1170,6 +1170,19 @@ h3 {
   border-color: rgba(255, 139, 152, 0.28);
 }
 
+.btn-start-muted:disabled {
+  background: rgba(255, 255, 255, 0.035);
+  color: #a8b6cc;
+  border-color: rgba(255, 255, 255, 0.08);
+  opacity: 0.68;
+}
+
+.btn-danger-active {
+  background: rgba(255, 120, 138, 0.18);
+  border-color: rgba(255, 139, 152, 0.42);
+  color: #ffe0e5;
+}
+
 .btn-secondary {
   background: rgba(255, 255, 255, 0.035);
   color: var(--text);
@@ -1249,7 +1262,7 @@ h3 {
 }
 
 .summary-strip {
-  grid-template-columns: minmax(220px, 0.9fr) minmax(360px, 1.6fr) minmax(220px, 0.9fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
   align-items: start;
@@ -1341,6 +1354,24 @@ h3 {
   justify-self: start;
   white-space: normal;
   line-height: 1.25;
+}
+
+.alerts-progress-hourly {
+  color: #dce7f7;
+  font-size: 11px;
+}
+
+.alerts-progress-hourly.is-waiting {
+  color: #f4d890;
+}
+
+.alerts-progress-hourly.is-open {
+  color: #bff7df;
+}
+
+.alerts-progress-helper {
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .alerts-progress-kicker {
@@ -1643,7 +1674,7 @@ h3 {
   display: grid;
   gap: 4px;
   align-content: start;
-  padding: 9px 11px;
+  padding: 10px 12px;
   min-height: 0;
   border-radius: 12px;
   background: rgba(8, 18, 33, 0.72);
@@ -1708,7 +1739,7 @@ h3 {
 }
 
 .summary-value {
-  font-size: clamp(1.25rem, 1.7vw, 1.6rem);
+  font-size: clamp(1.35rem, 1.9vw, 1.75rem);
   font-weight: 800;
   line-height: 0.98;
   word-break: break-word;
@@ -1830,6 +1861,132 @@ h3 {
 .summary-card-active_senders,
 .summary-card-awaiting {
   grid-column: auto;
+}
+
+.sender-status-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(8, 18, 33, 0.78);
+}
+
+.sender-status-head {
+  margin-bottom: 0;
+}
+
+.sender-status-table-wrap {
+  overflow-x: auto;
+}
+
+.sender-status-table {
+  width: 100%;
+  min-width: 820px;
+  border-collapse: collapse;
+}
+
+.sender-status-table th,
+.sender-status-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.sender-status-table th {
+  color: #9fb1ce;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.sender-status-table td {
+  color: #edf4ff;
+  font-size: 12px;
+}
+
+.sender-status-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.sender-status-table tr.is-selected td {
+  background: rgba(123, 183, 255, 0.045);
+}
+
+.sender-status-name-btn {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #f5f9ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sender-status-name-btn:hover {
+  color: var(--primary);
+}
+
+.sender-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  max-width: 180px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sender-status-pill-good {
+  border-color: rgba(124, 224, 183, 0.22);
+  background: rgba(124, 224, 183, 0.1);
+  color: #bff7df;
+}
+
+.sender-status-pill-warn,
+.sender-status-pill-paused {
+  border-color: rgba(240, 192, 103, 0.22);
+  background: rgba(240, 192, 103, 0.1);
+  color: #f4d890;
+}
+
+.sender-status-pill-bad {
+  border-color: rgba(255, 139, 152, 0.2);
+  background: rgba(255, 139, 152, 0.09);
+  color: #ffbdc5;
+}
+
+.sender-status-pill-neutral {
+  color: #c8d5e8;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.sender-status-activity {
+  max-width: 260px;
+  color: #b7c7df;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sender-status-action-btn {
+  height: 30px;
+  min-width: 64px;
+  padding: 0 10px;
+  border-radius: 10px;
+}
+
+.sender-status-empty {
+  padding: 14px 10px;
 }
 
 .workspace-metric-block {
