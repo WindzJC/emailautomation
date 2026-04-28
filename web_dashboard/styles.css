@@ -805,6 +805,23 @@ h3 {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.heavy-panel,
+.operator-table-block,
+.quarantine-shell,
+.dispatch-shell,
+.operator-result-shell {
+  content-visibility: auto;
+  contain: layout paint;
+}
+
+.heavy-panel {
+  contain-intrinsic-size: 1px 240px;
+}
+
+.heavy-panel:not([open]) > *:not(summary) {
+  display: none;
+}
+
 .operator-table-head {
   display: flex;
   justify-content: space-between;

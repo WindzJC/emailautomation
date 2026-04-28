@@ -70,6 +70,7 @@ const els = {
   leadsQuarantineNoteBtn: document.getElementById("leads-quarantine-note-btn"),
   leadsQuarantineMeta: document.getElementById("leads-quarantine-meta"),
   leadsQuarantineResults: document.getElementById("leads-quarantine-results"),
+  leadsQuarantineShell: document.querySelector(".leads-review-shell"),
   leadsImportantDispatchSourceMode: document.getElementById("leads-dispatch-source-mode"),
   leadsImportantDispatchCap: document.getElementById("leads-dispatch-cap"),
   leadsImportantDispatchSourceNote: document.getElementById("leads-dispatch-source-note"),
@@ -136,10 +137,14 @@ let lastImportantDispatchSource = null;
 let lastImportantDispatchPreview = null;
 let lastQuarantineReview = null;
 let lastQuarantineReviewLead = null;
+let socketReconnectTimer = null;
+let socketShouldReconnect = false;
+let quarantineInboxOpen = false;
+let quarantineToggleBtn = null;
 const selectedQuarantineLeadIds = new Set();
 const excludedQuarantineLeadIds = new Set();
 let allFilteredQuarantineSelected = false;
-let quarantinePageSize = 25;
+let quarantinePageSize = 10;
 let quarantinePageIndex = 0;
 let didHydrate = false;
 let selectedProfileName = "";
@@ -157,7 +162,7 @@ const IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY = "emailautomation.activeImportantVe
 const IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY = "emailautomation.activeImportantDispatchJobId";
 const VERIFY_MODE_FAST_TRIAGE = "FAST_TRIAGE";
 const VERIFY_MODE_STRICT_PUBLIC_PROOF = "STRICT_PUBLIC_PROOF";
-const QUARANTINE_PAGE_SIZE_OPTIONS = [25, 50, 100];
+const QUARANTINE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 const VERIFY_FAST_DEFAULT_PATHS = {
   verified_path: "_important/leads_triaged_keep.csv",
   rejected_path: "_important/leads_triaged_reject.csv",
@@ -380,6 +385,113 @@ function applyDashboardTab() {
   }
 }
 
+function isOpsTabVisible() {
+  return activeDashboardTab === "ops" || wallboardMode;
+}
+
+function isLeadsTabVisible() {
+  return activeDashboardTab === "leads" && !wallboardMode;
+}
+
+function markDashboardHydrated() {
+  if (!didHydrate && els.page) {
+    didHydrate = true;
+    requestAnimationFrame(() => {
+      els.page.classList.remove("booting");
+    });
+  }
+}
+
+function stopLeadsBackgroundActivity() {
+  stopImportantLeadCheckJobPolling();
+  stopImportantLeadVerifyJobPolling();
+  stopImportantLeadDispatchJobPolling();
+  closeQuarantineInbox();
+}
+
+function syncTabBackgroundActivity() {
+  if (isOpsTabVisible()) {
+    void fetchSnapshot();
+    connectSocket();
+  } else {
+    stopSocket();
+  }
+  if (!isLeadsTabVisible()) {
+    stopLeadsBackgroundActivity();
+  }
+}
+
+function applyLeadsTriageCopy() {
+  const verifyPanel = els.leadsImportantVerifyBtn?.closest?.(".leads-step-panel");
+  const eyebrow = verifyPanel?.querySelector?.(".panel-header .eyebrow");
+  const heading = verifyPanel?.querySelector?.(".panel-header h2");
+  const helper = verifyPanel?.querySelector?.(".panel-header .muted");
+  if (eyebrow) {
+    setNodeText(eyebrow, "Lead Triage");
+  }
+  if (heading) {
+    setNodeText(heading, "Lead Triage");
+  }
+  if (helper) {
+    setNodeText(
+      helper,
+      "Fast Triage is the default lead gate. Open Quarantine Inbox only when you need manual review.",
+    );
+  }
+}
+
+function setQuarantineInboxOpen(open, { load = false } = {}) {
+  quarantineInboxOpen = Boolean(open);
+  if (els.leadsQuarantineShell) {
+    els.leadsQuarantineShell.hidden = !quarantineInboxOpen;
+    els.leadsQuarantineShell.classList.toggle("hidden", !quarantineInboxOpen);
+  }
+  if (quarantineToggleBtn) {
+    quarantineToggleBtn.setAttribute("aria-expanded", String(quarantineInboxOpen));
+    setNodeText(quarantineToggleBtn, quarantineInboxOpen ? "Close Quarantine Inbox" : "Open Quarantine Inbox");
+  }
+  if (!quarantineInboxOpen) {
+    clearQuarantineSelection();
+    lastQuarantineReview = null;
+    lastQuarantineReviewLead = null;
+    if (els.leadsQuarantineMeta) {
+      setNodeText(els.leadsQuarantineMeta, "Quarantine review is closed.");
+    }
+    if (els.leadsQuarantineResults) {
+      setNodeHtml(els.leadsQuarantineResults, "");
+    }
+    return;
+  }
+  if (load) {
+    quarantinePageSize = 10;
+    quarantinePageIndex = 0;
+    void refreshQuarantineReview(false, true);
+  }
+}
+
+function openQuarantineInbox({ load = true } = {}) {
+  setQuarantineInboxOpen(true, { load });
+}
+
+function closeQuarantineInbox() {
+  setQuarantineInboxOpen(false);
+}
+
+function initQuarantineInboxDisclosure() {
+  if (!els.leadsQuarantineShell || quarantineToggleBtn) return;
+  quarantineToggleBtn = document.createElement("button");
+  quarantineToggleBtn.type = "button";
+  quarantineToggleBtn.className = "btn btn-secondary";
+  quarantineToggleBtn.setAttribute("aria-expanded", "false");
+  setNodeText(quarantineToggleBtn, "Open Quarantine Inbox");
+  quarantineToggleBtn.addEventListener("click", () => {
+    if (quarantineInboxOpen) closeQuarantineInbox();
+    else openQuarantineInbox({ load: true });
+  });
+  els.leadsQuarantineShell.parentNode?.insertBefore(quarantineToggleBtn, els.leadsQuarantineShell);
+  closeQuarantineInbox();
+}
+
 function applyWallboardMode() {
   if (els.page) {
     els.page.classList.toggle("wallboard-mode", wallboardMode);
@@ -399,6 +511,7 @@ function setWallboardMode(nextMode) {
   wallboardMode = Boolean(nextMode);
   applyWallboardMode();
   syncLocationState();
+  syncTabBackgroundActivity();
 }
 
 function toggleWallboardMode() {
@@ -414,7 +527,8 @@ function setDashboardTab(nextTab) {
     applyDashboardTab();
   }
   syncLocationState();
-  if (activeDashboardTab === "leads") {
+  syncTabBackgroundActivity();
+  if (isLeadsTabVisible()) {
     fetchLeadsStatus();
   }
 }
@@ -1490,7 +1604,7 @@ function quarantineReviewQueryString() {
   Object.entries(payload).forEach(([key, value]) => {
     if (value !== "") params.set(key, value);
   });
-  const normalizedPageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(Number(quarantinePageSize)) ? Number(quarantinePageSize) : 25;
+  const normalizedPageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(Number(quarantinePageSize)) ? Number(quarantinePageSize) : 10;
   const normalizedPageIndex = Math.max(0, Number(quarantinePageIndex || 0));
   params.set("limit", String(normalizedPageSize));
   params.set("offset", String(normalizedPageIndex * normalizedPageSize));
@@ -1516,8 +1630,8 @@ function quarantineFilteredCount(review = lastQuarantineReview) {
 }
 
 function quarantineRowsPerPage(review = lastQuarantineReview) {
-  const value = Number(review?.filters?.limit || quarantinePageSize || 25);
-  return QUARANTINE_PAGE_SIZE_OPTIONS.includes(value) ? value : 25;
+  const value = Number(review?.filters?.limit || quarantinePageSize || 10);
+  return QUARANTINE_PAGE_SIZE_OPTIONS.includes(value) ? value : 10;
 }
 
 function quarantineCurrentOffset(review = lastQuarantineReview) {
@@ -1649,13 +1763,15 @@ function selectAllFilteredQuarantineLeads() {
 }
 
 function setQuarantineRowsPerPage(value) {
+  if (!quarantineInboxOpen) return;
   const next = Number(value);
-  quarantinePageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(next) ? next : 25;
+  quarantinePageSize = QUARANTINE_PAGE_SIZE_OPTIONS.includes(next) ? next : 10;
   quarantinePageIndex = 0;
   void refreshQuarantineReview(true, false);
 }
 
 function moveQuarantinePage(direction) {
+  if (!quarantineInboxOpen) return;
   const totalPages = quarantineTotalPages(lastQuarantineReview);
   quarantinePageIndex = Math.max(0, Math.min(totalPages - 1, quarantinePageIndex + direction));
   void refreshQuarantineReview(true, false);
@@ -1742,6 +1858,12 @@ function renderQuarantineReview(review) {
     Lead: event.email || event.full_name || event.lead_id || "-",
     When: formatGeneratedAt(event.created_at || ""),
   }));
+  const detailInspectionBlocks = detail?.lead_id
+    ? `
+      ${renderOperatorTableBlock("Recent Lead History", "Most recent ledger activity for the selected lead.", ["Event", "Reason / Note", "When"], detailHistoryRows, "No lead history yet.")}
+      ${renderOperatorTableBlock("Recent Review Actions", "Latest actions for the inspected quarantine context.", ["Action", "Lead", "When"], recentReviewRows, "No recent review actions yet.")}
+    `
+    : "";
   setNodeHtml(
     els.leadsQuarantineResults,
     `
@@ -1871,15 +1993,13 @@ function renderQuarantineReview(review) {
                   <span class="inspector-fact-label">Operator Note</span>
                   <p class="muted">${escapeHtml(detail.operator_note || "No operator note yet.")}</p>
                 </section>
-                ${renderOperatorTableBlock("Recent Lead History", "Most recent ledger activity for the selected lead.", ["Event", "Reason / Note", "When"], detailHistoryRows, "No lead history yet.")}
-                ${renderOperatorTableBlock("Recent Review Actions", "Latest actions across this quarantine inbox.", ["Action", "Lead", "When"], recentReviewRows, "No recent review actions yet.")}
+                ${detailInspectionBlocks}
               `
               : `
                 <section class="operator-empty-state operator-empty-state-inline">
                   <strong>Inspector is waiting.</strong>
                   <span>Select a quarantined lead to inspect history, provenance, suppression state, and dispatch context.</span>
                 </section>
-                ${renderOperatorTableBlock("Recent Review Actions", "Latest actions across this quarantine inbox.", ["Action", "Lead", "When"], recentReviewRows, "No recent review actions yet.")}
               `
           }
         </aside>
@@ -1901,6 +2021,7 @@ async function loadQuarantineReviewLeadDetail(leadId) {
 }
 
 async function refreshQuarantineReview(preserveSelection = true, resetPage = false) {
+  if (!quarantineInboxOpen) return;
   try {
     if (resetPage) {
       quarantinePageIndex = 0;
@@ -1919,13 +2040,12 @@ async function refreshQuarantineReview(preserveSelection = true, resetPage = fal
       clearQuarantineSelection();
     }
     lastQuarantineReview = review;
-    const leadIdToFocus = focusedQuarantineLeadId(review);
-    if (leadIdToFocus) {
-      await loadQuarantineReviewLeadDetail(leadIdToFocus);
-    } else {
+    const currentFocusedLeadId = String(lastQuarantineReviewLead?.lead_id || "").trim();
+    const visibleIds = visibleQuarantineLeadIds(review);
+    if (!currentFocusedLeadId || !visibleIds.includes(currentFocusedLeadId)) {
       lastQuarantineReviewLead = null;
-      renderQuarantineReview(lastQuarantineReview);
     }
+    renderQuarantineReview(lastQuarantineReview);
   } catch (err) {
     showMessage(`Quarantine review load failed: ${err}`, "error");
   }
@@ -2136,6 +2256,24 @@ function renderOperatorTableBlock(title, caption, headers, rows, emptyText = "No
   `;
 }
 
+function compactPreviewTable(rows = [], preferredHeaders = [], maxRows = 5, maxColumns = 4) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const allHeaders = sourceRows.length ? Object.keys(sourceRows[0] || {}) : [];
+  const headerByLower = new Map(allHeaders.map((header) => [String(header).toLowerCase(), header]));
+  const picked = [];
+  preferredHeaders.forEach((candidate) => {
+    const header = headerByLower.get(String(candidate || "").toLowerCase());
+    if (header && !picked.includes(header)) picked.push(header);
+  });
+  allHeaders.forEach((header) => {
+    if (picked.length < maxColumns && !picked.includes(header)) picked.push(header);
+  });
+  return {
+    headers: picked.slice(0, maxColumns),
+    rows: sourceRows.slice(0, maxRows),
+  };
+}
+
 function renderImportantLeadCheck(result) {
   if (els.leadsImportantCheckMeta) {
     if (result?.generated_at_utc) {
@@ -2213,9 +2351,9 @@ function renderImportantLeadVerify(result) {
   const keepRows = Array.isArray(result.keep_preview_rows) ? result.keep_preview_rows : [];
   const rejectRows = Array.isArray(result.reject_preview_rows) ? result.reject_preview_rows : [];
   const quarantineRows = Array.isArray(result.quarantine_preview_rows) ? result.quarantine_preview_rows : [];
-  const keepHeaders = keepRows.length ? Object.keys(keepRows[0] || {}) : [];
-  const rejectHeaders = rejectRows.length ? Object.keys(rejectRows[0] || {}) : [];
-  const quarantineHeaders = quarantineRows.length ? Object.keys(quarantineRows[0] || {}) : [];
+  const keepPreview = compactPreviewTable(keepRows, ["Email", "FirstName", "BookTitle", "Title"]);
+  const rejectPreview = compactPreviewTable(rejectRows, ["Email", "FirstName", "Reason", "ReasonCode", "Score"]);
+  const quarantinePreview = compactPreviewTable(quarantineRows, ["Email", "FirstName", "Reason", "ReasonCode", "Score"]);
   const reasonRows = Object.entries(result.reason_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) }));
   setNodeHtml(
     els.leadsImportantVerifyResults,
@@ -2238,9 +2376,9 @@ function renderImportantLeadVerify(result) {
           ${reasonRows.length
             ? renderOperatorTableBlock("Reason Ledger", "Local triage evidence for the current pass.", ["Reason", "Count"], reasonRows, "No verification reasons were recorded.")
             : ""}
-          ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward.`, keepHeaders, keepRows, "No rows moved to keep.")}
-          ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed.", rejectHeaders, rejectRows, "No rows were rejected.")}
-          ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review.", quarantineHeaders, quarantineRows, "No rows were quarantined.")}
+          ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward. Showing up to 5 rows.`, keepPreview.headers, keepPreview.rows, "No rows moved to keep.")}
+          ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed. Showing up to 5 rows.", rejectPreview.headers, rejectPreview.rows, "No rows were rejected.")}
+          ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review. Showing up to 5 rows.", quarantinePreview.headers, quarantinePreview.rows, "No rows were quarantined.")}
         </div>
       </div>
     `,
@@ -2331,7 +2469,7 @@ function renderImportantDispatch(result) {
             <div class="operator-table-head">
               <div>
                 <h3>Dispatch Checklist</h3>
-                <p class="muted">Move top to bottom. Confirm only after this surface is clean.</p>
+                <p class="muted">Intake/check volume is not dispatch approval. Confirm only after this surface is clean.</p>
               </div>
             </div>
             <div class="op-checklist-items dispatch-runbook-items">
@@ -2346,14 +2484,14 @@ function renderImportantDispatch(result) {
                 <div class="op-checklist-step">2</div>
                 <div class="op-checklist-copy">
                   <strong>Source</strong>
-                  <span>${escapeHtml(sourceName)} · ${Number(dispatchSource.dispatch_source_row_count || 0)} rows · ${Number(dispatchSource.dispatch_eligible_row_count || 0)} eligible</span>
+                  <span>${escapeHtml(sourceName)} · ${Number(dispatchSource.dispatch_source_row_count || 0)} rows · ${Number(dispatchSource.dispatch_eligible_row_count || 0)} eligible before cap</span>
                 </div>
               </div>
               <div class="op-checklist-item ${dispatchPreview ? "is-ready" : "is-warn"}">
                 <div class="op-checklist-step">3</div>
                 <div class="op-checklist-copy">
                   <strong>Preview</strong>
-                  <span>${dispatchPreview ? `${Number(dispatchPreview.dispatch_selected_row_count || 0)} selected · ${Number(dispatchPreview.total_rows_would_write || 0)} would write` : "Run Preview Dispatch to compute the exact write set."}</span>
+                  <span>${dispatchPreview ? `${Number(dispatchPreview.dispatch_selected_row_count || 0)} selected by this cap · ${Number(dispatchPreview.total_rows_would_write || 0)} would write` : "Run Preview Dispatch to compute the exact capped write set."}</span>
                 </div>
               </div>
               <div class="op-checklist-item ${dispatchPreview && preflightAllowed ? "is-ready" : "is-warn"}">
@@ -2614,6 +2752,7 @@ function renderLeadsStatus(status) {
   const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
   const activeVerifyJob = lastLeadsStatus?.active_important_verify_job || null;
   const activeDispatchJob = lastLeadsStatus?.active_important_dispatch_job || null;
+  const shouldResumeLeadJobs = isLeadsTabVisible();
   syncImportantLeadPathInputs(lastLeadsStatus);
   syncImportantVerifyPathInputs(lastLeadsStatus);
   syncImportantDispatchSourceMode(lastLeadsStatus);
@@ -2622,13 +2761,19 @@ function renderLeadsStatus(status) {
   lastImportantVerify = lastLeadsStatus?.latest_lead_triage || lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
-  if (!resumeImportantLeadCheckJob(activeCheckJob)) {
+  if (shouldResumeLeadJobs && !resumeImportantLeadCheckJob(activeCheckJob)) {
+    renderImportantLeadCheck(lastImportantLeadCheck);
+  } else if (!shouldResumeLeadJobs) {
     renderImportantLeadCheck(lastImportantLeadCheck);
   }
-  if (!resumeImportantLeadVerifyJob(activeVerifyJob)) {
+  if (shouldResumeLeadJobs && !resumeImportantLeadVerifyJob(activeVerifyJob)) {
+    renderImportantLeadVerify(lastImportantVerify);
+  } else if (!shouldResumeLeadJobs) {
     renderImportantLeadVerify(lastImportantVerify);
   }
-  if (!resumeImportantLeadDispatchJob(activeDispatchJob)) {
+  if (shouldResumeLeadJobs && !resumeImportantLeadDispatchJob(activeDispatchJob)) {
+    renderImportantDispatch(lastImportantDispatch);
+  } else if (!shouldResumeLeadJobs) {
     renderImportantDispatch(lastImportantDispatch);
   }
 
@@ -2765,7 +2910,7 @@ async function fetchLeadsStatus() {
   try {
     const data = await fetchJson("/api/leads/status");
     renderLeadsStatus(data.status || {});
-    await refreshQuarantineReview(true);
+    markDashboardHydrated();
   } catch (err) {
     if (activeDashboardTab === "leads") {
       showMessage(`Leads status failed: ${err}`, "error");
@@ -4019,11 +4164,16 @@ function renderControls(snapshot) {
     els.sendCapInput.value = String(sendCap);
   }
   if (els.sendCapNote) {
-    const activeSenders = Number(controls.active_sender_count || 0);
-    const activeFleetTotal = Number(controls.fleet_total_for_active_senders || sendCap || 0);
+    const activeSenders = Number(controls.active_sendgrid_sender_count || 0);
+    const availableSenders = Number(controls.available_sendgrid_sender_count || 0);
+    const estimatedFleetTotal = Number(controls.estimated_total_if_start_all || 0);
+    const activeFleetTotal = Number(controls.fleet_total_for_active_senders || 0);
     const lines = [
-      `SendGrid target: ${sendCap || 0} total | ${activeSenders} active senders | Fleet target: ~${activeFleetTotal || 0}`,
+      `SendGrid fleet cap: ${sendCap || 0} total | ${activeSenders} active SG | all ${availableSenders || 0} SG: ~${estimatedFleetTotal || 0}`,
     ];
+    if (activeSenders > 0) {
+      lines.push(`Active SG fleet cap: ~${activeFleetTotal || 0}`);
+    }
     const scheduleBits = [];
     if (automation?.sendgrid_daily?.enabled) {
       scheduleBits.push(`SG daily ${automation.sendgrid_daily.local_time}`);
@@ -4324,7 +4474,8 @@ function renderWebhookSummary(profile, snapshot = {}) {
     return `<span class="event-chip ${cls}">${escapeHtml(statusLabel(lower))}: ${count}</span>`;
   }).join("");
 
-  const recent = (webhook.recent || []).map((row) => `
+  const visibleRecent = (Array.isArray(webhook.recent) ? webhook.recent : []).slice(0, MAX_VISIBLE_WEBHOOK_ROWS);
+  const recent = visibleRecent.map((row) => `
     <tr>
       <td>${escapeHtml(formatGeneratedAt(row.time || ""))}</td>
       <td>${escapeHtml(statusLabel(row.status || ""))}</td>
@@ -4480,6 +4631,23 @@ function paneTailLineCount(text) {
   return normalized.split(/\r?\n/).length;
 }
 
+const MAX_VISIBLE_PANE_TAIL_LINES = 10;
+const MAX_VISIBLE_WEBHOOK_ROWS = 8;
+
+function tailLines(text, limit = MAX_VISIBLE_PANE_TAIL_LINES) {
+  const normalized = String(text || "").trimEnd();
+  if (!normalized) return "";
+  return normalized.split(/\r?\n/).slice(-Math.max(1, Number(limit) || 1)).join("\n");
+}
+
+function isDisclosureOpen(node) {
+  return Boolean(node && !node.classList.contains("hidden") && node.open);
+}
+
+function clearNodeHtml(node) {
+  if (node && node.innerHTML) node.innerHTML = "";
+}
+
 function createProfileDetailNode() {
   const node = elementFromHTML(`
     <article class="detail-card">
@@ -4538,7 +4706,7 @@ function createProfileDetailNode() {
         </div>
       </section>
 
-      <details class="detail-disclosure detail-live-disclosure">
+      <details class="detail-disclosure detail-live-disclosure heavy-panel">
         <summary>
           <span class="detail-summary-copy">
             <span class="detail-summary-title">Mailbox Detail</span>
@@ -4549,7 +4717,7 @@ function createProfileDetailNode() {
         <div class="detail-live-slot"></div>
       </details>
 
-      <details class="detail-disclosure detail-webhook-disclosure">
+      <details class="detail-disclosure detail-webhook-disclosure heavy-panel">
         <summary>
           <span class="detail-summary-copy">
             <span class="detail-summary-title">Delivery / Webhook Detail</span>
@@ -4560,7 +4728,7 @@ function createProfileDetailNode() {
         <div class="detail-webhook-slot"></div>
       </details>
 
-      <details class="detail-disclosure detail-queue-disclosure">
+      <details class="detail-disclosure detail-queue-disclosure heavy-panel">
         <summary>
           <span class="detail-summary-copy">
             <span class="detail-summary-title">Queue Context</span>
@@ -4571,7 +4739,7 @@ function createProfileDetailNode() {
         <div class="profile-meta detail-meta"></div>
       </details>
 
-      <details class="detail-disclosure detail-guard-disclosure">
+      <details class="detail-disclosure detail-guard-disclosure heavy-panel">
         <summary>
           <span class="detail-summary-copy">
             <span class="detail-summary-title">Bounce Guard Detail</span>
@@ -4582,7 +4750,7 @@ function createProfileDetailNode() {
         <div class="detail-guard-slot"></div>
       </details>
 
-      <details class="detail-pane detail-runtime-output">
+      <details class="detail-pane detail-runtime-output heavy-panel">
         <summary>
           <span class="detail-summary-copy">
             <span class="detail-summary-title">Pane Tail / Runtime Output</span>
@@ -4628,6 +4796,26 @@ function createProfileDetailNode() {
     runtimeSummaryMeta: node.querySelector(".detail-runtime-summary-meta"),
     paneTail: node.querySelector(".detail-runtime-output pre"),
   };
+  const clearDisclosureContent = (disclosure) => {
+    if (disclosure === node._refs.liveDisclosure) clearNodeHtml(node._refs.live);
+    if (disclosure === node._refs.webhookDisclosure) clearNodeHtml(node._refs.webhook);
+    if (disclosure === node._refs.queueDisclosure) clearNodeHtml(node._refs.meta);
+    if (disclosure === node._refs.guardDisclosure) clearNodeHtml(node._refs.guard);
+    if (disclosure === node._refs.runtimeDisclosure) setNodeText(node._refs.paneTail, "");
+  };
+  [
+    node._refs.liveDisclosure,
+    node._refs.webhookDisclosure,
+    node._refs.queueDisclosure,
+    node._refs.guardDisclosure,
+    node._refs.runtimeDisclosure,
+  ].forEach((disclosure) => {
+    if (!disclosure) return;
+    disclosure.addEventListener("toggle", () => {
+      if (disclosure.open) rerenderCurrentSelection();
+      else clearDisclosureContent(disclosure);
+    });
+  });
   return node;
 }
 
@@ -4668,8 +4856,6 @@ function updateProfileDetailNode(node, snapshot, profile) {
   };
   node._refs = refs;
 
-  node._refs = refs;
-
   const activity = profileActivityState(profile);
   const runtimeClass = `detail-runtime-${activity.tone || "neutral"}`;
   const pendingAction = pendingProfileActions.get(profile.name) || "";
@@ -4687,7 +4873,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const webhookRecent = Array.isArray(webhook.recent) ? webhook.recent : [];
   const webhookCounts = webhook.counts || {};
   const hasPaneTail = profileHasPaneTail(profile);
-  const paneTailText = hasPaneTail ? String(profile.tmux_tail || "").trimEnd() : "(no pane output)";
+  const paneTailText = hasPaneTail ? tailLines(profile.tmux_tail, MAX_VISIBLE_PANE_TAIL_LINES) : "(no pane output)";
   const paneTailLines = hasPaneTail ? paneTailLineCount(paneTailText) : 0;
   const guard = snapshot.private_bounce_guard || {};
   const hasWebhookDetail = channel !== "sendgrid"
@@ -4745,19 +4931,24 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeHtml(refs.primaryWarning, renderDetailPrimaryWarning(profile));
   setNodeHtml(refs.coreRuntime, renderDetailCoreRuntime(profile));
 
-  setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
   setNodeText(refs.liveSummaryMeta, liveSummary);
   if (refs.liveDisclosure) {
-    const showLive = Boolean(String(refs.live.innerHTML || "").trim());
+    const showLive = true;
     refs.liveDisclosure.classList.toggle("hidden", !showLive);
-    refs.liveDisclosure.open = showLive && (activity.tone === "bad" || Number(profile.awaiting_outcome || 0) > 0);
+    if (!showLive) refs.liveDisclosure.open = false;
+    if (isDisclosureOpen(refs.liveDisclosure)) setNodeHtml(refs.live, renderLiveDelivery(profile, snapshot.activity_hours));
+    else clearNodeHtml(refs.live);
   }
-  setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}, snapshot.automation || {}));
   if (refs.guardDisclosure) {
-    const showGuard = Boolean(profile.name === "private_jc" && String(refs.guard.innerHTML || "").trim());
+    const showGuard = Boolean(profile.name === "private_jc");
     setNodeText(refs.guardSummaryMeta, showGuard ? guardSummary : "");
     refs.guardDisclosure.classList.toggle("hidden", !showGuard);
-    refs.guardDisclosure.open = showGuard && (guard.status === "error" || guard.cooldown_active);
+    if (!showGuard) refs.guardDisclosure.open = false;
+    if (isDisclosureOpen(refs.guardDisclosure)) {
+      setNodeHtml(refs.guard, renderDetailPrivateBounceGuard(profile, snapshot.private_bounce_guard || {}, snapshot.automation || {}));
+    } else {
+      clearNodeHtml(refs.guard);
+    }
   }
   setNodeText(
     refs.progressNote,
@@ -4765,31 +4956,36 @@ function updateProfileDetailNode(node, snapshot, profile) {
   );
   setNodeText(refs.progressValue, `${acceptedRaw}/${profile.max_total || "∞"}`);
   refs.progressFill.style.width = `${progress}%`;
-  setNodeHtml(refs.webhook, renderWebhookSummary(profile, snapshot));
   setNodeText(refs.webhookSummaryMeta, webhookSummaryText);
   if (refs.webhookDisclosure) {
     refs.webhookDisclosure.classList.toggle("hidden", !hasWebhookDetail);
-    refs.webhookDisclosure.open = hasWebhookDetail && (Number(webhookSummary.failed || 0) > 0 || webhookRecent.length > 0);
+    if (!hasWebhookDetail) refs.webhookDisclosure.open = false;
+    if (isDisclosureOpen(refs.webhookDisclosure)) setNodeHtml(refs.webhook, renderWebhookSummary(profile, snapshot));
+    else clearNodeHtml(refs.webhook);
   }
-  setNodeHtml(
-    refs.meta,
-    metaBoxes.map((item) => `
-      <div class="detail-meta-row">
-        <div class="detail-meta-label">${escapeHtml(item.label)}</div>
-        <code class="detail-meta-value">${escapeHtml(item.value || "-")}</code>
-      </div>
-    `).join(""),
-  );
   setNodeText(refs.queueSummaryMeta, queueSummary);
   if (refs.queueDisclosure) {
-    refs.queueDisclosure.open = activity.tone !== "good";
+    if (isDisclosureOpen(refs.queueDisclosure)) {
+      setNodeHtml(
+        refs.meta,
+        metaBoxes.map((item) => `
+          <div class="detail-meta-row">
+            <div class="detail-meta-label">${escapeHtml(item.label)}</div>
+            <code class="detail-meta-value">${escapeHtml(item.value || "-")}</code>
+          </div>
+        `).join(""),
+      );
+    } else {
+      clearNodeHtml(refs.meta);
+    }
   }
   setNodeText(refs.runtimeSummaryMeta, runtimeSummary);
   if (refs.runtimeDisclosure) {
     refs.runtimeDisclosure.classList.toggle("hidden", !hasPaneTail);
-    refs.runtimeDisclosure.open = hasPaneTail && activity.tone === "bad";
+    if (!hasPaneTail) refs.runtimeDisclosure.open = false;
   }
-  setNodeText(refs.paneTail, paneTailText);
+  if (isDisclosureOpen(refs.runtimeDisclosure)) setNodeText(refs.paneTail, paneTailText);
+  else setNodeText(refs.paneTail, "");
 }
 
 function renderProfileDetail(snapshot, profile) {
@@ -4918,7 +5114,7 @@ async function postAction(path, options = {}) {
 async function saveSendCap() {
   const rawValue = Number(els.sendCapInput?.value || 0);
   if (!Number.isInteger(rawValue) || rawValue < 1) {
-    showMessage("Enter a whole number of at least 1 for the SendGrid total cap.", "error");
+    showMessage("Enter a whole number of at least 1 for the SendGrid fleet cap.", "error");
     return;
   }
   if (els.sendCapSaveBtn) {
@@ -5105,45 +5301,68 @@ async function runLeadShard() {
   }
 }
 
-function connectSocket() {
+function connectSocket(forceReconnect = false) {
   if (!authState.authenticated) {
     stopSocket();
     return;
   }
-  if (socket) {
-    socket.close();
+  if (!isOpsTabVisible()) {
+    stopSocket();
+    return;
   }
+  socketShouldReconnect = true;
+  if (socket && !forceReconnect && socket.readyState !== WebSocket.CLOSING && socket.readyState !== WebSocket.CLOSED) {
+    return;
+  }
+  if (socketReconnectTimer) {
+    clearTimeout(socketReconnectTimer);
+    socketReconnectTimer = null;
+  }
+  if (socket) {
+    socketShouldReconnect = false;
+    socket.close();
+    socket = null;
+  }
+  socketShouldReconnect = true;
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const hours = encodeURIComponent(currentActivityHours());
   const tail = encodeURIComponent(currentTailLines());
-  socket = new WebSocket(`${protocol}://${location.host}/ws?hours=${hours}&tail_lines=${tail}`);
+  const nextSocket = new WebSocket(`${protocol}://${location.host}/ws?hours=${hours}&tail_lines=${tail}`);
+  socket = nextSocket;
 
-  socket.addEventListener("open", () => {
+  nextSocket.addEventListener("open", () => {
     setConnectionState(true);
   });
 
-  socket.addEventListener("message", (event) => {
+  nextSocket.addEventListener("message", (event) => {
     const payload = JSON.parse(event.data);
     renderSnapshot(payload);
   });
 
-  socket.addEventListener("close", () => {
+  nextSocket.addEventListener("close", () => {
     setConnectionState(false);
-    socket = null;
-    if (authState.authenticated) {
-      setTimeout(connectSocket, 1500);
+    if (socket === nextSocket) {
+      socket = null;
+    }
+    if (socketShouldReconnect && authState.authenticated && isOpsTabVisible()) {
+      socketReconnectTimer = setTimeout(connectSocket, 1500);
     }
   });
 
-  socket.addEventListener("error", () => {
+  nextSocket.addEventListener("error", () => {
     setConnectionState(false);
-    if (socket) {
+    if (socket === nextSocket) {
       socket.close();
     }
   });
 }
 
 function stopSocket() {
+  socketShouldReconnect = false;
+  if (socketReconnectTimer) {
+    clearTimeout(socketReconnectTimer);
+    socketReconnectTimer = null;
+  }
   if (socket) {
     try {
       socket.close();
@@ -5156,12 +5375,12 @@ function stopSocket() {
 }
 
 async function bootstrapAuthenticatedDashboard() {
-  await Promise.allSettled([fetchSnapshot(), fetchLeadsStatus()]);
-  await Promise.allSettled([
-    hydrateImportantLeadCheckJobOnLoad(),
-    hydrateImportantLeadVerifyJobOnLoad(),
-    hydrateImportantLeadDispatchJobOnLoad(),
-  ]);
+  if (isLeadsTabVisible()) {
+    await fetchLeadsStatus();
+    stopSocket();
+    return;
+  }
+  await fetchSnapshot();
   connectSocket();
 }
 
@@ -5219,7 +5438,10 @@ if (els.leadsCleanBtn) els.leadsCleanBtn.addEventListener("click", () => runLead
 if (els.leadsPreviewBtn) els.leadsPreviewBtn.addEventListener("click", () => previewLeadShard());
 if (els.leadsShardBtn) els.leadsShardBtn.addEventListener("click", () => runLeadShard());
 if (els.leadsRefreshBtn) els.leadsRefreshBtn.addEventListener("click", () => fetchLeadsStatus());
-if (els.leadsQuarantineRefreshBtn) els.leadsQuarantineRefreshBtn.addEventListener("click", () => refreshQuarantineReview(false, false));
+if (els.leadsQuarantineRefreshBtn) els.leadsQuarantineRefreshBtn.addEventListener("click", () => {
+  if (!quarantineInboxOpen) openQuarantineInbox({ load: false });
+  refreshQuarantineReview(false, false);
+});
 if (els.leadsQuarantinePromoteBtn) els.leadsQuarantinePromoteBtn.addEventListener("click", () => runQuarantineReviewAction("promote_dispatch_ready"));
 if (els.leadsQuarantineRejectBtn) els.leadsQuarantineRejectBtn.addEventListener("click", () => runQuarantineReviewAction("reject_permanently"));
 if (els.leadsQuarantineStrictBtn) els.leadsQuarantineStrictBtn.addEventListener("click", () => runQuarantineReviewAction("send_to_strict_verify"));
@@ -5320,8 +5542,8 @@ if (els.sendCapInput) {
     }
   });
 }
-if (els.hoursSelect) els.hoursSelect.addEventListener("change", () => connectSocket());
-if (els.tailSelect) els.tailSelect.addEventListener("change", () => connectSocket());
+if (els.hoursSelect) els.hoursSelect.addEventListener("change", () => connectSocket(true));
+if (els.tailSelect) els.tailSelect.addEventListener("change", () => connectSocket(true));
 if (els.overviewGrid) els.overviewGrid.addEventListener("click", handleOverviewClick);
 if (els.profileDetail) els.profileDetail.addEventListener("click", handleProfileDetailClick);
 if (els.detailProfileSelect) {
@@ -5343,6 +5565,8 @@ wallboardMode = readWallboardModeFromLocation();
 activeDashboardTab = readDashboardTabFromLocation();
 applyWallboardMode();
 applyDashboardTab();
+applyLeadsTriageCopy();
+initQuarantineInboxDisclosure();
 renderImportantLeadCheck(lastImportantLeadCheck);
 renderImportantLeadVerify(lastImportantVerify);
 renderImportantDispatch(lastImportantDispatch);
