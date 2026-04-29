@@ -3659,7 +3659,7 @@ function renderAlertsProgress(snapshot) {
     `
       <div class="alerts-progress-list">
         ${items.map((item) => `
-          <article class="alerts-progress-item alerts-progress-row alerts-progress-item-${item.key}">
+          <article class="alerts-progress-item alerts-progress-row alerts-progress-item-${item.key} ${item.active > 0 ? "is-running" : "is-stopped"}">
             <div class="alerts-progress-main">
               <div class="alerts-progress-label-row">
                 <span class="alerts-progress-dot"></span>
@@ -3670,7 +3670,10 @@ function renderAlertsProgress(snapshot) {
                 <span class="alerts-progress-unit muted">sent</span>
               </div>
             </div>
-            <span class="alerts-progress-meta muted">${item.active} active • ${item.cap ? `cap ${Number(item.cap).toLocaleString()}` : "cap ∞"} • ${escapeHtml(windowLabel)}</span>
+            <span class="alerts-progress-state alerts-progress-state-${item.active > 0 ? "running" : "stopped"}">
+              ${item.active > 0 ? "RUNNING" : "STOPPED"} · ${Number(item.active || 0).toLocaleString()} active
+            </span>
+            <span class="alerts-progress-meta muted">${item.cap ? `Cap ${Number(item.cap).toLocaleString()}` : "Cap ∞"} · ${escapeHtml(windowLabel)}</span>
             ${renderHourlyMeta(item)}
           </article>
         `).join("")}
