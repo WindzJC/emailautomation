@@ -3637,21 +3637,41 @@ function renderAlertsProgress(snapshot) {
   if (!els.alertsProgress) return;
   const items = summarizeAlertProgress(snapshot);
   const windowLabel = `${Number(snapshot?.activity_hours || 24)}h window`;
-  const renderHourlyMeta = (item) => {
-    if (item.key !== "sendgrid" || !item.hourly) return "";
-    const cap = Number(item.hourly.cap || 0);
-    const used = Number(item.hourly.used || 0);
-    const remaining = Number(item.hourly.remaining || 0);
-    const waiting = Boolean(item.hourly.waiting);
-    const waitSeconds = Number(item.hourly.next_slot_seconds || 0);
-    const stateText = waiting
-      ? `Waiting for rolling slot in ${humanizeDurationClock(waitSeconds)}`
-      : "Slots available now";
+  const controls = snapshot?.controls || {};
+  const automation = snapshot?.automation || {};
+  const sendTarget = Number(controls.send_target_total || controls.send_cap_total || controls.send_cap_per_profile || 0);
+  const availableSenders = Number(controls.available_sendgrid_sender_count || controls.available_sender_count || 0);
+  const targetWindowHours = Number(controls.send_target_window_hours || 18);
+  const targetHourlyCap = Number(controls.send_target_hourly_cap || 0) || Math.ceil(sendTarget / Math.max(1, targetWindowHours || 18));
+  const perProfileTarget = Number(controls.send_target_per_profile || 0)
+    || Math.ceil(sendTarget / Math.max(1, availableSenders || 5));
+  const sendgridDailyTime = automation?.sendgrid_daily?.enabled
+    ? automation.sendgrid_daily.local_time
+    : null;
+  const renderSendGridMeta = (item) => {
+    if (item.key !== "sendgrid") return "";
+    let hourlyBits = "";
+    if (item.hourly) {
+      const cap = targetHourlyCap || Number(item.hourly.cap || 0);
+      const used = Number(item.hourly.used || 0);
+      const remaining = Math.max(0, cap - used);
+      const waiting = cap > 0 && used >= cap;
+      const waitSeconds = Number(item.hourly.next_slot_seconds || 0);
+      const stateText = waiting
+        ? `Waiting for rolling slot in ${humanizeDurationClock(waitSeconds)}`
+        : "Slots available now";
+      hourlyBits = `
+        <span class="alerts-progress-meta alerts-progress-hourly">Hourly cap: ${Number(used || 0).toLocaleString()} / ${Number(cap || 0).toLocaleString()}</span>
+        <span class="alerts-progress-meta alerts-progress-hourly">Remaining this hour: ${Number(remaining || 0).toLocaleString()}</span>
+        <span class="alerts-progress-meta alerts-progress-hourly ${waiting ? "is-waiting" : "is-open"}">${escapeHtml(stateText)}</span>
+        <span class="alerts-progress-helper muted">SendGrid resumes automatically as the rolling 1-hour window frees slots.</span>
+      `;
+    }
     return `
-      <span class="alerts-progress-meta alerts-progress-hourly">Hourly cap: ${Number(used || 0).toLocaleString()} / ${Number(cap || 0).toLocaleString()}</span>
-      <span class="alerts-progress-meta alerts-progress-hourly">Remaining this hour: ${Number(remaining || 0).toLocaleString()}</span>
-      <span class="alerts-progress-meta alerts-progress-hourly ${waiting ? "is-waiting" : "is-open"}">${escapeHtml(stateText)}</span>
-      <span class="alerts-progress-helper muted">SendGrid resumes automatically as the rolling 1-hour window frees slots.</span>
+      <span class="alerts-progress-meta alerts-progress-plan">Target window: ${Number(sendTarget || 0).toLocaleString()} emails · 6 PM to 12 PM (${Number(targetWindowHours || 18)}h)</span>
+      <span class="alerts-progress-meta alerts-progress-plan">Per-profile plan: ~${Number(perProfileTarget || 0).toLocaleString()} across ${Number(availableSenders || 0).toLocaleString()} SG</span>
+      <span class="alerts-progress-meta alerts-progress-plan">Daily cap: ${sendgridDailyTime ? `SG ${escapeHtml(sendgridDailyTime)}` : "manual"}</span>
+      ${hourlyBits}
     `;
   };
   setNodeHtml(
@@ -3673,8 +3693,9 @@ function renderAlertsProgress(snapshot) {
             <span class="alerts-progress-state alerts-progress-state-${item.active > 0 ? "running" : "stopped"}">
               ${item.active > 0 ? "RUNNING" : "STOPPED"} · ${Number(item.active || 0).toLocaleString()} active
             </span>
-            <span class="alerts-progress-meta muted">${item.cap ? `Cap ${Number(item.cap).toLocaleString()}` : "Cap ∞"} · ${escapeHtml(windowLabel)}</span>
-            ${renderHourlyMeta(item)}
+            ${item.key === "sendgrid" ? renderSendGridMeta(item) : `
+              <span class="alerts-progress-meta muted">${item.cap ? `Cap ${Number(item.cap).toLocaleString()}` : "Cap ∞"} · ${escapeHtml(windowLabel)}</span>
+            `}
           </article>
         `).join("")}
       </div>
@@ -4269,13 +4290,13 @@ function renderSignals(snapshot) {
 function renderControls(snapshot) {
   const controls = snapshot.controls || {};
   const automation = snapshot.automation || {};
-  const sendCap = Number(controls.send_cap_total || controls.send_cap_per_profile || 0);
+  const sendTarget = Number(controls.send_target_total || controls.send_cap_total || controls.send_cap_per_profile || 0);
   const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
   const hasActiveSender = profiles.some((profile) => isProfileActive(profile))
     || Number(controls.active_sendgrid_sender_count || 0) > 0
     || Number(controls.active_profile_count || controls.active_profiles || 0) > 0;
-  if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendCap > 0) {
-    els.sendCapInput.value = String(sendCap);
+  if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendTarget > 0) {
+    els.sendCapInput.value = String(sendTarget);
   }
   if (els.startBtn) {
     els.startBtn.disabled = hasActiveSender;
@@ -4289,23 +4310,11 @@ function renderControls(snapshot) {
     els.stopBtn.classList.toggle("btn-danger-active", hasActiveSender);
   }
   if (els.sendCapNote) {
-    const activeSenders = Number(controls.active_sendgrid_sender_count || 0);
-    const availableSenders = Number(controls.available_sendgrid_sender_count || 0);
-    const estimatedFleetTotal = Number(controls.estimated_total_if_start_all || 0);
-    const activeFleetTotal = Number(controls.fleet_total_for_active_senders || 0);
-    const lines = [
-      `SendGrid fleet cap: ${sendCap || 0} total | ${activeSenders} active SG | all ${availableSenders || 0} SG: ~${estimatedFleetTotal || 0}`,
-    ];
-    if (activeSenders > 0) {
-      lines.push(`Active SG fleet cap: ~${activeFleetTotal || 0}`);
-    }
+    const lines = [];
     if (hasActiveSender) {
       lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
     }
     const scheduleBits = [];
-    if (automation?.sendgrid_daily?.enabled) {
-      scheduleBits.push(`SG daily ${automation.sendgrid_daily.local_time}`);
-    }
     if (automation?.private_jc_daily?.enabled) {
       scheduleBits.push(`JC daily ${automation.private_jc_daily.local_time}`);
     }
@@ -4314,6 +4323,9 @@ function renderControls(snapshot) {
     }
     if (scheduleBits.length) {
       lines.push(scheduleBits.join(" | "));
+    }
+    if (!lines.length) {
+      lines.push("Choose a send target, then Start All.");
     }
     setNodeHtml(
       els.sendCapNote,
@@ -5285,8 +5297,8 @@ async function postAction(path, options = {}) {
 
 async function saveSendCap() {
   const rawValue = Number(els.sendCapInput?.value || 0);
-  if (!Number.isInteger(rawValue) || rawValue < 1) {
-    showMessage("Enter a whole number of at least 1 for the SendGrid fleet cap.", "error");
+  if (![5000, 10000].includes(rawValue)) {
+    showMessage("Choose a SendGrid target of 5,000 or 10,000.", "error");
     return;
   }
   if (els.sendCapSaveBtn) {
@@ -5298,7 +5310,7 @@ async function saveSendCap() {
   } finally {
     if (els.sendCapSaveBtn) {
       els.sendCapSaveBtn.disabled = false;
-      setNodeText(els.sendCapSaveBtn, "Save Cap");
+      setNodeText(els.sendCapSaveBtn, "Save");
     }
   }
 }
