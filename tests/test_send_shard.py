@@ -29,13 +29,59 @@ from send_shard import (
     domain_finalize_attempt,
     domain_wait_for_slot,
     filter_account_map_entries_for_runtime_dedupe,
+    get_personalization_name,
     is_temporary_auth_failure,
     prioritize_always_send_rows,
     prune_sent_from_csv,
+    render_message_parts,
 )
 
 
 class SendShardTests(unittest.TestCase):
+    def test_personalization_name_blocks_raw_fallbacks_when_not_allowed(self) -> None:
+        row = {
+            "FirstName": "",
+            "first_name_clean": "",
+            "firstname": "A",
+            "authorname": "A Murray",
+            "name": "A Murray",
+            "personalization_allowed": "false",
+        }
+
+        personalization_name = get_personalization_name(row)
+        author = send_shard.choose_salutation_name(personalization_name, "test@example.com")
+        _, body_text, _, _ = render_message_parts(
+            author,
+            "",
+            "Subject",
+            "Hi {FirstName},\n\nBody",
+            "unsubscribe@example.com",
+            signature_file=None,
+        )
+
+        self.assertEqual(personalization_name, "")
+        self.assertTrue(body_text.startswith("Hi there,"))
+
+    def test_personalization_name_uses_clean_first_name_when_allowed(self) -> None:
+        row = {
+            "first_name_clean": "José",
+            "personalization_allowed": "true",
+        }
+
+        self.assertEqual(get_personalization_name(row), "José")
+
+    def test_personalization_name_keeps_old_safe_rows_without_guard_fields(self) -> None:
+        old_row = {"Email": "safe@example.com", "FirstName": "Alice"}
+        blocked_new_row = {
+            "Email": "unsafe@example.com",
+            "FirstName": "A",
+            "authorname": "A Murray",
+            "personalization_allowed": "false",
+        }
+
+        self.assertEqual(get_personalization_name(old_row), "Alice")
+        self.assertEqual(get_personalization_name(blocked_new_row), "")
+
     def test_sendgrid_profile_defaults_use_35s_pacing_and_keep_noon_stop(self) -> None:
         for profile_name in [
             "sendgrid_annette",

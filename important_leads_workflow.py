@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -40,6 +41,8 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EMAIL_IN_TEXT_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 SAFE_SPLIT_RE = re.compile(r"[;,/|]+")
+FIRST_NAME_PHONE_RE = re.compile(r"^[+()\d\s.\-]{5,}$")
+FIRST_NAME_EMAIL_LIKE_RE = re.compile(r"^[^\s@]+@[^\s@]+$")
 
 EMAIL_HEADER_CANDIDATES = (
     "email",
@@ -121,6 +124,64 @@ ROLE_ACCOUNT_BLOCKLIST = set(ROLE_LOCALPART_BLOCKLIST) | {
     "sales",
     "support",
     "team",
+}
+FIRST_NAME_HONORIFICS = {
+    "dr",
+    "doctor",
+    "rev",
+    "reverend",
+    "pastor",
+    "prof",
+    "professor",
+    "mr",
+    "mrs",
+    "ms",
+    "miss",
+}
+FIRST_NAME_CREDENTIALS = {
+    "cpa",
+    "dds",
+    "dmd",
+    "do",
+    "esq",
+    "jd",
+    "mba",
+    "md",
+    "phd",
+    "rn",
+}
+FIRST_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+FIRST_NAME_ROLE_TITLES = {
+    "author",
+    "ceo",
+    "chair",
+    "coach",
+    "cofounder",
+    "consultant",
+    "director",
+    "founder",
+    "manager",
+    "owner",
+    "president",
+    "speaker",
+    "writer",
+}
+FIRST_NAME_GENERIC_BUSINESS = {
+    "admin",
+    "billing",
+    "contact",
+    "customerservice",
+    "help",
+    "hello",
+    "info",
+    "inquiries",
+    "marketing",
+    "office",
+    "sales",
+    "service",
+    "support",
+    "team",
+    "unknown",
 }
 KNOWN_COMMON_DOMAINS = sorted(set(COMMON_DOMAIN_FIXES.values()) | {
     "gmail.com",
@@ -226,6 +287,136 @@ def _trimmed_first_name(value: str) -> str:
         return ""
     token = raw.split()[0]
     return re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", token) or token
+
+
+def _normalize_name_whitespace(value: object) -> str:
+    return re.sub(r"\s+", " ", _strip_cell(value)).strip()
+
+
+def _strip_balanced_name_wrappers(value: str) -> str:
+    text = _normalize_name_whitespace(value)
+    changed = True
+    while changed and text:
+        changed = False
+        if len(text) >= 2 and text[0] in "\"“”‘’" and text[-1] in "\"“”‘’":
+            text = _normalize_name_whitespace(text[1:-1])
+            changed = True
+        if len(text) >= 2 and text[0] == "(" and text[-1] == ")":
+            text = _normalize_name_whitespace(text[1:-1])
+            changed = True
+    return text.strip(" \t\r\n,;")
+
+
+def _name_lookup_key(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "", unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")).lower()
+
+
+def _name_has_letter(value: str) -> bool:
+    return any(ch.isalpha() for ch in value or "")
+
+
+def _name_letter_count(value: str) -> int:
+    return sum(1 for ch in value or "" if ch.isalpha())
+
+
+def _name_punctuation_ratio(value: str) -> float:
+    text = value or ""
+    meaningful = [ch for ch in text if not ch.isspace()]
+    if not meaningful:
+        return 1.0
+    punctuation = [ch for ch in meaningful if not ch.isalnum()]
+    return len(punctuation) / len(meaningful)
+
+
+def _looks_like_mojibake(value: str) -> bool:
+    text = value or ""
+    if "\ufffd" in text:
+        return True
+    return any(token in text for token in ("Ã", "Â", "â€", "â€™", "ðŸ", "�"))
+
+
+def _first_name_candidate(value: object) -> str:
+    text = _strip_balanced_name_wrappers(str(value or ""))
+    if not text:
+        return ""
+    parts = text.split()
+    if len(parts) > 1 and all(len(part.strip(".")) == 1 for part in parts):
+        return text
+    return text
+
+
+def _first_name_hygiene(value: object) -> Dict[str, str]:
+    raw = _normalize_name_whitespace(value)
+    candidate = _first_name_candidate(raw)
+    result = {
+        "first_name_clean": "",
+        "first_name_status": "",
+        "personalization_allowed": "false",
+        "cleanup_notes": "",
+    }
+
+    def invalid(status: str) -> Dict[str, str]:
+        result["first_name_status"] = status
+        result["cleanup_notes"] = f"first_name:{status}"
+        return result
+
+    if not candidate:
+        return invalid("blank")
+    if raw and raw[0] in {":", "'", "’"}:
+        return invalid("surrounding_punctuation")
+    if _looks_like_mojibake(candidate):
+        return invalid("mojibake")
+    if FIRST_NAME_EMAIL_LIKE_RE.match(candidate) or "@" in candidate:
+        return invalid("email_like")
+    if FIRST_NAME_PHONE_RE.match(candidate):
+        return invalid("phone_like")
+    if _name_punctuation_ratio(candidate) >= 0.6:
+        return invalid("mostly_punctuation")
+    if not _name_has_letter(candidate):
+        return invalid("blank")
+
+    no_period = candidate.replace(".", "")
+    letters_only = "".join(ch for ch in no_period if ch.isalpha())
+    compact_lookup = _name_lookup_key(candidate)
+    if compact_lookup in FIRST_NAME_HONORIFICS:
+        return invalid("honorific_only")
+    if compact_lookup in FIRST_NAME_CREDENTIALS:
+        return invalid("credential_only")
+    if compact_lookup in FIRST_NAME_SUFFIXES:
+        return invalid("suffix_only")
+    if compact_lookup in FIRST_NAME_ROLE_TITLES:
+        return invalid("role_title_only")
+    if compact_lookup in FIRST_NAME_GENERIC_BUSINESS:
+        return invalid("generic_business")
+    if re.fullmatch(r"(?:[A-Za-z]\.){1,4}", candidate.replace(" ", "")):
+        return invalid("dotted_initials")
+    if _name_letter_count(candidate) <= 1:
+        return invalid("one_character")
+    if re.fullmatch(r"[A-Za-z](?:\s+[A-Za-z])+", candidate):
+        return invalid("initials_only")
+    if letters_only and letters_only.isupper() and len(letters_only) <= 3:
+        return invalid("initials_only")
+
+    result["first_name_clean"] = candidate
+    result["first_name_status"] = "valid"
+    result["personalization_allowed"] = "true"
+    result["cleanup_notes"] = "" if candidate == raw else "first_name:normalized_wrappers"
+    return result
+
+
+def _last_name_clean(value: object) -> str:
+    return _strip_balanced_name_wrappers(str(value or ""))
+
+
+def _first_name_source(raw_row: Dict[str, str], normalized_row: Dict[str, str], core_headers: Dict[str, str]) -> str:
+    if core_headers.get("FirstName"):
+        first_raw = _strip_cell(raw_row.get(core_headers["FirstName"], ""))
+        if first_raw:
+            return first_raw
+    full_name = _normalize_name_whitespace(normalized_row.get("FullName", ""))
+    if full_name:
+        return full_name.split()[0]
+    return ""
 
 
 def _full_identity_value(row: Dict[str, str], core_headers: Dict[str, str]) -> str:
@@ -408,7 +599,16 @@ def _unique_header(value: str, used: set[str]) -> str:
 
 def _master_output_headers(fieldnames: Sequence[str], core_headers: Dict[str, str]) -> tuple[List[str], Dict[str, str]]:
     used: set[str] = set()
-    output_headers = ["FullName", "FirstName", "Email"]
+    output_headers = [
+        "FullName",
+        "FirstName",
+        "Email",
+        "first_name_clean",
+        "last_name_clean",
+        "first_name_status",
+        "personalization_allowed",
+        "cleanup_notes",
+    ]
     used.update(output_headers)
     source_to_output: Dict[str, str] = {}
 
@@ -1774,13 +1974,18 @@ def check_master_leads(
         for source, target in source_to_output.items():
             normalized_row[target] = _strip_cell(raw_row.get(source, ""))
         normalized_row["FullName"] = _full_identity_value(raw_row, core_headers)
-        normalized_row["FirstName"] = _trimmed_first_name(normalized_row["FullName"])
+        first_name_source = _first_name_source(raw_row, normalized_row, core_headers)
+        first_name_hygiene = _first_name_hygiene(first_name_source)
+        normalized_row["FirstName"] = first_name_hygiene["first_name_clean"]
+        normalized_row["first_name_clean"] = first_name_hygiene["first_name_clean"]
+        normalized_row["first_name_status"] = first_name_hygiene["first_name_status"]
+        normalized_row["personalization_allowed"] = first_name_hygiene["personalization_allowed"]
+        normalized_row["cleanup_notes"] = first_name_hygiene["cleanup_notes"]
+        normalized_row["last_name_clean"] = _last_name_clean(raw_row.get(core_headers["LastName"], "")) if core_headers["LastName"] else ""
         if core_headers["FirstName"]:
             first_raw = _strip_cell(raw_row.get(core_headers["FirstName"], ""))
-            if first_raw:
-                normalized_row["FirstName"] = _trimmed_first_name(first_raw)
-                if not normalized_row["FullName"]:
-                    normalized_row["FullName"] = first_raw
+            if first_raw and not normalized_row["FullName"]:
+                normalized_row["FullName"] = first_raw
 
         validation = _email_validation_result(
             raw_row.get(core_headers["Email"], ""),
@@ -2011,9 +2216,15 @@ def _queue_output_headers(existing_headers: Iterable[Sequence[str]], master_head
 def _master_row_to_queue_row(row: Dict[str, str], queue_headers: Sequence[str]) -> Dict[str, str]:
     queue_row = {header: "" for header in queue_headers}
     queue_row["Email"] = norm_email(row.get("Email", ""))
-    queue_row["FirstName"] = _trimmed_first_name(
-        row.get("FirstName", "") or row.get("FullName", "") or row.get("AuthorName", "")
-    )
+    personalization_allowed = str(row.get("personalization_allowed", "")).strip().lower()
+    if personalization_allowed in {"true", "1", "yes"}:
+        queue_row["FirstName"] = _trimmed_first_name(row.get("first_name_clean", "") or row.get("FirstName", ""))
+    elif "personalization_allowed" in row:
+        queue_row["FirstName"] = ""
+    else:
+        queue_row["FirstName"] = _trimmed_first_name(
+            row.get("FirstName", "") or row.get("FullName", "") or row.get("AuthorName", "")
+        )
     for header in queue_headers:
         if header in {"Email", "FirstName"}:
             continue

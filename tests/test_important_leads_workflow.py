@@ -162,7 +162,20 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["corrected_rows"], 1)
             self.assertEqual(report["safe_fixes_applied"], 1)
             self.assertEqual(report["blank_rows"], 1)
-            self.assertEqual(report["output_fieldnames"], ["FullName", "FirstName", "Email", "Source"])
+            self.assertEqual(
+                report["output_fieldnames"],
+                [
+                    "FullName",
+                    "FirstName",
+                    "Email",
+                    "first_name_clean",
+                    "last_name_clean",
+                    "first_name_status",
+                    "personalization_allowed",
+                    "cleanup_notes",
+                    "Source",
+                ],
+            )
 
             with output_path.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
@@ -170,6 +183,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["FullName"], "Alice Example")
             self.assertEqual(rows[0]["FirstName"], "Alice")
+            self.assertEqual(rows[0]["first_name_clean"], "Alice")
+            self.assertEqual(rows[0]["first_name_status"], "valid")
+            self.assertEqual(rows[0]["personalization_allowed"], "true")
             self.assertEqual(rows[0]["Email"], "alice@gmail.com")
             self.assertEqual(rows[0]["Source"], "list-a")
             self.assertEqual(rows[1]["Email"], "bob@yahoo.com")
@@ -204,6 +220,114 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(summary["invalid_syntax_removed"], 1)
             self.assertEqual(summary["blank_rows"], 1)
             self.assertFalse(summary["deliverability_enabled"])
+
+    def test_check_master_leads_hardens_first_names_without_rejecting_valid_emails(self) -> None:
+        invalid_cases = {
+            "A": "one_character",
+            "AA": "initials_only",
+            "J.": "dotted_initials",
+            "A.J.": "dotted_initials",
+            "Dr.": "honorific_only",
+            "PhD": "credential_only",
+            "MD": "credential_only",
+            "Jr.": "suffix_only",
+            "CEO": "role_title_only",
+            "Founder": "role_title_only",
+            "Author": "role_title_only",
+            "Info": "generic_business",
+            "Admin": "generic_business",
+            ":Lisa": "surrounding_punctuation",
+            "'Ana": "surrounding_punctuation",
+            "555-121-9090": "phone_like",
+            "bad@example.com": "email_like",
+            "!!!": "mostly_punctuation",
+            "JosÃ©": "mojibake",
+            "": "blank",
+        }
+        valid_cases = ["John", "Mary", "Anne-Marie", "O’Connor", "José", "Chloë", "Jean Luc", "ทองแดง", "(Seth)"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "leadschecker.csv"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            rows = []
+            index = 0
+            for name in invalid_cases:
+                index += 1
+                rows.append({"first_name": name, "last_name": "Example", "email": f"bad-name-{index}@example.org"})
+            for name in valid_cases:
+                index += 1
+                rows.append({"first_name": name, "last_name": "Example", "email": f"good-name-{index}@example.org"})
+            write_csv(input_path, ["first_name", "last_name", "email"], rows)
+
+            report = check_master_leads(
+                input_path=input_path,
+                output_path=output_path,
+                rejected_path=rejected_path,
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                report_dir=tmp / "reports",
+                summary_dir=tmp / "check_runs",
+                validate_deliverability=False,
+                reject_role_accounts=False,
+                reject_disposable=False,
+                persist_state=False,
+            )
+
+            self.assertEqual(report["cleaned_rows"], len(rows))
+            self.assertEqual(report["rejected_rows"], 0)
+            with output_path.open(newline="", encoding="utf-8-sig") as handle:
+                cleaned = list(csv.DictReader(handle))
+            by_email = {row["Email"]: row for row in cleaned}
+
+            for idx, (name, status) in enumerate(invalid_cases.items(), start=1):
+                row = by_email[f"bad-name-{idx}@example.org"]
+                self.assertEqual(row["FirstName"], "", name)
+                self.assertEqual(row["first_name_clean"], "", name)
+                self.assertEqual(row["first_name_status"], status, name)
+                self.assertEqual(row["personalization_allowed"], "false", name)
+                self.assertIn(status, row["cleanup_notes"], name)
+
+            valid_start = len(invalid_cases) + 1
+            for offset, name in enumerate(valid_cases):
+                row = by_email[f"good-name-{valid_start + offset}@example.org"]
+                expected = "Seth" if name == "(Seth)" else name
+                self.assertEqual(row["FirstName"], expected)
+                self.assertEqual(row["first_name_clean"], expected)
+                self.assertEqual(row["first_name_status"], "valid")
+                self.assertEqual(row["personalization_allowed"], "true")
+                self.assertEqual(row["last_name_clean"], "Example")
+
+    def test_queue_row_does_not_repopulate_first_name_when_personalization_blocked(self) -> None:
+        row = {
+            "Email": "test@example.com",
+            "first_name": "A",
+            "first_name_clean": "",
+            "personalization_allowed": "false",
+            "FullName": "A Murray",
+            "AuthorName": "A Murray",
+            "author": "A Murray",
+            "name": "A Murray",
+        }
+
+        queue_row = important_leads_workflow._master_row_to_queue_row(row, ["Email", "FirstName", "FullName"])
+
+        self.assertEqual(queue_row["Email"], "test@example.com")
+        self.assertEqual(queue_row["FirstName"], "")
+
+    def test_queue_row_uses_clean_first_name_when_personalization_allowed(self) -> None:
+        row = {
+            "Email": "lisa@example.com",
+            "first_name": ":Lisa",
+            "first_name_clean": "Lisa",
+            "personalization_allowed": "true",
+        }
+
+        queue_row = important_leads_workflow._master_row_to_queue_row(row, ["Email", "FirstName"])
+
+        self.assertEqual(queue_row["Email"], "lisa@example.com")
+        self.assertEqual(queue_row["FirstName"], "Lisa")
 
     def test_check_master_leads_reports_progress_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

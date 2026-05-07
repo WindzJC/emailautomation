@@ -71,7 +71,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-SENDGRID_MAX_MESSAGES_1H = max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 1000))
+SENDGRID_MAX_MESSAGES_1H = max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 180))
 
 PROVIDER_LIMIT_DEFAULTS = {
     "private": {"max_messages_1h": 80},
@@ -494,29 +494,29 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {FirstName},
 
-We are currently reviewing a limited number of titles for possible consignment placement, and part of that review is whether the presentation is strong enough to support the book properly in a retail setting.
+We’re currently opening a small number of consignment spots for independent authors and inviting select authors to submit titles for review.
 
-A strong book can still lose momentum when the cover, positioning, and supporting materials are not doing enough to communicate value early. In both online and physical retail, that first layer of presentation often shapes whether a reader looks closer or moves on.
+Before stocking any book, we review content fit, print quality, presentation, and retail-ready pricing. Presentation matters in both online and physical retail, so we want to make sure each title is positioned well before it reaches the shelf.
 
-Before we move forward with any title, we look closely at content fit, print quality, presentation, and retail-ready pricing.
+To submit a title for review, please reply with:
 
-To support a book effectively once stocked, we generally like to see two essentials in place:
+— Title
+— ISBN or retailer link
+— Retail price
+— Genre/category
+— Short book teaser or trailer, if available
+— Author or book page with direct retailer links, if available
 
-a short book teaser or trailer
-a clean author or book page where readers can learn more and go directly to retailer links
+If you don’t currently have a teaser, trailer, or author/book page, that’s okay. If the title looks like a good fit, we can also provide optional support in creating those materials before placement.
 
-If those assets are already in place, feel free to send them over. If not, and the title appears to be a fit, we can advise on what would need to be strengthened before placement.
+Our current consignment terms are:
 
-Our consignment structure is straightforward:
+— You retain 85% of the sale price
+— Shipping to the store is covered by the author
+— Sales reporting and payouts are issued quarterly
+— No consignment fees beyond shipping
 
-you retain 85% of the sale price
-shipping to participating store locations is covered by the author
-sales reporting and payouts are issued quarterly, within 90 days after quarter-end
-there are no added consignment fees beyond shipping
-
-If this is of interest, reply with Interested and send the title, ISBN or retailer link, and retail price. If the book appears to be a fit, I’ll send the next steps.
-
-I look forward to hearing from you.
+If the title looks like a good fit, I’ll send the next steps and our consignment agreement for review.
 
 Best regards,
 {SIGIMG}
@@ -524,16 +524,17 @@ Best regards,
 
 PITCH_JC_BODY = """Hi {FirstName},
 
-I’m reaching out because I work specifically with authors on the visual side of promotion.
+I’m reaching out because I help authors improve how their books show up online.
 
-A strong book can still lose attention online when the hook does not land fast enough. At Astra Productions, I help fix that with hook-first trailers that feel closer to a film preview, premium author pages, and launch visuals built to make the story clearer, build trust faster, and turn more interest into clicks.
+A strong book can still lose attention when the first impression doesn’t feel clear, polished, or credible enough. At Astra Productions, we create premium author websites, cinematic book trailers, and launch visuals that help authors present their work professionally and turn more interest into clicks.
 
-I’ve spent 6+ years helping authors strengthen how their books are presented online. You can review the work at astraproductions.co. Trailer projects start at $999, author websites at $499, and the launch bundle at $1299.
+I’ve spent 6+ years helping authors strengthen how their work is presented online. You can see examples here: astraproductions.co
 
-If that sounds aligned, reply and I’ll send one concise idea for how I’d approach it.
+Would you be open to seeing a clean direction for an author website that could make your book feel more polished and credible online?
 
 Windelle JC
 Creative Director, Astra Productions
+astraproductions.co
 {SIGIMG}
 
 P.S. If you’d rather not hear from me again, just reply unsub.
@@ -566,7 +567,7 @@ PITCHES = {
 
   },
     "pitch_jc": {
-        "subject": "Quick thought on your book",
+        "subject": "A trailer idea for your book",
         "body": PITCH_JC_BODY,
     },
 
@@ -951,6 +952,18 @@ def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
         if name in lower_row:
             return lower_row[name]
     return ""
+
+
+def get_personalization_name(row: Dict[str, str]) -> str:
+    lower_keys = {(key or "").strip().lower() for key in row}
+    if "personalization_allowed" in lower_keys:
+        allowed = get_row_value_ci(row, ["personalization_allowed"]).strip().lower()
+        if allowed not in {"true", "1", "yes"}:
+            return ""
+    return get_row_value_ci(
+        row,
+        ["first_name_clean", "firstname", "first_name", "first name", "authorname", "author_name", "author", "name"],
+    )
 
 
 def localpart(email_addr: str) -> str:
@@ -2275,6 +2288,7 @@ def main():
         *,
         emit_suppressed_logs: bool,
         allow_missing_always_send_rows: bool = True,
+        exclude_logged_always_send: bool = False,
     ) -> tuple[List[Dict[str, str]], Dict[str, int], int, int]:
         candidate_rows = list(current_rows) if current_rows is not None else read_rows(csv_path)
         current_already_done = load_already_done(log_path)
@@ -2315,6 +2329,8 @@ def main():
             if email_addr in current_unsubbed or email_addr in current_suppressed:
                 continue
             is_always_send = email_addr in always_send_set
+            if exclude_logged_always_send and is_always_send and email_addr in current_already_done:
+                continue
             if args.block_role_recipients and role_block_set and not is_always_send:
                 if is_role_recipient(email_addr, role_block_set):
                     snapshot_stats["skipped_role_recipients"] += 1
@@ -2393,6 +2409,7 @@ def main():
             refreshed_pending, _, refreshed_row_count, refreshed_eligible_count = build_pending_snapshot(
                 emit_suppressed_logs=False,
                 allow_missing_always_send_rows=False,
+                exclude_logged_always_send=True,
             )
             if refreshed_eligible_count > 0:
                 pending = refreshed_pending
@@ -2908,10 +2925,7 @@ def main():
                         stop_reason = "daily_cap"
                         break
 
-                raw_author = get_row_value_ci(
-                    r,
-                    ["authorname", "author_name", "firstname", "first_name", "first name", "author", "name"],
-                )
+                raw_author = get_personalization_name(r)
                 author = choose_salutation_name(raw_author, to_email)
                 book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
 
@@ -3546,6 +3560,7 @@ def main():
                     refreshed_pending, _, refreshed_row_count, refreshed_eligible_count = build_pending_snapshot(
                         emit_suppressed_logs=False,
                         allow_missing_always_send_rows=False,
+                        exclude_logged_always_send=True,
                     )
                     if refreshed_eligible_count > 0:
                         pending = refreshed_pending
