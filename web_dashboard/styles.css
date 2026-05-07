@@ -1385,27 +1385,9 @@ h3 {
   border-color: rgba(124, 224, 183, 0.16);
 }
 
-.alerts-progress-hourly {
-  color: #dce7f7;
-  font-size: 11px;
-}
-
 .alerts-progress-plan {
   color: #b9c7dc;
   font-size: 11px;
-}
-
-.alerts-progress-hourly.is-waiting {
-  color: #f4d890;
-}
-
-.alerts-progress-hourly.is-open {
-  color: #bff7df;
-}
-
-.alerts-progress-helper {
-  font-size: 11px;
-  line-height: 1.3;
 }
 
 .alerts-progress-kicker {

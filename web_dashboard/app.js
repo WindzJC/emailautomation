@@ -3642,7 +3642,6 @@ function renderAlertsProgress(snapshot) {
   const sendTarget = Number(controls.send_target_total || controls.send_cap_total || controls.send_cap_per_profile || 0);
   const availableSenders = Number(controls.available_sendgrid_sender_count || controls.available_sender_count || 0);
   const targetWindowHours = Number(controls.send_target_window_hours || 18);
-  const targetHourlyCap = Number(controls.send_target_hourly_cap || 0) || Math.ceil(sendTarget / Math.max(1, targetWindowHours || 18));
   const perProfileTarget = Number(controls.send_target_per_profile || 0)
     || Math.ceil(sendTarget / Math.max(1, availableSenders || 5));
   const sendgridDailyTime = automation?.sendgrid_daily?.enabled
@@ -3650,28 +3649,10 @@ function renderAlertsProgress(snapshot) {
     : null;
   const renderSendGridMeta = (item) => {
     if (item.key !== "sendgrid") return "";
-    let hourlyBits = "";
-    if (item.hourly) {
-      const cap = targetHourlyCap || Number(item.hourly.cap || 0);
-      const used = Number(item.hourly.used || 0);
-      const remaining = Math.max(0, cap - used);
-      const waiting = cap > 0 && used >= cap;
-      const waitSeconds = Number(item.hourly.next_slot_seconds || 0);
-      const stateText = waiting
-        ? `Waiting for rolling slot in ${humanizeDurationClock(waitSeconds)}`
-        : "Slots available now";
-      hourlyBits = `
-        <span class="alerts-progress-meta alerts-progress-hourly">Hourly cap: ${Number(used || 0).toLocaleString()} / ${Number(cap || 0).toLocaleString()}</span>
-        <span class="alerts-progress-meta alerts-progress-hourly">Remaining this hour: ${Number(remaining || 0).toLocaleString()}</span>
-        <span class="alerts-progress-meta alerts-progress-hourly ${waiting ? "is-waiting" : "is-open"}">${escapeHtml(stateText)}</span>
-        <span class="alerts-progress-helper muted">SendGrid resumes automatically as the rolling 1-hour window frees slots.</span>
-      `;
-    }
     return `
       <span class="alerts-progress-meta alerts-progress-plan">Target window: ${Number(sendTarget || 0).toLocaleString()} emails · 6 PM to 12 PM (${Number(targetWindowHours || 18)}h)</span>
       <span class="alerts-progress-meta alerts-progress-plan">Per-profile plan: ~${Number(perProfileTarget || 0).toLocaleString()} across ${Number(availableSenders || 0).toLocaleString()} SG</span>
       <span class="alerts-progress-meta alerts-progress-plan">Daily cap: ${sendgridDailyTime ? `SG ${escapeHtml(sendgridDailyTime)}` : "manual"}</span>
-      ${hourlyBits}
     `;
   };
   setNodeHtml(
