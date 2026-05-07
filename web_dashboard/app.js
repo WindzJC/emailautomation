@@ -4673,7 +4673,40 @@ function buildDetailKicker(profile) {
   return `${pending} pending in this queue. ${reasonNote || "Start this sender when you want it live."}`;
 }
 
-function buildProfileActionNote(profile) {
+function sendgridFleetTarget(snapshot) {
+  const controls = snapshot?.controls || {};
+  const target = Number(controls.send_target_total || controls.send_cap_total || 0);
+  return Number.isFinite(target) && target > 0 ? target : 0;
+}
+
+function sendgridProfileTarget(snapshot) {
+  const controls = snapshot?.controls || {};
+  const explicitTarget = Number(controls.send_target_per_profile || 0);
+  if (Number.isFinite(explicitTarget) && explicitTarget > 0) return explicitTarget;
+  const fleetTarget = sendgridFleetTarget(snapshot);
+  const senderCount = Number(controls.available_sendgrid_sender_count || controls.available_sender_count || 0);
+  return fleetTarget > 0 ? Math.ceil(fleetTarget / Math.max(1, senderCount || 5)) : 0;
+}
+
+function buildProfileActionNote(profile, snapshot = lastSnapshot) {
+  const channel = profileTelemetryChannel(profile);
+  if (channel === "sendgrid") {
+    const fleetTarget = sendgridFleetTarget(snapshot);
+    const profileTarget = sendgridProfileTarget(snapshot);
+    const targetCopy = profileTarget > 0
+      ? `~${Number(profileTarget).toLocaleString()} profile target from fleet cap ${Number(fleetTarget || 0).toLocaleString()}`
+      : `fleet cap ${Number(fleetTarget || profile.max_total || 0).toLocaleString()}`;
+    if (profile?.restart_blocked) {
+      return profile?.restart_block_reason || "Start is blocked until the provider cooldown window ends.";
+    }
+    if (canStopProfile(profile)) {
+      return `Profile is active. Dashboard start cap is shared across active SendGrid profiles (${targetCopy}). Stop pauses only this sender.`;
+    }
+    if ((profile.runtime_state || "") === "finished") {
+      return `This sender reached its current target or exhausted the queue. Dashboard start cap is shared across active SendGrid profiles (${targetCopy}).`;
+    }
+    return `Queue is idle. Start runs only this sender using the shared SendGrid launch target (${targetCopy}).`;
+  }
   if (profile?.restart_blocked) {
     return profile?.restart_block_reason || "Start is blocked until the provider cooldown window ends.";
   }
@@ -5008,10 +5041,14 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const paceDisplay = effectiveSpacing > 0 ? `${effectiveSpacing}s${effectivePace > 0 ? ` (~${effectivePace}/h)` : ""}` : "-";
   const maxTotalRaw = Number(profile.max_total || 0);
   const acceptedRaw = profileRunSentDisplay(profile);
-  const progress = maxTotalRaw > 0 ? Math.max(0, Math.min(100, (acceptedRaw / maxTotalRaw) * 100)) : 0;
+  const channel = profileTelemetryChannel(profile);
+  const isSendGridProfile = channel === "sendgrid";
+  const fleetTargetRaw = isSendGridProfile ? sendgridFleetTarget(snapshot) : 0;
+  const profileTargetRaw = isSendGridProfile ? sendgridProfileTarget(snapshot) : 0;
+  const progressDenominator = isSendGridProfile ? (profileTargetRaw || maxTotalRaw) : maxTotalRaw;
+  const progress = progressDenominator > 0 ? Math.max(0, Math.min(100, (acceptedRaw / progressDenominator) * 100)) : 0;
   const showProgress = isProfileActive(profile) || acceptedRaw > 0;
   const showSession = Boolean(profile.pane_index || profile.tmux_command);
-  const channel = profileTelemetryChannel(profile);
   const webhook = profile.webhook || {};
   const webhookSummary = webhook.summary || {};
   const webhookRecent = Array.isArray(webhook.recent) ? webhook.recent : [];
@@ -5061,7 +5098,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.paneLabel, `Pane ${profile.pane_index} / ${profile.tmux_command || "-"}`);
   setNodeText(refs.runtimeNote, profile.runtime_note || "Pane is idle.");
   setNodeText(refs.lastUpdate, profileLastUpdateText(profile));
-  setNodeText(refs.actionNote, (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile) : "");
+  setNodeText(refs.actionNote, (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile, snapshot) : "");
 
   refs.startButton.dataset.profile = profile.name || "";
   refs.startButton.disabled = startDisabled;
@@ -5096,9 +5133,20 @@ function updateProfileDetailNode(node, snapshot, profile) {
   }
   setNodeText(
     refs.progressNote,
-    showProgress ? `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.` : "",
+    showProgress
+      ? isSendGridProfile
+        ? `Dashboard start cap is shared across active SendGrid profiles. Fleet cap ${fleetTargetRaw ? Number(fleetTargetRaw).toLocaleString() : "∞"}${profileTargetRaw ? ` · ~${Number(profileTargetRaw).toLocaleString()} profile target` : ""}. Base profile cap ${profile.configured_max_total || "∞"}.`
+        : `Dashboard start cap ${profile.max_total || "∞"} accepted recipient${Number(profile.max_total || 0) === 1 ? "" : "s"}. Base profile cap ${profile.configured_max_total || "∞"}.`
+      : "",
   );
-  setNodeText(refs.progressValue, `${acceptedRaw}/${profile.max_total || "∞"}`);
+  setNodeText(
+    refs.progressValue,
+    isSendGridProfile
+      ? profileTargetRaw
+        ? `${Number(acceptedRaw).toLocaleString()} / ~${Number(profileTargetRaw).toLocaleString()} profile target`
+        : `${Number(acceptedRaw).toLocaleString()} sent · fleet cap ${fleetTargetRaw ? Number(fleetTargetRaw).toLocaleString() : "∞"}`
+      : `${Number(acceptedRaw).toLocaleString()}/${profile.max_total || "∞"}`,
+  );
   refs.progressFill.style.width = `${progress}%`;
   refs.progressFill.closest(".progress-wrap")?.classList.toggle("hidden", !showProgress);
   refs.paneLabel.closest(".detail-core-meta-row")?.classList.toggle("hidden", !showSession);
