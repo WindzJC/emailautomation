@@ -496,7 +496,7 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {FirstName},
 
-Our team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+My team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
 
 We’re currently opening a small number of consignment spots for independent authors and inviting select authors to submit titles for review.  If there’s another book you’d rather focus on, we’d be happy to look at that instead.
 
@@ -586,13 +586,22 @@ PITCHES = {
 
 
 BOOK_TITLE_PERSONALIZED_OPENING = (
-    "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "My team came across {BookTitle} and thought the book could benefit from a clearer, "
     "more polished online presentation for readers discovering your work."
 )
+BOOK_TITLE_PERSONALIZED_OPENINGS = (
+    BOOK_TITLE_PERSONALIZED_OPENING,
+    (
+        "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
+        "more polished online presentation for readers discovering your work."
+    ),
+)
 BOOK_TITLE_GENERIC_OPENING = (
-    "Our team works with independent authors to improve how their work is presented online, "
+    "My team works with independent authors to improve how their work is presented online, "
     "especially through clearer websites, stronger book visuals, and more polished launch materials."
 )
+UNRESOLVED_PLACEHOLDER_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}")
+ALLOWED_RENDER_PLACEHOLDERS = {"{SIGIMG}"}
 
 
 def norm_email(s: str) -> str:
@@ -680,6 +689,43 @@ def template_requires_book_title(subject: str, body_template: str) -> bool:
     return "{BookTitle}" in (subject or "") or "{BookTitle}" in (body_template or "")
 
 
+def _book_title_body_without_fallback_opening(body_template: str) -> str:
+    text = body_template or ""
+    for opening in BOOK_TITLE_PERSONALIZED_OPENINGS:
+        text = text.replace(opening, "")
+    return text
+
+
+def _unresolved_placeholders(*values: str) -> Set[str]:
+    placeholders: Set[str] = set()
+    for value in values:
+        placeholders.update(UNRESOLVED_PLACEHOLDER_RE.findall(value or ""))
+    return placeholders - ALLOWED_RENDER_PLACEHOLDERS
+
+
+def book_title_fallback_supported(subject: str, body_template: str, subject_fallback: str) -> bool:
+    if not template_requires_book_title(subject, body_template):
+        return False
+    if "{BookTitle}" in (subject or "") and not str(subject_fallback or "").strip():
+        return False
+    if "{BookTitle}" in _book_title_body_without_fallback_opening(body_template):
+        return False
+    subject_text, body_text, _html_body, _cid = render_message_parts(
+        GENERIC_SALUTATION,
+        "",
+        subject,
+        body_template,
+        DEFAULT_UNSUB_EMAIL,
+        signature_file=None,
+        subject_fallback=subject_fallback,
+    )
+    if _unresolved_placeholders(subject_text, body_text):
+        return False
+    if "{BookTitle}" in body_text or "your book" in body_text.lower():
+        return False
+    return True
+
+
 def csv_fieldnames(path: Path) -> List[str]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -693,13 +739,19 @@ def validate_book_title_queue_contract(
     subject: str,
     body_template: str,
     profile_name: str,
+    subject_fallback: str = "",
+    strict_book_title_required: bool = False,
 ) -> bool:
     if not template_requires_book_title(subject, body_template):
         return True
 
+    fallback_supported = (
+        not strict_book_title_required
+        and book_title_fallback_supported(subject, body_template, subject_fallback)
+    )
     fieldnames = csv_fieldnames(csv_path)
     has_book_title = any((field or "").strip().lower() == "booktitle" for field in fieldnames)
-    if not has_book_title:
+    if not has_book_title and not fallback_supported:
         print(
             "ERROR: BookTitle-personalized profile requires a BookTitle column: "
             f"profile={profile_name or '-'} csv={csv_path}"
@@ -707,19 +759,47 @@ def validate_book_title_queue_contract(
         return False
 
     bad_rows: List[str] = []
+    unresolved_rows: List[str] = []
     for index, row in enumerate(rows, start=2):
-        email_addr = resolve_recipient_email(row)
         book_title = get_row_value_ci(row, ["BookTitle"])
-        if invalid_campaign_book_title(book_title):
-            bad_rows.append(f"row={index} email={email_addr or '-'} BookTitle={book_title or '[blank]'}")
+        if not fallback_supported and invalid_campaign_book_title(book_title):
+            bad_rows.append(f"row={index} BookTitle=blank_or_unsafe")
             if len(bad_rows) >= 5:
                 break
+        if fallback_supported:
+            email_addr = resolve_recipient_email(row)
+            raw_author = get_personalization_name(row)
+            author = choose_salutation_name(raw_author, email_addr)
+            first_name = author.split()[0] if author else GENERIC_SALUTATION
+            merge_fields = row_merge_fields(row, email_addr, first_name, book_title)
+            subject_text, body_text, _html_body, _cid = render_message_parts(
+                author,
+                book_title,
+                subject,
+                body_template,
+                DEFAULT_UNSUB_EMAIL,
+                signature_file=None,
+                merge_fields=merge_fields,
+                subject_fallback=subject_fallback,
+            )
+            if _unresolved_placeholders(subject_text, body_text) or "{BookTitle}" in body_text:
+                unresolved_rows.append(f"row={index} unresolved_placeholder")
+                if len(unresolved_rows) >= 5:
+                    break
     if bad_rows:
         print(
             "ERROR: BookTitle-personalized profile cannot use this queue because BookTitle is blank or unsafe. "
             f"profile={profile_name or '-'} csv={csv_path}"
         )
         for item in bad_rows:
+            print(f" - {item}")
+        return False
+    if unresolved_rows:
+        print(
+            "ERROR: BookTitle fallback rendering would leave unresolved placeholders. "
+            f"profile={profile_name or '-'} csv={csv_path}"
+        )
+        for item in unresolved_rows:
             print(f" - {item}")
         return False
     return True
@@ -1549,7 +1629,8 @@ def render_message_parts(
     missing_or_unsafe_book_title = invalid_campaign_book_title(raw_book_title)
     if missing_or_unsafe_book_title:
         format_args["BookTitle"] = ""
-        body_template = body_template.replace(BOOK_TITLE_PERSONALIZED_OPENING, BOOK_TITLE_GENERIC_OPENING)
+        for opening in BOOK_TITLE_PERSONALIZED_OPENINGS:
+            body_template = body_template.replace(opening, BOOK_TITLE_GENERIC_OPENING)
     body_text = body_template.format(**format_args)
     subject_args = dict(format_args)
     subject_args["SIGIMG"] = ""
@@ -2062,6 +2143,11 @@ def main():
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--preview_messages", action="store_true", help="Render message preview CSV without sending.")
     ap.add_argument("--preflight", action="store_true")
+    ap.add_argument(
+        "--strict_book_title_required",
+        action="store_true",
+        help="Require every row to have a safe BookTitle even when the pitch has fallback rendering.",
+    )
     ap.add_argument("--human_mode", action="store_true", help="Add light random pacing and rare microbreaks.")
     ap.add_argument("--no-human_mode", dest="human_mode", action="store_false", help="Disable human pacing.")
     ap.add_argument("--human_jitter_minus", type=int, default=2)
@@ -2496,6 +2582,8 @@ def main():
         subject=subject,
         body_template=body_template,
         profile_name=str(args.profile or ""),
+        subject_fallback=subject_fallback,
+        strict_book_title_required=bool(getattr(args, "strict_book_title_required", False) or pitch.get("require_book_title")),
     ):
         emit_worker_event("ERROR", "invalid_booktitle_queue", csv_path=str(csv_path))
         return

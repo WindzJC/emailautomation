@@ -607,10 +607,10 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("Independent author consignment review", subject_text)
         self.assertIn(
-            "Our team works with independent authors to improve how their work is presented online, especially through clearer websites, stronger book visuals, and more polished launch materials.",
+            "My team works with independent authors to improve how their work is presented online, especially through clearer websites, stronger book visuals, and more polished launch materials.",
             body_text,
         )
-        self.assertNotIn("Our team came across", body_text)
+        self.assertNotIn("My team came across", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
@@ -627,7 +627,7 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("Our team works with independent authors", body_text)
+        self.assertIn("My team works with independent authors", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
@@ -644,12 +644,133 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Consignment review for The Quiet Harbor", subject_text)
-        self.assertIn("Our team came across The Quiet Harbor", body_text)
-        self.assertNotIn("Our team works with independent authors", body_text)
+        self.assertIn("My team came across The Quiet Harbor", body_text)
+        self.assertNotIn("My team works with independent authors", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
-    def test_book_title_template_queue_contract_blocks_missing_book_title_column(self) -> None:
+    def test_fallback_capable_book_title_pitch_allows_mixed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "titled@example.com,Tina,The Quiet Harbor\n"
+                "untitled@example.com,Uma,\n",
+                encoding="utf-8",
+            )
+            rows = send_shard.read_rows(csv_path)
+
+            self.assertTrue(
+                send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    profile_name="sendgrid_annette",
+                    subject_fallback="Independent author consignment review",
+                )
+            )
+
+            titled = rows[0]
+            titled_subject, titled_body, _html_body, _cid = render_message_parts(
+                "Tina",
+                titled["BookTitle"],
+                "Consignment review for {BookTitle}",
+                send_shard.PITCH_1_5_BODY,
+                "annette@barnesnoblemarketing.com",
+                signature_file=None,
+                merge_fields=send_shard.row_merge_fields(titled, titled["Email"], "Tina", titled["BookTitle"]),
+                subject_fallback="Independent author consignment review",
+            )
+            self.assertEqual("Consignment review for The Quiet Harbor", titled_subject)
+            self.assertIn("My team came across The Quiet Harbor", titled_body)
+            self.assertNotIn("{BookTitle}", titled_body)
+            self.assertNotIn("your book", titled_body)
+
+            untitled = rows[1]
+            fallback_subject, fallback_body, _html_body, _cid = render_message_parts(
+                "Uma",
+                untitled["BookTitle"],
+                "Consignment review for {BookTitle}",
+                send_shard.PITCH_1_5_BODY,
+                "annette@barnesnoblemarketing.com",
+                signature_file=None,
+                merge_fields=send_shard.row_merge_fields(untitled, untitled["Email"], "Uma", untitled["BookTitle"]),
+                subject_fallback="Independent author consignment review",
+            )
+            self.assertEqual("Independent author consignment review", fallback_subject)
+            self.assertIn("My team works with independent authors", fallback_body)
+            self.assertNotIn("My team came across", fallback_body)
+            self.assertNotIn("{BookTitle}", fallback_body)
+            self.assertNotIn("your book", fallback_body)
+
+    def test_fallback_capable_book_title_pitch_passes_preflight_with_mixed_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "titled@example.com,Tina,The Quiet Harbor\n"
+                "untitled@example.com,Uma,\n",
+                encoding="utf-8",
+            )
+            profile["interval"] = 35
+            profile["cooldown_seconds"] = 35
+            profile["repeat"] = True
+            original_csv = csv_path.read_text(encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(settings, "STATE_DIR", state), patch.object(
+                send_shard, "SHARDS_DIR", shards
+            ), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(
+                send_shard, "STATE_DIR", state
+            ), patch.object(
+                send_shard, "ROOT", base
+            ), patch.object(
+                send_shard, "DEFAULT_UNSUB_CSV", unsub
+            ), patch.object(
+                send_shard, "DEFAULT_SUPPRESS_CSV", suppress
+            ), patch.object(
+                send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress
+            ), patch.object(
+                send_shard, "SENDGRID_COUNTERS_PATH", counters
+            ), patch.dict(
+                send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False
+            ), patch.object(
+                sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette", "--preflight"]
+            ), redirect_stdout(stdout):
+                send_shard.main()
+
+            self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
+            self.assertIn("PREFLIGHT: ok (no sending).", stdout.getvalue())
+
+    def test_strict_book_title_template_queue_contract_blocks_missing_book_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "titled@example.com,Tina,The Quiet Harbor\n"
+                "untitled@example.com,Uma,\n",
+                encoding="utf-8",
+            )
+            rows = send_shard.read_rows(csv_path)
+
+            self.assertFalse(
+                send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    profile_name="sendgrid_annette",
+                    subject_fallback="Independent author consignment review",
+                    strict_book_title_required=True,
+                )
+            )
+
+    def test_strict_book_title_template_queue_contract_blocks_missing_book_title_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
             csv_path.write_text("Email,FirstName\nreader@example.com,Anna\n", encoding="utf-8")
@@ -662,6 +783,7 @@ class SendShardTests(unittest.TestCase):
                     subject="Consignment review for {BookTitle}",
                     body_template=send_shard.PITCH_1_5_BODY,
                     profile_name="sendgrid_annette",
+                    strict_book_title_required=True,
                 )
             )
 
