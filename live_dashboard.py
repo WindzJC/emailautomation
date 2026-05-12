@@ -49,6 +49,7 @@ except Exception:  # pragma: no cover - dependency fallback
     defuse_stdlib = None
 
 import runtime_control
+import runtime_audit
 import settings
 from dashboard_core import (
     SENDGRID_PROFILES,
@@ -293,8 +294,6 @@ def _resolve_dashboard_csv_path(raw_value: str, default_path: Path) -> Path:
     if not candidate:
         return default_path
     if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", candidate):
-        raise ValueError("Leads paths must stay inside this workspace.")
-    if os.name != "nt" and re.match(r"^/mnt/[A-Za-z]/", candidate):
         raise ValueError("Leads paths must stay inside this workspace.")
     path = Path(candidate)
     if not path.is_absolute():
@@ -1008,9 +1007,12 @@ def _run_important_dispatch_job(job_id: str) -> None:
         job["remaining_rows"] = 0
         job["eta_seconds"] = 0
         job["progress_percent"] = 100
-        job["message"] = (
-            f"Dispatch complete. Astra added {report['added_astra']} row(s), SendGrid added "
-            f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
+        job["message"] = str(
+            report.get("message")
+            or (
+                f"Dispatch complete. Astra added {report['added_astra']} row(s), SendGrid added "
+                f"{report['added_sendgrid']} row(s), skipped both {report['skipped_both']}."
+            )
         )
         _save_important_dispatch_job(job)
     except Exception as exc:
@@ -1622,6 +1624,7 @@ async def _background_automation_loop() -> None:
 
 @app.on_event("startup")
 async def _startup_background_automation() -> None:
+    runtime_audit.write_app_start()
     if getattr(app.state, "automation_task", None) is None:
         app.state.automation_task = asyncio.create_task(_background_automation_loop())
     _resume_pending_important_check_jobs()
@@ -1629,6 +1632,7 @@ async def _startup_background_automation() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown_background_automation() -> None:
+    runtime_audit.write_app_shutdown()
     task = getattr(app.state, "automation_task", None)
     if task is None:
         return
@@ -1805,7 +1809,7 @@ def update_send_cap(payload: SendCapPayload) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "message": f"Dashboard SendGrid cap saved: {cap} total.",
+            "message": f"Dashboard SendGrid target saved: {cap} emails from 6 PM to 12 PM.",
             "snapshot": _build_live_snapshot(),
         }
     )

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
-from io import BytesIO
+from io import BytesIO, StringIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,11 +13,20 @@ from unittest.mock import patch
 from openpyxl import Workbook
 
 import lead_ledger
+import important_leads_workflow
 import live_dashboard
 from important_leads_workflow import ImportantLeadsCheckError
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def test_resolve_dashboard_csv_path_accepts_absolute_workspace_mnt_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            path = Path(tmpdir) / "checked.csv"
+
+            resolved = live_dashboard._resolve_dashboard_csv_path(str(path), live_dashboard.IMPORTANT_LEADS_OUTPUT)
+
+        self.assertEqual(path.resolve(strict=False), resolved)
+
     def test_leads_pipeline_status_summarizes_next_step_and_counts(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -42,6 +52,189 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("quarantine", pipeline["next_step"])
         review_step = next(step for step in pipeline["steps"] if step["key"] == "quarantine")
         self.assertEqual("warn", review_step["state"])
+
+    def test_upload_check_large_author_csv_writes_fresh_outputs_and_counts(self) -> None:
+        valid_rows = 1005
+        buffer = StringIO()
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(["AuthorName", "AuthorEmail", "BookTitle", "PersonalizedOpeningLine"])
+        for index in range(valid_rows):
+            writer.writerow([
+                f"Author {index}",
+                f"synthetic-author-{index}@example.com",
+                f"Book {index}",
+                f"Opening line {index}",
+            ])
+        writer.writerow(["Duplicate", "synthetic-author-10@example.com", "Duplicate Book", "Duplicate line"])
+        writer.writerow(["Invalid", "not-an-email", "Invalid Book", "Invalid line"])
+        writer.writerow(["Missing", "", "Missing Book", "Missing line"])
+        content = buffer.getvalue().encode("utf-8")
+
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            check_runs_dir = tmp / "check_runs"
+            jobs_dir = tmp / "jobs"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
+            suppressed_path.write_text("Email\n", encoding="utf-8")
+            unsubscribed_path.write_text("Email\n", encoding="utf-8")
+            sendgrid_suppressions_path.write_text("email,state,type\n", encoding="utf-8")
+
+            def check_master_leads_without_external_state(**kwargs):
+                return important_leads_workflow.check_master_leads(
+                    **kwargs,
+                    sendgrid_suppressions_path=sendgrid_suppressions_path,
+                    suppressed_path=suppressed_path,
+                    unsubscribed_path=unsubscribed_path,
+                    report_dir=tmp / "state",
+                    summary_dir=tmp / "check_summaries",
+                    validate_deliverability=False,
+                    reject_role_accounts=False,
+                    reject_disposable=False,
+                    persist_state=False,
+                )
+
+            def start_check_job_without_thread(**kwargs):
+                job_id = "check_20260512_010203_synthetic"
+                job = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "stage": "queued",
+                    "created_at_utc": "2026-05-12T01:02:03+00:00",
+                    "updated_at_utc": "2026-05-12T01:02:03+00:00",
+                    "source_label": kwargs["source_label"],
+                    "source_mode": kwargs["source_mode"],
+                    "original_uploaded_filename": kwargs["original_uploaded_filename"],
+                    "server_received_filename": kwargs["server_received_filename"],
+                    "selected_filename": kwargs["selected_filename"],
+                    "selected_size_bytes": kwargs["selected_size_bytes"],
+                    "selected_extension": kwargs["selected_extension"],
+                    "source_sheet": kwargs["source_sheet"],
+                    "input_path": str(kwargs["input_path"]),
+                    "saved_input_path": str(kwargs["effective_input_path"]),
+                    "output_path": str(kwargs["output_path"]),
+                    "rejected_path": str(kwargs["rejected_path"]),
+                    "effective_input_path": str(kwargs["effective_input_path"]),
+                    "total_input_rows": int(kwargs["total_input_rows"] or 0),
+                    "processed_rows": 0,
+                    "remaining_rows": int(kwargs["total_input_rows"] or 0),
+                    "eta_seconds": "",
+                    "progress_percent": 0,
+                }
+                live_dashboard._save_important_check_job(job)
+                return job
+
+            upload = live_dashboard.UploadFile(
+                filename="lead_op_author_personalized_upload.csv",
+                file=BytesIO(content),
+            )
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_RUNS", check_runs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
+                live_dashboard,
+                "timestamp_slug",
+                return_value="20260512_010203",
+            ), patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                side_effect=check_master_leads_without_external_state,
+            ), patch.object(
+                live_dashboard,
+                "_start_important_check_job",
+                side_effect=start_check_job_without_thread,
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}):
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="lead_op_author_personalized_upload.csv",
+                        client_selected_size_bytes=str(len(content)),
+                        client_selected_extension=".csv",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+                body = json.loads(response.body)
+                live_dashboard._run_important_check_job(body["job"]["job_id"])
+
+            self.assertEqual(202, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertEqual("lead_op_author_personalized_upload.csv", body["server_received_filename"])
+            self.assertEqual(valid_rows + 3, body["job"]["total_input_rows"])
+
+            saved_job = json.loads((jobs_dir / f"{body['job']['job_id']}.json").read_text(encoding="utf-8"))
+            report = saved_job["check"]
+            self.assertEqual("completed", saved_job["status"])
+            self.assertEqual(valid_rows, report["cleaned_rows"])
+            self.assertEqual(3, report["rejected_rows"])
+            self.assertEqual(1, report["reason_counts"]["DUPLICATE_IN_BATCH"])
+            self.assertEqual(1, report["reason_counts"]["INVALID_EMAIL_SYNTAX"])
+            self.assertEqual(1, report["reason_counts"]["MISSING_EMAIL"])
+            self.assertEqual(str(output_path), saved_job["output_path"])
+            self.assertEqual(str(rejected_path), saved_job["rejected_path"])
+            self.assertEqual(valid_rows, live_dashboard._count_csv_rows(output_path))
+            self.assertEqual(3, live_dashboard._count_csv_rows(rejected_path))
+
+            pipeline = live_dashboard._build_leads_pipeline_status(
+                {
+                    "important_output_label": str(output_path),
+                    "important_triage_keep_label": str(tmp / "missing_triaged_keep.csv"),
+                    "important_triage_quarantine_label": str(tmp / "missing_quarantine.csv"),
+                    "latest_master_check": {
+                        "generated_at_utc": "2026-05-12T00:00:00+00:00",
+                        "cleaned_rows": 1,
+                    },
+                    "dispatch_source": {"dispatch_eligible_row_count": valid_rows},
+                }
+            )
+            self.assertEqual(valid_rows, pipeline["checked_rows"])
+            self.assertEqual(valid_rows, pipeline["steps"][0]["count"])
+            self.assertEqual(valid_rows, pipeline["dispatch_eligible_rows"])
+
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sendgrid_queues = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            jc_log = tmp / "private_jc_log.csv"
+            sendgrid_logs = [tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]
+            jc_queue.write_text("Email,FirstName\n", encoding="utf-8")
+            jc_log.write_text("Email,Status\n", encoding="utf-8")
+            for path in sendgrid_queues:
+                path.write_text("Email,FirstName\n", encoding="utf-8")
+            for path in sendgrid_logs:
+                path.write_text("Email,Status\n", encoding="utf-8")
+
+            preview = important_leads_workflow.preview_dispatch_master_leads(
+                master_path=output_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_CLEANED,
+                dispatch_cap="all",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sendgrid_queues,
+                jc_log_path=jc_log,
+                sendgrid_log_paths=sendgrid_logs,
+                sendgrid_suppressions_path=sendgrid_suppressions_path,
+                suppressed_path=suppressed_path,
+                unsubscribed_path=unsubscribed_path,
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=tmp / "dispatch_previews",
+            )
+            self.assertEqual(valid_rows, preview["dispatch_source_row_count"])
+            self.assertEqual(valid_rows, preview["dispatch_eligible_row_count"])
 
     def test_dispatch_job_creates_pre_dispatch_archive_before_confirm(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -698,7 +891,7 @@ class LiveDashboardTests(unittest.TestCase):
                         client_selected_filename="authors_upload.csv",
                         client_selected_size_bytes="37",
                         client_selected_extension=".csv",
-                        output_path="/mnt/d/VS/email automation/_important/leads.csv",
+                        output_path="D:\\VS\\email automation\\_important\\leads.csv",
                         rejected_path="C:\\VS\\email automation\\_important\\leads_rejected.csv",
                     )
                 )
@@ -1407,6 +1600,7 @@ class LiveDashboardTests(unittest.TestCase):
             quarantine_path = tmp / "leads_quarantine.csv"
             input_path.write_text("Email,FullName\njane@example.com,Jane Author\n", encoding="utf-8")
             payload = live_dashboard.ImportantLeadVerifyPayload(
+                mode=live_dashboard.TRIAGE_MODE_STRICT,
                 input_path=str(input_path),
                 verified_path=str(verified_path),
                 rejected_path=str(rejected_path),
@@ -1962,33 +2156,33 @@ class LiveDashboardTests(unittest.TestCase):
 
         body = json.loads(response.body)
         self.assertEqual(200, response.status_code)
-        self.assertEqual(
-            {
-                "shard": 1,
-                "check_paste_policy": {
-                    "mode": "small_manual_only",
-                    "paste_warning_rows": 250,
-                    "paste_max_rows": 1000,
-                    "upload_required_rows": 1000,
-                    "upload_recommended_rows": 250,
-                },
-                "check": 2,
-                "dispatch": 3,
-                "verify": 4,
-                "dispatch_source_mode": "strict_verified",
-                "dispatch_source_path": "_important/leads_verified.csv",
-                "dispatch_source_exists": True,
-                "dispatch_source_row_count": 1,
-                "dispatch_eligible_row_count": 1,
-                "dispatch_block_reason": "",
-                "verification_required": True,
-                "verification_file_mtime": "2026-04-09T00:00:00+00:00",
-                "active_important_check_job": None,
-                "active_important_verify_job": None,
-                "active_important_dispatch_job": None,
+        expected = {
+            "shard": 1,
+            "check_paste_policy": {
+                "mode": "small_manual_only",
+                "paste_warning_rows": 250,
+                "paste_max_rows": 1000,
+                "upload_required_rows": 1000,
+                "upload_recommended_rows": 250,
             },
-            body["status"],
-        )
+            "check": 2,
+            "dispatch": 3,
+            "verify": 4,
+            "dispatch_source_mode": "strict_verified",
+            "dispatch_source_path": "_important/leads_verified.csv",
+            "dispatch_source_exists": True,
+            "dispatch_source_row_count": 1,
+            "dispatch_eligible_row_count": 1,
+            "dispatch_block_reason": "",
+            "verification_required": True,
+            "verification_file_mtime": "2026-04-09T00:00:00+00:00",
+            "active_important_check_job": None,
+            "active_important_verify_job": None,
+            "active_important_dispatch_job": None,
+        }
+        for key, value in expected.items():
+            self.assertEqual(value, body["status"][key])
+        self.assertIn("pipeline", body["status"])
 
     def test_shard_block_when_senders_active(self) -> None:
         payload = live_dashboard.ShardLeadsPayload(
