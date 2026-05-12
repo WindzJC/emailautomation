@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -60,6 +61,9 @@ from dashboard_core import (
 from important_leads_verify import (
     TRIAGE_MODE_FAST,
     TRIAGE_MODE_STRICT,
+    TRIAGE_PATHS_STATE_KEY,
+    TRIAGE_STATE_KEY,
+    _triage_path_state_labels,
     fast_triage_master_leads,
     important_leads_triage_path_state,
     important_leads_verify_path_state,
@@ -151,6 +155,7 @@ IMPORTANT_LEADS_DISPATCH_JOBS = settings.APP_ROOT / "_important" / "dispatch_job
 IMPORTANT_LEADS_DISPATCH_PREVIEWS = IMPORTANT_LEADS_DISPATCH_JOBS / "previews"
 IMPORTANT_LEADS_PASTE_WARNING_ROWS = _int_env("IMPORTANT_LEADS_PASTE_WARNING_ROWS", 250)
 IMPORTANT_LEADS_PASTE_MAX_ROWS = max(IMPORTANT_LEADS_PASTE_WARNING_ROWS, _int_env("IMPORTANT_LEADS_PASTE_MAX_ROWS", 1000))
+IMPORTANT_LEADS_CHECK_UPLOAD_MAX_BYTES = _int_env("DASHBOARD_CHECK_UPLOAD_MAX_BYTES", 150 * 1024 * 1024)
 app = FastAPI(title="Email Automation Live Dashboard")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -437,7 +442,7 @@ def _important_check_job_with_progress(job: dict[str, object]) -> dict[str, obje
 def _find_active_important_check_job() -> dict[str, object] | None:
     if not IMPORTANT_LEADS_CHECK_JOBS.exists():
         return None
-    active_statuses = {"queued", "running", "checking"}
+    active_statuses = {"queued", "running", "checking", "auto_triage_running"}
     candidates: list[tuple[float, dict[str, object]]] = []
     for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
         try:
@@ -458,6 +463,261 @@ def _find_active_important_check_job() -> dict[str, object] | None:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
+
+
+def _parse_iso_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _check_job_created_sort_key(job: dict[str, object], path: Path | None = None) -> float:
+    created = _parse_iso_timestamp(job.get("created_at_utc"))
+    if created:
+        return created.timestamp()
+    if path is not None:
+        try:
+            return path.stat().st_mtime
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _has_newer_important_check_job(job: dict[str, object]) -> bool:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return False
+    job_id = str(job.get("job_id") or "").strip()
+    current_key = _check_job_created_sort_key(job, _important_check_job_path(job_id) if job_id else None)
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            other = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(other, dict):
+            continue
+        other_id = str(other.get("job_id") or path.stem).strip()
+        if other_id == job_id:
+            continue
+        if _check_job_created_sort_key(other, path) > current_key:
+            return True
+    return False
+
+
+def _auto_triage_already_running(exclude_check_job_id: str = "") -> bool:
+    active_verify = _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS)
+    if active_verify and str(active_verify.get("mode") or "").upper() == TRIAGE_MODE_FAST:
+        return True
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return False
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("job_id") or path.stem).strip() == exclude_check_job_id:
+            continue
+        if str(job.get("auto_triage_status") or "").strip().lower() == "running":
+            return True
+    return False
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _copy_csv_atomic(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_suffix(f"{destination.suffix}.{os.getpid()}.tmp")
+    shutil.copyfile(source, tmp_path)
+    tmp_path.replace(destination)
+    settings.secure_private_file(destination)
+
+
+def _promote_auto_triage_outputs(
+    *,
+    staged_keep_path: Path,
+    staged_rejected_path: Path,
+    staged_quarantine_path: Path,
+    keep_path: Path,
+    rejected_path: Path,
+    quarantine_path: Path,
+) -> None:
+    _copy_csv_atomic(staged_keep_path, keep_path)
+    _copy_csv_atomic(staged_rejected_path, rejected_path)
+    _copy_csv_atomic(staged_quarantine_path, quarantine_path)
+
+
+def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, object]:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return job
+    if str(job.get("source_mode") or "").strip() != "uploaded_file":
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "not_upload_check"
+        return job
+    if str(job.get("status") or "").strip().lower() in {"failed", "canceled", "cancelled"} or job.get("cancel_requested"):
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "check_not_successful"
+        return job
+    existing_status = str(job.get("auto_triage_status") or "").strip().lower()
+    if existing_status in {"running", "completed", "failed", "skipped"}:
+        return job
+
+    output_path = Path(str(job.get("output_path") or ""))
+    rejected_path = Path(str(job.get("rejected_path") or ""))
+    expected_output = IMPORTANT_LEADS_OUTPUT.resolve(strict=False)
+    expected_rejected = IMPORTANT_LEADS_REJECTED.resolve(strict=False)
+    if output_path.resolve(strict=False) != expected_output or rejected_path.resolve(strict=False) != expected_rejected:
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "non_default_check_outputs"
+        return job
+    if not output_path.exists() or not rejected_path.exists():
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "fresh_check_outputs_missing"
+        return job
+    if _has_newer_important_check_job(job):
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "newer_check_job_started"
+        return job
+    if _auto_triage_already_running(exclude_check_job_id=job_id):
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "triage_already_running"
+        return job
+
+    checked_signature = _file_signature(output_path)
+    staged_dir = IMPORTANT_LEADS_CHECK_RUNS / "auto_triage" / job_id
+    staged_keep_path = staged_dir / "leads_triaged_keep.csv"
+    staged_rejected_path = staged_dir / "leads_triaged_reject.csv"
+    staged_quarantine_path = staged_dir / "leads_triaged_quarantine.csv"
+    keep_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_keep.csv")
+    triage_rejected_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_reject.csv")
+    quarantine_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv")
+
+    job["status"] = "auto_triage_running"
+    job["stage"] = "auto_triage"
+    job["phase"] = "auto_triage"
+    job["auto_triage_status"] = "running"
+    job["auto_triage_source_check_job_id"] = job_id
+    job["auto_triage_started_at_utc"] = iso_utc()
+    job["auto_triage_keep_path"] = str(keep_path)
+    job["auto_triage_rejected_path"] = str(triage_rejected_path)
+    job["auto_triage_quarantine_path"] = str(quarantine_path)
+    job["message"] = "Check complete. Auto triage running."
+    _save_important_check_job(job)
+
+    started_at = time.monotonic()
+    last_progress_save_at = 0.0
+
+    def save_auto_triage_progress(processed_rows: int, total_rows: int) -> None:
+        nonlocal job, last_progress_save_at
+        now = time.monotonic()
+        if processed_rows < total_rows and now - last_progress_save_at < 0.75:
+            return
+        last_progress_save_at = now
+        total = max(0, int(total_rows or 0))
+        processed = min(total, max(0, int(processed_rows or 0)))
+        remaining = max(0, total - processed)
+        elapsed = max(0.001, now - started_at)
+        rate = processed / elapsed if processed > 0 else 0.0
+        job["auto_triage_total_rows"] = total
+        job["auto_triage_processed_rows"] = processed
+        job["auto_triage_remaining_rows"] = remaining
+        job["auto_triage_progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
+        job["auto_triage_eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
+        _save_important_check_job(job)
+
+    def should_cancel_auto_triage() -> bool:
+        try:
+            latest_job = _load_important_check_job(job_id)
+            if latest_job.get("cancel_requested"):
+                return True
+        except Exception:
+            pass
+        return _has_newer_important_check_job(job)
+
+    try:
+        report = fast_triage_master_leads(
+            input_path=output_path,
+            keep_path=staged_keep_path,
+            rejected_path=staged_rejected_path,
+            quarantine_path=staged_quarantine_path,
+            persist_state=False,
+            progress_callback=save_auto_triage_progress,
+            should_cancel=should_cancel_auto_triage,
+        )
+        if bool(report.get("canceled")) or should_cancel_auto_triage():
+            job["status"] = "completed"
+            job["stage"] = "done"
+            job["phase"] = "done"
+            job["auto_triage_status"] = "skipped"
+            job["auto_triage_skip_reason"] = "newer_check_job_started" if _has_newer_important_check_job(job) else "canceled"
+            job["message"] = "Check complete. Auto triage skipped before publishing outputs."
+            return job
+        if _file_signature(output_path) != checked_signature:
+            job["status"] = "completed"
+            job["stage"] = "done"
+            job["phase"] = "done"
+            job["auto_triage_status"] = "skipped"
+            job["auto_triage_skip_reason"] = "checked_output_changed"
+            job["message"] = "Check complete. Auto triage skipped because checked output changed."
+            return job
+
+        _promote_auto_triage_outputs(
+            staged_keep_path=staged_keep_path,
+            staged_rejected_path=staged_rejected_path,
+            staged_quarantine_path=staged_quarantine_path,
+            keep_path=keep_path,
+            rejected_path=triage_rejected_path,
+            quarantine_path=quarantine_path,
+        )
+        final_report = dict(report)
+        final_report["input_label"] = str(output_path)
+        final_report["verified_label"] = str(keep_path)
+        final_report["rejected_label"] = str(triage_rejected_path)
+        final_report["quarantine_label"] = str(quarantine_path)
+        final_report["auto_triage_source_check_job_id"] = job_id
+        save_state(
+            **{
+                TRIAGE_PATHS_STATE_KEY: _triage_path_state_labels(
+                    output_path,
+                    keep_path,
+                    triage_rejected_path,
+                    quarantine_path,
+                ),
+                TRIAGE_STATE_KEY: final_report,
+            }
+        )
+        job["status"] = "completed"
+        job["stage"] = "done"
+        job["phase"] = "done"
+        job["auto_triage_status"] = "completed"
+        job["auto_triage_completed_at_utc"] = iso_utc()
+        job["auto_triage_report"] = final_report
+        job["auto_triage_total_rows"] = int(final_report.get("total_input_rows") or final_report.get("input_rows") or 0)
+        job["auto_triage_processed_rows"] = int(final_report.get("processed_rows") or 0)
+        job["auto_triage_remaining_rows"] = 0
+        job["auto_triage_progress_percent"] = 100
+        job["message"] = (
+            f"Check complete. Auto triage complete: KEEP {int(final_report.get('keep_count') or 0)}, "
+            f"REJECT {int(final_report.get('reject_count') or 0)}, "
+            f"QUARANTINE {int(final_report.get('quarantine_count') or 0)}."
+        )
+    except Exception as exc:
+        job["status"] = "triage_failed"
+        job["stage"] = "triage_failed"
+        job["phase"] = "triage_failed"
+        job["auto_triage_status"] = "failed"
+        job["auto_triage_error"] = str(exc)
+        job["auto_triage_completed_at_utc"] = iso_utc()
+        job["message"] = f"Check complete. Auto triage failed: {exc}"
+    return job
 
 
 def _job_path(directory: Path, job_id: str) -> Path:
@@ -677,7 +937,7 @@ def _run_important_check_job(job_id: str) -> None:
         def save_progress(processed_rows: int, total_rows: int) -> None:
             nonlocal job, last_progress_save_at
             try:
-                latest_job = _load_important_verify_job(job_id)
+                latest_job = _load_important_check_job(job_id)
                 if latest_job.get("cancel_requested"):
                     job["cancel_requested"] = True
             except Exception:
@@ -704,8 +964,24 @@ def _run_important_check_job(job_id: str) -> None:
             effective_input_path=Path(str(job.get("effective_input_path") or "")),
             progress_callback=save_progress,
         )
+        if job.get("cancel_requested"):
+            job["status"] = "canceled"
+            job["stage"] = "canceled"
+            job["phase"] = "canceled"
+            job["completed_at_utc"] = iso_utc()
+            job["check"] = report
+            job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
+            job["remaining_rows"] = 0
+            job["eta_seconds"] = 0
+            job["progress_percent"] = 100
+            job["auto_triage_status"] = "skipped"
+            job["auto_triage_skip_reason"] = "check_canceled"
+            job["message"] = "Check completed after cancellation request. Auto triage skipped."
+            _save_important_check_job(job)
+            return
         job["status"] = "completed"
         job["stage"] = "done"
+        job["phase"] = "check_complete"
         job["completed_at_utc"] = iso_utc()
         job["check"] = report
         job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
@@ -717,6 +993,7 @@ def _run_important_check_job(job_id: str) -> None:
             f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
             f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
         )
+        job = _run_auto_fast_triage_after_check(job)
         _save_important_check_job(job)
     except Exception as exc:
         job["status"] = "failed"
@@ -1106,21 +1383,23 @@ def _build_leads_pipeline_status(status: dict[str, object]) -> dict[str, object]
     strict_rows = _csv_count_from_status_label(status, "important_verify_keep_label", STRICT_VERIFIED_PATH)
     quarantine_rows = _csv_count_from_status_label(status, "important_triage_quarantine_label", IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv"))
     eligible_rows = int(dispatch_source.get("dispatch_eligible_row_count") or status.get("dispatch_eligible_row_count") or 0)
+    auto_triage_running = bool(active_check and str(active_check.get("auto_triage_status") or "").lower() == "running")
+    check_running = bool(active_check and not auto_triage_running)
 
     steps = [
         {
             "key": "check",
             "label": "Check",
-            "state": "active" if active_check else ("done" if checked_rows or latest_check.get("generated_at_utc") else "waiting"),
+            "state": "active" if check_running else ("done" if checked_rows or latest_check.get("generated_at_utc") or auto_triage_running else "waiting"),
             "count": checked_rows or int(latest_check.get("cleaned_rows") or 0),
-            "note": "Cleaning/upload job running." if active_check else "Cleaned leads ready." if checked_rows else "Run Check Leads.",
+            "note": "Cleaning/upload job running." if check_running else "Check complete." if auto_triage_running else "Cleaned leads ready." if checked_rows else "Run Check Leads.",
         },
         {
             "key": "triage",
             "label": "Triage",
-            "state": "active" if (active_verify and str(active_verify.get("mode") or "").upper() == TRIAGE_MODE_FAST) else ("done" if triaged_rows or latest_triage.get("generated_at_utc") else "waiting"),
-            "count": triaged_rows or int(latest_triage.get("keep_count") or latest_triage.get("verified_count") or 0),
-            "note": "Fast triage running." if active_verify else "Fast triage keep rows ready." if triaged_rows else "Run fast triage.",
+            "state": "active" if (auto_triage_running or (active_verify and str(active_verify.get("mode") or "").upper() == TRIAGE_MODE_FAST)) else ("done" if triaged_rows or latest_triage.get("generated_at_utc") else "waiting"),
+            "count": triaged_rows or int(active_check.get("auto_triage_processed_rows") or 0) if auto_triage_running else triaged_rows or int(latest_triage.get("keep_count") or latest_triage.get("verified_count") or 0),
+            "note": "Auto triage running." if auto_triage_running else "Fast triage running." if active_verify else "Fast triage keep rows ready." if triaged_rows else "Run fast triage.",
         },
         {
             "key": "quarantine",
@@ -1711,6 +1990,11 @@ async def _read_upload_bytes_with_limit(file: UploadFile, *, limit: int) -> byte
     return content
 
 
+def _human_upload_limit(limit: int) -> str:
+    megabytes = max(1, int(limit or 0) // (1024 * 1024))
+    return f"{megabytes} MB"
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -1928,26 +2212,27 @@ async def check_important_leads_upload(
         selected_size_bytes = max(0, int(str(client_selected_size_bytes or "0").strip() or 0))
     except Exception:
         selected_size_bytes = 0
-    if selected_size_bytes > settings.DASHBOARD_MAX_UPLOAD_BYTES:
+    max_upload_bytes = IMPORTANT_LEADS_CHECK_UPLOAD_MAX_BYTES
+    if selected_size_bytes > max_upload_bytes:
         return JSONResponse(
             {
                 "ok": False,
-                "message": f"Upload too large. Limit is {settings.DASHBOARD_MAX_UPLOAD_BYTES} bytes.",
+                "message": f"Upload too large. Upload CSV/XLSX files up to {_human_upload_limit(max_upload_bytes)}.",
                 "error": "UPLOAD_TOO_LARGE",
-                "details": {"max_upload_bytes": settings.DASHBOARD_MAX_UPLOAD_BYTES},
+                "details": {"max_upload_bytes": max_upload_bytes, "max_upload_megabytes": max_upload_bytes // (1024 * 1024)},
                 "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             },
             status_code=413,
         )
     try:
-        content = await _read_upload_bytes_with_limit(file, limit=settings.DASHBOARD_MAX_UPLOAD_BYTES)
+        content = await _read_upload_bytes_with_limit(file, limit=max_upload_bytes)
     except ValueError as exc:
         return JSONResponse(
             {
                 "ok": False,
-                "message": str(exc),
+                "message": f"{exc} Upload CSV/XLSX files up to {_human_upload_limit(max_upload_bytes)}.",
                 "error": "UPLOAD_TOO_LARGE",
-                "details": {"max_upload_bytes": settings.DASHBOARD_MAX_UPLOAD_BYTES},
+                "details": {"max_upload_bytes": max_upload_bytes, "max_upload_megabytes": max_upload_bytes // (1024 * 1024)},
                 "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
             },
             status_code=413,

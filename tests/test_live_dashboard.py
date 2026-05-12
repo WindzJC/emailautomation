@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 from io import BytesIO, StringIO
 import tempfile
 import unittest
@@ -19,6 +20,17 @@ from important_leads_workflow import ImportantLeadsCheckError
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def _write_csv(self, path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def _read_csv_rows(self, path: Path) -> list[dict[str, str]]:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            return list(csv.DictReader(handle))
+
     def test_resolve_dashboard_csv_path_accepts_absolute_workspace_mnt_path(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             path = Path(tmpdir) / "checked.csv"
@@ -26,6 +38,32 @@ class LiveDashboardTests(unittest.TestCase):
             resolved = live_dashboard._resolve_dashboard_csv_path(str(path), live_dashboard.IMPORTANT_LEADS_OUTPUT)
 
         self.assertEqual(path.resolve(strict=False), resolved)
+
+    def test_resolve_dashboard_csv_path_blocks_windows_traversal_and_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir, tempfile.TemporaryDirectory() as outside_dir:
+            tmp = Path(tmpdir)
+            outside = Path(outside_dir)
+            outside_file = outside / "escaped.csv"
+            outside_file.write_text("Email\n", encoding="utf-8")
+
+            for raw_path in (
+                "C:\\VS\\email automation\\_important\\leads.csv",
+                "D:\\VS\\email automation\\_important\\leads.csv",
+                str(live_dashboard.settings.APP_ROOT.parent / "outside.csv"),
+                str(tmp / ".." / ".." / "outside.csv"),
+            ):
+                with self.assertRaises(ValueError):
+                    live_dashboard._resolve_dashboard_csv_path(raw_path, live_dashboard.IMPORTANT_LEADS_OUTPUT)
+
+            link = tmp / "outside_link.csv"
+            os.symlink(outside_file, link)
+            with self.assertRaises(ValueError):
+                live_dashboard._resolve_dashboard_csv_path(str(link), live_dashboard.IMPORTANT_LEADS_OUTPUT)
+
+            linked_dir = tmp / "outside_dir"
+            os.symlink(outside, linked_dir)
+            with self.assertRaises(ValueError):
+                live_dashboard._resolve_dashboard_csv_path(str(linked_dir / "nested.csv"), live_dashboard.IMPORTANT_LEADS_OUTPUT)
 
     def test_leads_pipeline_status_summarizes_next_step_and_counts(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -55,6 +93,7 @@ class LiveDashboardTests(unittest.TestCase):
 
     def test_upload_check_large_author_csv_writes_fresh_outputs_and_counts(self) -> None:
         valid_rows = 1005
+        declared_upload_size = 87 * 1024 * 1024
         buffer = StringIO()
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(["AuthorName", "AuthorEmail", "BookTitle", "PersonalizedOpeningLine"])
@@ -164,7 +203,7 @@ class LiveDashboardTests(unittest.TestCase):
                     live_dashboard.check_important_leads_upload(
                         file=upload,
                         client_selected_filename="lead_op_author_personalized_upload.csv",
-                        client_selected_size_bytes=str(len(content)),
+                        client_selected_size_bytes=str(declared_upload_size),
                         client_selected_extension=".csv",
                         output_path=str(output_path),
                         rejected_path=str(rejected_path),
@@ -176,6 +215,8 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(202, response.status_code)
             self.assertTrue(body["ok"])
             self.assertEqual("lead_op_author_personalized_upload.csv", body["server_received_filename"])
+            self.assertEqual(declared_upload_size, body["selected_size_bytes"])
+            self.assertEqual(declared_upload_size, body["job"]["selected_size_bytes"])
             self.assertEqual(valid_rows + 3, body["job"]["total_input_rows"])
 
             saved_job = json.loads((jobs_dir / f"{body['job']['job_id']}.json").read_text(encoding="utf-8"))
@@ -190,6 +231,22 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(str(rejected_path), saved_job["rejected_path"])
             self.assertEqual(valid_rows, live_dashboard._count_csv_rows(output_path))
             self.assertEqual(3, live_dashboard._count_csv_rows(rejected_path))
+            with output_path.open(newline="", encoding="utf-8-sig") as handle:
+                output_reader = csv.DictReader(handle)
+                output_rows = list(output_reader)
+            self.assertIn("BookTitle", output_reader.fieldnames or [])
+            self.assertIn("AuthorName", output_reader.fieldnames or [])
+            self.assertIn("PersonalizedOpeningLine", output_reader.fieldnames or [])
+            self.assertEqual(valid_rows, len(output_rows))
+            self.assertEqual("Book 0", output_rows[0]["BookTitle"])
+            self.assertEqual("Author 0", output_rows[0]["AuthorName"])
+            with rejected_path.open(newline="", encoding="utf-8-sig") as handle:
+                rejected_reader = csv.DictReader(handle)
+                rejected_rows = list(rejected_reader)
+            self.assertIn("BookTitle", rejected_reader.fieldnames or [])
+            rejected_titles = {row["BookTitle"] for row in rejected_rows}
+            self.assertIn("Invalid Book", rejected_titles)
+            self.assertIn("Missing Book", rejected_titles)
 
             pipeline = live_dashboard._build_leads_pipeline_status(
                 {
@@ -235,6 +292,101 @@ class LiveDashboardTests(unittest.TestCase):
             )
             self.assertEqual(valid_rows, preview["dispatch_source_row_count"])
             self.assertEqual(valid_rows, preview["dispatch_eligible_row_count"])
+
+    def test_check_important_leads_upload_rejects_declared_size_over_check_upload_limit(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.csv",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_master_leads:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="authors_upload.csv",
+                        client_selected_size_bytes=str(live_dashboard.IMPORTANT_LEADS_CHECK_UPLOAD_MAX_BYTES + 1),
+                        client_selected_extension=".csv",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(413, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_TOO_LARGE", body["error"])
+            self.assertIn("CSV/XLSX", body["message"])
+            self.assertEqual(live_dashboard.IMPORTANT_LEADS_CHECK_UPLOAD_MAX_BYTES, body["details"]["max_upload_bytes"])
+            check_master_leads.assert_not_called()
+
+    def test_check_important_leads_upload_rejects_stream_over_check_upload_limit(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            upload = live_dashboard.UploadFile(
+                filename="authors_upload.csv",
+                file=BytesIO(b"Email,FirstName\nanna@example.com,Anna\n"),
+            )
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(live_dashboard, "important_leads_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "_read_upload_bytes_with_limit",
+                side_effect=ValueError("Upload too large. Limit is 157286400 bytes."),
+            ) as read_upload, patch.object(
+                live_dashboard,
+                "_start_important_check_job",
+            ) as start_job:
+                response = asyncio.run(
+                    live_dashboard.check_important_leads_upload(
+                        file=upload,
+                        client_selected_filename="authors_upload.csv",
+                        client_selected_size_bytes="0",
+                        client_selected_extension=".csv",
+                        output_path=str(output_path),
+                        rejected_path=str(rejected_path),
+                    )
+                )
+
+            body = json.loads(response.body)
+            self.assertEqual(413, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("UPLOAD_TOO_LARGE", body["error"])
+            self.assertIn("CSV/XLSX", body["message"])
+            self.assertEqual(live_dashboard.IMPORTANT_LEADS_CHECK_UPLOAD_MAX_BYTES, body["details"]["max_upload_bytes"])
+            read_upload.assert_called_once()
+            start_job.assert_not_called()
 
     def test_dispatch_job_creates_pre_dispatch_archive_before_confirm(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -2183,6 +2335,237 @@ class LiveDashboardTests(unittest.TestCase):
         for key, value in expected.items():
             self.assertEqual(value, body["status"][key])
         self.assertIn("pipeline", body["status"])
+
+    def test_upload_check_success_auto_runs_fast_triage_without_touching_shards(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            important_dir = tmp / "_important"
+            state_dir = tmp / "state"
+            jobs_dir = important_dir / "check_runs" / "jobs"
+            check_runs_dir = important_dir / "check_runs"
+            output_path = important_dir / "leads.csv"
+            rejected_path = important_dir / "leads_rejected.csv"
+            keep_path = important_dir / "leads_triaged_keep.csv"
+            triage_reject_path = important_dir / "leads_triaged_reject.csv"
+            quarantine_path = important_dir / "leads_triaged_quarantine.csv"
+            input_path = check_runs_dir / "uploaded.csv"
+            ledger_path = state_dir / "lead_ledger.sqlite3"
+            shard_path = tmp / "data" / "shards" / "recipients_sendgrid_1.csv"
+            self._write_csv(shard_path, ["Email", "FirstName"], [{"Email": "queued@example.test", "FirstName": "Queued"}])
+            shard_before = shard_path.read_text(encoding="utf-8")
+            state_dir.mkdir(parents=True, exist_ok=True)
+            self._write_csv(state_dir / "suppressed.csv", ["Email"], [])
+            self._write_csv(state_dir / "unsubscribed.csv", ["Email"], [])
+            self._write_csv(state_dir / "sendgrid_suppressions.csv", ["email", "status"], [])
+            headers = [
+                "FullName",
+                "FirstName",
+                "Email",
+                "BookTitle",
+                "AuthorName",
+                "AuthorEmail",
+                "PersonalizedOpeningLine",
+                "WhyAstraFit",
+                "Website",
+                "BookURL",
+                "ConfidenceScore",
+                "source_file",
+                "source_sheet",
+                "source_row",
+            ]
+            self._write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        "FullName": "Alpha Baker",
+                        "FirstName": "Alpha",
+                        "Email": "alpha.author@examplebooks.com",
+                        "BookTitle": "Signals at Dawn",
+                        "AuthorName": "Alpha Baker",
+                        "AuthorEmail": "alpha.author@examplebooks.com",
+                        "PersonalizedOpeningLine": "Synthetic opening.",
+                        "WhyAstraFit": "Synthetic fit.",
+                        "Website": "https://example.test/alpha",
+                        "BookURL": "https://books.example.test/signals",
+                        "ConfidenceScore": "0.99",
+                        "source_file": "synthetic.csv",
+                        "source_sheet": "Sheet1",
+                        "source_row": "2",
+                    }
+                ],
+            )
+            job = {
+                "job_id": "check_auto_triage_success",
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-05-13T00:00:00+00:00",
+                "source_mode": "uploaded_file",
+                "input_path": str(input_path),
+                "saved_input_path": str(input_path),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "effective_input_path": str(input_path),
+                "total_input_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+            }
+
+            def check_master_leads_without_external_state(**kwargs):
+                return important_leads_workflow.check_master_leads(
+                    **kwargs,
+                    sendgrid_suppressions_path=state_dir / "sendgrid_suppressions.csv",
+                    suppressed_path=state_dir / "suppressed.csv",
+                    unsubscribed_path=state_dir / "unsubscribed.csv",
+                    report_dir=state_dir,
+                    summary_dir=check_runs_dir,
+                    validate_deliverability=False,
+                    reject_role_accounts=False,
+                    reject_disposable=False,
+                    persist_state=False,
+                )
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_OUTPUT", output_path), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_REJECTED",
+                rejected_path,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_RUNS", check_runs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(live_dashboard.settings, "STATE_DIR", state_dir), patch.object(
+                live_dashboard.settings,
+                "LEAD_LEDGER_DB_PATH",
+                ledger_path,
+            ), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                side_effect=check_master_leads_without_external_state,
+            ):
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._run_important_check_job(job["job_id"])
+
+            saved_job = json.loads((jobs_dir / f"{job['job_id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual("completed", saved_job["status"])
+            self.assertEqual("completed", saved_job["auto_triage_status"])
+            self.assertEqual(1, live_dashboard._count_csv_rows(output_path))
+            self.assertEqual(1, live_dashboard._count_csv_rows(keep_path))
+            self.assertEqual(0, live_dashboard._count_csv_rows(triage_reject_path))
+            self.assertTrue(quarantine_path.exists())
+            keep_rows = self._read_csv_rows(keep_path)
+            self.assertEqual("Signals at Dawn", keep_rows[0]["BookTitle"])
+            self.assertEqual("Alpha Baker", keep_rows[0]["AuthorName"])
+            self.assertEqual("Synthetic opening.", keep_rows[0]["PersonalizedOpeningLine"])
+            self.assertEqual("Synthetic fit.", keep_rows[0]["WhyAstraFit"])
+            self.assertEqual(shard_before, shard_path.read_text(encoding="utf-8"))
+
+            with patch.object(live_dashboard, "fast_triage_master_leads") as fast_triage:
+                live_dashboard._run_auto_fast_triage_after_check(saved_job)
+            fast_triage.assert_not_called()
+
+    def test_upload_check_failure_and_cancel_skip_auto_triage(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            important_dir = tmp / "_important"
+            state_dir = tmp / "state"
+            jobs_dir = important_dir / "check_runs" / "jobs"
+            check_runs_dir = important_dir / "check_runs"
+            output_path = important_dir / "leads.csv"
+            rejected_path = important_dir / "leads_rejected.csv"
+            keep_path = important_dir / "leads_triaged_keep.csv"
+            input_path = check_runs_dir / "uploaded.csv"
+            self._write_csv(
+                input_path,
+                ["FullName", "Email", "BookTitle"],
+                [{"FullName": "Beta Writer", "Email": "beta@examplebooks.com", "BookTitle": "Beta Book"}],
+            )
+            state_dir.mkdir(parents=True, exist_ok=True)
+            self._write_csv(state_dir / "suppressed.csv", ["Email"], [])
+            self._write_csv(state_dir / "unsubscribed.csv", ["Email"], [])
+            self._write_csv(state_dir / "sendgrid_suppressions.csv", ["email", "status"], [])
+            base_job = {
+                "status": "queued",
+                "stage": "queued",
+                "created_at_utc": "2026-05-13T00:00:00+00:00",
+                "source_mode": "uploaded_file",
+                "input_path": str(input_path),
+                "saved_input_path": str(input_path),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "effective_input_path": str(input_path),
+                "total_input_rows": 1,
+                "processed_rows": 0,
+                "remaining_rows": 1,
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_OUTPUT", output_path), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_REJECTED",
+                rejected_path,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_RUNS", check_runs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(live_dashboard.settings, "STATE_DIR", state_dir), patch.object(
+                live_dashboard.settings,
+                "LEAD_LEDGER_DB_PATH",
+                state_dir / "lead_ledger.sqlite3",
+            ):
+                failed_job = dict(base_job, job_id="check_auto_triage_failed")
+                live_dashboard._save_important_check_job(failed_job)
+                with patch.object(live_dashboard, "check_master_leads", side_effect=RuntimeError("synthetic failure")):
+                    live_dashboard._run_important_check_job(failed_job["job_id"])
+                saved_failed = json.loads((jobs_dir / f"{failed_job['job_id']}.json").read_text(encoding="utf-8"))
+                self.assertEqual("failed", saved_failed["status"])
+                self.assertFalse(keep_path.exists())
+
+                def check_master_leads_without_external_state(**kwargs):
+                    return important_leads_workflow.check_master_leads(
+                        **kwargs,
+                        sendgrid_suppressions_path=state_dir / "sendgrid_suppressions.csv",
+                        suppressed_path=state_dir / "suppressed.csv",
+                        unsubscribed_path=state_dir / "unsubscribed.csv",
+                        report_dir=state_dir,
+                        summary_dir=check_runs_dir,
+                        validate_deliverability=False,
+                        reject_role_accounts=False,
+                        reject_disposable=False,
+                        persist_state=False,
+                    )
+
+                canceled_job = dict(base_job, job_id="check_auto_triage_canceled", cancel_requested=True)
+                live_dashboard._save_important_check_job(canceled_job)
+                with patch.object(live_dashboard, "check_master_leads", side_effect=check_master_leads_without_external_state):
+                    live_dashboard._run_important_check_job(canceled_job["job_id"])
+                saved_canceled = json.loads((jobs_dir / f"{canceled_job['job_id']}.json").read_text(encoding="utf-8"))
+                self.assertEqual("canceled", saved_canceled["status"])
+                self.assertEqual("skipped", saved_canceled["auto_triage_status"])
+                self.assertFalse(keep_path.exists())
+
+    def test_pipeline_reports_auto_triage_running_from_check_job(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            checked.write_text("Email,FirstName\none@example.com,One\n", encoding="utf-8")
+            pipeline = live_dashboard._build_leads_pipeline_status(
+                {
+                    "important_output_label": str(checked),
+                    "important_triage_keep_label": str(tmp / "missing_keep.csv"),
+                    "important_triage_quarantine_label": str(tmp / "missing_quarantine.csv"),
+                    "active_important_check_job": {
+                        "status": "auto_triage_running",
+                        "stage": "auto_triage",
+                        "auto_triage_status": "running",
+                        "auto_triage_processed_rows": 1,
+                    },
+                }
+            )
+
+        check_step = next(step for step in pipeline["steps"] if step["key"] == "check")
+        triage_step = next(step for step in pipeline["steps"] if step["key"] == "triage")
+        self.assertEqual("done", check_step["state"])
+        self.assertEqual("active", triage_step["state"])
+        self.assertEqual("Auto triage running.", triage_step["note"])
 
     def test_shard_block_when_senders_active(self) -> None:
         payload = live_dashboard.ShardLeadsPayload(
