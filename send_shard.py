@@ -528,7 +528,7 @@ Best regards,
 
 PITCH_JC_BODY = """Hi {FirstName},
 
-My Team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+My team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
 
 I’m reaching out because I help authors improve how their books show up online.
 
@@ -536,7 +536,7 @@ A strong book can still lose attention when the first impression doesn’t feel 
 
 I’ve spent 6+ years helping authors strengthen how their work is presented online. You can see examples here: astraproductions.co
 
-Would you be open to seeing a clean direction for an author website that could make {BookTitle} feel more polished and credible online?
+Would you be open to seeing a clean direction for an author website that could make your online presentation feel more polished and credible?
 
 Windelle JC
 Creative Director, Astra Productions
@@ -578,7 +578,8 @@ PITCHES = {
 
   },
     "pitch_jc": {
-        "subject": "A trailer idea for your book",
+        "subject": "A trailer idea for {BookTitle}",
+        "subject_fallback": "A trailer idea for independent authors",
         "body": PITCH_JC_BODY,
     },
 

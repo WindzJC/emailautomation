@@ -747,6 +747,62 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
             self.assertIn("PREFLIGHT: ok (no sending).", stdout.getvalue())
 
+    def test_pitch_jc_missing_book_title_uses_fallback_subject_and_body(self) -> None:
+        pitch = send_shard.PITCHES["pitch_jc"]
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="jc@astraproductions.co",
+            to_email="reader@example.com",
+            author="Jamie Example",
+            book_title="",
+            subject=pitch["subject"],
+            body_template=pitch["body"],
+            unsub_email="jc@astraproductions.co",
+            subject_fallback=pitch["subject_fallback"],
+        )
+
+        self.assertEqual("A trailer idea for independent authors", subject_text)
+        self.assertIn("My team works with independent authors", body_text)
+        self.assertNotIn("My team came across", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+        self.assertNotIn("your book", body_text)
+
+    def test_pitch_jc_present_book_title_renders_personalized_subject_and_body(self) -> None:
+        pitch = send_shard.PITCHES["pitch_jc"]
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="jc@astraproductions.co",
+            to_email="reader@example.com",
+            author="Jamie Example",
+            book_title="The Quiet Harbor",
+            subject=pitch["subject"],
+            body_template=pitch["body"],
+            unsub_email="jc@astraproductions.co",
+            subject_fallback=pitch["subject_fallback"],
+        )
+
+        self.assertEqual("A trailer idea for The Quiet Harbor", subject_text)
+        self.assertIn("My team came across The Quiet Harbor", body_text)
+        self.assertNotIn("My team works with independent authors", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+        self.assertNotIn("your book", body_text)
+
+    def test_pitch_jc_fallback_capable_queue_contract_allows_missing_book_title_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_private_jc.csv"
+            csv_path.write_text("Email,FirstName\nreader@example.com,Jamie\n", encoding="utf-8")
+            rows = send_shard.read_rows(csv_path)
+            pitch = send_shard.PITCHES["pitch_jc"]
+
+            self.assertTrue(
+                send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject=pitch["subject"],
+                    body_template=pitch["body"],
+                    profile_name="private_jc",
+                    subject_fallback=pitch["subject_fallback"],
+                )
+            )
+
     def test_strict_book_title_template_queue_contract_blocks_missing_book_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
