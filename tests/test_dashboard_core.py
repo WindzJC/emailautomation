@@ -16,6 +16,22 @@ from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
+    def test_queue_safety_alert_blocks_mixed_recipient_queue(self) -> None:
+        alert = dashboard_core.queue_safety_alert(
+            {
+                "safe": False,
+                "overlap_with_triaged_reject": 5,
+                "outside_checked_output_count": 3,
+                "outside_intended_source_count": 7,
+            }
+        )
+
+        self.assertIsNotNone(alert)
+        self.assertEqual("critical", alert["severity"])
+        self.assertEqual("Recipient queue unsafe", alert["title"])
+        self.assertIn("Freeze sending", alert["message"])
+        self.assertIn("5 email(s) overlap triaged_reject", alert["message"])
+
     def test_infer_runtime_state_detects_cooldown(self) -> None:
         state, label, note = dashboard_core.infer_runtime_state(
             "email",
@@ -404,7 +420,7 @@ class DashboardCoreTests(unittest.TestCase):
                 }
             }
             (base / "dashboard_run_settings.json").write_text(
-                json.dumps({"send_cap_per_profile": 25, "updated_at_utc": "2026-03-25T01:00:00+00:00"}),
+                json.dumps({"send_cap_per_profile": 5000, "updated_at_utc": "2026-03-25T01:00:00+00:00"}),
                 encoding="utf-8",
             )
             self._write_recipients(base / "recipients_alpha.csv", "reader@example.com")
@@ -413,9 +429,9 @@ class DashboardCoreTests(unittest.TestCase):
             with self._patched_dashboard_context(base, profiles):
                 snapshot = dashboard_core.build_dashboard_snapshot(activity_hours=24, tail_lines=8)
 
-        self.assertEqual(25, snapshot["controls"]["send_cap_per_profile"])
-        self.assertEqual(25, snapshot["controls"]["estimated_total_if_start_all"])
-        self.assertEqual(25, snapshot["profiles"][0]["max_total"])
+        self.assertEqual(5000, snapshot["controls"]["send_target_total"])
+        self.assertEqual(5000, snapshot["controls"]["estimated_total_if_start_all"])
+        self.assertEqual(5000, snapshot["profiles"][0]["max_total"])
         self.assertEqual(100, snapshot["profiles"][0]["configured_max_total"])
         self.assertEqual(35, snapshot["profiles"][0]["interval_seconds"])
         self.assertEqual(35, snapshot["profiles"][0]["effective_spacing_seconds"])
@@ -621,7 +637,7 @@ class DashboardCoreTests(unittest.TestCase):
             python_bin = base / "python"
             python_bin.write_text("", encoding="utf-8")
             settings_path = base / "dashboard_run_settings.json"
-            settings_path.write_text(json.dumps({"send_cap_per_profile": 25}), encoding="utf-8")
+            settings_path.write_text(json.dumps({"send_cap_per_profile": 5000}), encoding="utf-8")
 
             calls: list[list[str]] = []
 
@@ -666,11 +682,50 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn(
-            [str(python_bin), "send_shard.py", "--profile", "sendgrid_alpha", "--preflight", "--max_total", "25"],
+            [
+                str(python_bin),
+                "send_shard.py",
+                "--profile",
+                "sendgrid_alpha",
+                "--preflight",
+                "--max_total",
+                "5000",
+                "--max_messages_1h",
+                "278",
+            ],
             calls,
         )
         send_keys_commands = [cmd for cmd in calls if cmd[:3] == ["tmux", "send-keys", "-t"]]
-        self.assertTrue(any("--max_total 25" in " ".join(cmd) for cmd in send_keys_commands))
+        self.assertTrue(any("--max_total 5000 --max_messages_1h 278" in " ".join(cmd) for cmd in send_keys_commands))
+
+    def test_sendgrid_hourly_cap_status_uses_dashboard_window_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            settings_path = base / "dashboard_run_settings.json"
+            settings_path.write_text(json.dumps({"send_cap_per_profile": 10000}), encoding="utf-8")
+            profiles = {
+                name: {
+                    "provider": "sendgrid",
+                    "csv": f"{name}.csv",
+                    "log": f"{name}.csv",
+                    "from_email": f"{name}@example.com",
+                    "interval": 35,
+                    "cooldown_seconds": 35,
+                }
+                for name in ["sendgrid_a", "sendgrid_b", "sendgrid_c", "sendgrid_d", "sendgrid_e"]
+            }
+            with patch.multiple(
+                dashboard_core,
+                PROFILES=profiles,
+                SENDGRID_PROFILES=list(profiles.keys()),
+                DASHBOARD_PROFILES=list(profiles.keys()),
+                START_ALL_PROFILES=list(profiles.keys()),
+                DASHBOARD_RUN_SETTINGS_PATH=settings_path,
+                LOGS_DIR=base,
+            ):
+                status = dashboard_core.build_sendgrid_hourly_cap_status()
+
+        self.assertEqual(556, status["cap"])
 
     def test_start_private_profile_requires_password_env_value(self) -> None:
         profiles = {

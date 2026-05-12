@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 import signal
@@ -35,6 +36,7 @@ from sendgrid_hygiene import (
     parse_iso_utc,
 )
 from sendgrid_launch_auth import resolve_sendgrid_api_key
+from tools.rebuild_recipient_queues import build_queue_safety_report
 
 ROOT = settings.APP_ROOT
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
@@ -72,6 +74,8 @@ START_ALL_PROFILES = [
     for name in DASHBOARD_PROFILES
     if not bool(PROFILES.get(name, {}).get("dashboard_manual_only"))
 ]
+SENDGRID_TARGET_WINDOW_HOURS = 18
+SENDGRID_SEND_TARGET_OPTIONS = (5000, 10000)
 
 STATUS_ALIASES = {
     "processed": "processed",
@@ -262,15 +266,17 @@ def profile_pane_index(profile_name: str) -> int:
 
 
 def default_dashboard_send_cap_per_profile() -> int:
-    for profile_name in START_ALL_PROFILES:
-        cfg = PROFILES.get(profile_name, {})
-        try:
-            value = int(cfg.get("max_total") or 0)
-        except Exception:
-            value = 0
-        if value > 0:
-            return value
-    return max(1, int(settings.SEND_CAP_DEFAULT))
+    return SENDGRID_SEND_TARGET_OPTIONS[0]
+
+
+def _normalize_sendgrid_target_total(value: object) -> int:
+    try:
+        numeric = int(value or 0)
+    except Exception:
+        numeric = 0
+    if numeric in SENDGRID_SEND_TARGET_OPTIONS:
+        return numeric
+    return SENDGRID_SEND_TARGET_OPTIONS[0]
 
 
 def _normalize_dashboard_local_time(value: object, default: str = DEFAULT_AUTO_START_LOCAL_TIME) -> str:
@@ -308,11 +314,9 @@ def load_dashboard_run_settings() -> Dict[str, object]:
         return settings
     if not isinstance(raw, dict):
         return settings
-    try:
-        send_cap = int(raw.get("send_cap_per_profile") or defaults["send_cap_per_profile"])
-    except Exception:
-        send_cap = int(defaults["send_cap_per_profile"])
-    settings["send_cap_per_profile"] = max(1, send_cap)
+    settings["send_cap_per_profile"] = _normalize_sendgrid_target_total(
+        raw.get("send_cap_per_profile") or defaults["send_cap_per_profile"]
+    )
     settings["auto_start_sendgrid_enabled"] = bool(raw.get("auto_start_sendgrid_enabled", defaults["auto_start_sendgrid_enabled"]))
     settings["auto_start_sendgrid_local_time"] = _normalize_dashboard_local_time(
         raw.get("auto_start_sendgrid_local_time"),
@@ -330,7 +334,9 @@ def load_dashboard_run_settings() -> Dict[str, object]:
 def save_dashboard_run_settings_patch(patch: Dict[str, object]) -> Dict[str, object]:
     current = load_dashboard_run_settings()
     payload = {
-        "send_cap_per_profile": max(1, int(patch.get("send_cap_per_profile", current["send_cap_per_profile"]))),
+        "send_cap_per_profile": _normalize_sendgrid_target_total(
+            patch.get("send_cap_per_profile", current["send_cap_per_profile"])
+        ),
         "auto_start_sendgrid_enabled": bool(patch.get("auto_start_sendgrid_enabled", current["auto_start_sendgrid_enabled"])),
         "auto_start_sendgrid_local_time": _normalize_dashboard_local_time(
             patch.get("auto_start_sendgrid_local_time", current["auto_start_sendgrid_local_time"]),
@@ -352,16 +358,21 @@ def save_dashboard_run_settings_patch(patch: Dict[str, object]) -> Dict[str, obj
 
 def save_dashboard_send_cap_per_profile(send_cap_per_profile: int) -> Dict[str, object]:
     return save_dashboard_run_settings_patch({
-        "send_cap_per_profile": max(1, int(send_cap_per_profile)),
+        "send_cap_per_profile": _normalize_sendgrid_target_total(send_cap_per_profile),
     })
 
 
-def dashboard_send_cap_per_profile() -> int:
+def dashboard_send_target_total() -> int:
     settings = load_dashboard_run_settings()
-    try:
-        return max(1, int(settings.get("send_cap_per_profile") or default_dashboard_send_cap_per_profile()))
-    except Exception:
-        return default_dashboard_send_cap_per_profile()
+    return _normalize_sendgrid_target_total(settings.get("send_cap_per_profile"))
+
+
+def dashboard_send_cap_per_profile() -> int:
+    return max(1, math.ceil(dashboard_send_target_total() / max(1, len(START_ALL_PROFILES))))
+
+
+def dashboard_sendgrid_hourly_target_cap() -> int:
+    return max(1, math.ceil(dashboard_send_target_total() / SENDGRID_TARGET_WINDOW_HOURS))
 
 
 def sendgrid_hourly_cap_limit() -> int:
@@ -380,8 +391,8 @@ def sendgrid_hourly_cap_limit() -> int:
 
 
 def build_sendgrid_hourly_cap_status(now: Optional[datetime] = None) -> Dict[str, object]:
-    """Expose the same rolling 1h SendGrid pacing guard used by send_shard."""
-    limit = sendgrid_hourly_cap_limit()
+    """Expose the dashboard-selected rolling 1h SendGrid pacing target."""
+    limit = dashboard_sendgrid_hourly_target_cap()
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=1)
     slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
@@ -916,6 +927,7 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
     env = os.environ.copy()
     env["TMUX_SENDGRID_ATTACH"] = "0"
     env["SENDGRID_DASHBOARD_MAX_TOTAL"] = str(dashboard_send_cap_per_profile())
+    env["SENDGRID_DASHBOARD_MAX_MESSAGES_1H"] = str(dashboard_sendgrid_hourly_target_cap())
     try:
         proc = subprocess.run(
             ["bash", "./run_sendgrid_tmux.sh"],
@@ -1085,6 +1097,7 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     env = os.environ.copy()
     env["SENDGRID_API_KEY"] = api_key
     max_total_override = dashboard_send_cap_per_profile()
+    hourly_cap_override = dashboard_sendgrid_hourly_target_cap()
     preflight = subprocess.run(
         [
             str(PYTHON_BIN),
@@ -1094,6 +1107,8 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
             "--preflight",
             "--max_total",
             str(max_total_override),
+            "--max_messages_1h",
+            str(hourly_cap_override),
         ],
         cwd=ROOT,
         env=env,
@@ -1122,7 +1137,7 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
         f"cd {shlex.quote(str(ROOT))} && "
         f"export SENDGRID_API_KEY={shlex.quote(api_key)} && "
         f"{shlex.quote(str(PYTHON_BIN))} send_shard.py --profile {shlex.quote(profile_name)} "
-        f"--max_total {max_total_override}"
+        f"--max_total {max_total_override} --max_messages_1h {hourly_cap_override}"
     )
     subprocess.run(
         ["tmux", "send-keys", "-t", target, "C-c"],
@@ -2421,6 +2436,40 @@ def build_threshold_alerts(
     return alerts
 
 
+def build_dashboard_queue_safety_report() -> Dict[str, object]:
+    try:
+        return build_queue_safety_report()
+    except Exception as exc:
+        return {
+            "safe": False,
+            "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
+            "message": f"Queue safety check failed: {exc}",
+        }
+
+
+def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
+    if bool(report.get("safe")):
+        return None
+    reject_overlap = int(report.get("overlap_with_triaged_reject") or 0)
+    outside_checked = int(report.get("outside_checked_output_count") or 0)
+    outside_intended = int(report.get("outside_intended_source_count") or 0)
+    if str(report.get("message") or "").strip():
+        message = str(report.get("message"))
+    else:
+        message = (
+            "Live recipient queue is not safe to send. "
+            f"{reject_overlap} email(s) overlap triaged_reject, "
+            f"{outside_checked} are outside the latest checked output, and "
+            f"{outside_intended} are outside the intended source. "
+            "Freeze sending and rebuild queues from the current campaign source."
+        )
+    return {
+        "severity": "critical",
+        "title": "Recipient queue unsafe",
+        "message": message,
+    }
+
+
 def health_banner_state(
     session_label: str,
     active_profiles: int,
@@ -3061,7 +3110,9 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         # best-effort only; don't let detection failures break snapshot build
         pass
     controls = load_dashboard_run_settings()
+    send_target_total = dashboard_send_target_total()
     send_cap_per_profile = dashboard_send_cap_per_profile()
+    sendgrid_hourly_target_cap = dashboard_sendgrid_hourly_target_cap()
     attempts = collect_send_attempts(SENDGRID_PROFILES)
     email_to_profile = unique_send_profile_by_email(attempts)
     message_id_to_profile = latest_send_profile_by_message_id(attempts)
@@ -3181,6 +3232,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
             except Exception:
                 profile["run_sent_display"] = 0
 
+    queue_safety = build_dashboard_queue_safety_report()
     run_status_items = build_run_status_items(
         session_label,
         profile_dicts,
@@ -3200,6 +3252,9 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         auto_stop_events=auto_stop_events,
         private_bounce_guard=private_bounce_guard,
     )
+    queue_alert = queue_safety_alert(queue_safety)
+    if queue_alert:
+        alerts.insert(0, queue_alert)
     banner_state, banner_message = health_banner_state(
         session_label,
         active_profiles,
@@ -3215,10 +3270,15 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "activity_hours": activity_hours,
         "controls": {
             "send_cap_per_profile": send_cap_per_profile,
+            "send_target_total": send_target_total,
+            "send_target_per_profile": send_cap_per_profile,
+            "send_target_window_hours": SENDGRID_TARGET_WINDOW_HOURS,
+            "send_target_hourly_cap": sendgrid_hourly_target_cap,
+            "send_target_options": list(SENDGRID_SEND_TARGET_OPTIONS),
             "active_sender_count": active_start_all_profiles,
             "available_sender_count": len(START_ALL_PROFILES),
             "fleet_total_for_active_senders": send_cap_per_profile * active_start_all_profiles,
-            "estimated_total_if_start_all": send_cap_per_profile * len(START_ALL_PROFILES),
+            "estimated_total_if_start_all": send_target_total,
             "updated_at_utc": str(controls.get("updated_at_utc") or ""),
         },
         "health": {"state": banner_state, "message": banner_message},
@@ -3242,6 +3302,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "run_status_items": run_status_items,
         "telemetry_notes": telemetry_notes,
         "alerts": alerts,
+        "queue_safety": queue_safety,
         "webhook_health": webhook_health,
         "awaiting_age_buckets": {
             "labels": dict(AWAITING_BUCKET_LABELS),
