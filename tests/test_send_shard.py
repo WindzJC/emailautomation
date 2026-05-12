@@ -611,6 +611,7 @@ class SendShardTests(unittest.TestCase):
             body_text,
         )
         self.assertNotIn("My team came across", body_text)
+        self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
@@ -628,6 +629,7 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("Independent author consignment review", subject_text)
         self.assertIn("My team works with independent authors", body_text)
+        self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
@@ -644,7 +646,8 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Consignment review for The Quiet Harbor", subject_text)
-        self.assertIn("My team came across The Quiet Harbor", body_text)
+        self.assertIn("Our team came across The Quiet Harbor", body_text)
+        self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("My team works with independent authors", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
@@ -683,7 +686,8 @@ class SendShardTests(unittest.TestCase):
                 subject_fallback="Independent author consignment review",
             )
             self.assertEqual("Consignment review for The Quiet Harbor", titled_subject)
-            self.assertIn("My team came across The Quiet Harbor", titled_body)
+            self.assertIn("Our team came across The Quiet Harbor", titled_body)
+            self.assertNotIn("My team came across The Quiet Harbor", titled_body)
             self.assertNotIn("{BookTitle}", titled_body)
             self.assertNotIn("your book", titled_body)
 
@@ -701,6 +705,7 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual("Independent author consignment review", fallback_subject)
             self.assertIn("My team works with independent authors", fallback_body)
             self.assertNotIn("My team came across", fallback_body)
+            self.assertNotIn("Our team came across", fallback_body)
             self.assertNotIn("{BookTitle}", fallback_body)
             self.assertNotIn("your book", fallback_body)
 
@@ -763,6 +768,7 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual("A trailer idea for independent authors", subject_text)
         self.assertIn("My team works with independent authors", body_text)
         self.assertNotIn("My team came across", body_text)
+        self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
         self.assertNotIn("your book", body_text)
 
@@ -781,6 +787,7 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("A trailer idea for The Quiet Harbor", subject_text)
         self.assertIn("My team came across The Quiet Harbor", body_text)
+        self.assertNotIn("Our team came across The Quiet Harbor", body_text)
         self.assertNotIn("My team works with independent authors", body_text)
         self.assertNotIn("{BookTitle}", body_text)
         self.assertNotIn("your book", body_text)

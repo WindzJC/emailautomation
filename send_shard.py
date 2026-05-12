@@ -494,9 +494,22 @@ SIGNATURE_BY_FROM: Dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-PITCH_1_5_BODY = """Hi {FirstName},
+PRIVATE_JC_BOOK_TITLE_OPENING = (
+    "My team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "more polished online presentation for readers discovering your work."
+)
+SENDGRID_BOOK_TITLE_OPENING = (
+    "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "more polished online presentation for readers discovering your work."
+)
+BOOK_TITLE_GENERIC_OPENING = (
+    "My team works with independent authors to improve how their work is presented online, "
+    "especially through clearer websites, stronger book visuals, and more polished launch materials."
+)
 
-My team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+PITCH_1_5_BODY = f"""Hi {{FirstName}},
+
+{SENDGRID_BOOK_TITLE_OPENING}
 
 We’re currently opening a small number of consignment spots for independent authors and inviting select authors to submit titles for review.  If there’s another book you’d rather focus on, we’d be happy to look at that instead.
 
@@ -523,12 +536,12 @@ Our current consignment terms are:
 If the title looks like a good fit, I’ll send the next steps and our consignment agreement for review.
 
 Best regards,
-{SIGIMG}
+{{SIGIMG}}
 """
 
-PITCH_JC_BODY = """Hi {FirstName},
+PITCH_JC_BODY = f"""Hi {{FirstName}},
 
-My team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+{PRIVATE_JC_BOOK_TITLE_OPENING}
 
 I’m reaching out because I help authors improve how their books show up online.
 
@@ -541,7 +554,7 @@ Would you be open to seeing a clean direction for an author website that could m
 Windelle JC
 Creative Director, Astra Productions
 astraproductions.co
-{SIGIMG}
+{{SIGIMG}}
 
 P.S. If you’d rather not hear from me again, just reply unsub.
 """
@@ -585,21 +598,9 @@ PITCHES = {
 
 }
 
-
-BOOK_TITLE_PERSONALIZED_OPENING = (
-    "My team came across {BookTitle} and thought the book could benefit from a clearer, "
-    "more polished online presentation for readers discovering your work."
-)
-BOOK_TITLE_PERSONALIZED_OPENINGS = (
-    BOOK_TITLE_PERSONALIZED_OPENING,
-    (
-        "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
-        "more polished online presentation for readers discovering your work."
-    ),
-)
-BOOK_TITLE_GENERIC_OPENING = (
-    "My team works with independent authors to improve how their work is presented online, "
-    "especially through clearer websites, stronger book visuals, and more polished launch materials."
+BOOK_TITLE_FALLBACK_OPENINGS = (
+    PRIVATE_JC_BOOK_TITLE_OPENING,
+    SENDGRID_BOOK_TITLE_OPENING,
 )
 UNRESOLVED_PLACEHOLDER_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}")
 ALLOWED_RENDER_PLACEHOLDERS = {"{SIGIMG}"}
@@ -692,7 +693,7 @@ def template_requires_book_title(subject: str, body_template: str) -> bool:
 
 def _book_title_body_without_fallback_opening(body_template: str) -> str:
     text = body_template or ""
-    for opening in BOOK_TITLE_PERSONALIZED_OPENINGS:
+    for opening in BOOK_TITLE_FALLBACK_OPENINGS:
         text = text.replace(opening, "")
     return text
 
@@ -1630,7 +1631,7 @@ def render_message_parts(
     missing_or_unsafe_book_title = invalid_campaign_book_title(raw_book_title)
     if missing_or_unsafe_book_title:
         format_args["BookTitle"] = ""
-        for opening in BOOK_TITLE_PERSONALIZED_OPENINGS:
+        for opening in BOOK_TITLE_FALLBACK_OPENINGS:
             body_template = body_template.replace(opening, BOOK_TITLE_GENERIC_OPENING)
     body_text = body_template.format(**format_args)
     subject_args = dict(format_args)
