@@ -593,6 +593,78 @@ class SendShardTests(unittest.TestCase):
         self.assertIn("Hi there,", body_text)
         self.assertNotIn("Hi ,", body_text)
 
+    def test_missing_book_title_uses_subject_fallback_and_generic_body_opening(self) -> None:
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.com",
+            author="Anna Example",
+            book_title="",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("Independent author consignment review", subject_text)
+        self.assertIn(
+            "Our team works with independent authors to improve how their work is presented online, especially through clearer websites, stronger book visuals, and more polished launch materials.",
+            body_text,
+        )
+        self.assertNotIn("Our team came across", body_text)
+        self.assertNotIn("your book", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.com",
+            author="Anna Example",
+            book_title="",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            merge_fields={"FirstName": "Anna", "BookTitle": ""},
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("Independent author consignment review", subject_text)
+        self.assertIn("Our team works with independent authors", body_text)
+        self.assertNotIn("your book", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+
+    def test_present_book_title_renders_personalized_subject_and_body(self) -> None:
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.com",
+            author="Anna Example",
+            book_title="The Quiet Harbor",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("Consignment review for The Quiet Harbor", subject_text)
+        self.assertIn("Our team came across The Quiet Harbor", body_text)
+        self.assertNotIn("Our team works with independent authors", body_text)
+        self.assertNotIn("your book", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+
+    def test_book_title_template_queue_contract_blocks_missing_book_title_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            csv_path.write_text("Email,FirstName\nreader@example.com,Anna\n", encoding="utf-8")
+            rows = send_shard.read_rows(csv_path)
+
+            self.assertFalse(
+                send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    profile_name="sendgrid_annette",
+                )
+            )
+
     def test_sendgrid_unsubscribe_footer_uses_mailto_list_link(self) -> None:
         text_content, html_content = append_sendgrid_unsubscribe_footer(
             "Hello there",

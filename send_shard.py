@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import signal
 import smtplib
 import ssl
 import tempfile
@@ -28,6 +29,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 import settings
+import runtime_audit
 from provider_pacing import (
     mark_recovery_started,
     provider_pacing_status,
@@ -494,7 +496,9 @@ SIGNATURE_BY_PITCH = {
 
 PITCH_1_5_BODY = """Hi {FirstName},
 
-We’re currently opening a small number of consignment spots for independent authors and inviting select authors to submit titles for review.
+Our team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+
+We’re currently opening a small number of consignment spots for independent authors and inviting select authors to submit titles for review.  If there’s another book you’d rather focus on, we’d be happy to look at that instead.
 
 Before stocking any book, we review content fit, print quality, presentation, and retail-ready pricing. Presentation matters in both online and physical retail, so we want to make sure each title is positioned well before it reaches the shelf.
 
@@ -507,7 +511,7 @@ To submit a title for review, please reply with:
 — Short book teaser or trailer, if available
 — Author or book page with direct retailer links, if available
 
-If you don’t currently have a teaser, trailer, or author/book page, that’s okay. If the title looks like a good fit, we can also provide optional support in creating those materials before placement.
+If you don’t currently have a trailer, or author/book page, that’s okay. If the title looks like a good fit, we can also provide optional support in creating those materials before placement.
 
 Our current consignment terms are:
 
@@ -524,13 +528,15 @@ Best regards,
 
 PITCH_JC_BODY = """Hi {FirstName},
 
+My Team came across {BookTitle} and thought the book could benefit from a clearer, more polished online presentation for readers discovering your work.
+
 I’m reaching out because I help authors improve how their books show up online.
 
 A strong book can still lose attention when the first impression doesn’t feel clear, polished, or credible enough. At Astra Productions, we create premium author websites, cinematic book trailers, and launch visuals that help authors present their work professionally and turn more interest into clicks.
 
 I’ve spent 6+ years helping authors strengthen how their work is presented online. You can see examples here: astraproductions.co
 
-Would you be open to seeing a clean direction for an author website that could make your book feel more polished and credible online?
+Would you be open to seeing a clean direction for an author website that could make {BookTitle} feel more polished and credible online?
 
 Windelle JC
 Creative Director, Astra Productions
@@ -542,27 +548,32 @@ P.S. If you’d rather not hear from me again, just reply unsub.
 
 PITCHES = {
     "pitch1": {
-        "subject": "Consignment Consideration",
+        "subject": "Consignment review for {BookTitle}",
+        "subject_fallback": "Independent author consignment review",
         "body": PITCH_1_5_BODY,
             },
 
     "pitch2": {
-        "subject": "Consignment Consideration",
+        "subject": "Consignment review for {BookTitle}",
+        "subject_fallback": "Independent author consignment review",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch3": {
-        "subject": "Consignment Consideration",
+        "subject": "Consignment review for {BookTitle}",
+        "subject_fallback": "Independent author consignment review",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch4": {
-        "subject": "Consignment Consideration",
+        "subject": "Consignment review for {BookTitle}",
+        "subject_fallback": "Independent author consignment review",
         "body": PITCH_1_5_BODY,
     },
 
     "pitch5": {
-        "subject": "Consignment Consideration",
+        "subject": "Consignment review for {BookTitle}",
+        "subject_fallback": "Independent author consignment review",
         "body": PITCH_1_5_BODY,
 
   },
@@ -574,6 +585,16 @@ PITCHES = {
 }
 
 
+BOOK_TITLE_PERSONALIZED_OPENING = (
+    "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "more polished online presentation for readers discovering your work."
+)
+BOOK_TITLE_GENERIC_OPENING = (
+    "Our team works with independent authors to improve how their work is presented online, "
+    "especially through clearer websites, stronger book visuals, and more polished launch materials."
+)
+
+
 def norm_email(s: str) -> str:
     _, addr = parseaddr(s or "")
     return addr.strip().lower()
@@ -581,6 +602,127 @@ def norm_email(s: str) -> str:
 
 def make_unsub_mailto(unsub_email: str) -> str:
     return f"mailto:{unsub_email}?subject={quote('unsubscribe')}&body={quote('unsubscribe')}"
+
+
+def invalid_subject_book_title(value: str) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    normalized = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    if raw.startswith("{") and raw.endswith("}"):
+        return True
+    return normalized in {"booktitle", "title", "none", "nan", "null", "yourbook"}
+
+
+BAD_BOOK_TITLE_KEYS = {
+    "approved",
+    "archway",
+    "authorhouse",
+    "authorhouseuk",
+    "balboa",
+    "bookbaby",
+    "booktrailer",
+    "canceled",
+    "cancelled",
+    "complete",
+    "completed",
+    "ebook",
+    "hardcover",
+    "illustrationpackage",
+    "inprogress",
+    "iuniverse",
+    "launchpackage",
+    "lulu",
+    "marketingpackage",
+    "na",
+    "notstarted",
+    "paperback",
+    "pending",
+    "publishingpackage",
+    "rejected",
+    "resubmission",
+    "submission",
+    "tbd",
+    "trafford",
+    "unknown",
+    "website",
+    "websitepackage",
+    "westbow",
+    "xlibris",
+}
+BOOK_TITLE_PHONE_RE = re.compile(r"^[+()\d\s.\-]{7,}$")
+BOOK_TITLE_PERCENT_RE = re.compile(r"^\s*\d+(?:\.\d+)?\s*%\s*$")
+BOOK_TITLE_URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
+BOOK_TITLE_EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+
+def invalid_campaign_book_title(value: str) -> bool:
+    raw = str(value or "").strip()
+    if invalid_subject_book_title(raw):
+        return True
+    normalized = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    if normalized in BAD_BOOK_TITLE_KEYS:
+        return True
+    digits = re.sub(r"\D+", "", raw)
+    if BOOK_TITLE_PHONE_RE.match(raw) and len(digits) >= 7:
+        return True
+    if BOOK_TITLE_PERCENT_RE.match(raw):
+        return True
+    if BOOK_TITLE_EMAIL_RE.match(raw.lower()):
+        return True
+    if BOOK_TITLE_URL_RE.search(raw):
+        return True
+    lowered = raw.lower()
+    return any(term in lowered for term in ("package", "book trailer", "website"))
+
+
+def template_requires_book_title(subject: str, body_template: str) -> bool:
+    return "{BookTitle}" in (subject or "") or "{BookTitle}" in (body_template or "")
+
+
+def csv_fieldnames(path: Path) -> List[str]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        return [str(field or "").strip().lstrip("\ufeff") for field in (reader.fieldnames or [])]
+
+
+def validate_book_title_queue_contract(
+    *,
+    csv_path: Path,
+    rows: Sequence[Dict[str, str]],
+    subject: str,
+    body_template: str,
+    profile_name: str,
+) -> bool:
+    if not template_requires_book_title(subject, body_template):
+        return True
+
+    fieldnames = csv_fieldnames(csv_path)
+    has_book_title = any((field or "").strip().lower() == "booktitle" for field in fieldnames)
+    if not has_book_title:
+        print(
+            "ERROR: BookTitle-personalized profile requires a BookTitle column: "
+            f"profile={profile_name or '-'} csv={csv_path}"
+        )
+        return False
+
+    bad_rows: List[str] = []
+    for index, row in enumerate(rows, start=2):
+        email_addr = resolve_recipient_email(row)
+        book_title = get_row_value_ci(row, ["BookTitle"])
+        if invalid_campaign_book_title(book_title):
+            bad_rows.append(f"row={index} email={email_addr or '-'} BookTitle={book_title or '[blank]'}")
+            if len(bad_rows) >= 5:
+                break
+    if bad_rows:
+        print(
+            "ERROR: BookTitle-personalized profile cannot use this queue because BookTitle is blank or unsafe. "
+            f"profile={profile_name or '-'} csv={csv_path}"
+        )
+        for item in bad_rows:
+            print(f" - {item}")
+        return False
+    return True
 
 
 SENDGRID_ASM_GROUP_UNSUB_RAW_URL = "<%asm_group_unsubscribe_raw_url%>"
@@ -949,9 +1091,17 @@ def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
         return ""
     lower_row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
     for name in col_names:
-        if name in lower_row:
-            return lower_row[name]
+        key = str(name or "").strip().lower()
+        if key in lower_row:
+            return lower_row[key]
     return ""
+
+
+def resolve_recipient_email(row: Dict[str, str]) -> str:
+    email = norm_email(get_row_value_ci(row, ["Email"]))
+    if email:
+        return email
+    return norm_email(get_row_value_ci(row, ["AuthorEmail", "author_email"]))
 
 
 def get_personalization_name(row: Dict[str, str]) -> str:
@@ -964,6 +1114,19 @@ def get_personalization_name(row: Dict[str, str]) -> str:
         row,
         ["first_name_clean", "firstname", "first_name", "first name", "authorname", "author_name", "author", "name"],
     )
+
+
+def row_merge_fields(row: Dict[str, str], to_email: str, first_name: str, book_title: str) -> Dict[str, str]:
+    return {
+        "FirstName": (first_name or GENERIC_SALUTATION).strip() or GENERIC_SALUTATION,
+        "AuthorName": get_row_value_ci(row, ["AuthorName", "author_name", "FullName", "full_name", "author", "name"]),
+        "AuthorEmail": get_row_value_ci(row, ["AuthorEmail", "author_email"]) or to_email,
+        "BookTitle": (book_title or "").strip(),
+        "PersonalizedOpeningLine": get_row_value_ci(
+            row,
+            ["PersonalizedOpeningLine", "personalized_opening_line", "personalized opening line"],
+        ),
+    }
 
 
 def localpart(email_addr: str) -> str:
@@ -998,6 +1161,22 @@ def load_already_done(sent_log: Path) -> Set[str]:
             if e:
                 out.add(e)
     return out
+
+
+def email_logged_sent(sent_log: Path, email_addr: str) -> bool:
+    email = norm_email(email_addr)
+    if not email or not sent_log.exists():
+        return False
+    try:
+        with sent_log.open(newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                if norm_email(r.get("Email") or "") != email:
+                    continue
+                if (r.get("Status") or "").strip().upper() == "SENT":
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 def resolve_map_path(base: Path, value: str) -> Path:
@@ -1150,6 +1329,37 @@ def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
             "Status": status,
             "Info": (info or "")[:300],
         })
+
+
+MESSAGE_PREVIEW_FIELDS = [
+    "Email",
+    "AuthorEmail",
+    "AuthorName",
+    "FirstName",
+    "BookTitle",
+    "PersonalizedOpeningLine",
+    "Subject",
+    "Body",
+]
+
+
+def message_preview_path(profile: str) -> Path:
+    safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile or "sender").strip() or "sender")
+    return settings.APP_ROOT / "data" / "message_previews" / f"{safe_profile}_message_preview.csv"
+
+
+def write_message_preview_header(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MESSAGE_PREVIEW_FIELDS)
+        writer.writeheader()
+
+
+def append_message_preview_row(path: Path, row: Dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MESSAGE_PREVIEW_FIELDS, extrasaction="ignore")
+        writer.writerow({field: row.get(field, "") for field in MESSAGE_PREVIEW_FIELDS})
 
 
 def worker_log_path(sent_log: Path) -> Path:
@@ -1309,29 +1519,44 @@ def render_message_parts(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path],
+    merge_fields: Optional[Dict[str, str]] = None,
+    subject_fallback: str = "",
 ) -> Tuple[str, str, str, Optional[str]]:
     unsub_mailto = make_unsub_mailto(unsub_email)
 
     author = (author or GENERIC_SALUTATION).strip()
     first_name = author.split()[0] if author else GENERIC_SALUTATION
-    book_title = (book_title or "").strip() or "your book"
+    raw_book_title = (book_title or "").strip()
 
     format_args = {
         "FirstName": first_name,
-        "BookTitle": book_title,
+        "AuthorName": "",
+        "AuthorEmail": "",
+        "BookTitle": raw_book_title,
+        "PersonalizedOpeningLine": "",
         "UnsubEmail": unsub_email,
         "UnsubMailto": unsub_mailto,
         "SIGIMG": "{SIGIMG}",   # keep marker for HTML rendering
     }
+    if merge_fields:
+        for key in ("FirstName", "AuthorName", "AuthorEmail", "BookTitle", "PersonalizedOpeningLine"):
+            if key in merge_fields:
+                format_args[key] = str(merge_fields.get(key) or "")
+        format_args["FirstName"] = format_args["FirstName"] or GENERIC_SALUTATION
+        raw_book_title = str(format_args.get("BookTitle") or "").strip()
+        format_args["BookTitle"] = raw_book_title
 
+    missing_or_unsafe_book_title = invalid_campaign_book_title(raw_book_title)
+    if missing_or_unsafe_book_title:
+        format_args["BookTitle"] = ""
+        body_template = body_template.replace(BOOK_TITLE_PERSONALIZED_OPENING, BOOK_TITLE_GENERIC_OPENING)
     body_text = body_template.format(**format_args)
-    subject_text = subject.format(
-        FirstName=first_name,
-        BookTitle=book_title,
-        UnsubEmail=unsub_email,
-        UnsubMailto=unsub_mailto,
-        SIGIMG="",
-    )
+    subject_args = dict(format_args)
+    subject_args["SIGIMG"] = ""
+    if subject_fallback and "{BookTitle}" in subject and missing_or_unsafe_book_title:
+        subject_text = subject_fallback
+    else:
+        subject_text = subject.format(**subject_args)
 
     cid = SIGNATURE_CID if (signature_file and signature_file.exists()) else None
     html_body = text_to_html(body_text, unsub_mailto, cid=cid)
@@ -1347,6 +1572,8 @@ def build_message(
     body_template: str,
     unsub_email: str,
     signature_file: Optional[Path] = None,
+    merge_fields: Optional[Dict[str, str]] = None,
+    subject_fallback: str = "",
 ) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
     subject_text, body_text, html_body, cid = render_message_parts(
         author,
@@ -1355,6 +1582,8 @@ def build_message(
         body_template,
         unsub_email,
         signature_file,
+        merge_fields=merge_fields,
+        subject_fallback=subject_fallback,
     )
 
     msg = EmailMessage()
@@ -1831,6 +2060,7 @@ def main():
     ap.add_argument("--max_total", type=int, default=0)
     ap.add_argument("--stop_at_local", default="", help="Stop automatically at local time HH:MM (24h).")
     ap.add_argument("--dry_run", action="store_true")
+    ap.add_argument("--preview_messages", action="store_true", help="Render message preview CSV without sending.")
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--human_mode", action="store_true", help="Add light random pacing and rare microbreaks.")
     ap.add_argument("--no-human_mode", dest="human_mode", action="store_false", help="Disable human pacing.")
@@ -1920,6 +2150,7 @@ def main():
     ap.set_defaults(block_role_recipients=True)
 
     args = ap.parse_args()
+    no_send_mode = bool(getattr(args, "dry_run", False) or getattr(args, "preview_messages", False))
     if args.list_profiles:
         print("Profiles available:")
         for name, cfg in sorted(PROFILES.items()):
@@ -2143,7 +2374,7 @@ def main():
         print("Provide them via flags or set a --profile that includes them.")
         return
 
-    if args.provider == "sendgrid" and not args.dry_run and not sendgrid_api_key:
+    if args.provider == "sendgrid" and not no_send_mode and not sendgrid_api_key:
         print("ERROR: SENDGRID_API_KEY is required for --provider sendgrid.")
         return
 
@@ -2159,6 +2390,7 @@ def main():
     host, port = SMTP_PRESETS.get(args.provider, ("sendgrid", "api"))
     pitch = PITCHES[args.pitch]
     subject = (pitch.get("subject") or "").strip()
+    subject_fallback = (pitch.get("subject_fallback") or "").strip()
     body_template = (pitch.get("body") or "").strip()
 
     csv_path = _resolve_shard_path(args.csv)
@@ -2166,6 +2398,9 @@ def main():
     unsub_csv_path = _resolve_state_path(args.unsub_csv)
     suppress_csv_path = _resolve_state_path(args.suppress_csv)
     sendgrid_suppression_csv_path = _resolve_state_path(args.sendgrid_suppression_csv)
+    preview_messages_path = message_preview_path(str(args.profile or Path(str(args.csv or "sender")).stem))
+    if args.preview_messages:
+        write_message_preview_header(preview_messages_path)
     should_log_worker = bool(args.profile) and not any(
         (
             bool(args.list_profiles),
@@ -2177,6 +2412,9 @@ def main():
     )
     worker_event_log_path = worker_log_path(log_path) if should_log_worker else None
     worker_pid = os.getpid()
+    worker_started_monotonic = time.monotonic()
+    last_heartbeat_monotonic = 0.0
+    last_recipient_for_audit = ""
 
     def emit_worker_event(event_type: str, reason: str, **fields: object) -> None:
         if not worker_event_log_path:
@@ -2192,6 +2430,56 @@ def main():
             **fields,
         )
 
+    def audit_worker(
+        status: str,
+        *,
+        sent: int = 0,
+        errors: int = 0,
+        last_recipient: str = "",
+        action: str = "",
+        pending_count: Optional[int] = None,
+        terminal: bool = False,
+        force: bool = False,
+    ) -> None:
+        nonlocal last_heartbeat_monotonic
+        now_mono = time.monotonic()
+        if not force and not terminal and now_mono - last_heartbeat_monotonic < 30:
+            return
+        last_heartbeat_monotonic = now_mono
+        try:
+            runtime_audit.update_worker_heartbeat(
+                profile=str(args.profile or ""),
+                status=status,
+                app_started_monotonic=worker_started_monotonic,
+                sent_this_run=sent,
+                errors_this_run=errors,
+                last_recipient=last_recipient,
+                last_action=action or status,
+                queue_file=csv_path.name,
+                pending_count=pending_count,
+                terminal=terminal,
+            )
+        except Exception:
+            pass
+
+    def request_stop(signum, _frame) -> None:
+        audit_worker(
+            "interrupted",
+            sent=0,
+            errors=0,
+            last_recipient=last_recipient_for_audit,
+            action=f"signal_{int(signum)}",
+            terminal=False,
+            force=True,
+        )
+        raise KeyboardInterrupt
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    if should_log_worker:
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
+
     if not csv_path.exists():
         emit_worker_event("ERROR", "missing_csv", missing_path=str(csv_path))
         print("ERROR missing:", csv_path)
@@ -2202,6 +2490,15 @@ def main():
         my_domains = {DEFAULT_DOMAIN}
 
     rows = read_rows(csv_path)
+    if not validate_book_title_queue_contract(
+        csv_path=csv_path,
+        rows=rows,
+        subject=subject,
+        body_template=body_template,
+        profile_name=str(args.profile or ""),
+    ):
+        emit_worker_event("ERROR", "invalid_booktitle_queue", csv_path=str(csv_path))
+        return
     already_done = load_already_done(log_path)
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
@@ -2269,13 +2566,15 @@ def main():
         if args.global_dedupe:
             sent_for_prune |= global_done
         sent_for_prune -= always_send_set
-        if args.preflight or should_skip_sendgrid_prune_on_startup(args):
+        if args.preflight or args.preview_messages or should_skip_sendgrid_prune_on_startup(args):
             prune_fn = count_prunable_rows
         else:
             prune_fn = prune_sent_from_csv
         removed = prune_fn(csv_path, sent_for_prune)
         if removed:
-            if args.preflight:
+            if args.preview_messages:
+                print(f"PRUNE: would remove {removed} from {csv_path.name} (preview only)")
+            elif args.preflight:
                 print(f"PRUNE: would remove {removed} from {csv_path.name} (preflight only)")
             elif should_skip_sendgrid_prune_on_startup(args):
                 print(f"PRUNE: startup would remove {removed} from {csv_path.name} (guard active)")
@@ -2314,7 +2613,7 @@ def main():
         }
 
         for row in candidate_rows:
-            email_addr = norm_email(row.get("Email") or "")
+            email_addr = resolve_recipient_email(row)
             if not email_addr:
                 continue
             if email_addr in snapshot_seen_in_input:
@@ -2404,6 +2703,8 @@ def main():
         print(f"CSV DUPES: skipped={skipped_dupes}")
     if args.dry_run:
         print("DRY RUN: no emails will be sent.")
+    if args.preview_messages:
+        print("PREVIEW MESSAGES: no emails will be sent.")
     if eligible_pending_count == 0:
         if repeat_mode := bool(getattr(args, "repeat", False)):
             refreshed_pending, _, refreshed_row_count, refreshed_eligible_count = build_pending_snapshot(
@@ -2537,7 +2838,7 @@ def main():
 
     from_user = norm_email(args.from_email) or norm_email(input("From (email address you are logging in as): "))
     pw = ""
-    if not args.dry_run and args.provider != "sendgrid":
+    if not no_send_mode and args.provider != "sendgrid":
         if args.password_env:
             pw = os.environ.get(args.password_env, "").strip()
         if not pw and args.password:
@@ -2597,7 +2898,7 @@ def main():
             SENDGRID_COUNTERS_PATH, SENDGRID_GLOBAL_COUNTER_KEY
         )
         # Enforce per-account daily cap (prefer per-account counter over global)
-        if not args.dry_run and sendgrid_cap_enabled and sendgrid_account_sent_today >= sendgrid_effective_cap:
+        if not no_send_mode and sendgrid_cap_enabled and sendgrid_account_sent_today >= sendgrid_effective_cap:
             log_row(
                 log_path,
                 "",
@@ -2652,6 +2953,26 @@ def main():
     human_state: Dict[str, int] = {}
     provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
     last_success_sent_at_utc: Optional[datetime] = None
+
+    def audit_sleep(seconds: float, action: str = "SLEEP") -> None:
+        remaining_sleep = max(0.0, float(seconds or 0))
+        while remaining_sleep > 0:
+            chunk = min(30.0, remaining_sleep)
+            time.sleep(chunk)
+            remaining_sleep -= chunk
+            audit_worker(
+                "running",
+                sent=sent_this_run,
+                errors=error_count,
+                last_recipient=last_recipient_for_audit,
+                action=action,
+                pending_count=len(pending),
+                force=True,
+            )
+
+    def audit_sleep_with_jitter(seconds: int, jitter: int = 10) -> None:
+        audit_sleep(max(1, int(seconds)) + random.randint(0, max(0, int(jitter))), action="SLEEP")
+
     if human_mode_active:
         every_min = max(1, int(getattr(args, "human_break_every_min", 120) or 120))
         every_max = max(every_min, int(getattr(args, "human_break_every_max", 240) or every_min))
@@ -2689,7 +3010,7 @@ def main():
 
     def record_sendgrid_success() -> None:
         nonlocal sendgrid_sent_today, sendgrid_account_sent_today
-        if args.provider != "sendgrid" or args.dry_run:
+        if args.provider != "sendgrid" or no_send_mode:
             return
         keys = [SENDGRID_GLOBAL_COUNTER_KEY]
         if sendgrid_counter_key:
@@ -2711,7 +3032,7 @@ def main():
         provider_recovery_pending = False
 
     def reserve_domain_attempt_slot() -> str:
-        if args.dry_run:
+        if no_send_mode:
             return ""
         if args.provider not in ("private", "sendgrid") or not args.max_messages_1h:
             return ""
@@ -2827,10 +3148,24 @@ def main():
         batch_size=int(batch_size),
         max_total=int(args.max_total or 0),
     )
+    runtime_audit.write_lifecycle_event(
+        "WORKER_START",
+        profile=str(args.profile or ""),
+        queue_file=csv_path.name,
+        starting_pending_count=len(pending),
+    )
+    audit_worker(
+        "running",
+        sent=0,
+        errors=0,
+        action="WORKER_START",
+        pending_count=len(pending),
+        force=True,
+    )
 
     stop_reason = ""
     try:
-        if not args.dry_run and args.provider == "gmail":
+        if not no_send_mode and args.provider == "gmail":
             ensure_smtp()
 
         pending_index = 0
@@ -2867,8 +3202,28 @@ def main():
                     break
                 i = idx + 1
                 r = pending[idx]
-                to_email = norm_email(r.get("Email") or "")
+                to_email = resolve_recipient_email(r)
                 if not to_email:
+                    next_index = idx + 1
+                    continue
+                last_recipient_for_audit = to_email
+                audit_worker(
+                    "running",
+                    sent=sent_this_run,
+                    errors=error_count,
+                    last_recipient=last_recipient_for_audit,
+                    action="BEFORE_SEND",
+                    pending_count=len(pending),
+                )
+                if email_logged_sent(log_path, to_email):
+                    if not args.preview_messages:
+                        log_row(log_path, to_email, "SKIP", "event_type=SKIPPED_ALREADY_SENT")
+                        runtime_audit.write_lifecycle_event(
+                            "SKIPPED_ALREADY_SENT",
+                            profile=str(args.profile or ""),
+                            recipient=to_email,
+                            queue_file=csv_path.name,
+                        )
                     next_index = idx + 1
                     continue
 
@@ -2910,8 +3265,8 @@ def main():
                     sendgrid_account_sent_today, _ = get_sendgrid_sent_today_live(
                         SENDGRID_COUNTERS_PATH, sendgrid_counter_key
                     )
-                    if sendgrid_cap_enabled and sendgrid_account_sent_today >= sendgrid_effective_cap:
-                        if not args.dry_run:
+                    if not no_send_mode and sendgrid_cap_enabled and sendgrid_account_sent_today >= sendgrid_effective_cap:
+                        if not no_send_mode:
                             log_row(
                                 log_path,
                                 "",
@@ -2927,19 +3282,39 @@ def main():
 
                 raw_author = get_personalization_name(r)
                 author = choose_salutation_name(raw_author, to_email)
-                book_title = (r.get("BookTitle") or r.get("Title") or "").strip()
+                book_title = get_row_value_ci(r, ["BookTitle"])
+                first_name = author.split()[0] if author else GENERIC_SALUTATION
+                merge_fields = row_merge_fields(r, to_email, first_name, book_title)
 
                 msg, subject_text, body_text, html_body, cid = build_message(
                     from_user, to_email, author, book_title,
                     subject, body_template, unsub_email,
                     signature_file=sig_path,
+                    merge_fields=merge_fields,
+                    subject_fallback=subject_fallback,
                 )
 
                 next_index = idx + 1
                 attempt_slot_token = ""
                 try:
                     total_sent_attempted += 1
-                    if args.dry_run:
+                    if args.preview_messages:
+                        append_message_preview_row(
+                            preview_messages_path,
+                            {
+                                "Email": to_email,
+                                "AuthorEmail": merge_fields.get("AuthorEmail", ""),
+                                "AuthorName": merge_fields.get("AuthorName", ""),
+                                "FirstName": merge_fields.get("FirstName", ""),
+                                "BookTitle": merge_fields.get("BookTitle", ""),
+                                "PersonalizedOpeningLine": merge_fields.get("PersonalizedOpeningLine", ""),
+                                "Subject": subject_text,
+                                "Body": body_text.replace("{SIGIMG}", "").strip(),
+                            },
+                        )
+                        print(f"[{i}/{len(pending)}] PREVIEW {to_email}")
+                        continue
+                    elif args.dry_run:
                         log_row(log_path, to_email, "DRYRUN", "not_sent")
                         print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                     else:
@@ -3132,7 +3507,7 @@ def main():
 
                         smtp_close(smtp)
                         smtp = None
-                        time.sleep(retry_wait_s)
+                        audit_sleep(retry_wait_s, action="AUTH_RETRY_WAIT")
 
                         retry_slot_token = ""
                         try:
@@ -3270,7 +3645,7 @@ def main():
 
                     smtp_close(smtp)
                     smtp = None
-                    sleep_with_jitter(max(args.interval, 60), jitter=10)
+                    audit_sleep_with_jitter(max(args.interval, 60), jitter=10)
 
                     retry_slot_token = ""
                     try:
@@ -3362,10 +3737,10 @@ def main():
                             stop_reason = circuit_reason
                             break
 
-                        time.sleep(wait_s)
+                        audit_sleep(wait_s, action="THROTTLE_WAIT")
                         smtp_close(smtp)
                         smtp = None
-                        sleep_with_jitter(max(args.interval, 60), jitter=10)
+                        audit_sleep_with_jitter(max(args.interval, 60), jitter=10)
 
                         retry_slot_token = ""
                         try:
@@ -3480,7 +3855,7 @@ def main():
                         elif sendgrid_err_cls == "TEMP_THROTTLE":
                             wait_s = backoff_seconds()
                             print(f"SENDGRID THROTTLE: sleeping {wait_s}s before next attempt.")
-                            time.sleep(wait_s)
+                            audit_sleep(wait_s, action="SENDGRID_THROTTLE_WAIT")
                     if (
                         args.provider == "sendgrid"
                         and args.suppress_invalid
@@ -3516,6 +3891,14 @@ def main():
 
                 if stop_reason:
                     break
+                audit_worker(
+                    "running",
+                    sent=sent_this_run,
+                    errors=error_count,
+                    last_recipient=last_recipient_for_audit,
+                    action="LOOP",
+                    pending_count=len(pending),
+                )
                 if repeat_mode and batch_sent >= batch_limit:
                     break
                 if idx < len(pending) - 1:
@@ -3526,13 +3909,16 @@ def main():
                             print("STOP: schedule_end reached (--stop_at_local).")
                             break
                         if remaining < int(args.interval):
-                            time.sleep(max(1, remaining))
+                            audit_sleep(max(1, remaining), action="SCHEDULE_END_WAIT")
                             stop_reason = "schedule_end"
                             print("STOP: schedule_end reached (--stop_at_local).")
                             break
-                    sleep_with_jitter(args.interval, jitter=10)
+                    audit_sleep_with_jitter(args.interval, jitter=10)
 
             pending_index = next_index
+
+            if args.preview_messages:
+                break
 
             if repeat_mode:
                 remaining_pending = max(0, len(pending) - pending_index)
@@ -3590,14 +3976,14 @@ def main():
                             print("STOP: schedule_end reached (--stop_at_local).")
                             break
                         if remaining < cooldown_seconds:
-                            time.sleep(max(1, remaining))
+                            audit_sleep(max(1, remaining), action="SCHEDULE_END_WAIT")
                             print("STOP: schedule_end reached (--stop_at_local).")
                             break
                     if human_mode_active:
                         sleep_s = humanized_cooldown_sleep_seconds(cooldown_seconds, sent_this_run, human_state, args)
-                        time.sleep(sleep_s)
+                        audit_sleep(sleep_s, action="COOLDOWN_WAIT")
                     else:
-                        time.sleep(cooldown_seconds)
+                        audit_sleep(cooldown_seconds, action="COOLDOWN_WAIT")
             else:
                 break
 
@@ -3613,6 +3999,16 @@ def main():
             total_sent_attempted=total_sent_attempted,
             total_skipped_suppressed=skipped_sendgrid_suppressed if args.provider == "sendgrid" else 0,
         )
+        audit_worker(
+            "stopped" if stop_reason else "done",
+            sent=sent_this_run,
+            errors=error_count,
+            last_recipient=last_recipient_for_audit,
+            action=final_reason,
+            pending_count=len(pending),
+            terminal=True,
+            force=True,
+        )
         print(
             "DONE:"
             f" sent={sent_this_run}"
@@ -3621,12 +4017,34 @@ def main():
             f" total_skipped_suppressed={skipped_sendgrid_suppressed if args.provider == 'sendgrid' else 0}"
             f" total_sent_attempted={total_sent_attempted}"
         )
+        if args.preview_messages:
+            print(f"PREVIEW FILE: {preview_messages_path}")
         if args.prune_sent and sent_this_run_emails:
             prunable = sent_this_run_emails - always_send_set
             removed = prune_sent_from_csv(csv_path, prunable)
             if removed:
                 print(f"PRUNE: removed {removed} from {csv_path.name}")
 
+    except KeyboardInterrupt:
+        emit_worker_event(
+            "STOP",
+            "interrupted",
+            pending_index=locals().get("pending_index", 0),
+            pending_count=len(pending),
+            sent_this_run=sent_this_run,
+            error_count=error_count,
+        )
+        audit_worker(
+            "interrupted",
+            sent=sent_this_run,
+            errors=error_count,
+            last_recipient=last_recipient_for_audit,
+            action="INTERRUPTED",
+            pending_count=len(pending),
+            terminal=True,
+            force=True,
+        )
+        raise
     except Exception as exc:
         emit_worker_event(
             "ERROR",
@@ -3635,8 +4053,21 @@ def main():
             pending_count=len(pending),
             traceback=traceback.format_exc(),
         )
+        audit_worker(
+            "error",
+            sent=sent_this_run,
+            errors=error_count,
+            last_recipient=last_recipient_for_audit,
+            action=type(exc).__name__,
+            pending_count=len(pending),
+            terminal=True,
+            force=True,
+        )
         raise
     finally:
+        if should_log_worker:
+            signal.signal(signal.SIGINT, previous_sigint)
+            signal.signal(signal.SIGTERM, previous_sigterm)
         smtp_close(smtp)
 
 if __name__ == "__main__":
