@@ -499,6 +499,56 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("temp artifact", " ".join(body["blocked_reasons"]))
         start_sender.assert_not_called()
 
+    def test_start_all_does_not_block_on_stale_lead_state_when_queue_and_readiness_pass(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": []}
+        temp_path = live_dashboard.settings.APP_ROOT / "tmp_synthetic_run" / "_important" / "leads.csv"
+        status = {
+            "active_important_check_job": None,
+            "latest_master_check": {"output_label": str(temp_path), "rejected_label": ""},
+            "latest_lead_triage": {
+                "verified_label": str(temp_path.with_name("leads_triaged_keep.csv")),
+                "rejected_label": str(temp_path.with_name("leads_triaged_reject.csv")),
+            },
+            "latest_auto_dispatch_preview": {},
+        }
+
+        with patch.object(
+            live_dashboard,
+            "SENDGRID_PROFILES",
+            ["sendgrid_annette"],
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=safe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_combined_leads_status",
+            return_value=status,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": [], "queue_safety": safe_report},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_all_senders",
+            return_value=(True, "started"),
+        ) as start_all_senders, patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start()
+
+        self.assertEqual(200, response.status_code)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertNotIn("leads.csv", " ".join(body.get("blocked_reasons", [])))
+        start_all_senders.assert_called_once()
+
     def test_start_profile_does_not_block_missing_live_important_files_after_dispatch_cleanup(self) -> None:
         with tempfile.TemporaryDirectory(prefix="synthetic_dispatch_cleanup_", dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -510,7 +560,7 @@ class LiveDashboardTests(unittest.TestCase):
             checked.write_text("Email,FirstName\nreader@example.test,Ava\n", encoding="utf-8")
             keep.write_text("Email,FirstName\nreader@example.test,Ava\n", encoding="utf-8")
             reject.write_text("Email,FirstName\n", encoding="utf-8")
-            missing = tmp / "_important"
+            missing = tmp / "tmp_stale_after_dispatch_cleanup" / "_important"
             status = {
                 "active_important_check_job": None,
                 "latest_master_check": {

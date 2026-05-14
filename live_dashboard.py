@@ -2370,6 +2370,8 @@ def _lead_state_start_block_reasons(queue_safety: dict[str, object] | None = Non
     if isinstance(active_check, dict):
         job_id = str(active_check.get("job_id") or "").strip() or "unknown"
         reasons.append(f"Check Leads is still running or stale: {job_id}.")
+    if archived_queue_source_ready:
+        return reasons
 
     checks: list[tuple[str, Path | None]] = []
     latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
@@ -2454,7 +2456,8 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
             suffix = f" {reason_text}" if reason_text else ""
             blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
 
-    blocked_reasons.extend(_lead_state_start_block_reasons(queue_safety))
+    if requested_profile:
+        blocked_reasons.extend(_lead_state_start_block_reasons(queue_safety))
     blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))
 
     ok = not blocked_reasons
