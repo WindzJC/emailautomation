@@ -2323,8 +2323,44 @@ def _state_file_mtime(path: Path | None) -> float:
         return 0.0
 
 
-def _lead_state_start_block_reasons() -> list[str]:
+def _queue_safety_report_path(value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = settings.APP_ROOT / path
+    return path
+
+
+def _path_exists_nonempty(path: Path | None) -> bool:
+    if path is None:
+        return False
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def _queue_safety_has_valid_archived_source(queue_safety: dict[str, object]) -> bool:
+    if not bool(queue_safety.get("safe")):
+        return False
+    source_resolution = str(queue_safety.get("source_resolution") or "").strip()
+    archived_resolutions = {
+        "latest_queue_rebuild_archived_dispatch_state",
+        "latest_queue_rebuild_manifest",
+        "latest_dispatch_staged_batch_archive",
+    }
+    if source_resolution not in archived_resolutions:
+        return False
+    intended = _queue_safety_report_path(queue_safety.get("intended_source_path"))
+    checked = _queue_safety_report_path(queue_safety.get("checked_path"))
+    return _path_exists_nonempty(intended) and _path_exists_nonempty(checked)
+
+
+def _lead_state_start_block_reasons(queue_safety: dict[str, object] | None = None) -> list[str]:
     reasons: list[str] = []
+    archived_queue_source_ready = _queue_safety_has_valid_archived_source(queue_safety or {})
     try:
         status = _combined_leads_status()
     except Exception as exc:
@@ -2362,15 +2398,15 @@ def _lead_state_start_block_reasons() -> list[str]:
             continue
         if _path_is_temp_artifact(path):
             reasons.append(f"{label} points to a temp artifact: {path.name}.")
-        if not path.exists():
+        if not archived_queue_source_ready and not path.exists():
             reasons.append(f"{label} is missing: {path.name}.")
 
     check_mtime = _state_file_mtime(check_output)
     triage_mtime = _state_file_mtime(triage_keep)
-    if check_mtime and triage_mtime and triage_mtime < check_mtime:
+    if not archived_queue_source_ready and check_mtime and triage_mtime and triage_mtime < check_mtime:
         reasons.append("Triage output is older than the checked leads output.")
 
-    if latest_preview:
+    if not archived_queue_source_ready and latest_preview:
         preview_time = _parse_iso_timestamp(
             latest_preview.get("generated_at_utc")
             or latest_preview.get("completed_at_utc")
@@ -2418,7 +2454,7 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
             suffix = f" {reason_text}" if reason_text else ""
             blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
 
-    blocked_reasons.extend(_lead_state_start_block_reasons())
+    blocked_reasons.extend(_lead_state_start_block_reasons(queue_safety))
     blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))
 
     ok = not blocked_reasons

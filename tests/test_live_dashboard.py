@@ -499,6 +499,79 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("temp artifact", " ".join(body["blocked_reasons"]))
         start_sender.assert_not_called()
 
+    def test_start_profile_does_not_block_missing_live_important_files_after_dispatch_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="synthetic_dispatch_cleanup_", dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            archived = tmp / "data" / "state" / "backups" / "staged_batches" / "dispatch_clean"
+            archived.mkdir(parents=True)
+            checked = archived / "leads.csv"
+            keep = archived / "leads_triaged_keep.csv"
+            reject = archived / "leads_triaged_reject.csv"
+            checked.write_text("Email,FirstName\nreader@example.test,Ava\n", encoding="utf-8")
+            keep.write_text("Email,FirstName\nreader@example.test,Ava\n", encoding="utf-8")
+            reject.write_text("Email,FirstName\n", encoding="utf-8")
+            missing = tmp / "_important"
+            status = {
+                "active_important_check_job": None,
+                "latest_master_check": {
+                    "output_label": str(missing / "leads.csv"),
+                    "rejected_label": str(missing / "leads_rejected.csv"),
+                },
+                "latest_lead_triage": {
+                    "verified_label": str(missing / "leads_triaged_keep.csv"),
+                    "rejected_label": str(missing / "leads_triaged_reject.csv"),
+                },
+                "latest_auto_dispatch_preview": {},
+            }
+            safe_report = {
+                "safe": True,
+                "unsafe_reasons": [],
+                "source_resolution": "latest_queue_rebuild_archived_dispatch_state",
+                "intended_source_path": str(keep),
+                "checked_path": str(checked),
+                "triaged_keep_path": str(keep),
+                "triaged_reject_path": str(reject),
+                "outside_checked_output_count": 0,
+                "outside_intended_source_count": 0,
+                "overlap_with_triaged_reject": 0,
+            }
+
+            with patch.object(
+                live_dashboard.runtime_control,
+                "is_known_profile",
+                return_value=True,
+            ), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value=safe_report,
+            ), patch.object(
+                live_dashboard,
+                "_active_sender_names",
+                return_value=set(),
+            ), patch.object(
+                live_dashboard,
+                "_profile_readiness_from_snapshot",
+                return_value={"status": "PASS", "reasons": []},
+            ), patch.object(
+                live_dashboard,
+                "_combined_leads_status",
+                return_value=status,
+            ), patch.object(
+                live_dashboard,
+                "_build_live_snapshot",
+                return_value={"profiles": [], "queue_safety": safe_report},
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "start_sender",
+                return_value=(True, "Started sendgrid_annette."),
+            ) as start_sender, patch.object(live_dashboard.time, "sleep"):
+                response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(200, response.status_code)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        start_sender.assert_called_once_with("sendgrid_annette")
+
     def test_upload_check_large_author_csv_writes_fresh_outputs_and_counts(self) -> None:
         valid_rows = 1005
         declared_upload_size = 87 * 1024 * 1024
