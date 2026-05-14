@@ -10,11 +10,12 @@ export TMUX_TMPDIR="$HOME/.local/state/tmux"
 
 PY="${PYTHON_BIN:-./.venv/bin/python}"
 SESSION_NAME="${TMUX_SENDGRID_SESSION:-sendgrid}"
-BACKUP_DIR="${SENDGRID_BACKUP_DIR:-backups}"
-REPORT_PATH="${SENDGRID_NORMALIZE_REPORT:-sendgrid_shard_normalize_report.json}"
 ATTACH_MODE="${TMUX_SENDGRID_ATTACH:-1}"
 MAX_TOTAL_OVERRIDE="${SENDGRID_DASHBOARD_MAX_TOTAL:-}"
+MAX_MESSAGES_1H_OVERRIDE="${SENDGRID_DASHBOARD_MAX_MESSAGES_1H:-}"
 STARTUP_PRUNE_GUARD="${SENDGRID_SKIP_PRUNE_ON_STARTUP:-0}"
+DRY_RUN="${TMUX_SENDGRID_DRY_RUN:-0}"
+PREFLIGHT_LOG_DIR="${SENDGRID_PREFLIGHT_LOG_DIR:-data/logs/sendgrid_start_all_preflight}"
 PROFILES=(
   sendgrid_annette
   sendgrid_jordan
@@ -89,19 +90,14 @@ then
   exit 1
 fi
 
-if [[ "${SENDGRID_SKIP_NORMALIZE:-0}" != "1" ]]; then
-  echo "Normalizing SendGrid shards..."
-  "$PY" tools/normalize_sendgrid_shards.py \
-    --shards-glob 'recipients_sendgrid_*.csv' \
-    --backup-dir "$BACKUP_DIR" \
-    --always-send 'astraproductionsbyjc@gmail.com' \
-    --report-path "$REPORT_PATH"
-fi
-
 EXTRA_ARGS=()
 if [[ -n "$MAX_TOTAL_OVERRIDE" ]]; then
   EXTRA_ARGS+=(--max_total "$MAX_TOTAL_OVERRIDE")
-  echo "Dashboard send cap override: $MAX_TOTAL_OVERRIDE per sender"
+  echo "Dashboard send target per-profile cap: $MAX_TOTAL_OVERRIDE"
+fi
+if [[ -n "$MAX_MESSAGES_1H_OVERRIDE" ]]; then
+  EXTRA_ARGS+=(--max_messages_1h "$MAX_MESSAGES_1H_OVERRIDE")
+  echo "Dashboard rolling hourly cap override: $MAX_MESSAGES_1H_OVERRIDE total/hour"
 fi
 if [[ "$STARTUP_PRUNE_GUARD" == "1" ]]; then
   echo "Startup prune guard enabled for SendGrid boot."
@@ -113,9 +109,33 @@ fi
 
 echo "Running preflight checks..."
 "$PY" send_shard.py --profile sendgrid_annette --status-sendgrid
+mkdir -p "$PREFLIGHT_LOG_DIR"
 for profile in "${PROFILES[@]}"; do
-  "$PY" send_shard.py --profile "$profile" --preflight >/dev/null
+  echo "Preflight: $profile"
+  preflight_log="$PREFLIGHT_LOG_DIR/${profile}.preflight.log"
+  if preflight_output="$("$PY" send_shard.py --profile "$profile" --preflight 2>&1)"; then
+    printf '%s\n' "$preflight_output" > "$preflight_log"
+    if [[ -n "$preflight_output" ]]; then
+      printf '%s\n' "$preflight_output"
+    fi
+  else
+    status=$?
+    printf '%s\n' "$preflight_output" > "$preflight_log"
+    echo "Preflight failed for $profile. Output saved to $preflight_log."
+    if [[ -n "$preflight_output" ]]; then
+      printf '%s\n' "$preflight_output"
+    fi
+    exit "$status"
+  fi
 done
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "Dry run enabled; launch commands that would be sent:"
+  for profile in "${PROFILES[@]}"; do
+    echo "$PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
+  done
+  exit 0
+fi
 
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 tmux new-session -d -s "$SESSION_NAME" -n run
@@ -129,18 +149,46 @@ tmux select-layout -t "$SESSION_NAME":run tiled
 tmux set-environment -t "$SESSION_NAME" SENDGRID_API_KEY "$SENDGRID_API_KEY"
 tmux set-environment -t "$SESSION_NAME" SENDGRID_SKIP_PRUNE_ON_STARTUP "$STARTUP_PRUNE_GUARD"
 
-for pane_profile in \
-  "$SESSION_NAME:run.0 sendgrid_annette" \
-  "$SESSION_NAME:run.1 sendgrid_jordan" \
-  "$SESSION_NAME:run.2 sendgrid_jodi" \
-  "$SESSION_NAME:run.3 sendgrid_alison" \
-  "$SESSION_NAME:run.4 sendgrid_fiorela"; do
-  pane="${pane_profile%% *}"
-  profile="${pane_profile##* }"
+mapfile -t PANE_IDS < <(tmux list-panes -t "$SESSION_NAME:run" -F '#{pane_index} #{pane_id}' | sort -n | awk '{print $2}')
+if [[ "${#PANE_IDS[@]}" -lt "${#PROFILES[@]}" ]]; then
+  echo "Unable to launch all SendGrid profiles: expected ${#PROFILES[@]} panes, found ${#PANE_IDS[@]}."
+  tmux list-panes -t "$SESSION_NAME:run" -F '#{pane_index} #{pane_id} #{pane_current_command}' || true
+  exit 1
+fi
+
+for idx in "${!PROFILES[@]}"; do
+  profile="${PROFILES[$idx]}"
+  pane="${PANE_IDS[$idx]}"
   escaped_key="$(printf '%q' "$SENDGRID_API_KEY")"
   escaped_guard="$(printf '%q' "$STARTUP_PRUNE_GUARD")"
-  tmux send-keys -t "$pane" "cd \"$ROOT\"; export SENDGRID_API_KEY=$escaped_key; export SENDGRID_SKIP_PRUNE_ON_STARTUP=$escaped_guard; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR" C-m
+  launch_command="cd \"$ROOT\"; export SENDGRID_API_KEY=$escaped_key; export SENDGRID_SKIP_PRUNE_ON_STARTUP=$escaped_guard; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
+  echo "Launching $profile in pane $pane"
+  echo "Launch command: $PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
+  tmux send-keys -t "$pane" "$launch_command" C-m
 done
+
+missing_profiles=()
+deadline=$((SECONDS + 8))
+while true; do
+  missing_profiles=()
+  for profile in "${PROFILES[@]}"; do
+    if ! pgrep -af "[s]end_shard.py --profile $profile" >/dev/null; then
+      missing_profiles+=("$profile")
+    fi
+  done
+  if [[ "${#missing_profiles[@]}" -eq 0 || "$SECONDS" -ge "$deadline" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "${#missing_profiles[@]}" -gt 0 ]]; then
+  echo "PARTIALLY_STARTED: missing profiles: ${missing_profiles[*]}"
+  echo "Current send_shard.py processes:"
+  pgrep -af "[s]end_shard.py --profile" || true
+  echo "Current tmux panes:"
+  tmux list-panes -t "$SESSION_NAME:run" -F '#{pane_index} #{pane_id} #{pane_current_command}' || true
+  exit 2
+fi
 
 if [[ "$ATTACH_MODE" == "0" ]]; then
   echo "Started tmux session: $SESSION_NAME"

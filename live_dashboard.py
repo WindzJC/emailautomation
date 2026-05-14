@@ -60,6 +60,8 @@ from dashboard_core import (
     build_dashboard_snapshot,
     build_profile_message_readiness,
     campaign_history_record,
+    detect_running_preview_profiles,
+    detect_running_sender_profiles,
     load_dashboard_run_settings,
     message_preview_output_paths,
     message_preview_path_for_profile,
@@ -2428,7 +2430,9 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
     snapshot = _build_live_snapshot()
     queue_safety = build_dashboard_queue_safety_report()
     active_profiles = _active_sender_names()
+    active_preview_profiles = _active_preview_names(profiles if requested_profile else None)
     blocked_reasons: list[str] = []
+    warning_reasons: list[str] = []
 
     queue_safe = bool(queue_safety.get("safe"))
     if not queue_safe:
@@ -2441,8 +2445,14 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
     if requested_profile:
         if requested_profile in active_profiles:
             blocked_reasons.append(f"{requested_profile} is already active.")
+        if requested_profile in active_preview_profiles:
+            blocked_reasons.append(f"{requested_profile} preview validation is already running.")
     elif active_profiles:
         blocked_reasons.append(f"Active senders are already running: {', '.join(sorted(active_profiles))}.")
+    elif active_preview_profiles:
+        blocked_reasons.append(
+            f"Preview validation is already running: {', '.join(sorted(active_preview_profiles))}."
+        )
 
     readiness_by_profile: dict[str, dict[str, object]] = {}
     readiness_status_by_profile: dict[str, str] = {}
@@ -2451,14 +2461,19 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
         readiness_by_profile[profile] = readiness
         status = str(readiness.get("status") or "NOT RUN").strip().upper() or "NOT RUN"
         readiness_status_by_profile[profile] = status
-        if status != "PASS":
-            reason_text = "; ".join(str(reason) for reason in readiness.get("reasons", []) if str(reason or "").strip())
-            suffix = f" {reason_text}" if reason_text else ""
+        if status == "PASS":
+            continue
+        reason_text = "; ".join(str(reason) for reason in readiness.get("reasons", []) if str(reason or "").strip())
+        suffix = f" {reason_text}" if reason_text else ""
+        if status in {"NOT RUN", "STALE"}:
+            warning_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
+        else:
             blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
 
     if requested_profile:
         blocked_reasons.extend(_lead_state_start_block_reasons(queue_safety))
     blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))
+    warning_reasons = list(dict.fromkeys(reason for reason in warning_reasons if str(reason or "").strip()))
 
     ok = not blocked_reasons
     queue_safety_status = "safe" if queue_safe else "unsafe"
@@ -2477,6 +2492,8 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
         "safety_status": queue_safety_status,
         "message_readiness": readiness_by_profile,
         "message_readiness_status": message_readiness_status,
+        "warning_reasons": warning_reasons,
+        "warnings": warning_reasons,
         "blocked_reasons": blocked_reasons,
         "reasons": blocked_reasons,
         "suggested_fix": (
@@ -2511,6 +2528,8 @@ def _start_preconditions_block_response(report: dict[str, object]) -> JSONRespon
         "queue_safety_status": report.get("queue_safety_status") or "unknown",
         "safety_status": report.get("safety_status") or report.get("queue_safety_status") or "unknown",
         "message_readiness_status": report.get("message_readiness_status") or "",
+        "warning_reasons": report.get("warning_reasons") or [],
+        "warnings": report.get("warnings") or report.get("warning_reasons") or [],
         "blocked_reasons": reasons,
         "reasons": reasons,
         "queue_safety": queue_safety,
@@ -2522,8 +2541,21 @@ def _start_preconditions_block_response(report: dict[str, object]) -> JSONRespon
 
 
 def _active_sender_names() -> set[str]:
+    names: set[str] = set()
     try:
-        return {str(item.name) for item in runtime_control.list_active_sender_snapshots(tail_lines=12)}
+        names.update(str(item.name) for item in runtime_control.list_active_sender_snapshots(tail_lines=12))
+    except Exception:
+        pass
+    try:
+        names.update(detect_running_sender_profiles())
+    except Exception:
+        pass
+    return names
+
+
+def _active_preview_names(profile_names: list[str] | None = None) -> set[str]:
+    try:
+        return detect_running_preview_profiles(profile_names)
     except Exception:
         return set()
 
@@ -2766,13 +2798,20 @@ def start() -> JSONResponse:
     ok, message = runtime_control.start_all_senders()
     time.sleep(0.6)
     snapshot = _build_live_snapshot()
+    partially_started = str(message or "").startswith("PARTIALLY_STARTED")
     _append_campaign_history(
-        "start_all_started" if ok else "start_all_blocked",
+        "start_all_started" if ok else "start_all_partially_started" if partially_started else "start_all_blocked",
         profile="all",
         snapshot=snapshot,
         blocked_reasons=[] if ok else [message],
     )
-    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
+    return JSONResponse({
+        "ok": ok,
+        "status": "STARTED" if ok else "PARTIALLY_STARTED" if partially_started else "BLOCKED",
+        "message": message,
+        "warnings": preconditions.get("warning_reasons") or [],
+        "snapshot": _build_live_snapshot(),
+    })
 
 
 @app.post("/api/start/{profile_name}")
@@ -2793,7 +2832,12 @@ def start_profile(profile_name: str) -> JSONResponse:
         snapshot=snapshot,
         blocked_reasons=[] if ok else [message],
     )
-    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
+    return JSONResponse({
+        "ok": ok,
+        "message": message,
+        "warnings": preconditions.get("warning_reasons") or [],
+        "snapshot": _build_live_snapshot(),
+    })
 
 
 @app.post("/api/stop")

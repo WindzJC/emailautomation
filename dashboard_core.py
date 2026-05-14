@@ -17,6 +17,7 @@ import urllib.request
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -47,6 +48,7 @@ AUTO_STOP_EVENTS_PATH = STATE_DIR / "auto_stop_events.jsonl"
 ACTIVITY_LOG_PATH = settings.ACTIVITY_LOG_PATH
 SUPPRESSION_CSV = settings.SENDGRID_SUPPRESSIONS_PATH
 NORMALIZE_REPORT_PATH = settings.SENDGRID_NORMALIZE_REPORT_PATH
+CAMPAIGN_RUN_HISTORY_PATH = settings.LOGS_DIR / "campaign_run_history.jsonl"
 WEBHOOK_EVENTS_PATH = settings.WEBHOOK_EVENTS_PATH
 WEBHOOK_DEDUPE_DB = SENDGRID_WEBHOOK_DEDUPE_DB
 WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
@@ -71,11 +73,14 @@ DASHBOARD_PROFILES = [
 ]
 START_ALL_PROFILES = [
     name
-    for name in DASHBOARD_PROFILES
+    for name in SENDGRID_PROFILES
     if not bool(PROFILES.get(name, {}).get("dashboard_manual_only"))
 ]
 SENDGRID_TARGET_WINDOW_HOURS = 18
 SENDGRID_SEND_TARGET_OPTIONS = (5000, 10000)
+MESSAGE_PREVIEW_DIR = settings.APP_ROOT / "data" / "message_previews"
+EMAIL_SYNTAX_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+START_ALL_PARTIAL_PREFIX = "PARTIALLY_STARTED"
 
 STATUS_ALIASES = {
     "processed": "processed",
@@ -472,6 +477,266 @@ def count_pending(path: Path) -> int:
     return max(0, len(read_csv_rows(path)))
 
 
+def iso_mtime(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def profile_expected_pitch_mode(profile_name: str) -> str:
+    return "astra_visual" if profile_name == "private_jc" else "consignment"
+
+
+def profile_actual_pitch_mode(profile_name: str) -> str:
+    pitch_key = str(PROFILES.get(profile_name, {}).get("pitch") or "").strip()
+    if pitch_key == "pitch_jc":
+        return "astra_visual"
+    if pitch_key in {"pitch1", "pitch2", "pitch3", "pitch4", "pitch5"}:
+        return "consignment"
+    return pitch_key or "unknown"
+
+
+def message_preview_path_for_profile(profile_name: str) -> Path:
+    safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile_name or "sender").strip() or "sender")
+    return MESSAGE_PREVIEW_DIR / f"{safe_profile}_message_preview.csv"
+
+
+def message_preview_output_paths(input_path: Path) -> Tuple[Path, Path, Path]:
+    stem = input_path.stem
+    base = stem[: -len("_message_preview")] if stem.endswith("_message_preview") else stem
+    return (
+        input_path.parent / f"{base}_message_preview_validated.csv",
+        input_path.parent / f"{base}_message_preview_failed.csv",
+        input_path.parent / f"{base}_message_preview_summary.txt",
+    )
+
+
+def _csv_row_count_with_fieldnames(path: Path) -> Tuple[List[str], int, List[Dict[str, str]]]:
+    if not path.exists():
+        return [], 0, []
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [str(field or "").lstrip("\ufeff").strip() for field in (reader.fieldnames or [])]
+        rows = [{field: str(row.get(field, "") or "").strip() for field in fieldnames} for row in reader]
+    return fieldnames, len(rows), rows
+
+
+def _normalized_email_for_readiness(row: Dict[str, str]) -> str:
+    lower = {str(key or "").strip().lower(): str(value or "").strip() for key, value in row.items()}
+    _, addr = parseaddr(lower.get("email") or lower.get("authoremail") or "")
+    return addr.strip().lower()
+
+
+def _validation_failed_count(failed_path: Path, summary_path: Path) -> Optional[int]:
+    if failed_path.exists():
+        _, row_count, _rows = _csv_row_count_with_fieldnames(failed_path)
+        return row_count
+    if summary_path.exists():
+        try:
+            text = summary_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        match = re.search(r"(?im)^failed rows:\s*(\d+)\s*$", text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
+    cfg = PROFILES.get(profile_name, {})
+    csv_path = _profile_csv_path(cfg)
+    fieldnames, row_count, rows = _csv_row_count_with_fieldnames(csv_path)
+    field_by_lower = {field.lower(): field for field in fieldnames}
+    book_title_field = field_by_lower.get("booktitle", "")
+    book_title_present = bool(book_title_field)
+    rows_with_book_title = sum(1 for row in rows if book_title_field and str(row.get(book_title_field) or "").strip())
+    fallback_rows = max(0, row_count - rows_with_book_title)
+
+    seen: Set[str] = set()
+    duplicate_count = 0
+    invalid_count = 0
+    for row in rows:
+        email = _normalized_email_for_readiness(row)
+        if not email or not EMAIL_SYNTAX_RE.match(email):
+            invalid_count += 1
+            continue
+        if email in seen:
+            duplicate_count += 1
+        else:
+            seen.add(email)
+
+    preview_path = message_preview_path_for_profile(profile_name)
+    validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
+    _preview_fields, preview_row_count, _preview_rows = _csv_row_count_with_fieldnames(preview_path)
+    preview_exists = preview_path.exists()
+    validation_artifacts = [path for path in (validated_path, failed_path, summary_path) if path.exists()]
+    validation_time_utc = max((iso_mtime(path) for path in validation_artifacts), default="")
+    preview_time_utc = iso_mtime(preview_path) if preview_exists else ""
+    queue_time_utc = iso_mtime(csv_path)
+    preview_mtime = safe_path_mtime(preview_path)
+    queue_mtime = safe_path_mtime(csv_path)
+    validation_mtime = max((safe_path_mtime(path) for path in validation_artifacts), default=0.0)
+    failed_count = _validation_failed_count(failed_path, summary_path)
+
+    expected_mode = profile_expected_pitch_mode(profile_name)
+    actual_mode = profile_actual_pitch_mode(profile_name)
+    reasons: List[str] = []
+    validation_status = "NOT RUN"
+    if preview_exists and failed_count is not None:
+        validation_status = "FAIL" if failed_count > 0 else "PASS"
+
+    status = "PASS"
+    if not book_title_present:
+        status = "FAIL"
+        reasons.append("BookTitle column is missing.")
+    if invalid_count > 0:
+        status = "FAIL"
+        reasons.append("Recipient queue has invalid email rows.")
+    if duplicate_count > 0:
+        status = "FAIL"
+        reasons.append("Recipient queue has duplicate email rows.")
+    if expected_mode != actual_mode:
+        status = "FAIL"
+        reasons.append("Profile pitch mode does not match expected mode.")
+    if validation_status == "FAIL":
+        status = "FAIL"
+        reasons.append("Preview validation failed.")
+    if status == "PASS" and not preview_exists:
+        status = "NOT RUN"
+        reasons.append("Rendered message preview CSV is missing.")
+    if status == "PASS" and validation_status == "NOT RUN":
+        status = "NOT RUN"
+        reasons.append("Preview validation has not run.")
+    if status == "PASS" and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
+        status = "STALE"
+        reasons.append("Preview CSV is older than the recipient queue.")
+    if status == "PASS" and validation_mtime and preview_mtime and validation_mtime < preview_mtime:
+        status = "STALE"
+        reasons.append("Validation is older than the preview CSV.")
+
+    return {
+        "status": status,
+        "recipient_file": csv_path.name,
+        "recipient_row_count": row_count,
+        "book_title_column_present": book_title_present,
+        "rows_with_book_title": rows_with_book_title,
+        "fallback_row_count": fallback_rows,
+        "invalid_email_count": invalid_count,
+        "duplicate_email_count": duplicate_count,
+        "preview_csv_exists": preview_exists,
+        "preview_row_count": preview_row_count,
+        "preview_validation_status": validation_status,
+        "last_preview_generated_utc": preview_time_utc,
+        "last_validation_time_utc": validation_time_utc,
+        "queue_updated_utc": queue_time_utc,
+        "pitch_mode_expected": expected_mode,
+        "actual_profile_mode": actual_mode,
+        "preview_csv_name": preview_path.name,
+        "reasons": reasons,
+    }
+
+
+def safe_path_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _profile_from_snapshot(snapshot: Optional[Dict[str, object]], profile_name: str) -> Dict[str, object]:
+    profiles = snapshot.get("profiles") if isinstance(snapshot, dict) else []
+    if not isinstance(profiles, list):
+        return {}
+    for profile in profiles:
+        if isinstance(profile, dict) and str(profile.get("name") or "") == profile_name:
+            return profile
+    return {}
+
+
+def campaign_history_record(
+    event_type: str,
+    *,
+    profile: str = "",
+    snapshot: Optional[Dict[str, object]] = None,
+    queue_safety: Optional[Dict[str, object]] = None,
+    blocked_reasons: Optional[Sequence[object]] = None,
+    preview_file: str = "",
+    preview_row_count: Optional[int] = None,
+    validation_status: str = "",
+) -> Dict[str, object]:
+    profile_name = str(profile or "").strip()
+    profile_snapshot = _profile_from_snapshot(snapshot, profile_name)
+    readiness = dict(profile_snapshot.get("message_readiness") or {}) if profile_snapshot else {}
+    if not readiness and profile_name and profile_name != "all":
+        readiness = build_profile_message_readiness(profile_name)
+    cfg = PROFILES.get(profile_name, {}) if profile_name and profile_name != "all" else {}
+    recipient_file = str(cfg.get("csv") or readiness.get("recipient_file") or "")
+    queue_report = queue_safety or ((snapshot or {}).get("queue_safety") if isinstance(snapshot, dict) else {}) or {}
+    safe_value = queue_report.get("safe") if isinstance(queue_report, dict) else None
+    queue_safety_status = "safe" if safe_value is True else "unsafe" if safe_value is False else "unknown"
+    sent_count = profile_snapshot.get("run_sent_display", profile_snapshot.get("run_sent", ""))
+    failed_count = profile_snapshot.get("run_errors", "")
+    reasons = [str(reason) for reason in (blocked_reasons or []) if str(reason or "").strip()]
+    if not reasons and isinstance(queue_report, dict) and safe_value is False:
+        raw_reasons = queue_report.get("unsafe_reasons")
+        if isinstance(raw_reasons, list):
+            reasons = [str(reason) for reason in raw_reasons]
+        elif queue_report.get("message"):
+            reasons = [str(queue_report.get("message"))]
+    return {
+        "event_type": str(event_type or "").strip(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "profile": profile_name,
+        "pitch_mode": profile_expected_pitch_mode(profile_name) if profile_name and profile_name != "all" else "",
+        "recipient_file": Path(recipient_file).name if recipient_file else "",
+        "recipient_row_count": int(readiness.get("recipient_row_count") or 0),
+        "BookTitle_column_present": bool(readiness.get("book_title_column_present")),
+        "BookTitle_populated_count": int(readiness.get("rows_with_book_title") or 0),
+        "fallback_blank_BookTitle_count": int(readiness.get("fallback_row_count") or 0),
+        "preview_file": str(preview_file or readiness.get("preview_csv_name") or ""),
+        "preview_row_count": int(preview_row_count if preview_row_count is not None else readiness.get("preview_row_count") or 0),
+        "validation_status": str(validation_status or readiness.get("preview_validation_status") or ""),
+        "message_readiness_status": str(readiness.get("status") or ""),
+        "queue_safety_status": queue_safety_status,
+        "blocked_reasons": reasons,
+        "sent_count": int(sent_count or 0) if str(sent_count or "").isdigit() else sent_count,
+        "failed_count": int(failed_count or 0) if str(failed_count or "").isdigit() else failed_count,
+    }
+
+
+def append_campaign_run_history(record: Dict[str, object], path: Path = CAMPAIGN_RUN_HISTORY_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    try:
+        settings.secure_private_file(path)
+    except Exception:
+        pass
+
+
+def load_campaign_run_history(limit: int = 25, path: Path = CAMPAIGN_RUN_HISTORY_PATH) -> List[Dict[str, object]]:
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    records: List[Dict[str, object]] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+        if len(records) >= limit:
+            break
+    return records
+
+
 def format_when(ts: Optional[datetime]) -> str:
     if not ts:
         return ""
@@ -796,7 +1061,7 @@ def load_dashboard_profile_snapshots(tail_lines: int = 12) -> List[ProfileSnapsh
     return snapshots
 
 
-def _detect_running_send_shard_profiles() -> set:
+def _detect_running_send_shard_profiles(*, include_preview: bool = False) -> set:
     """Return a set of profile names that have a running send_shard.py process.
 
     This is a best-effort fallback for cases where senders were started
@@ -810,13 +1075,19 @@ def _detect_running_send_shard_profiles() -> set:
     for line in ps.splitlines():
         if "send_shard.py" not in line:
             continue
+        if not include_preview and "--preview_messages" in line:
+            continue
         m = re.search(r"--profile\s+(\S+)", line)
         if m:
             out.add(m.group(1))
     return out
 
 
-def _running_sender_processes(profile_names: Optional[Iterable[str]] = None) -> List[Dict[str, object]]:
+def _running_sender_processes(
+    profile_names: Optional[Iterable[str]] = None,
+    *,
+    include_preview: bool = True,
+) -> List[Dict[str, object]]:
     allowed_profiles = set(profile_names or DASHBOARD_PROFILES)
     processes: List[Dict[str, object]] = []
     try:
@@ -838,12 +1109,52 @@ def _running_sender_processes(profile_names: Optional[Iterable[str]] = None) -> 
         if pid == current_pid:
             continue
         command = parts[1]
+        if not include_preview and "--preview_messages" in command:
+            continue
         match = re.search(r"--profile(?:=|\s+)([^\s]+)", command)
         profile = match.group(1) if match else ""
         if profile not in allowed_profiles or profile not in DASHBOARD_PROFILES:
             continue
         processes.append({"pid": pid, "profile": profile, "command": command})
     return processes
+
+
+def detect_running_preview_profiles(profile_names: Optional[Iterable[str]] = None) -> set[str]:
+    profiles: set[str] = set()
+    for proc in _running_sender_processes(profile_names, include_preview=True):
+        if "--preview_messages" in str(proc.get("command") or ""):
+            profiles.add(str(proc.get("profile") or ""))
+    return {profile for profile in profiles if profile}
+
+
+def detect_running_sender_profiles(profile_names: Optional[Iterable[str]] = None) -> set[str]:
+    profiles: set[str] = set()
+    for proc in _running_sender_processes(profile_names, include_preview=False):
+        profiles.add(str(proc.get("profile") or ""))
+    return {profile for profile in profiles if profile}
+
+
+def _redact_launcher_output(text: str) -> str:
+    redacted = re.sub(r"SG\.[A-Za-z0-9_.-]+", "[redacted-sendgrid-key]", str(text or ""))
+    return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted-email]", redacted)
+
+
+def _compact_launcher_output(text: str, limit: int = 600) -> str:
+    cleaned = _redact_launcher_output(text).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _wait_for_started_profiles(profiles: Sequence[str], wait_seconds: float = 5.0) -> set[str]:
+    expected = {str(profile) for profile in profiles}
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    active: set[str] = set()
+    while True:
+        active = detect_running_sender_profiles(expected)
+        if expected.issubset(active) or time.monotonic() >= deadline:
+            return active
+        time.sleep(0.25)
 
 
 def stop_sender_processes(
@@ -925,6 +1236,31 @@ def _apply_process_runtime_fallback(snapshot: ProfileSnapshot) -> None:
 
 def run_sendgrid_launcher() -> tuple[bool, str]:
     env = os.environ.copy()
+    profiles = [profile for profile in START_ALL_PROFILES if profile in SENDGRID_PROFILES]
+    if not profiles:
+        return False, "No SendGrid profiles are configured for Start All."
+    key_resolution = resolve_sendgrid_api_key(env=env, env_files=SENDGRID_ENV_FILES)
+    if not key_resolution.ok:
+        return False, key_resolution.error
+    env["SENDGRID_API_KEY"] = key_resolution.key
+    python_bin = _python_runtime_bin()
+    if not python_bin:
+        return False, "Missing Python runtime for SendGrid preflight."
+    preflight_outputs: Dict[str, str] = {}
+    for profile in profiles:
+        preflight = subprocess.run(
+            [str(python_bin), "send_shard.py", "--profile", profile, "--preflight"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        output = "\n".join(part for part in [preflight.stdout.strip(), preflight.stderr.strip()] if part).strip()
+        preflight_outputs[profile] = _compact_launcher_output(output or "Preflight passed with no output.")
+        if preflight.returncode != 0:
+            return False, preflight_outputs[profile] or f"Preflight failed for {profile}."
     env["TMUX_SENDGRID_ATTACH"] = "0"
     env["SENDGRID_DASHBOARD_MAX_TOTAL"] = str(dashboard_send_cap_per_profile())
     env["SENDGRID_DASHBOARD_MAX_MESSAGES_1H"] = str(dashboard_sendgrid_hourly_target_cap())
@@ -941,7 +1277,26 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "Launcher timed out while starting sendgrid session."
     output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
-    return proc.returncode == 0, output or "(no output)"
+    output = _compact_launcher_output(output or "(no output)", limit=1200)
+    if proc.returncode != 0:
+        if START_ALL_PARTIAL_PREFIX in output:
+            return False, f"{START_ALL_PARTIAL_PREFIX}: {output}"
+        return False, output
+
+    active = _wait_for_started_profiles(profiles)
+    missing = [profile for profile in profiles if profile not in active]
+    if missing:
+        missing_details = []
+        for profile in missing:
+            missing_details.append(f"{profile}: preflight={preflight_outputs.get(profile) or '(missing)'}")
+        detail_text = "; ".join(missing_details)
+        return (
+            False,
+            f"{START_ALL_PARTIAL_PREFIX}: missing profiles: {', '.join(missing)}. "
+            f"Active profiles: {', '.join(sorted(active)) or 'none'}. "
+            f"Launcher output: {output}. Last preflight output: {detail_text}",
+        )
+    return True, output
 
 
 def _python_runtime_bin() -> Path:
@@ -3205,6 +3560,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         profile["telemetry_quality_tone"] = str(health.get("telemetry_tone") or "neutral")
         profile["telemetry_quality_note"] = str(health.get("telemetry_note") or "")
         profile["run_issue_state"] = str(health.get("run_issue_state") or "")
+        profile["message_readiness"] = build_profile_message_readiness(str(profile.get("name") or ""))
 
     # Expose a UI-only display fallback when webhook intake is stale.
     # Keep canonical `run_sent` unchanged; provide `run_sent_display` for the client.
@@ -3321,4 +3677,5 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "latest_failures": latest_failures(activity),
         "auto_stop_events": auto_stop_events,
         "profiles": profile_dicts,
+        "campaign_run_history": load_campaign_run_history(limit=25),
     }

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +17,152 @@ from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
+    def test_campaign_run_history_appends_and_loads_recent_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = Path(tmpdir) / "campaign_run_history.jsonl"
+            first = {"event_type": "start_all_requested", "timestamp": "2026-01-01T00:00:00+00:00"}
+            second = {"event_type": "start_all_started", "timestamp": "2026-01-01T00:01:00+00:00"}
+
+            dashboard_core.append_campaign_run_history(first, path=history_path)
+            dashboard_core.append_campaign_run_history(second, path=history_path)
+            records = dashboard_core.load_campaign_run_history(limit=1, path=history_path)
+
+        self.assertEqual([second], records)
+
+    def test_campaign_history_record_includes_readiness_and_queue_safety_fields(self) -> None:
+        snapshot = {
+            "queue_safety": {"safe": False, "unsafe_reasons": ["mixed_queue"]},
+            "profiles": [
+                {
+                    "name": "sendgrid_annette",
+                    "message_readiness": {
+                        "status": "PASS",
+                        "recipient_file": "recipients_sendgrid_1.csv",
+                        "recipient_row_count": 2,
+                        "book_title_column_present": True,
+                        "rows_with_book_title": 1,
+                        "fallback_row_count": 1,
+                        "preview_csv_name": "sendgrid_annette_message_preview.csv",
+                        "preview_row_count": 2,
+                        "preview_validation_status": "PASS",
+                    },
+                    "run_sent": 3,
+                    "run_errors": 1,
+                }
+            ],
+        }
+
+        record = dashboard_core.campaign_history_record(
+            "preview_validate_completed",
+            profile="sendgrid_annette",
+            snapshot=snapshot,
+        )
+
+        self.assertEqual("preview_validate_completed", record["event_type"])
+        self.assertEqual("sendgrid_annette", record["profile"])
+        self.assertEqual("consignment", record["pitch_mode"])
+        self.assertEqual("recipients_sendgrid_1.csv", record["recipient_file"])
+        self.assertEqual(2, record["recipient_row_count"])
+        self.assertEqual(True, record["BookTitle_column_present"])
+        self.assertEqual(1, record["BookTitle_populated_count"])
+        self.assertEqual(1, record["fallback_blank_BookTitle_count"])
+        self.assertEqual("unsafe", record["queue_safety_status"])
+        self.assertEqual(["mixed_queue"], record["blocked_reasons"])
+
+    def test_profile_message_readiness_passes_for_valid_current_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            shards.mkdir()
+            previews.mkdir()
+            queue = shards / "recipients_sendgrid_1.csv"
+            with queue.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
+                writer.writeheader()
+                writer.writerow({"Email": "reader1@example.com", "FirstName": "Ava", "BookTitle": "Launch One"})
+                writer.writerow({"Email": "reader2@example.com", "FirstName": "Ben", "BookTitle": ""})
+            preview = previews / "sendgrid_annette_message_preview.csv"
+            preview.write_text("Email,FirstName,BookTitle,Subject,Body\nreader1@example.com,Ava,Launch One,Subject,Body\n", encoding="utf-8")
+            (previews / "sendgrid_annette_message_preview_validated.csv").write_text("Email\nreader1@example.com\n", encoding="utf-8")
+            (previews / "sendgrid_annette_message_preview_failed.csv").write_text("Email\n", encoding="utf-8")
+            (previews / "sendgrid_annette_message_preview_summary.txt").write_text("failed rows: 0\n", encoding="utf-8")
+
+            profiles = {
+                "sendgrid_annette": {
+                    "provider": "sendgrid",
+                    "csv": str(queue),
+                    "log": str(base / "sendgrid_annette_log.csv"),
+                    "pitch": "pitch1",
+                }
+            }
+            with patch.multiple(dashboard_core, SHARDS_DIR=shards, MESSAGE_PREVIEW_DIR=previews, PROFILES=profiles):
+                readiness = dashboard_core.build_profile_message_readiness("sendgrid_annette")
+
+        self.assertEqual("PASS", readiness["status"])
+        self.assertEqual(2, readiness["recipient_row_count"])
+        self.assertEqual(True, readiness["book_title_column_present"])
+        self.assertEqual(1, readiness["rows_with_book_title"])
+        self.assertEqual(1, readiness["fallback_row_count"])
+        self.assertEqual("consignment", readiness["pitch_mode_expected"])
+        self.assertEqual("consignment", readiness["actual_profile_mode"])
+
+    def test_profile_message_readiness_flags_missing_booktitle_not_run_and_stale_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            shards.mkdir()
+            previews.mkdir()
+            queue = shards / "recipients_private_jc.csv"
+            with queue.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
+                writer.writeheader()
+                writer.writerow({"Email": "reader@example.com", "FirstName": "Ava"})
+
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "dashboard_enabled": True,
+                    "csv": str(queue),
+                    "log": str(base / "private_jc_log.csv"),
+                    "pitch": "pitch_jc",
+                }
+            }
+            with patch.multiple(dashboard_core, SHARDS_DIR=shards, MESSAGE_PREVIEW_DIR=previews, PROFILES=profiles):
+                missing = dashboard_core.build_profile_message_readiness("private_jc")
+
+            self.assertEqual("FAIL", missing["status"])
+            self.assertEqual(False, missing["book_title_column_present"])
+            self.assertEqual("NOT RUN", missing["preview_validation_status"])
+
+            with queue.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
+                writer.writeheader()
+                writer.writerow({"Email": "reader@example.com", "FirstName": "Ava", "BookTitle": "Launch One"})
+            preview = previews / "private_jc_message_preview.csv"
+            preview.write_text("Email,FirstName,BookTitle,Subject,Body\nreader@example.com,Ava,Launch One,Subject,Body\n", encoding="utf-8")
+            validated = previews / "private_jc_message_preview_validated.csv"
+            failed = previews / "private_jc_message_preview_failed.csv"
+            summary = previews / "private_jc_message_preview_summary.txt"
+            validated.write_text("Email\nreader@example.com\n", encoding="utf-8")
+            failed.write_text("Email\n", encoding="utf-8")
+            summary.write_text("failed rows: 0\n", encoding="utf-8")
+            old = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+            new = datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()
+            os.utime(preview, (old, old))
+            os.utime(validated, (old, old))
+            os.utime(failed, (old, old))
+            os.utime(summary, (old, old))
+            os.utime(queue, (new, new))
+
+            with patch.multiple(dashboard_core, SHARDS_DIR=shards, MESSAGE_PREVIEW_DIR=previews, PROFILES=profiles):
+                stale = dashboard_core.build_profile_message_readiness("private_jc")
+
+        self.assertEqual("STALE", stale["status"])
+        self.assertEqual("PASS", stale["preview_validation_status"])
+        self.assertIn("older than the recipient queue", " ".join(stale["reasons"]))
+
     def test_queue_safety_alert_blocks_mixed_recipient_queue(self) -> None:
         alert = dashboard_core.queue_safety_alert(
             {
@@ -697,6 +844,277 @@ class DashboardCoreTests(unittest.TestCase):
         )
         send_keys_commands = [cmd for cmd in calls if cmd[:3] == ["tmux", "send-keys", "-t"]]
         self.assertTrue(any("--max_total 5000 --max_messages_1h 278" in " ".join(cmd) for cmd in send_keys_commands))
+
+    def test_run_sendgrid_launcher_preflights_start_all_sendgrid_profiles_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append(list(cmd))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SENDGRID_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
+                DASHBOARD_PROFILES=["sendgrid_annette", "sendgrid_jordan", "private_jc"],
+                START_ALL_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(
+                dashboard_core,
+                "_wait_for_started_profiles",
+                return_value={"sendgrid_annette", "sendgrid_jordan"},
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertTrue(ok, message)
+        preflight_profiles = [
+            cmd[cmd.index("--profile") + 1]
+            for cmd in calls
+            if "send_shard.py" in cmd and "--preflight" in cmd
+        ]
+        self.assertEqual(["sendgrid_annette", "sendgrid_jordan"], preflight_profiles)
+        self.assertNotIn("private_jc", preflight_profiles)
+        self.assertTrue(any(cmd[:2] == ["bash", "./run_sendgrid_tmux.sh"] for cmd in calls))
+
+    def test_run_sendgrid_launcher_reports_success_only_when_all_five_profiles_active(self) -> None:
+        profiles = [
+            "sendgrid_annette",
+            "sendgrid_jordan",
+            "sendgrid_jodi",
+            "sendgrid_alison",
+            "sendgrid_fiorela",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                return SimpleNamespace(returncode=0, stdout=f"ok {' '.join(cmd)}", stderr="")
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SENDGRID_PROFILES=profiles,
+                DASHBOARD_PROFILES=profiles + ["private_jc"],
+                START_ALL_PROFILES=profiles,
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(
+                dashboard_core,
+                "_wait_for_started_profiles",
+                return_value=set(profiles),
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertTrue(ok, message)
+        self.assertNotIn("PARTIALLY_STARTED", message)
+
+    def test_run_sendgrid_launcher_reports_partial_when_one_profile_missing(self) -> None:
+        profiles = [
+            "sendgrid_annette",
+            "sendgrid_jordan",
+            "sendgrid_jodi",
+            "sendgrid_alison",
+            "sendgrid_fiorela",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                if "--preflight" in cmd:
+                    profile = cmd[cmd.index("--profile") + 1]
+                    return SimpleNamespace(returncode=0, stdout=f"{profile}: status=OK", stderr="")
+                return SimpleNamespace(returncode=0, stdout="Started tmux session: sendgrid", stderr="")
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SENDGRID_PROFILES=profiles,
+                DASHBOARD_PROFILES=profiles + ["private_jc"],
+                START_ALL_PROFILES=profiles,
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(
+                dashboard_core,
+                "_wait_for_started_profiles",
+                return_value=set(profiles) - {"sendgrid_fiorela"},
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertFalse(ok)
+        self.assertIn("PARTIALLY_STARTED", message)
+        self.assertIn("sendgrid_fiorela", message)
+        self.assertIn("sendgrid_fiorela: status=OK", message)
+
+    def test_run_sendgrid_launcher_reports_shell_partial_launch_failure(self) -> None:
+        profiles = [
+            "sendgrid_annette",
+            "sendgrid_jordan",
+            "sendgrid_jodi",
+            "sendgrid_alison",
+            "sendgrid_fiorela",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                if "--preflight" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="status=OK", stderr="")
+                return SimpleNamespace(
+                    returncode=2,
+                    stdout="Started tmux session setup\nPARTIALLY_STARTED: missing profiles: sendgrid_fiorela",
+                    stderr="",
+                )
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SENDGRID_PROFILES=profiles,
+                DASHBOARD_PROFILES=profiles + ["private_jc"],
+                START_ALL_PROFILES=profiles,
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertFalse(ok)
+        self.assertTrue(message.startswith("PARTIALLY_STARTED"))
+        self.assertIn("sendgrid_fiorela", message)
+
+    def test_run_sendgrid_tmux_script_uses_explicit_pane_ids_and_includes_fiorela(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "run_sendgrid_tmux.sh").read_text(encoding="utf-8")
+        self.assertIn("sendgrid_fiorela", script)
+        self.assertIn("mapfile -t PANE_IDS", script)
+        self.assertIn("Launching $profile in pane $pane", script)
+        self.assertIn("send_shard.py --profile $profile", script)
+        self.assertIn("PARTIALLY_STARTED: missing profiles", script)
+        self.assertIn("TMUX_SENDGRID_DRY_RUN", script)
+
+    def test_run_sendgrid_tmux_script_does_not_normalize_or_rewrite_shards(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "run_sendgrid_tmux.sh").read_text(encoding="utf-8")
+        self.assertNotIn("Normalizing SendGrid shards", script)
+        self.assertNotIn("normalize_sendgrid_shards.py", script)
+        self.assertNotIn("SENDGRID_NORMALIZE_REPORT", script)
+        self.assertNotIn("SENDGRID_BACKUP_DIR", script)
+        self.assertNotIn("sendgrid_shard_normalize_report", script)
+
+    def test_run_sendgrid_launcher_does_not_modify_recipient_csvs_before_launch(self) -> None:
+        profiles = [
+            "sendgrid_annette",
+            "sendgrid_jordan",
+            "sendgrid_jodi",
+            "sendgrid_alison",
+            "sendgrid_fiorela",
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+            shard_paths = []
+            profile_map = {}
+            for index, profile in enumerate(profiles, start=1):
+                shard = base / f"recipients_sendgrid_{index}.csv"
+                shard.write_text("Email,FirstName,BookTitle\nreader@example.test,Ava,Book\n", encoding="utf-8")
+                shard_paths.append(shard)
+                profile_map[profile] = {"provider": "sendgrid", "csv": shard.name, "log": f"{profile}_log.csv"}
+            before = {path: path.stat().st_mtime_ns for path in shard_paths}
+
+            def fake_run(cmd, **kwargs):
+                self.assertEqual(before, {path: path.stat().st_mtime_ns for path in shard_paths})
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=base,
+                PROFILES=profile_map,
+                SENDGRID_PROFILES=profiles,
+                DASHBOARD_PROFILES=profiles,
+                START_ALL_PROFILES=profiles,
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(
+                dashboard_core,
+                "_wait_for_started_profiles",
+                return_value=set(profiles),
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+            after = {path: path.stat().st_mtime_ns for path in shard_paths}
+
+        self.assertTrue(ok, message)
+        self.assertEqual(before, after)
+
+    def test_run_sendgrid_launcher_reports_failing_preflight_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                if "sendgrid_jordan" in cmd:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="synthetic preflight failure")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SENDGRID_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
+                START_ALL_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
+                PYTHON_BIN=python_bin,
+                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
+                    key="SG.synthetic",
+                    source_label="synthetic",
+                    masked_key="SG.s...",
+                    warning="",
+                    error="",
+                ),
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run) as run_mock:
+                ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertFalse(ok)
+        self.assertIn("synthetic preflight failure", message)
+        self.assertEqual(2, run_mock.call_count)
 
     def test_sendgrid_hourly_cap_status_uses_dashboard_window_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
