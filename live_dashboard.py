@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -54,8 +55,15 @@ import runtime_audit
 import settings
 from dashboard_core import (
     SENDGRID_PROFILES,
+    append_campaign_run_history,
+    build_dashboard_queue_safety_report,
     build_dashboard_snapshot,
+    build_profile_message_readiness,
+    campaign_history_record,
     load_dashboard_run_settings,
+    message_preview_output_paths,
+    message_preview_path_for_profile,
+    profile_expected_pitch_mode,
     save_dashboard_send_cap_per_profile,
 )
 from important_leads_verify import (
@@ -98,6 +106,7 @@ from lead_ledger import (
 from leads_workflow import (
     clean_uploaded_leads,
     iso_utc,
+    load_state,
     preview_shard_cleaned_leads,
     save_state,
     save_uploaded_csv,
@@ -106,6 +115,7 @@ from leads_workflow import (
     timestamp_slug,
 )
 from tools.package_campaign_handoff import pack_archive
+from tools.rebuild_recipient_queues import build_queue_safety_report
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
     PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS,
@@ -554,6 +564,179 @@ def _promote_auto_triage_outputs(
     _copy_csv_atomic(staged_quarantine_path, quarantine_path)
 
 
+def _count_book_title_rows(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"rows_with_booktitle": 0, "rows_without_booktitle": 0}
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        book_title_header = next((field for field in fieldnames if str(field or "").strip().lower() == "booktitle"), "")
+        with_title = 0
+        without_title = 0
+        for row in reader:
+            if book_title_header and str(row.get(book_title_header) or "").strip():
+                with_title += 1
+            else:
+                without_title += 1
+    return {"rows_with_booktitle": with_title, "rows_without_booktitle": without_title}
+
+
+def _book_title_fallback_readiness() -> dict[str, object]:
+    from send_shard import PROFILES, PITCHES, book_title_fallback_supported, template_requires_book_title
+
+    profile_names = [
+        "private_jc",
+        "sendgrid_annette",
+        "sendgrid_jordan",
+        "sendgrid_jodi",
+        "sendgrid_alison",
+        "sendgrid_fiorela",
+    ]
+    profiles: dict[str, dict[str, object]] = {}
+    all_ok = True
+    for profile_name in profile_names:
+        cfg = PROFILES.get(profile_name) or {}
+        pitch_key = str(cfg.get("pitch") or "")
+        pitch = PITCHES.get(pitch_key) or {}
+        subject = str(pitch.get("subject") or "")
+        body = str(pitch.get("body") or "")
+        subject_fallback = str(pitch.get("subject_fallback") or "")
+        requires_booktitle = template_requires_book_title(subject, body)
+        fallback_supported = book_title_fallback_supported(subject, body, subject_fallback) if requires_booktitle else True
+        strict_required = bool(pitch.get("require_book_title"))
+        ok = (not requires_booktitle) or (fallback_supported and not strict_required)
+        profiles[profile_name] = {
+            "pitch": pitch_key,
+            "requires_booktitle": requires_booktitle,
+            "fallback_supported": fallback_supported,
+            "strict_booktitle_required": strict_required,
+            "ready_for_missing_booktitle": ok,
+        }
+        all_ok = all_ok and ok
+    return {"fallback_capable": all_ok, "profiles": profiles}
+
+
+def _active_sender_state_summary() -> dict[str, object]:
+    active_profiles = runtime_control.list_active_sender_snapshots(tail_lines=12)
+    states = {str(item.name): str(item.runtime_state) for item in active_profiles}
+    return {
+        "active_sender_count": len(states),
+        "active_profiles": list(states.keys()),
+        "active_sender_states": states,
+        "any_sender_running": bool(states),
+    }
+
+
+def _auto_dispatch_preview_summary(
+    *,
+    preview: dict[str, object],
+    triage_report: dict[str, object],
+    keep_path: Path,
+    rejected_path: Path,
+) -> dict[str, object]:
+    booktitle_counts = _count_book_title_rows(keep_path)
+    fallback = _book_title_fallback_readiness()
+    sender_state = _active_sender_state_summary()
+    try:
+        queue_safety = build_queue_safety_report(
+            intended_source_path=keep_path,
+            checked_path=IMPORTANT_LEADS_OUTPUT,
+            triaged_keep_path=keep_path,
+            triaged_reject_path=rejected_path,
+        )
+    except Exception as exc:
+        queue_safety = {
+            "safe": False,
+            "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
+            "message": str(exc),
+        }
+    planned_counts = dict(preview.get("rows_written_per_queue") or {})
+    return {
+        "preview_id": str(preview.get("preview_id") or ""),
+        "preview_path": str(preview.get("preview_path") or ""),
+        "status": "previewed",
+        "total_keep_rows": int(triage_report.get("keep_count") or preview.get("dispatch_source_row_count") or 0),
+        "rejected_rows": int(triage_report.get("reject_count") or 0),
+        "quarantine_rows": int(triage_report.get("quarantine_count") or 0),
+        **booktitle_counts,
+        "fallback_capable": bool(fallback.get("fallback_capable")),
+        "fallback_readiness": fallback,
+        "suppression_unsubscribe_skip_count": int(preview.get("suppressed_skipped") or preview.get("skipped_suppressed") or 0),
+        "suppression_summary": dict(preview.get("suppression_summary") or {}),
+        "per_profile_planned_counts": planned_counts,
+        "queue_safety": queue_safety,
+        **sender_state,
+        "manual_rebuild_allowed": not bool(sender_state.get("any_sender_running")),
+        "manual_rebuild_required": True,
+        "manual_start_required": True,
+        "auto_rebuild_performed": False,
+        "auto_dispatch_performed": False,
+        "auto_start_performed": False,
+        "message": (
+            "Dispatch preview ready. Manual queue rebuild/confirm is required."
+            if not bool(sender_state.get("any_sender_running"))
+            else "Dispatch preview ready, but active senders must be stopped before queue rebuild/confirm."
+        ),
+    }
+
+
+def _run_auto_dispatch_preview_after_triage(
+    *,
+    job: dict[str, object],
+    triage_report: dict[str, object],
+    keep_path: Path,
+    rejected_path: Path,
+    quarantine_path: Path,
+) -> dict[str, object]:
+    job["auto_dispatch_preview_status"] = "running"
+    job["auto_dispatch_preview_started_at_utc"] = iso_utc()
+    job["message"] = "Auto triage complete. Building dispatch preview."
+    _save_important_check_job(job)
+    try:
+        preview = preview_dispatch_master_leads(
+            master_path=IMPORTANT_LEADS_OUTPUT,
+            rejected_path=IMPORTANT_LEADS_REJECTED,
+            verified_path=STRICT_VERIFIED_PATH,
+            triaged_keep_path=keep_path,
+            dispatch_source_mode=DISPATCH_SOURCE_TRIAGED_KEEP,
+            dispatch_cap=DISPATCH_CAP_ALL,
+            jc_queue_path=settings.SHARDS_DIR / "recipients_private_jc.csv",
+            sendgrid_queue_paths=[
+                settings.SHARDS_DIR / "recipients_sendgrid_1.csv",
+                settings.SHARDS_DIR / "recipients_sendgrid_2.csv",
+                settings.SHARDS_DIR / "recipients_sendgrid_3.csv",
+                settings.SHARDS_DIR / "recipients_sendgrid_4.csv",
+                settings.SHARDS_DIR / "recipients_sendgrid_5.csv",
+            ],
+            jc_log_path=settings.LOGS_DIR / "private_jc_log.csv",
+            sendgrid_log_paths=[
+                settings.LOGS_DIR / "sendgrid_annette_log.csv",
+                settings.LOGS_DIR / "sendgrid_jordan_log.csv",
+                settings.LOGS_DIR / "sendgrid_jodi_log.csv",
+                settings.LOGS_DIR / "sendgrid_alison_log.csv",
+                settings.LOGS_DIR / "sendgrid_fiorela_log.csv",
+            ],
+            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+        )
+        summary = _auto_dispatch_preview_summary(
+            preview=preview,
+            triage_report=triage_report,
+            keep_path=keep_path,
+            rejected_path=rejected_path,
+        )
+        job["auto_dispatch_preview_status"] = "completed"
+        job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
+        job["auto_dispatch_preview_id"] = summary["preview_id"]
+        job["auto_dispatch_preview"] = summary
+        save_state(latest_auto_dispatch_preview=summary)
+    except Exception as exc:
+        job["auto_dispatch_preview_status"] = "failed"
+        job["auto_dispatch_preview_error"] = str(exc)
+        job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
+        job["message"] = f"Auto triage complete. Dispatch preview failed: {exc}"
+    return job
+
+
 def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, object]:
     job_id = str(job.get("job_id") or "").strip()
     if not job_id:
@@ -704,10 +887,18 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job["auto_triage_processed_rows"] = int(final_report.get("processed_rows") or 0)
         job["auto_triage_remaining_rows"] = 0
         job["auto_triage_progress_percent"] = 100
+        job = _run_auto_dispatch_preview_after_triage(
+            job=job,
+            triage_report=final_report,
+            keep_path=keep_path,
+            rejected_path=triage_rejected_path,
+            quarantine_path=quarantine_path,
+        )
         job["message"] = (
             f"Check complete. Auto triage complete: KEEP {int(final_report.get('keep_count') or 0)}, "
             f"REJECT {int(final_report.get('reject_count') or 0)}, "
-            f"QUARANTINE {int(final_report.get('quarantine_count') or 0)}."
+            f"QUARANTINE {int(final_report.get('quarantine_count') or 0)}. "
+            f"Dispatch preview {str(job.get('auto_dispatch_preview_status') or 'not_started')}."
         )
     except Exception as exc:
         job["status"] = "triage_failed"
@@ -1439,6 +1630,7 @@ def _build_leads_pipeline_status(status: dict[str, object]) -> dict[str, object]
 
 
 def _combined_leads_status() -> dict[str, object]:
+    state = load_state()
     status = {
         **shard_status(),
         **important_leads_status(),
@@ -1446,6 +1638,7 @@ def _combined_leads_status() -> dict[str, object]:
         "active_important_check_job": _find_active_important_check_job(),
         "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
         "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
+        "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
     }
     status["pipeline"] = _build_leads_pipeline_status(status)
     return status
@@ -2050,10 +2243,496 @@ def snapshot(
     return _build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
 
 
+def _queue_safety_start_block_response(profile_name: str = "") -> JSONResponse | None:
+    report = build_dashboard_queue_safety_report()
+    if bool(report.get("safe")):
+        return None
+    reasons = report.get("unsafe_reasons")
+    if not isinstance(reasons, list):
+        reasons = []
+    message = str(report.get("message") or "").strip() or (
+        "Recipient queue is not safe to start. Rerun Upload & Check, confirm dispatch, "
+        "or rebuild queues from the current campaign source before starting senders."
+    )
+    snapshot_for_record = _build_live_snapshot()
+    _append_campaign_history(
+        "start_profile_blocked" if profile_name else "start_all_blocked",
+        profile=str(profile_name or "all"),
+        snapshot=snapshot_for_record,
+        queue_safety=report,
+        blocked_reasons=[str(reason) for reason in reasons],
+    )
+    payload = {
+        "ok": False,
+        "blocked": True,
+        "error": "queue_safety_unsafe",
+        "profile": str(profile_name or ""),
+        "safety_status": "unsafe",
+        "safe": False,
+        "reasons": [str(reason) for reason in reasons],
+        "queue_safety": report,
+        "suggested_fix": "Rerun Upload & Check, confirm dispatch, or rebuild queues from the current campaign source before starting senders.",
+        "message": message,
+        "snapshot": _build_live_snapshot(),
+    }
+    return JSONResponse(payload, status_code=409)
+
+
+def _start_precondition_profiles(profile_name: str = "") -> list[str]:
+    requested = str(profile_name or "").strip()
+    if requested:
+        return [requested]
+    return [str(profile) for profile in SENDGRID_PROFILES]
+
+
+def _profile_readiness_from_snapshot(snapshot: dict[str, object], profile_name: str) -> dict[str, object]:
+    profiles = snapshot.get("profiles")
+    if isinstance(profiles, list):
+        for profile in profiles:
+            if isinstance(profile, dict) and str(profile.get("name") or "") == profile_name:
+                readiness = profile.get("message_readiness")
+                if isinstance(readiness, dict):
+                    return dict(readiness)
+    return build_profile_message_readiness(profile_name)
+
+
+def _state_label_path(value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = settings.APP_ROOT / path
+    return path
+
+
+def _path_is_temp_artifact(path: Path) -> bool:
+    for part in path.parts:
+        lowered = part.lower()
+        if lowered.startswith("tmp") or lowered.startswith("pytest-"):
+            return True
+    return False
+
+
+def _state_file_mtime(path: Path | None) -> float:
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _lead_state_start_block_reasons() -> list[str]:
+    reasons: list[str] = []
+    try:
+        status = _combined_leads_status()
+    except Exception as exc:
+        return [f"Lead Op state could not be checked: {exc}"]
+
+    active_check = status.get("active_important_check_job")
+    if isinstance(active_check, dict):
+        job_id = str(active_check.get("job_id") or "").strip() or "unknown"
+        reasons.append(f"Check Leads is still running or stale: {job_id}.")
+
+    checks: list[tuple[str, Path | None]] = []
+    latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
+    latest_triage = status.get("latest_lead_triage") or status.get("latest_lead_verify")
+    if not isinstance(latest_triage, dict):
+        latest_triage = {}
+    latest_preview = status.get("latest_auto_dispatch_preview")
+    if not isinstance(latest_preview, dict):
+        latest_preview = {}
+
+    check_output = _state_label_path(latest_check.get("output_label") if isinstance(latest_check, dict) else "")
+    check_rejected = _state_label_path(latest_check.get("rejected_label") if isinstance(latest_check, dict) else "")
+    triage_keep = _state_label_path(latest_triage.get("verified_label") or latest_triage.get("keep_path"))
+    triage_reject = _state_label_path(latest_triage.get("rejected_label") or latest_triage.get("rejected_path"))
+    checks.extend(
+        [
+            ("checked leads output", check_output),
+            ("rejected leads output", check_rejected),
+            ("triage keep output", triage_keep),
+            ("triage reject output", triage_reject),
+        ]
+    )
+
+    for label, path in checks:
+        if path is None:
+            continue
+        if _path_is_temp_artifact(path):
+            reasons.append(f"{label} points to a temp artifact: {path.name}.")
+        if not path.exists():
+            reasons.append(f"{label} is missing: {path.name}.")
+
+    check_mtime = _state_file_mtime(check_output)
+    triage_mtime = _state_file_mtime(triage_keep)
+    if check_mtime and triage_mtime and triage_mtime < check_mtime:
+        reasons.append("Triage output is older than the checked leads output.")
+
+    if latest_preview:
+        preview_time = _parse_iso_timestamp(
+            latest_preview.get("generated_at_utc")
+            or latest_preview.get("completed_at_utc")
+            or latest_preview.get("created_at_utc")
+        )
+        if triage_mtime and preview_time is not None and preview_time.timestamp() < triage_mtime:
+            reasons.append("Dispatch preview is older than the triage output.")
+        elif triage_mtime and preview_time is None:
+            reasons.append("Dispatch preview is missing a current timestamp.")
+
+    return reasons
+
+
+def _build_start_preconditions_report(profile_name: str = "") -> dict[str, object]:
+    requested_profile = str(profile_name or "").strip()
+    profiles = _start_precondition_profiles(requested_profile)
+    snapshot = _build_live_snapshot()
+    queue_safety = build_dashboard_queue_safety_report()
+    active_profiles = _active_sender_names()
+    blocked_reasons: list[str] = []
+
+    queue_safe = bool(queue_safety.get("safe"))
+    if not queue_safe:
+        raw_reasons = queue_safety.get("unsafe_reasons")
+        if isinstance(raw_reasons, list) and raw_reasons:
+            blocked_reasons.extend(str(reason) for reason in raw_reasons)
+        else:
+            blocked_reasons.append(str(queue_safety.get("message") or "Recipient queue is unsafe."))
+
+    if requested_profile:
+        if requested_profile in active_profiles:
+            blocked_reasons.append(f"{requested_profile} is already active.")
+    elif active_profiles:
+        blocked_reasons.append(f"Active senders are already running: {', '.join(sorted(active_profiles))}.")
+
+    readiness_by_profile: dict[str, dict[str, object]] = {}
+    readiness_status_by_profile: dict[str, str] = {}
+    for profile in profiles:
+        readiness = _profile_readiness_from_snapshot(snapshot, profile)
+        readiness_by_profile[profile] = readiness
+        status = str(readiness.get("status") or "NOT RUN").strip().upper() or "NOT RUN"
+        readiness_status_by_profile[profile] = status
+        if status != "PASS":
+            reason_text = "; ".join(str(reason) for reason in readiness.get("reasons", []) if str(reason or "").strip())
+            suffix = f" {reason_text}" if reason_text else ""
+            blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
+
+    blocked_reasons.extend(_lead_state_start_block_reasons())
+    blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))
+
+    ok = not blocked_reasons
+    queue_safety_status = "safe" if queue_safe else "unsafe"
+    message_readiness_status: object
+    if requested_profile and profiles:
+        message_readiness_status = readiness_status_by_profile.get(profiles[0], "NOT RUN")
+    else:
+        message_readiness_status = readiness_status_by_profile
+    return {
+        "ok": ok,
+        "blocked": not ok,
+        "profile": requested_profile,
+        "profiles": profiles,
+        "queue_safety": queue_safety,
+        "queue_safety_status": queue_safety_status,
+        "safety_status": queue_safety_status,
+        "message_readiness": readiness_by_profile,
+        "message_readiness_status": message_readiness_status,
+        "blocked_reasons": blocked_reasons,
+        "reasons": blocked_reasons,
+        "suggested_fix": (
+            "Run Preview + Validate for each sender, wait for active jobs/senders to finish, "
+            "rerun Upload & Check/Fast Triage/Dispatch Preview if stale, then confirm/rebuild queues if needed."
+        ),
+        "snapshot": snapshot,
+    }
+
+
+def _start_preconditions_block_response(report: dict[str, object]) -> JSONResponse | None:
+    if bool(report.get("ok")):
+        return None
+    profile_name = str(report.get("profile") or "").strip()
+    queue_safety = report.get("queue_safety") if isinstance(report.get("queue_safety"), dict) else {}
+    reasons = [str(reason) for reason in (report.get("blocked_reasons") or []) if str(reason or "").strip()]
+    _append_campaign_history(
+        "start_profile_blocked" if profile_name else "start_all_blocked",
+        profile=profile_name or "all",
+        snapshot=report.get("snapshot") if isinstance(report.get("snapshot"), dict) else _build_live_snapshot(),
+        queue_safety=queue_safety,
+        blocked_reasons=reasons,
+    )
+    error = "queue_safety_unsafe" if str(report.get("queue_safety_status") or "") == "unsafe" else "start_preconditions_failed"
+    message = "NOT READY / BLOCKED: " + (" ".join(reasons) if reasons else "Start preconditions failed.")
+    payload = {
+        "ok": False,
+        "blocked": True,
+        "error": error,
+        "profile": profile_name,
+        "profiles": report.get("profiles") or [],
+        "queue_safety_status": report.get("queue_safety_status") or "unknown",
+        "safety_status": report.get("safety_status") or report.get("queue_safety_status") or "unknown",
+        "message_readiness_status": report.get("message_readiness_status") or "",
+        "blocked_reasons": reasons,
+        "reasons": reasons,
+        "queue_safety": queue_safety,
+        "suggested_fix": report.get("suggested_fix") or "",
+        "message": message,
+        "snapshot": _build_live_snapshot(),
+    }
+    return JSONResponse(payload, status_code=409)
+
+
+def _active_sender_names() -> set[str]:
+    try:
+        return {str(item.name) for item in runtime_control.list_active_sender_snapshots(tail_lines=12)}
+    except Exception:
+        return set()
+
+
+def _preview_validation_reason_counts(summary_path: Path, limit: int = 5) -> list[str]:
+    if not summary_path.exists():
+        return []
+    try:
+        text = summary_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    reasons: list[str] = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if not cleaned.startswith("- "):
+            continue
+        reason = cleaned[2:].strip()
+        if reason and reason.lower() != "none":
+            reasons.append(reason)
+        if len(reasons) >= limit:
+            break
+    return reasons
+
+
+def _append_campaign_history(
+    event_type: str,
+    *,
+    profile: str = "",
+    snapshot: dict[str, object] | None = None,
+    queue_safety: dict[str, object] | None = None,
+    blocked_reasons: list[object] | None = None,
+    preview_file: str = "",
+    preview_row_count: int | None = None,
+    validation_status: str = "",
+) -> None:
+    try:
+        append_campaign_run_history(
+            campaign_history_record(
+                event_type,
+                profile=profile,
+                snapshot=snapshot,
+                queue_safety=queue_safety,
+                blocked_reasons=blocked_reasons,
+                preview_file=preview_file,
+                preview_row_count=preview_row_count,
+                validation_status=validation_status,
+            )
+        )
+    except Exception:
+        pass
+
+
+@app.post("/api/profiles/{profile_name}/preview-validate")
+def preview_validate_profile(profile_name: str) -> JSONResponse:
+    profile_name = str(profile_name or "").strip()
+    if not runtime_control.is_known_profile(profile_name):
+        return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
+    if profile_name in _active_sender_names():
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "profile_active",
+                "profile": profile_name,
+                "message": f"Preview validation blocked: {profile_name} is actively sending.",
+                "snapshot": _build_live_snapshot(),
+            },
+            status_code=409,
+        )
+    active_dispatch = _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS)
+    if active_dispatch:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "dispatch_active",
+                "profile": profile_name,
+                "job": active_dispatch,
+                "message": "Preview validation blocked while dispatch confirm/rebuild is running.",
+                "snapshot": _build_live_snapshot(),
+            },
+            status_code=409,
+        )
+
+    python_bin = settings.APP_ROOT / ".venv" / "bin" / "python"
+    if not python_bin.exists():
+        python_bin = Path("python")
+    preview_cmd = [str(python_bin), "send_shard.py", "--profile", profile_name, "--preview_messages"]
+    expected_mode = profile_expected_pitch_mode(profile_name)
+    validate_cmd = [
+        str(python_bin),
+        "tools/validate_message_preview.py",
+        "--profile",
+        profile_name,
+        "--pitch-mode",
+        expected_mode,
+        "--fail-on-errors",
+    ]
+    preview_path = message_preview_path_for_profile(profile_name)
+    validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
+    _append_campaign_history(
+        "preview_validate_started",
+        profile=profile_name,
+        snapshot=_build_live_snapshot(),
+        preview_file=str(preview_path),
+        validation_status="RUNNING",
+    )
+
+    try:
+        preview_proc = subprocess.run(
+            preview_cmd,
+            cwd=settings.APP_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        _append_campaign_history(
+            "preview_validate_completed",
+            profile=profile_name,
+            snapshot=_build_live_snapshot(),
+            preview_file=str(preview_path),
+            preview_row_count=_count_csv_rows(preview_path),
+            validation_status="TIMEOUT",
+            blocked_reasons=["Preview generation timed out."],
+        )
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "preview_timeout",
+                "profile": profile_name,
+                "message": "Preview generation timed out before validation could run.",
+                "snapshot": _build_live_snapshot(),
+            },
+            status_code=504,
+        )
+    if preview_proc.returncode != 0:
+        _append_campaign_history(
+            "preview_validate_completed",
+            profile=profile_name,
+            snapshot=_build_live_snapshot(),
+            preview_file=str(preview_path),
+            preview_row_count=_count_csv_rows(preview_path),
+            validation_status="PREVIEW_FAILED",
+            blocked_reasons=["Preview generation failed."],
+        )
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "preview_failed",
+                "profile": profile_name,
+                "returncode": int(preview_proc.returncode),
+                "message": "Preview generation failed. No email was sent.",
+                "snapshot": _build_live_snapshot(),
+            },
+            status_code=500,
+        )
+
+    try:
+        validate_proc = subprocess.run(
+            validate_cmd,
+            cwd=settings.APP_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        _append_campaign_history(
+            "preview_validate_completed",
+            profile=profile_name,
+            snapshot=_build_live_snapshot(),
+            preview_file=str(preview_path),
+            preview_row_count=_count_csv_rows(preview_path),
+            validation_status="TIMEOUT",
+            blocked_reasons=["Preview validation timed out."],
+        )
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "validation_timeout",
+                "profile": profile_name,
+                "preview_path": str(preview_path),
+                "preview_row_count": _count_csv_rows(preview_path),
+                "message": "Preview validation timed out.",
+                "snapshot": _build_live_snapshot(),
+            },
+            status_code=504,
+        )
+
+    validation_passed = validate_proc.returncode == 0
+    reason_counts = _preview_validation_reason_counts(summary_path)
+    result = {
+        "profile": profile_name,
+        "pitch_mode": expected_mode,
+        "preview_path": str(preview_path),
+        "preview_row_count": _count_csv_rows(preview_path),
+        "validation_passed": validation_passed,
+        "validation_status": "PASS" if validation_passed else "FAIL",
+        "validation_returncode": int(validate_proc.returncode),
+        "validation_reasons": reason_counts,
+        "validated_path": str(validated_path),
+        "failed_path": str(failed_path),
+        "summary_path": str(summary_path),
+        "timestamp_utc": iso_utc(),
+    }
+    history_snapshot = _build_live_snapshot()
+    _append_campaign_history(
+        "preview_validate_completed",
+        profile=profile_name,
+        snapshot=history_snapshot,
+        preview_file=str(preview_path),
+        preview_row_count=int(result["preview_row_count"]),
+        validation_status=str(result["validation_status"]),
+        blocked_reasons=reason_counts,
+    )
+    snapshot = _build_live_snapshot()
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                f"Preview + validation passed for {profile_name}."
+                if validation_passed
+                else f"Preview generated but validation failed for {profile_name}."
+            ),
+            "result": result,
+            "snapshot": snapshot,
+        }
+    )
+
+
 @app.post("/api/start")
 def start() -> JSONResponse:
+    _append_campaign_history("start_all_requested", profile="all", snapshot=_build_live_snapshot())
+    preconditions = _build_start_preconditions_report()
+    blocked = _start_preconditions_block_response(preconditions)
+    if blocked is not None:
+        return blocked
     ok, message = runtime_control.start_all_senders()
     time.sleep(0.6)
+    snapshot = _build_live_snapshot()
+    _append_campaign_history(
+        "start_all_started" if ok else "start_all_blocked",
+        profile="all",
+        snapshot=snapshot,
+        blocked_reasons=[] if ok else [message],
+    )
     return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 
@@ -2061,8 +2740,20 @@ def start() -> JSONResponse:
 def start_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
+    _append_campaign_history("start_profile_requested", profile=profile_name, snapshot=_build_live_snapshot())
+    preconditions = _build_start_preconditions_report(profile_name=profile_name)
+    blocked = _start_preconditions_block_response(preconditions)
+    if blocked is not None:
+        return blocked
     ok, message = runtime_control.start_sender(profile_name)
     time.sleep(0.6)
+    snapshot = _build_live_snapshot()
+    _append_campaign_history(
+        "start_profile_started" if ok else "start_profile_blocked",
+        profile=profile_name,
+        snapshot=snapshot,
+        blocked_reasons=[] if ok else [message],
+    )
     return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
 
 

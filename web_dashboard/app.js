@@ -18,6 +18,7 @@ const els = {
   domainBreakdown: document.getElementById("domain-breakdown"),
   domainBreakdownCaption: document.getElementById("domain-breakdown-caption"),
   overviewGrid: document.getElementById("overview-grid"),
+  campaignRunHistory: document.getElementById("campaign-run-history"),
   runStatusList: document.getElementById("run-status-list"),
   telemetryNotesList: document.getElementById("telemetry-notes-list"),
   latestFailures: document.getElementById("latest-failures"),
@@ -79,6 +80,7 @@ const els = {
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsRunSafetyCard: document.getElementById("leads-run-safety-card"),
   leadsPipelineSteps: document.getElementById("leads-pipeline-steps"),
   leadsUploadInput: document.getElementById("leads-upload-input"),
   leadsUploadBtn: document.getElementById("leads-upload-btn"),
@@ -175,6 +177,7 @@ const VERIFY_STRICT_DEFAULT_PATHS = {
   quarantine_path: "_important/leads_quarantine.csv",
 };
 const pendingProfileActions = new Map();
+const profilePreviewValidationState = new Map();
 
 function currentActivityHours() {
   return els.hoursSelect?.value || "24";
@@ -788,6 +791,136 @@ function activeSenderProfiles(snapshot = lastSnapshot) {
   return Array.isArray(snapshot?.profiles)
     ? snapshot.profiles.filter((profile) => ["starting", "running", "cooldown", "sleeping"].includes(profile?.runtime_state || ""))
     : [];
+}
+
+function safeTimestampMs(value) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function currentImportantCheckJob(status = lastLeadsStatus) {
+  return status?.active_important_check_job || lastImportantLeadCheckJob || null;
+}
+
+function importantCheckJobProgress(job) {
+  const processed = Number(job?.processed_rows ?? job?.processed ?? 0);
+  const total = Number(job?.total_rows ?? job?.total ?? 0);
+  const explicitPercent = Number(job?.progress_percent);
+  const percent = Number.isFinite(explicitPercent)
+    ? Math.min(100, Math.max(0, explicitPercent))
+    : (total > 0 ? Math.min(100, Math.max(0, (processed / total) * 100)) : 0);
+  return { processed, total, percent };
+}
+
+function outputFreshnessLabel(value) {
+  if (value === true) return "Fresh";
+  if (value === false) return "Stale";
+  return "Unknown";
+}
+
+function hasCaseInsensitiveField(fields = [], fieldName = "") {
+  const expected = String(fieldName || "").trim().toLowerCase();
+  return Array.isArray(fields) && fields.some((field) => String(field || "").trim().toLowerCase() === expected);
+}
+
+function recipientQueueBookTitleStatus(status = lastLeadsStatus) {
+  const queues = [];
+  if (status?.jc_queue) {
+    queues.push({
+      label: "private_jc",
+      fields: Array.isArray(status.jc_queue.fieldnames) ? status.jc_queue.fieldnames : [],
+    });
+  }
+  if (Array.isArray(status?.sendgrid_queues)) {
+    status.sendgrid_queues.forEach((queue) => {
+      queues.push({
+        label: queue.profile || queue.name || queue.path || "sendgrid",
+        fields: Array.isArray(queue.fieldnames) ? queue.fieldnames : [],
+      });
+    });
+  }
+  const missing = queues
+    .filter((queue) => !hasCaseInsensitiveField(queue.fields, "BookTitle"))
+    .map((queue) => queue.label);
+  return { checked: queues.length > 0, missing };
+}
+
+function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  const activeCheckJob = currentImportantCheckJob(status);
+  const checkRunning = isActiveImportantLeadCheckJob(activeCheckJob);
+  const activeSenders = activeSenderProfiles(snapshot);
+  const latestCheck = status?.latest_master_check || {};
+  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || {};
+  const latestPreview = status?.latest_auto_dispatch_preview || {};
+  const latestCheckTime = safeTimestampMs(latestCheck.generated_at_utc);
+  const latestTriageTime = safeTimestampMs(latestTriage.generated_at_utc);
+  const previewTime = safeTimestampMs(latestPreview.generated_at_utc || latestPreview.completed_at_utc || latestPreview.created_at_utc);
+  const queueUnsafe = queueSafetyBlocked(snapshot) || latestPreview?.queue_safety?.safe === false;
+  const bookTitleStatus = recipientQueueBookTitleStatus(status);
+  const progress = importantCheckJobProgress(activeCheckJob);
+
+  const leadsFresh = checkRunning ? false : Boolean(latestCheckTime);
+  const triageFresh = checkRunning ? false : (latestCheckTime ? latestTriageTime >= latestCheckTime && latestTriageTime > 0 : null);
+  const previewFresh = checkRunning
+    ? false
+    : (latestTriageTime
+      ? (previewTime ? previewTime >= latestTriageTime : Boolean(latestPreview.preview_id || latestPreview.preview_path || latestPreview.status))
+      : null);
+
+  const reasons = [];
+  if (checkRunning) reasons.push("Check Leads is running.");
+  if (activeSenders.length) {
+    reasons.push(`Active senders are running: ${activeSenders.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`);
+  }
+  if (!leadsFresh) reasons.push("Current leads.csv has not been published for this run.");
+  if (triageFresh === false) reasons.push("Triage output is stale.");
+  if (previewFresh === false) reasons.push("Dispatch preview is stale.");
+  if (bookTitleStatus.missing.length) {
+    reasons.push(`Recipient queues are missing BookTitle: ${bookTitleStatus.missing.join(", ")}.`);
+  }
+  if (queueUnsafe) reasons.push(queueSafetyBlockMessage(snapshot) || "Queue safety is unsafe.");
+
+  let statusLabel = "SAFE TO CONTINUE";
+  if (queueUnsafe) {
+    statusLabel = "BLOCKED";
+  } else if (checkRunning || activeSenders.length || !leadsFresh || triageFresh === false || previewFresh === false) {
+    statusLabel = "WAIT";
+  }
+
+  const uploadFilename = activeCheckJob?.selected_filename
+    || activeCheckJob?.original_uploaded_filename
+    || activeCheckJob?.server_received_filename
+    || activeCheckJob?.source_label
+    || latestCheck.input_label
+    || "-";
+  const checkJobId = activeCheckJob?.job_id || latestCheck.check_job_id || latestCheck.job_id || "-";
+
+  return {
+    statusLabel,
+    reasons,
+    checkRunning,
+    activeSenders,
+    queueUnsafe,
+    progress,
+    uploadFilename,
+    checkJobId,
+    leadsFresh,
+    triageFresh,
+    previewFresh,
+    bookTitleStatus,
+  };
+}
+
+function dispatchActionBlockReason() {
+  const safety = leadsRunSafety();
+  if (safety.checkRunning) {
+    return `Check Leads is running for job ${safety.checkJobId}. Wait until leads.csv, triage, and preview are fresh.`;
+  }
+  if (safety.activeSenders.length) {
+    return `Active senders are running: ${safety.activeSenders.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`;
+  }
+  return "";
 }
 
 function currentShardPlanKey() {
@@ -1448,13 +1581,17 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
   const liveSenderProfiles = activeSenderProfiles();
   const sendersActive = liveSenderProfiles.length > 0;
+  const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
+  const dispatchBlockReason = dispatchActionBlockReason();
   const previewReady = dispatchPreviewMatchesCurrentSelection();
   const previewBlocked = !preview || !previewReady;
   if (els.leadsImportantDispatchPreviewBtn) {
-    els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive;
+    els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive || activeCheck;
+    els.leadsImportantDispatchPreviewBtn.title = dispatchBlockReason || "";
   }
   if (els.leadsImportantDispatchConfirmBtn) {
-    els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch || sourceBlocked || previewBlocked || sendersActive;
+    els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch || sourceBlocked || previewBlocked || sendersActive || activeCheck;
+    els.leadsImportantDispatchConfirmBtn.title = dispatchBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
   }
 }
 
@@ -2392,6 +2529,8 @@ function renderImportantDispatch(result) {
   const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
   const liveSenderProfiles = activeSenderProfiles();
   const sendersActive = liveSenderProfiles.length > 0;
+  const activeCheckRunning = isActiveImportantLeadCheckJob(currentImportantCheckJob());
+  const dispatchBlockReason = dispatchActionBlockReason();
   const liveQueues = Array.isArray(lastLeadsStatus?.sendgrid_queues) ? lastLeadsStatus.sendgrid_queues : [];
   const liveQueueMap = new Map(liveQueues.map((item) => [String(item.name || ""), Number(item.count || 0)]));
   const liveJcCount = Number(lastLeadsStatus?.jc_queue?.count || 0);
@@ -2411,7 +2550,7 @@ function renderImportantDispatch(result) {
   const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
   const sourceName = dispatchSource.dispatch_source_name || result?.dispatch_source_name || dispatchSource.dispatch_source_mode || result?.dispatch_source_mode || "triaged_keep";
   const sourcePath = dispatchSource.dispatch_source_path || result?.dispatch_source_path || "-";
-  const preflightAllowed = !sendersActive;
+  const preflightAllowed = !sendersActive && !activeCheckRunning;
   const preflightLabel = preflightAllowed ? "Allowed" : "Blocked";
   const activeSenderSummary = liveSenderProfiles.length
     ? liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")
@@ -2423,8 +2562,8 @@ function renderImportantDispatch(result) {
     if (dispatchPreview && !result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        sendersActive
-          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Dispatch actions are blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+        dispatchBlockReason
+          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Dispatch actions are blocked: ${dispatchBlockReason}`
           : `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
       );
     } else if (result?.generated_at_utc) {
@@ -2438,8 +2577,8 @@ function renderImportantDispatch(result) {
       const idleName = dispatchSource?.dispatch_source_name || (sourceMode === "strict_verified" ? "Strict Public Proof Verified" : "Fast Triage Keep");
       setNodeText(
         els.leadsImportantDispatchMeta,
-        sendersActive
-          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview and confirm are blocked while senders are active: ${liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`
+        dispatchBlockReason
+          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview and confirm are blocked: ${dispatchBlockReason}`
           : `Dispatch is idle. Source ${idleName} from ${idlePath}. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`,
       );
     }
@@ -2478,7 +2617,7 @@ function renderImportantDispatch(result) {
                 <div class="op-checklist-step">1</div>
                 <div class="op-checklist-copy">
                   <strong>Preflight</strong>
-                  <span>${preflightAllowed ? "All senders are stopped. Dispatch is allowed." : `Blocked until active senders stop: ${escapeHtml(activeSenderSummary)}`}</span>
+                  <span>${preflightAllowed ? "All senders are stopped and no Check Leads job is running. Dispatch is allowed." : escapeHtml(dispatchBlockReason || `Blocked until active senders stop: ${activeSenderSummary}`)}</span>
                 </div>
               </div>
               <div class="op-checklist-item ${dispatchSource.dispatch_source_path ? "is-ready" : "is-warn"}">
@@ -2748,6 +2887,45 @@ function renderShardWriteGuard() {
   }
 }
 
+function renderLeadsRunSafety(status = lastLeadsStatus) {
+  if (!els.leadsRunSafetyCard) return;
+  const safety = leadsRunSafety(status);
+  const tone = safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
+  const progress = safety.progress || {};
+  const progressText = progress.total > 0
+    ? `${progress.processed} / ${progress.total} (${progress.percent.toFixed(1)}%)`
+    : "n/a";
+  const reasons = safety.reasons.length
+    ? safety.reasons
+    : ["Current outputs look fresh and no active sender/check blocker is visible."];
+  setNodeHtml(
+    els.leadsRunSafetyCard,
+    `
+      <div class="leads-run-safety-head">
+        <div>
+          <p class="eyebrow">Current Run Safety</p>
+          <strong>${escapeHtml(safety.statusLabel)}</strong>
+        </div>
+        <span class="mini-pill">${escapeHtml(safety.queueUnsafe ? "Queue blocked" : safety.checkRunning ? "Check running" : safety.activeSenders.length ? "Senders active" : "Ready state")}</span>
+      </div>
+      <div class="leads-run-safety-body">
+        <div class="leads-run-safety-reasons">
+          ${reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}
+        </div>
+        ${renderOperatorMetricStrip([
+          { label: "Upload", value: safety.uploadFilename },
+          { label: "Check Job", value: safety.checkJobId },
+          { label: "Progress", value: progressText },
+          { label: "leads.csv", value: outputFreshnessLabel(safety.leadsFresh), tone: safety.leadsFresh === false ? "warn" : safety.leadsFresh === true ? "good" : "" },
+          { label: "Triaged Keep", value: outputFreshnessLabel(safety.triageFresh), tone: safety.triageFresh === false ? "warn" : safety.triageFresh === true ? "good" : "" },
+          { label: "Dispatch Preview", value: outputFreshnessLabel(safety.previewFresh), tone: safety.previewFresh === false ? "warn" : safety.previewFresh === true ? "good" : "" },
+        ], "leads-run-safety-metrics")}
+      </div>
+    `,
+  );
+  els.leadsRunSafetyCard.className = `leads-run-safety-card leads-run-safety-card-${tone}`;
+}
+
 function renderLeadsStatus(status) {
   lastLeadsStatus = status || lastLeadsStatus;
   const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
@@ -2785,6 +2963,7 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadsRunSafety(lastLeadsStatus);
   renderLeadsPipeline(lastLeadsStatus?.pipeline || {});
 
   if (els.leadsUploadMeta) {
@@ -2860,6 +3039,7 @@ function renderLeadsStatus(status) {
 
 function pipelineStateLabel(state) {
   const normalized = String(state || "").toLowerCase();
+  if (normalized === "stale") return "STALE";
   if (normalized === "done") return "Ready";
   if (normalized === "active") return "Running";
   if (normalized === "warn") return "Review";
@@ -2868,6 +3048,13 @@ function pipelineStateLabel(state) {
 
 function renderLeadsPipeline(pipeline) {
   const steps = Array.isArray(pipeline?.steps) ? pipeline.steps : [];
+  const safety = leadsRunSafety();
+  const staleKeys = new Set();
+  if (safety.checkRunning || safety.triageFresh === false) {
+    ["triage", "quarantine", "preview", "dispatch"].forEach((key) => staleKeys.add(key));
+  } else if (safety.previewFresh === false) {
+    ["preview", "dispatch"].forEach((key) => staleKeys.add(key));
+  }
   if (els.leadsPipelineMeta) {
     const checkedRows = Number(pipeline?.checked_rows || 0);
     const triageKeepRows = Number(pipeline?.triaged_keep_rows || 0);
@@ -2901,15 +3088,21 @@ function renderLeadsPipeline(pipeline) {
     steps.length
       ? steps.map((step, index) => {
           const state = String(step.state || "waiting").toLowerCase();
+          const key = String(step.key || "");
+          const isStale = staleKeys.has(key) && state !== "active";
+          const displayState = isStale ? "stale" : state;
+          const note = isStale
+            ? `${step.note || ""} Stale: newer Check Leads output is not ready for this stage.`
+            : (step.note || "");
           return `
-            <article class="leads-pipeline-step leads-pipeline-step-${escapeHtml(state)}">
+            <article class="leads-pipeline-step leads-pipeline-step-${escapeHtml(displayState)}">
               <div class="leads-pipeline-index">${index + 1}</div>
               <div class="leads-pipeline-copy">
                 <div class="leads-pipeline-title">
                   <strong>${escapeHtml(step.label || step.key || "-")}</strong>
-                  <span class="mini-pill">${escapeHtml(pipelineStateLabel(state))}</span>
+                  <span class="mini-pill">${escapeHtml(pipelineStateLabel(displayState))}</span>
                 </div>
-                <div class="muted">${escapeHtml(step.note || "")}</div>
+                <div class="muted">${escapeHtml(note)}</div>
               </div>
               <div class="leads-pipeline-count">${Number(step.count || 0)}</div>
             </article>
@@ -3075,6 +3268,12 @@ async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
 }
 
 async function previewImportantLeadDispatch() {
+  const blockReason = dispatchActionBlockReason();
+  if (blockReason) {
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(`Dispatch preview blocked: ${blockReason}`, "error");
+    return;
+  }
   if (activeSenderProfiles().length) {
     renderImportantDispatch(lastImportantDispatch);
     showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
@@ -3117,6 +3316,12 @@ async function previewImportantLeadDispatch() {
 }
 
 async function confirmImportantLeadDispatch() {
+  const blockReason = dispatchActionBlockReason();
+  if (blockReason) {
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(`Confirm Dispatch blocked: ${blockReason}`, "error");
+    return;
+  }
   if (activeSenderProfiles().length) {
     renderImportantDispatch(lastImportantDispatch);
     showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
@@ -3508,6 +3713,9 @@ function senderStatusBadge(profile) {
   if (profileTelemetryChannel(profile) === "sendgrid" && profile?.sendgrid_hourly_cap_waiting) {
     return { label: "Waiting · hourly cap", tone: "warn" };
   }
+  if (queueSafetyBlocked()) {
+    return { label: "Blocked", tone: "bad" };
+  }
   const runtimeState = String(profile?.runtime_state || "").trim();
   if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Live", tone: "good" };
   if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
@@ -3885,6 +4093,82 @@ function overviewStateIndicator(profile) {
   return { label: "Stopped", tone: "bad" };
 }
 
+function messageReadinessTone(status) {
+  const normalized = String(status || "").trim().toUpperCase().replace(/\s+/g, "-");
+  if (normalized === "PASS") return "pass";
+  if (normalized === "FAIL") return "fail";
+  if (normalized === "STALE") return "stale";
+  return "not-run";
+}
+
+function yesNo(value) {
+  return value ? "Yes" : "No";
+}
+
+function formatReadinessTime(value) {
+  return value ? formatGeneratedAt(value) : "-";
+}
+
+function renderMessageReadiness(profile) {
+  const readiness = profile?.message_readiness || {};
+  const profileName = String(profile?.name || "");
+  const previewState = profilePreviewValidationState.get(profileName) || {};
+  const previewRunning = previewState.kind === "loading";
+  const blockedByQueueSafety = queueSafetyBlocked();
+  const actionDisabled = previewRunning || isProfileActive(profile) || blockedByQueueSafety;
+  const actionTitle = previewRunning
+    ? "Preview + validation is running."
+    : isProfileActive(profile)
+      ? "Stop this sender before generating a preview."
+      : blockedByQueueSafety
+        ? queueSafetyBlockMessage()
+        : "Render the current queue without sending, then validate the preview.";
+  const status = String(readiness.status || "NOT RUN").trim().toUpperCase() || "NOT RUN";
+  const tone = messageReadinessTone(status);
+  const items = [
+    ["Rows", Number(readiness.recipient_row_count || 0).toLocaleString()],
+    ["BookTitle column", yesNo(readiness.book_title_column_present)],
+    ["BookTitle rows", Number(readiness.rows_with_book_title || 0).toLocaleString()],
+    ["Fallback rows", Number(readiness.fallback_row_count || 0).toLocaleString()],
+    ["Invalid emails", Number(readiness.invalid_email_count || 0).toLocaleString()],
+    ["Duplicate emails", Number(readiness.duplicate_email_count || 0).toLocaleString()],
+    ["Preview CSV", yesNo(readiness.preview_csv_exists)],
+    ["Validation", readiness.preview_validation_status || "NOT RUN"],
+    ["Preview time", formatReadinessTime(readiness.last_preview_generated_utc)],
+    ["Validation time", formatReadinessTime(readiness.last_validation_time_utc)],
+    ["Expected mode", readiness.pitch_mode_expected || "-"],
+    ["Actual mode", readiness.actual_profile_mode || "-"],
+  ];
+  const reasons = Array.isArray(readiness.reasons) ? readiness.reasons.filter(Boolean).slice(0, 2) : [];
+  return `
+    <section class="message-readiness message-readiness-${escapeHtml(tone)}">
+      <div class="message-readiness-head">
+        <span>Message Readiness</span>
+        <strong>${escapeHtml(status)}</strong>
+      </div>
+      <div class="message-readiness-actions">
+        <button
+          class="btn btn-secondary btn-sm preview-validate-profile-btn"
+          type="button"
+          data-profile="${escapeHtml(profileName)}"
+          ${actionDisabled ? "disabled" : ""}
+          title="${escapeHtml(actionTitle)}"
+        >${escapeHtml(previewRunning ? "Running..." : "Run Preview + Validate")}</button>
+      </div>
+      <div class="message-readiness-grid">
+        ${items.map(([label, value]) => `
+          <div class="message-readiness-item">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+          </div>
+        `).join("")}
+      </div>
+      ${previewState.message ? `<p class="message-readiness-feedback message-readiness-feedback-${escapeHtml(previewState.kind || "info")}">${escapeHtml(previewState.message)}</p>` : ""}
+      ${reasons.length ? `<p class="message-readiness-reason">${escapeHtml(reasons.join(" "))}</p>` : ""}
+    </section>
+  `;
+}
+
 function createOverviewCardNode() {
   const node = elementFromHTML(`
     <article class="overview-card overview-row overview-idle" data-profile="">
@@ -3905,6 +4189,7 @@ function createOverviewCardNode() {
         </div>
       </div>
       <div class="overview-metrics overview-stats"></div>
+      <div class="overview-message-readiness"></div>
     </article>
   `);
   node._refs = {
@@ -3913,6 +4198,7 @@ function createOverviewCardNode() {
     stateDot: node.querySelector(".overview-state-dot"),
     stateText: node.querySelector(".overview-state-text"),
     stats: node.querySelector(".overview-stats"),
+    messageReadiness: node.querySelector(".overview-message-readiness"),
     warningText: node.querySelector(".overview-warning-text"),
     providerBadge: node.querySelector(".overview-provider-badge"),
     cooldownBadge: node.querySelector(".overview-cooldown-badge"),
@@ -4031,6 +4317,7 @@ function updateOverviewCardNode(node, profile, selectedProfile) {
     () => createOverviewStatNode(),
     (statNode, stat) => updateOverviewStatNode(statNode, stat.label, stat.value),
   );
+  setNodeHtml(refs.messageReadiness, renderMessageReadiness(profile));
   const warningText = warning.tone === "neutral"
     ? String(profile.health_note || profile.reason_note || "").trim()
     : `${warning.label || "Watch"}: ${warning.message || ""}`;
@@ -4048,6 +4335,64 @@ function renderOverview(snapshot, selectedProfile) {
     (profile) => profile.name,
     () => createOverviewCardNode(),
     (node, profile) => updateOverviewCardNode(node, profile, selectedProfile),
+  );
+}
+
+function campaignHistoryEventLabel(value) {
+  return String(value || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function campaignHistoryReason(record) {
+  const reasons = Array.isArray(record?.blocked_reasons) ? record.blocked_reasons.filter(Boolean) : [];
+  if (reasons.length) return String(reasons[0]);
+  if (record?.validation_status) return String(record.validation_status);
+  if (record?.queue_safety_status) return `Queue ${record.queue_safety_status}`;
+  return "-";
+}
+
+function renderCampaignRunHistory(snapshot) {
+  if (!els.campaignRunHistory) return;
+  const records = Array.isArray(snapshot?.campaign_run_history) ? snapshot.campaign_run_history.slice(0, 25) : [];
+  if (!records.length) {
+    setNodeHtml(els.campaignRunHistory, `<p class="muted">No campaign run history yet.</p>`);
+    return;
+  }
+  setNodeHtml(
+    els.campaignRunHistory,
+    `
+      <div class="table-shell campaign-history-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Profile</th>
+              <th>Readiness</th>
+              <th>Validation</th>
+              <th>Rows</th>
+              <th>Sent</th>
+              <th>Result / Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${records.map((record) => `
+              <tr>
+                <td>${escapeHtml(formatReadinessTime(record.timestamp))}</td>
+                <td>${escapeHtml(campaignHistoryEventLabel(record.event_type))}</td>
+                <td>${escapeHtml(record.profile || "-")}</td>
+                <td>${escapeHtml(record.message_readiness_status || "-")}</td>
+                <td>${escapeHtml(record.validation_status || "-")}</td>
+                <td>${Number(record.recipient_row_count || 0).toLocaleString()}</td>
+                <td>${Number(record.sent_count || 0).toLocaleString()}</td>
+                <td>${escapeHtml(campaignHistoryReason(record))}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `,
   );
 }
 
@@ -4213,8 +4558,18 @@ function isProfileActive(profile) {
   return ["starting", "running", "cooldown", "sleeping"].includes(profile?.runtime_state || "");
 }
 
-function canStartProfile(profile) {
-  return !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
+function queueSafetyBlocked(snapshot = lastSnapshot) {
+  const queueSafety = snapshot?.queue_safety || {};
+  return queueSafety && queueSafety.safe === false;
+}
+
+function queueSafetyBlockMessage(snapshot = lastSnapshot) {
+  const queueSafety = snapshot?.queue_safety || {};
+  return String(queueSafety.message || "Recipient queue unsafe. Rebuild queues from the current campaign source before starting.").trim();
+}
+
+function canStartProfile(profile, snapshot = lastSnapshot) {
+  return !queueSafetyBlocked(snapshot) && !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
 }
 
 function canStopProfile(profile) {
@@ -4276,16 +4631,19 @@ function renderControls(snapshot) {
   const hasActiveSender = profiles.some((profile) => isProfileActive(profile))
     || Number(controls.active_sendgrid_sender_count || 0) > 0
     || Number(controls.active_profile_count || controls.active_profiles || 0) > 0;
+  const blockedByQueueSafety = queueSafetyBlocked(snapshot);
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendTarget > 0) {
     els.sendCapInput.value = String(sendTarget);
   }
   if (els.startBtn) {
-    els.startBtn.disabled = hasActiveSender;
-    els.startBtn.classList.toggle("btn-start-muted", hasActiveSender);
-    els.startBtn.title = hasActiveSender
+    els.startBtn.disabled = hasActiveSender || blockedByQueueSafety;
+    els.startBtn.classList.toggle("btn-start-muted", hasActiveSender || blockedByQueueSafety);
+    els.startBtn.title = blockedByQueueSafety
+      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`
+      : hasActiveSender
       ? "Some senders are already running. Use per-sender controls or Stop All first."
       : "Start all available senders.";
-    els.startBtn.setAttribute("aria-describedby", hasActiveSender ? "send-cap-note" : "");
+    els.startBtn.setAttribute("aria-describedby", (hasActiveSender || blockedByQueueSafety) ? "send-cap-note" : "");
   }
   if (els.stopBtn) {
     els.stopBtn.classList.toggle("btn-danger-active", hasActiveSender);
@@ -4294,6 +4652,9 @@ function renderControls(snapshot) {
     const lines = [];
     if (hasActiveSender) {
       lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
+    }
+    if (blockedByQueueSafety) {
+      lines.push(`NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`);
     }
     const scheduleBits = [];
     if (automation?.private_jc_daily?.enabled) {
@@ -5098,7 +5459,12 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.paneLabel, `Pane ${profile.pane_index} / ${profile.tmux_command || "-"}`);
   setNodeText(refs.runtimeNote, profile.runtime_note || "Pane is idle.");
   setNodeText(refs.lastUpdate, profileLastUpdateText(profile));
-  setNodeText(refs.actionNote, (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile, snapshot) : "");
+  setNodeText(
+    refs.actionNote,
+    queueSafetyBlocked(snapshot)
+      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`
+      : (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile, snapshot) : "",
+  );
 
   refs.startButton.dataset.profile = profile.name || "";
   refs.startButton.disabled = startDisabled;
@@ -5212,6 +5578,7 @@ function renderSnapshot(snapshot) {
   renderAwaitingAging(snapshot, selectedProfile);
   renderDomainBreakdown(snapshot);
   renderOverview(snapshot, selectedProfile);
+  renderCampaignRunHistory(snapshot);
   renderSignals(snapshot);
   renderFailures(snapshot);
   renderDetailSwitcher(snapshot, selectedProfile);
@@ -5247,8 +5614,46 @@ function rerenderCurrentSelection() {
   renderProfileDetail(lastSnapshot, selected);
 }
 
+async function runProfilePreviewValidation(profileName) {
+  const profile = String(profileName || "").trim();
+  if (!profile) return;
+  profilePreviewValidationState.set(profile, { kind: "loading", message: "Generating preview and validating..." });
+  rerenderCurrentSelection();
+  try {
+    const data = await fetchJson(`/api/profiles/${encodeURIComponent(profile)}/preview-validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const result = data.result || {};
+    const passed = result.validation_status === "PASS" || result.validation_passed === true;
+    const reasonText = Array.isArray(result.validation_reasons) && result.validation_reasons.length
+      ? ` Top reason: ${result.validation_reasons[0]}.`
+      : "";
+    profilePreviewValidationState.set(profile, {
+      kind: passed ? "success" : "error",
+      message: `${passed ? "Preview validation passed" : "Preview validation failed"} (${Number(result.preview_row_count || 0).toLocaleString()} row(s)).${reasonText}`,
+    });
+    if (data.snapshot) {
+      renderSnapshot(data.snapshot);
+    } else {
+      await fetchSnapshot();
+    }
+    showMessage(data.message || (passed ? "Preview validation passed." : "Preview validation failed."), passed ? "success" : "error");
+  } catch (err) {
+    profilePreviewValidationState.set(profile, { kind: "error", message: `Preview validation failed: ${err}` });
+    rerenderCurrentSelection();
+    showMessage(`Preview validation failed: ${err}`, "error");
+  }
+}
+
 function handleOverviewClick(event) {
   if (wallboardMode) return;
+  const previewButton = event.target.closest(".preview-validate-profile-btn[data-profile]");
+  if (previewButton && els.overviewGrid.contains(previewButton)) {
+    if (previewButton.disabled) return;
+    void runProfilePreviewValidation(previewButton.getAttribute("data-profile") || "");
+    return;
+  }
   const card = event.target.closest(".overview-card[data-profile]");
   if (!card || !els.overviewGrid.contains(card)) return;
   selectProfileByName(card.getAttribute("data-profile") || "");
@@ -5303,7 +5708,11 @@ async function postAction(path, options = {}) {
     const response = await fetch(path, fetchOptions);
     const data = await response.json().catch(() => ({}));
     const ok = response.ok && (data.ok !== false);
-    const message = data.message || data.detail || (ok ? "Action complete." : `Request failed (${response.status}).`);
+    const blockReasons = Array.isArray(data.blocked_reasons) ? data.blocked_reasons : Array.isArray(data.reasons) ? data.reasons : [];
+    const message = data.message
+      || (blockReasons.length ? `NOT READY / BLOCKED: ${blockReasons.join(" ")}` : "")
+      || data.detail
+      || (ok ? "Action complete." : `Request failed (${response.status}).`);
     if (profileName) {
       pendingProfileActions.delete(profileName);
       setProfileActionFeedback(profileName, ok ? "success" : "error", message);

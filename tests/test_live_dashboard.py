@@ -4,6 +4,7 @@ import asyncio
 import csv
 import json
 import os
+import subprocess
 from io import BytesIO, StringIO
 import tempfile
 import unittest
@@ -30,6 +31,158 @@ class LiveDashboardTests(unittest.TestCase):
     def _read_csv_rows(self, path: Path) -> list[dict[str, str]]:
         with path.open(newline="", encoding="utf-8-sig") as handle:
             return list(csv.DictReader(handle))
+
+    def test_preview_validate_profile_runs_preview_then_validation_without_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            preview_path = tmp / "sendgrid_annette_message_preview.csv"
+            validated_path = tmp / "sendgrid_annette_message_preview_validated.csv"
+            failed_path = tmp / "sendgrid_annette_message_preview_failed.csv"
+            summary_path = tmp / "sendgrid_annette_message_preview_summary.txt"
+            calls: list[list[str]] = []
+
+            def fake_run(command, **kwargs):
+                calls.append([str(part) for part in command])
+                if "send_shard.py" in command:
+                    preview_path.write_text(
+                        "Email,FirstName,BookTitle,Subject,Body\nreader@example.com,Ava,Launch,Subject,Body\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    validated_path.write_text("Email\nreader@example.com\n", encoding="utf-8")
+                    failed_path.write_text("Email\n", encoding="utf-8")
+                    summary_path.write_text("failed rows: 0\n", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
+                patch.object(live_dashboard.runtime_control, "list_active_sender_snapshots", return_value=[]),
+                patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None),
+                patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
+                patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path),
+                patch.object(live_dashboard, "message_preview_output_paths", return_value=(validated_path, failed_path, summary_path)),
+                patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
+                patch.object(live_dashboard, "subprocess") as subprocess_mock,
+            ):
+                subprocess_mock.run.side_effect = fake_run
+                subprocess_mock.TimeoutExpired = subprocess.TimeoutExpired
+                response = live_dashboard.preview_validate_profile("sendgrid_annette")
+
+        payload = json.loads(response.body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("PASS", payload["result"]["validation_status"])
+        self.assertEqual(1, payload["result"]["preview_row_count"])
+        self.assertEqual("consignment", payload["result"]["pitch_mode"])
+        self.assertEqual("send_shard.py", calls[0][1])
+        self.assertEqual("tools/validate_message_preview.py", calls[1][1])
+        self.assertIn("--preview_messages", calls[0])
+        self.assertIn("--fail-on-errors", calls[1])
+        self.assertEqual(
+            ["preview_validate_started", "preview_validate_completed"],
+            [call.args[0]["event_type"] for call in history_mock.call_args_list],
+        )
+
+    def test_preview_validate_profile_blocks_active_sender(self) -> None:
+        with (
+            patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
+            patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[SimpleNamespace(name="sendgrid_annette", runtime_state="running")],
+            ),
+            patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
+            patch.object(live_dashboard, "append_campaign_run_history"),
+        ):
+            response = live_dashboard.preview_validate_profile("sendgrid_annette")
+
+        payload = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("profile_active", payload["error"])
+
+    def test_preview_validate_profile_returns_validation_failure_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            preview_path = tmp / "private_jc_message_preview.csv"
+            validated_path = tmp / "private_jc_message_preview_validated.csv"
+            failed_path = tmp / "private_jc_message_preview_failed.csv"
+            summary_path = tmp / "private_jc_message_preview_summary.txt"
+
+            def fake_run(command, **kwargs):
+                if "send_shard.py" in command:
+                    preview_path.write_text(
+                        "Email,FirstName,BookTitle,Subject,Body\nreader@example.com,Ava,,Subject,Body\n",
+                        encoding="utf-8",
+                    )
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                validated_path.write_text("Email\n", encoding="utf-8")
+                failed_path.write_text("Email\nreader@example.com\n", encoding="utf-8")
+                summary_path.write_text("failed rows: 1\nfailure reasons:\n- missing_book_title: 1\n", encoding="utf-8")
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+            with (
+                patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
+                patch.object(live_dashboard.runtime_control, "list_active_sender_snapshots", return_value=[]),
+                patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None),
+                patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
+                patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path),
+                patch.object(live_dashboard, "message_preview_output_paths", return_value=(validated_path, failed_path, summary_path)),
+                patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
+                patch.object(live_dashboard.subprocess, "run", side_effect=fake_run),
+            ):
+                response = live_dashboard.preview_validate_profile("private_jc")
+
+        payload = json.loads(response.body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("FAIL", payload["result"]["validation_status"])
+        self.assertEqual(["missing_book_title: 1"], payload["result"]["validation_reasons"])
+        self.assertEqual("preview_validate_completed", history_mock.call_args_list[-1].args[0]["event_type"])
+
+    def test_start_all_writes_requested_and_started_history(self) -> None:
+        preconditions = {
+            "ok": True,
+            "blocked": False,
+            "profile": "",
+            "profiles": ["sendgrid_annette"],
+            "queue_safety": {"safe": True},
+            "queue_safety_status": "safe",
+            "snapshot": {"profiles": [], "queue_safety": {"safe": True}},
+        }
+        with (
+            patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": [], "queue_safety": {"safe": True}}),
+            patch.object(live_dashboard, "_build_start_preconditions_report", return_value=preconditions),
+            patch.object(live_dashboard.runtime_control, "start_all_senders", return_value=(True, "started")),
+            patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
+            patch.object(live_dashboard.time, "sleep", return_value=None),
+        ):
+            response = live_dashboard.start()
+
+        payload = json.loads(response.body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            ["start_all_requested", "start_all_started"],
+            [call.args[0]["event_type"] for call in history_mock.call_args_list],
+        )
+
+    def test_start_profile_blocked_by_queue_safety_writes_history(self) -> None:
+        with (
+            patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
+            patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": [], "queue_safety": {"safe": False}}),
+            patch.object(live_dashboard, "build_dashboard_queue_safety_report", return_value={"safe": False, "unsafe_reasons": ["mixed_queue"]}),
+            patch.object(live_dashboard, "_active_sender_names", return_value=set()),
+            patch.object(live_dashboard, "_profile_readiness_from_snapshot", return_value={"status": "PASS", "reasons": []}),
+            patch.object(live_dashboard, "_lead_state_start_block_reasons", return_value=[]),
+            patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
+        ):
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        payload = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            ["start_profile_requested", "start_profile_blocked"],
+            [call.args[0]["event_type"] for call in history_mock.call_args_list],
+        )
 
     def test_resolve_dashboard_csv_path_accepts_absolute_workspace_mnt_path(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -90,6 +243,261 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("quarantine", pipeline["next_step"])
         review_step = next(step for step in pipeline["steps"] if step["key"] == "quarantine")
         self.assertEqual("warn", review_step["state"])
+
+    def test_start_all_blocks_when_queue_safety_is_unsafe(self) -> None:
+        unsafe_report = {
+            "safe": False,
+            "unsafe_reasons": ["overlap_with_triaged_reject", "outside_intended_source"],
+            "message": "Synthetic unsafe queue.",
+        }
+
+        with patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=unsafe_report,
+        ), patch.object(
+            live_dashboard,
+            "SENDGRID_PROFILES",
+            ["sendgrid_annette"],
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"queue_safety": unsafe_report},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_all_senders",
+        ) as start_all_senders:
+            response = live_dashboard.start()
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["blocked"])
+        self.assertEqual("queue_safety_unsafe", body["error"])
+        self.assertEqual("unsafe", body["safety_status"])
+        self.assertEqual(unsafe_report["unsafe_reasons"], body["reasons"])
+        self.assertIn("rebuild queues", body["suggested_fix"])
+        start_all_senders.assert_not_called()
+
+    def test_start_profile_blocks_when_queue_safety_is_unsafe(self) -> None:
+        unsafe_report = {
+            "safe": False,
+            "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
+            "message": "Synthetic queue safety failure.",
+        }
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=unsafe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"queue_safety": unsafe_report},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender:
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertFalse(body["ok"])
+        self.assertEqual("sendgrid_annette", body["profile"])
+        self.assertEqual("queue_safety_unsafe", body["error"])
+        start_sender.assert_not_called()
+
+    def test_start_profile_allows_safe_queue_and_calls_runtime_start(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": []}
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=safe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "Started sendgrid_annette."),
+        ) as start_sender, patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"queue_safety": safe_report},
+        ), patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(200, response.status_code)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("Started sendgrid_annette.", body["message"])
+        start_sender.assert_called_once_with("sendgrid_annette")
+
+    def test_start_all_blocks_when_any_sender_is_active(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": []}
+
+        with patch.object(
+            live_dashboard,
+            "SENDGRID_PROFILES",
+            ["sendgrid_annette"],
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=safe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value={"sendgrid_jordan"},
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": [], "queue_safety": safe_report},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_all_senders",
+        ) as start_all_senders:
+            response = live_dashboard.start()
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("start_preconditions_failed", body["error"])
+        self.assertIn("sendgrid_jordan", " ".join(body["blocked_reasons"]))
+        start_all_senders.assert_not_called()
+
+    def test_start_profile_blocks_when_message_readiness_is_not_pass(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": []}
+        for status in ("NOT RUN", "STALE", "FAIL"):
+            with self.subTest(status=status), patch.object(
+                live_dashboard.runtime_control,
+                "is_known_profile",
+                return_value=True,
+            ), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value=safe_report,
+            ), patch.object(
+                live_dashboard,
+                "_active_sender_names",
+                return_value=set(),
+            ), patch.object(
+                live_dashboard,
+                "_profile_readiness_from_snapshot",
+                return_value={"status": status, "reasons": [f"synthetic {status.lower()}"]},
+            ), patch.object(
+                live_dashboard,
+                "_lead_state_start_block_reasons",
+                return_value=[],
+            ), patch.object(
+                live_dashboard,
+                "_build_live_snapshot",
+                return_value={"profiles": [], "queue_safety": safe_report},
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "start_sender",
+            ) as start_sender:
+                response = live_dashboard.start_profile("sendgrid_annette")
+
+            self.assertEqual(409, response.status_code)
+            body = json.loads(response.body)
+            self.assertEqual("start_preconditions_failed", body["error"])
+            self.assertEqual(status, body["message_readiness_status"])
+            self.assertIn(status, " ".join(body["blocked_reasons"]))
+            start_sender.assert_not_called()
+
+    def test_start_profile_blocks_stale_or_temp_lead_state(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": []}
+        temp_path = live_dashboard.settings.APP_ROOT / "tmp_synthetic_run" / "_important" / "leads.csv"
+        status = {
+            "active_important_check_job": None,
+            "latest_master_check": {"output_label": str(temp_path), "rejected_label": ""},
+            "latest_lead_triage": {},
+            "latest_auto_dispatch_preview": {},
+        }
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=safe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_combined_leads_status",
+            return_value=status,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": [], "queue_safety": safe_report},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender:
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertIn("temp artifact", " ".join(body["blocked_reasons"]))
+        start_sender.assert_not_called()
 
     def test_upload_check_large_author_csv_writes_fresh_outputs_and_counts(self) -> None:
         valid_rows = 1005
@@ -1852,6 +2260,10 @@ class LiveDashboardTests(unittest.TestCase):
                     "rejected_path": "_important/leads_verify_rejected.csv",
                     "quarantine_path": "_important/leads_quarantine.csv",
                 },
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[],
             ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
                 live_dashboard,
                 "preview_dispatch_master_leads",
@@ -1936,6 +2348,10 @@ class LiveDashboardTests(unittest.TestCase):
                     "rejected_path": "_important/leads_triaged_reject.csv",
                     "quarantine_path": "_important/leads_triaged_quarantine.csv",
                 },
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[],
             ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
                 live_dashboard,
                 "preview_dispatch_master_leads",
@@ -2392,7 +2808,39 @@ class LiveDashboardTests(unittest.TestCase):
                         "source_file": "synthetic.csv",
                         "source_sheet": "Sheet1",
                         "source_row": "2",
-                    }
+                    },
+                    {
+                        "FullName": "Gamma Harbor",
+                        "FirstName": "Gamma",
+                        "Email": "gamma.author@examplebooks.com",
+                        "BookTitle": "",
+                        "AuthorName": "Gamma Harbor",
+                        "AuthorEmail": "gamma.author@examplebooks.com",
+                        "PersonalizedOpeningLine": "Synthetic generic opening.",
+                        "WhyAstraFit": "Synthetic fit without title.",
+                        "Website": "https://example.test/gamma",
+                        "BookURL": "",
+                        "ConfidenceScore": "0.88",
+                        "source_file": "synthetic.csv",
+                        "source_sheet": "Sheet1",
+                        "source_row": "3",
+                    },
+                    {
+                        "FullName": "Reject Writer",
+                        "FirstName": "Reject",
+                        "Email": "reject@example.com",
+                        "BookTitle": "Rejected Book",
+                        "AuthorName": "Reject Writer",
+                        "AuthorEmail": "reject@example.com",
+                        "PersonalizedOpeningLine": "Synthetic reject opening.",
+                        "WhyAstraFit": "Synthetic reject fit.",
+                        "Website": "https://example.test/reject",
+                        "BookURL": "https://books.example.test/reject",
+                        "ConfidenceScore": "0.12",
+                        "source_file": "synthetic.csv",
+                        "source_sheet": "Sheet1",
+                        "source_row": "4",
+                    },
                 ],
             )
             job = {
@@ -2406,9 +2854,9 @@ class LiveDashboardTests(unittest.TestCase):
                 "output_path": str(output_path),
                 "rejected_path": str(rejected_path),
                 "effective_input_path": str(input_path),
-                "total_input_rows": 1,
+                "total_input_rows": 3,
                 "processed_rows": 0,
-                "remaining_rows": 1,
+                "remaining_rows": 3,
             }
 
             def check_master_leads_without_external_state(**kwargs):
@@ -2424,6 +2872,22 @@ class LiveDashboardTests(unittest.TestCase):
                     reject_disposable=False,
                     persist_state=False,
                 )
+
+            fake_preview = {
+                "preview_id": "dispatch_preview_auto_triage",
+                "preview_path": str(tmp / "dispatch_preview_auto_triage.json"),
+                "rows_written_per_queue": {
+                    "private_jc": 2,
+                    "sendgrid_1": 1,
+                    "sendgrid_2": 1,
+                    "sendgrid_3": 0,
+                    "sendgrid_4": 0,
+                    "sendgrid_5": 0,
+                },
+                "suppressed_skipped": 2,
+                "suppression_summary": {"total_perm": 1, "total_temp_active": 1},
+                "dispatch_source_row_count": 2,
+            }
 
             with patch.object(live_dashboard, "IMPORTANT_LEADS_OUTPUT", output_path), patch.object(
                 live_dashboard,
@@ -2441,16 +2905,35 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "check_master_leads",
                 side_effect=check_master_leads_without_external_state,
-            ):
+            ), patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                return_value=fake_preview,
+            ) as preview_dispatch, patch.object(
+                live_dashboard,
+                "build_queue_safety_report",
+                return_value={"safe": True, "unsafe_reasons": [], "shard_row_count_total": 0},
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[],
+            ), patch.object(
+                live_dashboard,
+                "confirm_dispatch_preview",
+            ) as confirm_dispatch, patch.object(
+                live_dashboard.runtime_control,
+                "start_sender",
+            ) as start_sender, patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
                 live_dashboard._save_important_check_job(job)
                 live_dashboard._run_important_check_job(job["job_id"])
 
             saved_job = json.loads((jobs_dir / f"{job['job_id']}.json").read_text(encoding="utf-8"))
             self.assertEqual("completed", saved_job["status"])
             self.assertEqual("completed", saved_job["auto_triage_status"])
-            self.assertEqual(1, live_dashboard._count_csv_rows(output_path))
-            self.assertEqual(1, live_dashboard._count_csv_rows(keep_path))
-            self.assertEqual(0, live_dashboard._count_csv_rows(triage_reject_path))
+            self.assertEqual("completed", saved_job["auto_dispatch_preview_status"])
+            self.assertEqual(3, live_dashboard._count_csv_rows(output_path))
+            self.assertEqual(2, live_dashboard._count_csv_rows(keep_path))
+            self.assertEqual(1, live_dashboard._count_csv_rows(triage_reject_path))
             self.assertTrue(quarantine_path.exists())
             keep_rows = self._read_csv_rows(keep_path)
             self.assertEqual("Signals at Dawn", keep_rows[0]["BookTitle"])
@@ -2458,6 +2941,28 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual("Synthetic opening.", keep_rows[0]["PersonalizedOpeningLine"])
             self.assertEqual("Synthetic fit.", keep_rows[0]["WhyAstraFit"])
             self.assertEqual(shard_before, shard_path.read_text(encoding="utf-8"))
+            preview_dispatch.assert_called_once()
+            self.assertEqual(keep_path, preview_dispatch.call_args.kwargs["triaged_keep_path"])
+            confirm_dispatch.assert_not_called()
+            start_sender.assert_not_called()
+            send_via_sendgrid.assert_not_called()
+            summary = saved_job["auto_dispatch_preview"]
+            self.assertEqual("dispatch_preview_auto_triage", summary["preview_id"])
+            self.assertEqual(2, summary["total_keep_rows"])
+            self.assertEqual(1, summary["rejected_rows"])
+            self.assertEqual(1, summary["rows_with_booktitle"])
+            self.assertEqual(1, summary["rows_without_booktitle"])
+            self.assertTrue(summary["fallback_capable"])
+            self.assertEqual(2, summary["suppression_unsubscribe_skip_count"])
+            self.assertEqual(1, summary["per_profile_planned_counts"]["sendgrid_1"])
+            self.assertTrue(summary["queue_safety"]["safe"])
+            self.assertFalse(summary["any_sender_running"])
+            self.assertTrue(summary["manual_rebuild_allowed"])
+            self.assertTrue(summary["manual_rebuild_required"])
+            self.assertTrue(summary["manual_start_required"])
+            self.assertFalse(summary["auto_rebuild_performed"])
+            self.assertFalse(summary["auto_dispatch_performed"])
+            self.assertFalse(summary["auto_start_performed"])
 
             with patch.object(live_dashboard, "fast_triage_master_leads") as fast_triage:
                 live_dashboard._run_auto_fast_triage_after_check(saved_job)
@@ -2566,6 +3071,50 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("done", check_step["state"])
         self.assertEqual("active", triage_step["state"])
         self.assertEqual("Auto triage running.", triage_step["note"])
+
+    def test_auto_dispatch_preview_marks_rebuild_blocked_when_sender_active(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            keep_path = tmp / "leads_triaged_keep.csv"
+            rejected_path = tmp / "leads_triaged_reject.csv"
+            self._write_csv(
+                keep_path,
+                ["Email", "FullName", "BookTitle"],
+                [
+                    {"Email": "one@examplebooks.com", "FullName": "One Author", "BookTitle": "One Book"},
+                    {"Email": "two@examplebooks.com", "FullName": "Two Author", "BookTitle": ""},
+                ],
+            )
+            self._write_csv(rejected_path, ["Email", "FullName", "BookTitle"], [])
+            preview = {
+                "preview_id": "dispatch_preview_blocked",
+                "preview_path": str(tmp / "dispatch_preview_blocked.json"),
+                "rows_written_per_queue": {"private_jc": 2, "sendgrid_1": 1},
+                "suppressed_skipped": 0,
+                "suppression_summary": {},
+            }
+            triage_report = {"keep_count": 2, "reject_count": 0, "quarantine_count": 0}
+
+            with patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[SimpleNamespace(name="sendgrid_annette", runtime_state="running")],
+            ), patch.object(
+                live_dashboard,
+                "build_queue_safety_report",
+                return_value={"safe": True, "unsafe_reasons": []},
+            ):
+                summary = live_dashboard._auto_dispatch_preview_summary(
+                    preview=preview,
+                    triage_report=triage_report,
+                    keep_path=keep_path,
+                    rejected_path=rejected_path,
+                )
+
+        self.assertTrue(summary["any_sender_running"])
+        self.assertEqual(["sendgrid_annette"], summary["active_profiles"])
+        self.assertFalse(summary["manual_rebuild_allowed"])
+        self.assertIn("active senders", summary["message"])
 
     def test_shard_block_when_senders_active(self) -> None:
         payload = live_dashboard.ShardLeadsPayload(
