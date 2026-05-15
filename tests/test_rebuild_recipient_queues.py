@@ -5,7 +5,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import tools.rebuild_recipient_queues as rebuild_tool
 from tools.rebuild_recipient_queues import (
     QUEUE_FILENAMES,
     build_queue_safety_report,
@@ -154,3 +156,111 @@ class RebuildRecipientQueuesTests(unittest.TestCase):
             self.assertEqual(0, result["after"]["overlap_with_triaged_reject"])
             self.assertEqual(0, result["after"]["outside_intended_source_count"])
             self.assertEqual(0, result["after"]["outside_checked_output_count"])
+
+    def test_queue_safety_uses_latest_dispatch_archive_when_current_sources_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            app_root = tmp / "app"
+            state_dir = app_root / "data" / "state"
+            staged = state_dir / "backups" / "staged_batches" / "dispatch_20260514_070407"
+            shards = default_queue_paths(app_root / "data" / "shards")
+            keep_rows = [
+                {"Email": "keep1@example.test", "FirstName": "One", "AuthorEmail": "author1@example.test", "AuthorName": "One Writer", "BookTitle": "Book One"},
+                {"Email": "keep2@example.test", "FirstName": "Two", "AuthorEmail": "author2@example.test", "AuthorName": "Two Writer", "BookTitle": "Book Two"},
+                {"Email": "keep3@example.test", "FirstName": "Three", "AuthorEmail": "author3@example.test", "AuthorName": "Three Writer", "BookTitle": ""},
+            ]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "PersonalizedOpeningLine"]
+            write_csv(staged / "leads.csv", headers, keep_rows)
+            write_csv(staged / "leads_triaged_keep.csv", headers, keep_rows)
+            write_csv(staged / "leads_triaged_reject.csv", headers, [])
+            for index, path in enumerate(shards):
+                rows = [keep_rows[index]] if index < len(keep_rows) else []
+                write_csv(path, headers, rows)
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "leads_dashboard_state.json").write_text(
+                json.dumps({"latest_dispatch": {"staged_batch_archive_path": str(staged)}}),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(rebuild_tool.settings, "APP_ROOT", app_root),
+                patch.object(rebuild_tool.settings, "STATE_DIR", state_dir),
+                patch.object(rebuild_tool.settings, "BACKUPS_DIR", state_dir / "backups"),
+            ):
+                report = build_queue_safety_report(shard_paths=shards)
+
+        self.assertTrue(report["safe"])
+        self.assertEqual("latest_dispatch_staged_batch_archive", report["source_resolution"])
+        self.assertEqual(str(staged / "leads_triaged_keep.csv"), report["intended_source_path"])
+        self.assertEqual(0, report["outside_checked_output_count"])
+        self.assertEqual(0, report["outside_intended_source_count"])
+        self.assertEqual(0, report["overlap_with_triaged_reject"])
+
+    def test_sendgrid_safe_rebuild_normalizes_placeholder_like_book_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source = tmp / "leads_triaged_keep.csv"
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shards = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "PersonalizedOpeningLine"]
+            rows = [
+                {
+                    "Email": "brace@example.test",
+                    "FirstName": "Brace",
+                    "AuthorEmail": "author-brace@example.test",
+                    "AuthorName": "Brace Writer",
+                    "BookTitle": "Život p{r}outníka",
+                    "PersonalizedOpeningLine": "Opening for Život p{r}outníka",
+                },
+                {
+                    "Email": "square@example.test",
+                    "FirstName": "Square",
+                    "AuthorEmail": "author-square@example.test",
+                    "AuthorName": "Square Writer",
+                    "BookTitle": "[(Horse Medicine)]",
+                    "PersonalizedOpeningLine": "Opening for [(Horse Medicine)]",
+                },
+                {
+                    "Email": "subtitle@example.test",
+                    "FirstName": "Subtitle",
+                    "AuthorEmail": "author-subtitle@example.test",
+                    "AuthorName": "Subtitle Writer",
+                    "BookTitle": "Evolutions in Bread: Artisan Pan Breads and Dutch-Oven Loaves at Home [A baking book by the author of Flour Water Salt Yeast] Kindle Edition",
+                    "PersonalizedOpeningLine": "Opening for title [A baking book by the author of Flour Water Salt Yeast]",
+                },
+            ]
+            write_csv(source, headers, rows)
+            write_csv(checked, headers, rows)
+            write_csv(reject, headers, [])
+            for path in shards:
+                write_csv(path, headers, [])
+
+            result = rebuild_tool.rebuild_sendgrid_recipient_queues(
+                intended_source_path=source,
+                checked_path=checked,
+                triaged_keep_path=source,
+                triaged_reject_path=reject,
+                shard_paths=shards,
+                apply=False,
+            )
+            planned_root = Path(str(result["quarantine_path"])).parent
+            planned_rows = [
+                row
+                for path in sorted(planned_root.glob("recipients_sendgrid_*.csv"))
+                for row in read_rows(path)
+            ]
+            quarantine_rows = read_rows(Path(str(result["quarantine_path"])))
+
+        self.assertEqual(3, result["included_rows"])
+        self.assertEqual([], quarantine_rows)
+        self.assertTrue(result["after"]["safe"])
+        titles = {row["Email"]: row["BookTitle"] for row in planned_rows}
+        self.assertEqual("Život proutníka", titles["brace@example.test"])
+        self.assertEqual("((Horse Medicine))", titles["square@example.test"])
+        self.assertIn("(A baking book by the author of Flour Water Salt Yeast)", titles["subtitle@example.test"])
+        for row in planned_rows:
+            self.assertNotRegex(row["BookTitle"], r"{[A-Za-z][A-Za-z0-9_]*}|\[[^\[\]\r\n]+\]|<<[^<>\r\n]+>>")
+            self.assertNotRegex(row["PersonalizedOpeningLine"], r"{[A-Za-z][A-Za-z0-9_]*}|\[[^\[\]\r\n]+\]|<<[^<>\r\n]+>>")
+            self.assertIn("BookTitle:", row["normalization_note"])
+            self.assertIn("PersonalizedOpeningLine:", row["normalization_note"])

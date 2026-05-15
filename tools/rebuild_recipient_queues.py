@@ -5,6 +5,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -27,8 +28,16 @@ QUEUE_FILENAMES = (
     "recipients_sendgrid_4.csv",
     "recipients_sendgrid_5.csv",
 )
+SENDGRID_QUEUE_FILENAMES = tuple(name for name in QUEUE_FILENAMES if name.startswith("recipients_sendgrid_"))
+SENDGRID_REQUIRED_HEADERS = ("Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle")
 EMAIL_HEADER_CANDIDATES = ("email", "authoremail", "author_email", "e_mail", "e-mail", "mail", "address")
 FIRST_NAME_CANDIDATES = ("firstname", "first_name", "first name", "authorname", "author_name", "author")
+EMAIL_SYNTAX_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+BRACE_PLACEHOLDER_TOKEN_RE = re.compile(r"{([A-Za-z][A-Za-z0-9_]*)}")
+SQUARE_PLACEHOLDER_TOKEN_RE = re.compile(r"\[([^\[\]\r\n]+)\]")
+ANGLE_PLACEHOLDER_TOKEN_RE = re.compile(r"<<([^<>\r\n]+)>>")
+PLACEHOLDER_LIKE_TOKEN_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}|\[[^\[\]\r\n]+\]|<<[^<>\r\n]+>>")
+RENDER_NORMALIZED_FIELDS = ("FirstName", "AuthorName", "BookTitle", "PersonalizedOpeningLine")
 
 
 def normalize_header(value: str) -> str:
@@ -46,6 +55,33 @@ def find_header(headers: Sequence[str], candidates: Sequence[str]) -> str | None
 
 def norm_email(value: object) -> str:
     return str(value or "").strip().lower()
+
+
+def placeholder_like_tokens(value: object) -> List[str]:
+    return PLACEHOLDER_LIKE_TOKEN_RE.findall(str(value or ""))
+
+
+def normalize_render_field_value(value: object) -> Tuple[str, List[str]]:
+    raw = str(value or "").strip()
+    notes: List[str] = []
+    if not raw:
+        return "", notes
+
+    cleaned = BRACE_PLACEHOLDER_TOKEN_RE.sub(lambda match: match.group(1), raw)
+    if cleaned != raw:
+        notes.append("removed_brace_placeholder_punctuation")
+
+    before_square = cleaned
+    cleaned = SQUARE_PLACEHOLDER_TOKEN_RE.sub(lambda match: f"({match.group(1).strip()})", cleaned)
+    if cleaned != before_square:
+        notes.append("converted_square_brackets_to_parentheses")
+
+    before_angle = cleaned
+    cleaned = ANGLE_PLACEHOLDER_TOKEN_RE.sub(lambda match: match.group(1).strip(), cleaned)
+    if cleaned != before_angle:
+        notes.append("removed_angle_placeholder_punctuation")
+
+    return cleaned.strip(), notes
 
 
 def read_csv(path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
@@ -100,11 +136,128 @@ def default_queue_paths(shards_dir: Path = settings.SHARDS_DIR) -> List[Path]:
     return [shards_dir / name for name in QUEUE_FILENAMES]
 
 
+def default_sendgrid_queue_paths(shards_dir: Path = settings.SHARDS_DIR) -> List[Path]:
+    return [shards_dir / name for name in SENDGRID_QUEUE_FILENAMES]
+
+
+def _is_sendgrid_queue_path(path: Path) -> bool:
+    return path.name in SENDGRID_QUEUE_FILENAMES
+
+
+def _missing_required_headers(headers: Sequence[str], required: Sequence[str] = SENDGRID_REQUIRED_HEADERS) -> List[str]:
+    present = {normalize_header(header) for header in headers}
+    return [header for header in required if normalize_header(header) not in present]
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def _resolve_app_path(value: object) -> Path:
+    path = Path(str(value or "").strip())
+    if path.is_absolute():
+        return path
+    return settings.APP_ROOT / path
+
+
+def _read_json(path: Path) -> Dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _staged_archive_source_paths(archive_dir: Path, origin: str) -> Dict[str, object] | None:
+    keep = archive_dir / "leads_triaged_keep.csv"
+    if not _nonempty_file(keep):
+        return None
+    checked = archive_dir / "leads.csv"
+    reject = archive_dir / "leads_triaged_reject.csv"
+    return {
+        "origin": origin,
+        "intended": keep,
+        "checked": checked if _nonempty_file(checked) else settings.APP_ROOT / "_important" / "leads.csv",
+        "triaged_keep": keep,
+        "triaged_reject": reject if _nonempty_file(reject) else settings.APP_ROOT / "_important" / "leads_triaged_reject.csv",
+    }
+
+
+def _source_paths_from_dispatch_state(state_path: Path, origin: str) -> Dict[str, object] | None:
+    state = _read_json(state_path)
+    latest_dispatch = state.get("latest_dispatch")
+    if not isinstance(latest_dispatch, dict):
+        return None
+    archive_text = str(latest_dispatch.get("staged_batch_archive_path") or "").strip()
+    if not archive_text:
+        return None
+    return _staged_archive_source_paths(_resolve_app_path(archive_text), origin)
+
+
+def _latest_queue_rebuild_source_paths() -> Dict[str, object] | None:
+    root = default_archive_root()
+    if not root.exists():
+        return None
+    manifests = sorted(root.glob("queue_rebuild_*/manifest.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for manifest_path in manifests:
+        manifest = _read_json(manifest_path)
+        source_paths = manifest.get("queue_safety_source_paths")
+        if isinstance(source_paths, dict):
+            keep_text = str(source_paths.get("triaged_keep_path") or source_paths.get("intended_source_path") or "").strip()
+            if keep_text:
+                keep = _resolve_app_path(keep_text)
+                if _nonempty_file(keep):
+                    checked = _resolve_app_path(source_paths.get("checked_path") or settings.APP_ROOT / "_important" / "leads.csv")
+                    reject = _resolve_app_path(source_paths.get("triaged_reject_path") or settings.APP_ROOT / "_important" / "leads_triaged_reject.csv")
+                    return {
+                        "origin": "latest_queue_rebuild_manifest",
+                        "intended": keep,
+                        "checked": checked,
+                        "triaged_keep": keep,
+                        "triaged_reject": reject,
+                    }
+        archived_state = manifest_path.parent / "data" / "state" / "leads_dashboard_state.json"
+        resolved = _source_paths_from_dispatch_state(archived_state, "latest_queue_rebuild_archived_dispatch_state")
+        if resolved:
+            return resolved
+    return None
+
+
+def default_queue_safety_sources(important_dir: Path = settings.APP_ROOT / "_important") -> Dict[str, object]:
+    checked = important_dir / "leads.csv"
+    keep = important_dir / "leads_triaged_keep.csv"
+    reject = important_dir / "leads_triaged_reject.csv"
+    if _nonempty_file(keep):
+        return {
+            "origin": "current_important_triaged_keep",
+            "intended": keep,
+            "checked": checked,
+            "triaged_keep": keep,
+            "triaged_reject": reject,
+        }
+
+    resolved = _latest_queue_rebuild_source_paths()
+    if resolved:
+        return resolved
+
+    resolved = _source_paths_from_dispatch_state(settings.STATE_DIR / "leads_dashboard_state.json", "latest_dispatch_staged_batch_archive")
+    if resolved:
+        return resolved
+
+    return {
+        "origin": "current_important_fallback",
+        "intended": checked,
+        "checked": checked,
+        "triaged_keep": keep,
+        "triaged_reject": reject,
+    }
+
+
 def default_intended_source(important_dir: Path = settings.APP_ROOT / "_important") -> Path:
-    triaged_keep = important_dir / "leads_triaged_keep.csv"
-    if triaged_keep.exists() and triaged_keep.stat().st_size > 0:
-        return triaged_keep
-    return important_dir / "leads.csv"
+    return Path(default_queue_safety_sources(important_dir)["intended"])
 
 
 def default_archive_root() -> Path:
@@ -120,10 +273,11 @@ def build_queue_safety_report(
     triaged_reject_path: Path | None = None,
 ) -> Dict[str, object]:
     important_dir = settings.APP_ROOT / "_important"
-    intended = intended_source_path or default_intended_source(important_dir)
-    checked = checked_path or important_dir / "leads.csv"
-    triaged_keep = triaged_keep_path or important_dir / "leads_triaged_keep.csv"
-    triaged_reject = triaged_reject_path or important_dir / "leads_triaged_reject.csv"
+    default_sources = default_queue_safety_sources(important_dir)
+    intended = intended_source_path or Path(default_sources["intended"])
+    checked = checked_path or Path(default_sources["checked"])
+    triaged_keep = triaged_keep_path or Path(default_sources["triaged_keep"])
+    triaged_reject = triaged_reject_path or Path(default_sources["triaged_reject"])
     queues = list(shard_paths or default_queue_paths())
 
     per_shard = []
@@ -131,8 +285,11 @@ def build_queue_safety_report(
     duplicate_rows_across_shards = 0
     seen: set[str] = set()
     for path in queues:
-        emails = email_set(path)
-        rows = row_count(path)
+        headers, raw_rows = read_csv(path)
+        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+        emails = {email for email in (norm_email(row.get(email_header or "")) for row in raw_rows) if email}
+        rows = len(raw_rows)
+        missing_required_headers = _missing_required_headers(headers) if _is_sendgrid_queue_path(path) else []
         per_shard.append(
             {
                 "path": str(path),
@@ -140,6 +297,8 @@ def build_queue_safety_report(
                 "row_count": rows,
                 "unique_emails": len(emails),
                 "missing_or_empty": not path.exists() or path.stat().st_size <= 0,
+                "missing_required_headers": missing_required_headers,
+                "required_headers_present": not missing_required_headers,
             }
         )
         duplicate_rows_across_shards += len(seen & emails)
@@ -155,8 +314,15 @@ def build_queue_safety_report(
     outside_checked = shard_emails - checked_emails if checked_emails else set(shard_emails)
     reject_overlap = shard_emails & reject_emails
     source_reject_overlap = intended_emails & reject_emails
+    missing_required_header_shards = [
+        {"name": str(item["name"]), "missing_required_headers": list(item["missing_required_headers"])}
+        for item in per_shard
+        if item.get("missing_required_headers")
+    ]
 
     unsafe_reasons = []
+    if missing_required_header_shards:
+        unsafe_reasons.append("MISSING_REQUIRED_HEADERS")
     if reject_overlap:
         unsafe_reasons.append("TRIAGED_REJECT_OVERLAP")
     if outside_checked:
@@ -169,6 +335,7 @@ def build_queue_safety_report(
     return {
         "safe": not unsafe_reasons,
         "unsafe_reasons": unsafe_reasons,
+        "source_resolution": str(default_sources.get("origin") or "explicit") if not any((intended_source_path, checked_path, triaged_keep_path, triaged_reject_path)) else "explicit",
         "intended_source_path": str(intended),
         "checked_path": str(checked),
         "triaged_keep_path": str(triaged_keep),
@@ -187,6 +354,8 @@ def build_queue_safety_report(
         "outside_intended_source_count": len(outside_intended),
         "outside_checked_output_count": len(outside_checked),
         "intended_source_reject_overlap_count": len(source_reject_overlap),
+        "missing_required_header_shards": missing_required_header_shards,
+        "missing_required_header_shard_count": len(missing_required_header_shards),
         "outside_intended_source_fingerprint": set_fingerprint(outside_intended) if outside_intended else "",
         "outside_checked_output_fingerprint": set_fingerprint(outside_checked) if outside_checked else "",
         "triaged_reject_overlap_fingerprint": set_fingerprint(reject_overlap) if reject_overlap else "",
@@ -252,6 +421,26 @@ def archive_inputs(
     return archive_dir
 
 
+def _record_queue_rebuild_source_paths(
+    archive_dir: Path,
+    *,
+    intended_source_path: Path,
+    checked_path: Path | None,
+    triaged_keep_path: Path | None,
+    triaged_reject_path: Path | None,
+) -> None:
+    manifest_path = archive_dir / "manifest.json"
+    manifest = _read_json(manifest_path)
+    manifest["queue_safety_source_paths"] = {
+        "intended_source_path": str(intended_source_path),
+        "checked_path": str(checked_path or settings.APP_ROOT / "_important" / "leads.csv"),
+        "triaged_keep_path": str(triaged_keep_path or intended_source_path),
+        "triaged_reject_path": str(triaged_reject_path or settings.APP_ROOT / "_important" / "leads_triaged_reject.csv"),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    settings.secure_private_file(manifest_path)
+
+
 def _first_name(row: Dict[str, str], headers: Sequence[str]) -> str:
     first_header = find_header(headers, FIRST_NAME_CANDIDATES)
     value = str(row.get(first_header or "", "") or "").strip()
@@ -259,6 +448,152 @@ def _first_name(row: Dict[str, str], headers: Sequence[str]) -> str:
         return value.split()[0].strip()
     full = str(row.get("FullName", "") or row.get("AuthorName", "") or "").strip()
     return full.split()[0].strip() if full else ""
+
+
+def _field_value(row: Dict[str, str], headers: Sequence[str], name: str) -> str:
+    normalized_name = normalize_header(name)
+    for header in headers:
+        if normalize_header(header) == normalized_name:
+            return str(row.get(header, "") or "").strip()
+    return ""
+
+
+def _append_exclusion(
+    excluded_rows: List[Dict[str, str]],
+    *,
+    email: str,
+    reason: str,
+    source: str,
+    shard_name: str = "",
+) -> None:
+    excluded_rows.append(
+        {
+            "Email": email,
+            "exclusion_reason": reason,
+            "source": source,
+            "shard_name": shard_name,
+        }
+    )
+
+
+def _source_rows_for_safe_rebuild(
+    *,
+    intended_source_path: Path,
+    checked_path: Path | None,
+    triaged_reject_path: Path | None,
+    existing_shard_paths: Sequence[Path],
+) -> Tuple[List[str], List[Dict[str, str]], List[Dict[str, str]]]:
+    headers, rows = read_csv(intended_source_path)
+    email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+    if not email_header:
+        raise ValueError(f"Intended source has no email column: {intended_source_path}")
+    missing_source_headers = _missing_required_headers(headers)
+    if missing_source_headers:
+        raise ValueError(f"Intended source is missing required SendGrid headers: {', '.join(missing_source_headers)}")
+
+    output_headers = list(headers)
+    if "Email" not in output_headers:
+        output_headers.insert(0, "Email")
+    if "FirstName" not in output_headers:
+        output_headers.append("FirstName")
+    for header in SENDGRID_REQUIRED_HEADERS:
+        if header not in output_headers:
+            output_headers.append(header)
+    if "normalization_note" not in output_headers:
+        output_headers.append("normalization_note")
+
+    checked_emails = email_set(checked_path) if checked_path else set()
+    reject_emails = email_set(triaged_reject_path) if triaged_reject_path else set()
+    intended_emails = {
+        email
+        for email in (norm_email(row.get(email_header)) for row in rows)
+        if email
+    }
+    excluded_rows: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    safe_rows: List[Dict[str, str]] = []
+
+    for shard_path in existing_shard_paths:
+        shard_headers, shard_rows = read_csv(shard_path)
+        shard_email_header = find_header(shard_headers, EMAIL_HEADER_CANDIDATES)
+        missing_headers = _missing_required_headers(shard_headers) if _is_sendgrid_queue_path(shard_path) else []
+        if missing_headers:
+            _append_exclusion(
+                excluded_rows,
+                email="",
+                reason="missing_required_headers:" + "|".join(missing_headers),
+                source="existing_queue",
+                shard_name=shard_path.name,
+            )
+        for shard_row in shard_rows:
+            email = norm_email(shard_row.get(shard_email_header or ""))
+            if not email:
+                continue
+            reasons = []
+            if email not in intended_emails:
+                reasons.append("outside_intended_source")
+            if checked_emails and email not in checked_emails:
+                reasons.append("outside_checked_output")
+            if email in reject_emails:
+                reasons.append("triaged_reject_overlap")
+            if reasons:
+                _append_exclusion(
+                    excluded_rows,
+                    email=email,
+                    reason="|".join(reasons),
+                    source="existing_queue",
+                    shard_name=shard_path.name,
+                )
+
+    for row in rows:
+        email = norm_email(row.get(email_header))
+        reasons = []
+        if not email or not EMAIL_SYNTAX_RE.match(email):
+            reasons.append("invalid_email")
+        if email and email in seen:
+            reasons.append("duplicate_email")
+        if checked_emails and email not in checked_emails:
+            reasons.append("outside_checked_output")
+        if email in reject_emails:
+            reasons.append("triaged_reject_overlap")
+        for header in SENDGRID_REQUIRED_HEADERS:
+            if not _field_value(row, headers, header) and header not in {"Email", "FirstName"}:
+                reasons.append(f"missing_required_field:{header}")
+        if reasons:
+            _append_exclusion(
+                excluded_rows,
+                email=email,
+                reason="|".join(dict.fromkeys(reasons)),
+                source="intended_source",
+            )
+            continue
+        seen.add(email)
+        normalized = {header: str(row.get(header, "") or "").strip() for header in output_headers}
+        normalized["Email"] = email
+        if not normalized.get("FirstName"):
+            normalized["FirstName"] = _first_name(row, headers)
+        normalization_notes: List[str] = []
+        for field in RENDER_NORMALIZED_FIELDS:
+            normalized_value, notes = normalize_render_field_value(normalized.get(field, ""))
+            normalized[field] = normalized_value
+            normalization_notes.extend(f"{field}:{note}" for note in notes)
+            if placeholder_like_tokens(normalized_value):
+                reasons.append(f"unsafe_render_field:{field}")
+        if reasons:
+            _append_exclusion(
+                excluded_rows,
+                email=email,
+                reason="|".join(dict.fromkeys(reasons)),
+                source="intended_source",
+            )
+            continue
+        if normalization_notes:
+            existing_note = str(normalized.get("normalization_note") or "").strip()
+            normalized["normalization_note"] = "|".join(
+                note for note in [existing_note, *normalization_notes] if note
+            )
+        safe_rows.append(normalized)
+    return output_headers, safe_rows, excluded_rows
 
 
 def load_rebuild_source_rows(source_path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
@@ -320,6 +655,13 @@ def rebuild_recipient_queues(
         state_dir=state_dir,
         protected_paths=protected_paths,
     )
+    _record_queue_rebuild_source_paths(
+        archive_dir,
+        intended_source_path=intended_source_path,
+        checked_path=checked_path,
+        triaged_keep_path=triaged_keep_path,
+        triaged_reject_path=triaged_reject_path,
+    )
     headers, rows = load_rebuild_source_rows(intended_source_path)
     buckets: List[List[Dict[str, str]]] = [[] for _ in queues]
     for index, row in enumerate(rows):
@@ -344,6 +686,100 @@ def rebuild_recipient_queues(
     }
 
 
+def rebuild_sendgrid_recipient_queues(
+    *,
+    intended_source_path: Path,
+    shard_paths: Sequence[Path] | None = None,
+    archive_root: Path | None = None,
+    checked_path: Path | None = None,
+    triaged_keep_path: Path | None = None,
+    triaged_reject_path: Path | None = None,
+    quarantine_path: Path | None = None,
+    apply: bool = False,
+) -> Dict[str, object]:
+    queues = list(shard_paths or default_sendgrid_queue_paths())
+    if len(queues) != len(SENDGRID_QUEUE_FILENAMES):
+        raise ValueError(f"Expected {len(SENDGRID_QUEUE_FILENAMES)} SendGrid queue paths.")
+    before = build_queue_safety_report(
+        shard_paths=queues,
+        intended_source_path=intended_source_path,
+        checked_path=checked_path,
+        triaged_keep_path=triaged_keep_path,
+        triaged_reject_path=triaged_reject_path,
+    )
+    headers, safe_rows, excluded_rows = _source_rows_for_safe_rebuild(
+        intended_source_path=intended_source_path,
+        checked_path=checked_path,
+        triaged_reject_path=triaged_reject_path,
+        existing_shard_paths=queues,
+    )
+    buckets: List[List[Dict[str, str]]] = [[] for _ in queues]
+    for index, row in enumerate(safe_rows):
+        buckets[index % len(queues)].append(row)
+
+    temp_root = Path(tempfile.mkdtemp(prefix="sendgrid_queue_plan_"))
+    planned_paths = [temp_root / path.name for path in queues]
+    for path, bucket in zip(planned_paths, buckets):
+        write_csv_atomic(path, headers, bucket)
+    planned_quarantine = temp_root / "sendgrid_queue_excluded.csv"
+    quarantine_headers = ["Email", "exclusion_reason", "source", "shard_name"]
+    write_csv_atomic(planned_quarantine, quarantine_headers, excluded_rows)
+    after = build_queue_safety_report(
+        shard_paths=planned_paths,
+        intended_source_path=intended_source_path,
+        checked_path=checked_path,
+        triaged_keep_path=triaged_keep_path,
+        triaged_reject_path=triaged_reject_path,
+    )
+
+    archive_dir = ""
+    output_quarantine_path = str(planned_quarantine)
+    if apply:
+        archive_dir_path = archive_inputs(
+            archive_root=archive_root,
+            shard_paths=queues,
+            protected_paths=[],
+        )
+        _record_queue_rebuild_source_paths(
+            archive_dir_path,
+            intended_source_path=intended_source_path,
+            checked_path=checked_path,
+            triaged_keep_path=triaged_keep_path,
+            triaged_reject_path=triaged_reject_path,
+        )
+        for path, bucket in zip(queues, buckets):
+            write_csv_atomic(path, headers, bucket)
+        output_quarantine = quarantine_path or settings.SHARDS_DIR / "sendgrid_queue_excluded.csv"
+        write_csv_atomic(output_quarantine, quarantine_headers, excluded_rows)
+        output_quarantine_path = str(output_quarantine)
+        archive_dir = str(archive_dir_path)
+        after = build_queue_safety_report(
+            shard_paths=queues,
+            intended_source_path=intended_source_path,
+            checked_path=checked_path,
+            triaged_keep_path=triaged_keep_path,
+            triaged_reject_path=triaged_reject_path,
+        )
+
+    excluded_by_reason: Dict[str, int] = {}
+    for row in excluded_rows:
+        for reason in str(row.get("exclusion_reason") or "").split("|"):
+            if reason:
+                excluded_by_reason[reason] = excluded_by_reason.get(reason, 0) + 1
+    return {
+        "ok": True,
+        "mode": "rebuild" if apply else "dry-run",
+        "archive_dir": archive_dir,
+        "quarantine_path": output_quarantine_path,
+        "included_rows": len(safe_rows),
+        "excluded_rows": len(excluded_rows),
+        "excluded_by_reason": excluded_by_reason,
+        "rows_written_per_shard": {path.name: len(bucket) for path, bucket in zip(queues, buckets)},
+        "before": before,
+        "after": after,
+    }
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dry-run or rebuild recipient queue shards from the current campaign source.")
     parser.add_argument("--source", type=Path, default=None, help="Intended campaign source CSV. Defaults to _important/leads_triaged_keep.csv when present.")
@@ -354,14 +790,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--archive-root", type=Path, default=default_archive_root())
     parser.add_argument("--rebuild", action="store_true", help="Rewrite recipient shard CSVs after archiving protected files.")
     parser.add_argument("--confirm-rebuild", action="store_true", help="Required with --rebuild.")
+    parser.add_argument("--sendgrid-only", action="store_true", help="Validate/rebuild only SendGrid recipient shard CSVs.")
+    parser.add_argument("--quarantine-output", type=Path, default=settings.SHARDS_DIR / "sendgrid_queue_excluded.csv")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     source = args.source or default_intended_source(settings.APP_ROOT / "_important")
-    shard_paths = default_queue_paths(args.shards_dir)
-    if args.rebuild:
+    shard_paths = default_sendgrid_queue_paths(args.shards_dir) if args.sendgrid_only else default_queue_paths(args.shards_dir)
+    if args.sendgrid_only:
+        if args.rebuild and not args.confirm_rebuild:
+            raise SystemExit("--rebuild requires --confirm-rebuild")
+        result = rebuild_sendgrid_recipient_queues(
+            intended_source_path=source,
+            shard_paths=shard_paths,
+            archive_root=args.archive_root,
+            checked_path=args.checked,
+            triaged_keep_path=args.triaged_keep,
+            triaged_reject_path=args.triaged_reject,
+            quarantine_path=args.quarantine_output,
+            apply=bool(args.rebuild and args.confirm_rebuild),
+        )
+    elif args.rebuild:
         if not args.confirm_rebuild:
             raise SystemExit("--rebuild requires --confirm-rebuild")
         result = rebuild_recipient_queues(

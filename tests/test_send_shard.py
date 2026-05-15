@@ -652,6 +652,80 @@ class SendShardTests(unittest.TestCase):
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
+    def test_placeholder_like_book_title_values_are_normalized_before_render(self) -> None:
+        cases = [
+            ("Život p{r}outníka", "Život proutníka", "{r}"),
+            ("[(Horse Medicine)]", "((Horse Medicine))", "[(Horse Medicine)]"),
+            (
+                "Evolutions in Bread: Artisan Pan Breads and Dutch-Oven Loaves at Home [A baking book by the author of Flour Water Salt Yeast] Kindle Edition",
+                "Evolutions in Bread: Artisan Pan Breads and Dutch-Oven Loaves at Home (A baking book by the author of Flour Water Salt Yeast) Kindle Edition",
+                "[A baking book by the author of Flour Water Salt Yeast]",
+            ),
+        ]
+        for raw_title, expected_title, forbidden_token in cases:
+            with self.subTest(raw_title=raw_title):
+                _msg, subject_text, body_text, _html_body, _cid = build_message(
+                    from_email="annette@barnesnoblemarketing.com",
+                    to_email="reader@example.com",
+                    author="Anna Example",
+                    book_title=raw_title,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    unsub_email="annette@barnesnoblemarketing.com",
+                    subject_fallback="Independent author consignment review",
+                )
+
+                self.assertIn(expected_title, subject_text)
+                self.assertIn(expected_title, body_text)
+                self.assertNotIn(forbidden_token, subject_text)
+                self.assertNotIn(forbidden_token, body_text)
+                self.assertNotIn("{BookTitle}", body_text)
+
+        _subject_text, body_text, _html_body, _cid = render_message_parts(
+            "Anna",
+            "Safe Book",
+            "Subject",
+            "Hi {FirstName},\n\n{PersonalizedOpeningLine}",
+            "unsubscribe@example.com",
+            signature_file=None,
+            merge_fields={
+                "FirstName": "Anna",
+                "BookTitle": "Safe Book",
+                "PersonalizedOpeningLine": "Opening for [(Horse Medicine)]",
+            },
+        )
+        self.assertIn("Opening for ((Horse Medicine))", body_text)
+        self.assertNotIn("[(Horse Medicine)]", body_text)
+
+    def test_preflight_reports_dictreader_data_row_and_bad_field_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "first@example.test,First,Safe Book\n"
+                "second@example.test,Second,Život p{r}outníka\n",
+                encoding="utf-8",
+            )
+            rows = send_shard.read_rows(csv_path)
+            stdout = io.StringIO()
+
+            with patch.object(send_shard, "normalize_render_field_value", side_effect=lambda value: (str(value or "").strip(), [])), redirect_stdout(stdout):
+                ok = send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    profile_name="sendgrid_annette",
+                    subject_fallback="Independent author consignment review",
+                )
+
+        self.assertFalse(ok)
+        output = stdout.getvalue()
+        self.assertIn("row=2", output)
+        self.assertIn("field=BookTitle", output)
+        self.assertIn("token={r}", output)
+        self.assertNotIn("row=3", output)
+
     def test_fallback_capable_book_title_pitch_allows_mixed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"

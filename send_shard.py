@@ -603,7 +603,38 @@ BOOK_TITLE_FALLBACK_OPENINGS = (
     SENDGRID_BOOK_TITLE_OPENING,
 )
 UNRESOLVED_PLACEHOLDER_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}")
+PLACEHOLDER_LIKE_TOKEN_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}|\[[^\[\]\r\n]+\]|<<[^<>\r\n]+>>")
+BRACE_PLACEHOLDER_TOKEN_RE = re.compile(r"{([A-Za-z][A-Za-z0-9_]*)}")
+SQUARE_PLACEHOLDER_TOKEN_RE = re.compile(r"\[([^\[\]\r\n]+)\]")
+ANGLE_PLACEHOLDER_TOKEN_RE = re.compile(r"<<([^<>\r\n]+)>>")
 ALLOWED_RENDER_PLACEHOLDERS = {"{SIGIMG}"}
+
+
+def placeholder_like_tokens(value: object) -> List[str]:
+    return PLACEHOLDER_LIKE_TOKEN_RE.findall(str(value or ""))
+
+
+def normalize_render_field_value(value: object) -> Tuple[str, List[str]]:
+    raw = str(value or "").strip()
+    notes: List[str] = []
+    if not raw:
+        return "", notes
+
+    cleaned = BRACE_PLACEHOLDER_TOKEN_RE.sub(lambda match: match.group(1), raw)
+    if cleaned != raw:
+        notes.append("removed_brace_placeholder_punctuation")
+
+    before_square = cleaned
+    cleaned = SQUARE_PLACEHOLDER_TOKEN_RE.sub(lambda match: f"({match.group(1).strip()})", cleaned)
+    if cleaned != before_square:
+        notes.append("converted_square_brackets_to_parentheses")
+
+    before_angle = cleaned
+    cleaned = ANGLE_PLACEHOLDER_TOKEN_RE.sub(lambda match: match.group(1).strip(), cleaned)
+    if cleaned != before_angle:
+        notes.append("removed_angle_placeholder_punctuation")
+
+    return cleaned.strip(), notes
 
 
 def norm_email(s: str) -> str:
@@ -762,21 +793,22 @@ def validate_book_title_queue_contract(
 
     bad_rows: List[str] = []
     unresolved_rows: List[str] = []
-    for index, row in enumerate(rows, start=2):
+    for index, row in enumerate(rows, start=1):
         book_title = get_row_value_ci(row, ["BookTitle"])
         if not fallback_supported and invalid_campaign_book_title(book_title):
             bad_rows.append(f"row={index} BookTitle=blank_or_unsafe")
             if len(bad_rows) >= 5:
                 break
         if fallback_supported:
+            normalized_book_title, normalization_notes = normalize_render_field_value(book_title)
             email_addr = resolve_recipient_email(row)
             raw_author = get_personalization_name(row)
             author = choose_salutation_name(raw_author, email_addr)
             first_name = author.split()[0] if author else GENERIC_SALUTATION
-            merge_fields = row_merge_fields(row, email_addr, first_name, book_title)
+            merge_fields = row_merge_fields(row, email_addr, first_name, normalized_book_title)
             subject_text, body_text, _html_body, _cid = render_message_parts(
                 author,
-                book_title,
+                normalized_book_title,
                 subject,
                 body_template,
                 DEFAULT_UNSUB_EMAIL,
@@ -784,8 +816,17 @@ def validate_book_title_queue_contract(
                 merge_fields=merge_fields,
                 subject_fallback=subject_fallback,
             )
-            if _unresolved_placeholders(subject_text, body_text) or "{BookTitle}" in body_text:
-                unresolved_rows.append(f"row={index} unresolved_placeholder")
+            unresolved = sorted(_unresolved_placeholders(subject_text, body_text))
+            remaining_tokens = [
+                token
+                for token in placeholder_like_tokens(subject_text + "\n" + body_text)
+                if token not in ALLOWED_RENDER_PLACEHOLDERS
+            ]
+            if unresolved or "{BookTitle}" in body_text or remaining_tokens:
+                tokens = unresolved or remaining_tokens or ["{BookTitle}"]
+                token_text = ",".join(tokens[:3])
+                note_text = f" normalization_note={'+'.join(normalization_notes)}" if normalization_notes else ""
+                unresolved_rows.append(f"row={index} field=BookTitle token={token_text} reason=unresolved_placeholder{note_text}")
                 if len(unresolved_rows) >= 5:
                     break
     if bad_rows:
@@ -1608,7 +1649,7 @@ def render_message_parts(
 
     author = (author or GENERIC_SALUTATION).strip()
     first_name = author.split()[0] if author else GENERIC_SALUTATION
-    raw_book_title = (book_title or "").strip()
+    raw_book_title, _book_title_normalization_notes = normalize_render_field_value(book_title or "")
 
     format_args = {
         "FirstName": first_name,
@@ -1624,8 +1665,11 @@ def render_message_parts(
         for key in ("FirstName", "AuthorName", "AuthorEmail", "BookTitle", "PersonalizedOpeningLine"):
             if key in merge_fields:
                 format_args[key] = str(merge_fields.get(key) or "")
+        for key in ("FirstName", "AuthorName", "PersonalizedOpeningLine"):
+            normalized_value, _notes = normalize_render_field_value(format_args.get(key) or "")
+            format_args[key] = normalized_value
         format_args["FirstName"] = format_args["FirstName"] or GENERIC_SALUTATION
-        raw_book_title = str(format_args.get("BookTitle") or "").strip()
+        raw_book_title, _book_title_normalization_notes = normalize_render_field_value(format_args.get("BookTitle") or "")
         format_args["BookTitle"] = raw_book_title
 
     missing_or_unsafe_book_title = invalid_campaign_book_title(raw_book_title)
