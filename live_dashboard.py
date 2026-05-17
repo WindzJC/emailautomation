@@ -160,6 +160,7 @@ WEBHOOK_DEDUPE_PATH = settings.WEBHOOK_DEDUPE_PATH
 IMPORTANT_LEADS_INPUT = settings.APP_ROOT / "_important" / "leadschecker.csv"
 IMPORTANT_LEADS_OUTPUT = settings.APP_ROOT / "_important" / "leads.csv"
 IMPORTANT_LEADS_REJECTED = settings.APP_ROOT / "_important" / "leads_rejected.csv"
+IMPORTANT_LEADS_RUNS = settings.APP_ROOT / "_important" / "runs"
 IMPORTANT_LEADS_CHECK_RUNS = settings.APP_ROOT / "_important" / "check_runs"
 IMPORTANT_LEADS_CHECK_JOBS = IMPORTANT_LEADS_CHECK_RUNS / "jobs"
 IMPORTANT_LEADS_VERIFY_JOBS = settings.APP_ROOT / "_important" / "verify_jobs"
@@ -686,9 +687,11 @@ def _run_auto_dispatch_preview_after_triage(
     *,
     job: dict[str, object],
     triage_report: dict[str, object],
+    master_path: Path,
     keep_path: Path,
     rejected_path: Path,
     quarantine_path: Path,
+    preview_dir: Path | None = None,
 ) -> dict[str, object]:
     job["auto_dispatch_preview_status"] = "running"
     job["auto_dispatch_preview_started_at_utc"] = iso_utc()
@@ -696,8 +699,8 @@ def _run_auto_dispatch_preview_after_triage(
     _save_important_check_job(job)
     try:
         preview = preview_dispatch_master_leads(
-            master_path=IMPORTANT_LEADS_OUTPUT,
-            rejected_path=IMPORTANT_LEADS_REJECTED,
+            master_path=master_path,
+            rejected_path=Path(str(job.get("rejected_path") or rejected_path)),
             verified_path=STRICT_VERIFIED_PATH,
             triaged_keep_path=keep_path,
             dispatch_source_mode=DISPATCH_SOURCE_TRIAGED_KEEP,
@@ -718,7 +721,7 @@ def _run_auto_dispatch_preview_after_triage(
                 settings.LOGS_DIR / "sendgrid_alison_log.csv",
                 settings.LOGS_DIR / "sendgrid_fiorela_log.csv",
             ],
-            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+            preview_dir=preview_dir or IMPORTANT_LEADS_DISPATCH_PREVIEWS,
         )
         summary = _auto_dispatch_preview_summary(
             preview=preview,
@@ -757,12 +760,6 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
 
     output_path = Path(str(job.get("output_path") or ""))
     rejected_path = Path(str(job.get("rejected_path") or ""))
-    expected_output = IMPORTANT_LEADS_OUTPUT.resolve(strict=False)
-    expected_rejected = IMPORTANT_LEADS_REJECTED.resolve(strict=False)
-    if output_path.resolve(strict=False) != expected_output or rejected_path.resolve(strict=False) != expected_rejected:
-        job["auto_triage_status"] = "skipped"
-        job["auto_triage_skip_reason"] = "non_default_check_outputs"
-        return job
     if not output_path.exists() or not rejected_path.exists():
         job["auto_triage_status"] = "skipped"
         job["auto_triage_skip_reason"] = "fresh_check_outputs_missing"
@@ -777,13 +774,17 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         return job
 
     checked_signature = _file_signature(output_path)
-    staged_dir = IMPORTANT_LEADS_CHECK_RUNS / "auto_triage" / job_id
+    staged_dir = Path(str(job.get("staged_run_dir") or "")) if job.get("staged_run_dir") else IMPORTANT_LEADS_RUNS / job_id
+    if not staged_dir.is_absolute():
+        staged_dir = settings.APP_ROOT / staged_dir
+    staged_dir.mkdir(parents=True, exist_ok=True)
     staged_keep_path = staged_dir / "leads_triaged_keep.csv"
     staged_rejected_path = staged_dir / "leads_triaged_reject.csv"
     staged_quarantine_path = staged_dir / "leads_triaged_quarantine.csv"
-    keep_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_keep.csv")
-    triage_rejected_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_reject.csv")
-    quarantine_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv")
+    staged_preview_dir = staged_dir / "dispatch_previews"
+    keep_path = staged_keep_path
+    triage_rejected_path = staged_rejected_path
+    quarantine_path = staged_quarantine_path
 
     job["status"] = "auto_triage_running"
     job["stage"] = "auto_triage"
@@ -794,6 +795,7 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
     job["auto_triage_keep_path"] = str(keep_path)
     job["auto_triage_rejected_path"] = str(triage_rejected_path)
     job["auto_triage_quarantine_path"] = str(quarantine_path)
+    job["staged_run_dir"] = str(staged_dir)
     job["message"] = "Check complete. Auto triage running."
     _save_important_check_job(job)
 
@@ -854,14 +856,6 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
             job["message"] = "Check complete. Auto triage skipped because checked output changed."
             return job
 
-        _promote_auto_triage_outputs(
-            staged_keep_path=staged_keep_path,
-            staged_rejected_path=staged_rejected_path,
-            staged_quarantine_path=staged_quarantine_path,
-            keep_path=keep_path,
-            rejected_path=triage_rejected_path,
-            quarantine_path=quarantine_path,
-        )
         final_report = dict(report)
         final_report["input_label"] = str(output_path)
         final_report["verified_label"] = str(keep_path)
@@ -892,9 +886,11 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job = _run_auto_dispatch_preview_after_triage(
             job=job,
             triage_report=final_report,
+            master_path=output_path,
             keep_path=keep_path,
             rejected_path=triage_rejected_path,
             quarantine_path=quarantine_path,
+            preview_dir=staged_preview_dir,
         )
         job["message"] = (
             f"Check complete. Auto triage complete: KEEP {int(final_report.get('keep_count') or 0)}, "
@@ -975,7 +971,7 @@ def _create_pre_dispatch_archive(job_id: str) -> dict[str, object]:
 def _find_active_dashboard_job(directory: Path) -> dict[str, object] | None:
     if not directory.exists():
         return None
-    active_statuses = {"queued", "running", "checking", "verifying", "dispatching"}
+    active_statuses = {"queued", "running", "checking", "verifying", "dispatching", "auto_triage_running"}
     candidates: list[tuple[float, dict[str, object]]] = []
     for path in directory.glob("*.json"):
         try:
@@ -1070,6 +1066,13 @@ def _check_important_leads_response(
     effective_input_path: Path,
     source_label: str | None = None,
 ) -> JSONResponse:
+    run_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    staged_run_dir = IMPORTANT_LEADS_RUNS / run_id
+    staged_run_dir.mkdir(parents=True, exist_ok=True)
+    live_output_path = output_path
+    live_rejected_path = rejected_path
+    output_path = staged_run_dir / "leads.csv"
+    rejected_path = staged_run_dir / "leads_rejected.csv"
     try:
         report = _execute_important_check(
             input_path=input_path,
@@ -1098,6 +1101,10 @@ def _check_important_leads_response(
     return JSONResponse(
         {
             "ok": True,
+            "run_id": run_id,
+            "staged_run_dir": str(staged_run_dir),
+            "live_output_path": str(live_output_path),
+            "live_rejected_path": str(live_rejected_path),
             "message": (
                 f"{prefix}checked {report['input_label']} into {report['output_label']}. "
                 f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
@@ -1216,6 +1223,11 @@ def _start_important_check_job(
     total_input_rows: int,
 ) -> dict[str, object]:
     job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    staged_run_dir = IMPORTANT_LEADS_RUNS / job_id
+    if str(source_mode or "").strip() == "uploaded_file":
+        staged_run_dir.mkdir(parents=True, exist_ok=True)
+        output_path = staged_run_dir / "leads.csv"
+        rejected_path = staged_run_dir / "leads_rejected.csv"
     job = {
         "job_id": job_id,
         "status": "queued",
@@ -1236,6 +1248,9 @@ def _start_important_check_job(
         "output_path": str(output_path),
         "rejected_path": str(rejected_path),
         "effective_input_path": str(effective_input_path),
+        "staged_run_dir": str(staged_run_dir) if str(source_mode or "").strip() == "uploaded_file" else "",
+        "live_output_path": str(IMPORTANT_LEADS_OUTPUT),
+        "live_rejected_path": str(IMPORTANT_LEADS_REJECTED),
         "total_input_rows": int(total_input_rows or 0),
         "processed_rows": 0,
         "remaining_rows": int(total_input_rows or 0),
@@ -1631,6 +1646,69 @@ def _build_leads_pipeline_status(status: dict[str, object]) -> dict[str, object]
     }
 
 
+def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
+    missing: list[str] = []
+    jc_queue = status.get("jc_queue") if isinstance(status.get("jc_queue"), dict) else {}
+    if jc_queue:
+        fields = [str(field).strip().lower() for field in jc_queue.get("fieldnames", []) if str(field).strip()]
+        if "booktitle" not in fields:
+            missing.append(str(jc_queue.get("profile") or jc_queue.get("name") or "private_jc"))
+    sendgrid_queues = status.get("sendgrid_queues")
+    if isinstance(sendgrid_queues, list):
+        for queue in sendgrid_queues:
+            if not isinstance(queue, dict):
+                continue
+            fields = [str(field).strip().lower() for field in queue.get("fieldnames", []) if str(field).strip()]
+            if "booktitle" not in fields:
+                missing.append(str(queue.get("profile") or queue.get("name") or queue.get("path") or "sendgrid"))
+    return missing
+
+
+def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, object]:
+    queue_safety = build_dashboard_queue_safety_report()
+    reasons: list[str] = []
+    if not bool(queue_safety.get("safe")):
+        raw_reasons = queue_safety.get("unsafe_reasons")
+        if isinstance(raw_reasons, list) and raw_reasons:
+            reasons.extend(str(reason) for reason in raw_reasons)
+        else:
+            reasons.append(str(queue_safety.get("message") or "Live recipient queue is unsafe."))
+    missing_booktitle = _queue_status_missing_booktitle(status)
+    if missing_booktitle:
+        reasons.append(f"Live recipient queues are missing BookTitle: {', '.join(missing_booktitle)}.")
+    return {
+        "status": "BLOCKED" if reasons else "READY",
+        "blocked": bool(reasons),
+        "reasons": reasons,
+        "queue_safety": queue_safety,
+        "missing_booktitle_queues": missing_booktitle,
+    }
+
+
+def _build_next_batch_prep_status(status: dict[str, object]) -> dict[str, object]:
+    active_check = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    pipeline = status.get("pipeline") if isinstance(status.get("pipeline"), dict) else {}
+    latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
+    latest_triage = status.get("latest_lead_triage") if isinstance(status.get("latest_lead_triage"), dict) else {}
+    latest_preview = status.get("latest_auto_dispatch_preview") if isinstance(status.get("latest_auto_dispatch_preview"), dict) else {}
+    reasons: list[str] = []
+    if active_check:
+        reasons.append("Check Leads is running for the next batch.")
+    if not latest_check.get("generated_at_utc") and not active_check:
+        reasons.append("Staged leads.csv is not ready.")
+    if latest_check.get("generated_at_utc") and not latest_triage.get("generated_at_utc"):
+        reasons.append("Staged triage is not ready.")
+    if latest_triage.get("generated_at_utc") and not latest_preview:
+        reasons.append("Staged dispatch preview is not ready.")
+    return {
+        "status": "WAIT" if active_check else ("SAFE TO PROMOTE" if not reasons else "NOT READY"),
+        "blocks_current_send": False,
+        "reasons": reasons,
+        "active_check_job": active_check,
+        "pipeline": pipeline,
+    }
+
+
 def _combined_leads_status() -> dict[str, object]:
     state = load_state()
     status = {
@@ -1643,6 +1721,8 @@ def _combined_leads_status() -> dict[str, object]:
         "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
     }
     status["pipeline"] = _build_leads_pipeline_status(status)
+    status["current_send_safety"] = _build_current_send_safety_status(status)
+    status["next_batch_prep"] = _build_next_batch_prep_status(status)
     return status
 
 
@@ -2470,8 +2550,9 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
         else:
             blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
 
-    if requested_profile:
-        blocked_reasons.extend(_lead_state_start_block_reasons(queue_safety))
+    lead_state_reasons = _lead_state_start_block_reasons(queue_safety)
+    if lead_state_reasons:
+        warning_reasons.extend(f"Next batch prep: {reason}" for reason in lead_state_reasons)
     blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))
     warning_reasons = list(dict.fromkeys(reason for reason in warning_reasons if str(reason or "").strip()))
 

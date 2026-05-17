@@ -274,6 +274,37 @@ class LiveDashboardTests(unittest.TestCase):
         review_step = next(step for step in pipeline["steps"] if step["key"] == "quarantine")
         self.assertEqual("warn", review_step["state"])
 
+    def test_check_leads_running_is_next_batch_status_not_current_send_blocker(self) -> None:
+        status = {
+            "active_important_check_job": {
+                "job_id": "check_next_batch",
+                "status": "running",
+                "stage": "checking",
+                "processed_rows": 10,
+                "total_input_rows": 100,
+            },
+            "latest_master_check": {},
+            "latest_lead_triage": {},
+            "latest_auto_dispatch_preview": {},
+            "pipeline": {},
+            "sendgrid_queues": [
+                {"profile": "sendgrid_1", "fieldnames": ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]},
+            ],
+        }
+        with patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value={"safe": True, "unsafe_reasons": []},
+        ):
+            current = live_dashboard._build_current_send_safety_status(status)
+            prep = live_dashboard._build_next_batch_prep_status(status)
+
+        self.assertEqual("READY", current["status"])
+        self.assertFalse(current["blocked"])
+        self.assertEqual("WAIT", prep["status"])
+        self.assertFalse(prep["blocks_current_send"])
+        self.assertIn("Check Leads is running", " ".join(prep["reasons"]))
+
     def test_start_all_blocks_when_queue_safety_is_unsafe(self) -> None:
         unsafe_report = {
             "safe": False,
@@ -655,7 +686,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("FAIL", " ".join(body["blocked_reasons"]))
         start_sender.assert_not_called()
 
-    def test_start_profile_blocks_stale_or_temp_lead_state(self) -> None:
+    def test_start_profile_warns_but_does_not_block_stale_next_batch_state(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
         temp_path = live_dashboard.settings.APP_ROOT / "tmp_synthetic_run" / "_important" / "leads.csv"
         status = {
@@ -692,13 +723,14 @@ class LiveDashboardTests(unittest.TestCase):
         ), patch.object(
             live_dashboard.runtime_control,
             "start_sender",
+            return_value=(True, "started"),
         ) as start_sender:
             response = live_dashboard.start_profile("sendgrid_annette")
 
-        self.assertEqual(409, response.status_code)
+        self.assertEqual(200, response.status_code)
         body = json.loads(response.body)
-        self.assertIn("temp artifact", " ".join(body["blocked_reasons"]))
-        start_sender.assert_not_called()
+        self.assertIn("temp artifact", " ".join(body["warnings"]))
+        start_sender.assert_called_once_with("sendgrid_annette")
 
     def test_start_all_does_not_block_on_stale_lead_state_when_queue_and_readiness_pass(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
@@ -1025,6 +1057,101 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(valid_rows, preview["dispatch_source_row_count"])
             self.assertEqual(valid_rows, preview["dispatch_eligible_row_count"])
 
+    def test_uploaded_check_job_writes_staged_outputs_without_overwriting_live_files(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            important_dir = tmp / "_important"
+            runs_dir = important_dir / "runs"
+            check_runs_dir = important_dir / "check_runs"
+            jobs_dir = check_runs_dir / "jobs"
+            live_output = important_dir / "leads.csv"
+            live_rejected = important_dir / "leads_rejected.csv"
+            input_path = check_runs_dir / "uploaded.csv"
+            self._write_csv(
+                input_path,
+                ["Email", "FirstName", "BookTitle"],
+                [{"Email": "reader@example.com", "FirstName": "Ava", "BookTitle": "Synthetic Book"}],
+            )
+            live_output.parent.mkdir(parents=True, exist_ok=True)
+            live_output.write_text("Email,FirstName\nexisting@example.com,Existing\n", encoding="utf-8")
+            live_rejected.write_text("Email,FirstName\n", encoding="utf-8")
+            live_output_before = live_output.read_text(encoding="utf-8")
+            live_rejected_before = live_rejected.read_text(encoding="utf-8")
+
+            class NoopThread:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def start(self):
+                    return None
+
+            def check_master_leads_without_external_state(**kwargs):
+                return important_leads_workflow.check_master_leads(
+                    **kwargs,
+                    sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                    suppressed_path=tmp / "suppressed.csv",
+                    unsubscribed_path=tmp / "unsubscribed.csv",
+                    report_dir=tmp / "state",
+                    summary_dir=check_runs_dir,
+                    validate_deliverability=False,
+                    reject_role_accounts=False,
+                    reject_disposable=False,
+                    persist_state=False,
+                )
+
+            (tmp / "sendgrid_suppressions.csv").write_text("email,state,type\n", encoding="utf-8")
+            (tmp / "suppressed.csv").write_text("Email\n", encoding="utf-8")
+            (tmp / "unsubscribed.csv").write_text("Email\n", encoding="utf-8")
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_OUTPUT",
+                live_output,
+            ), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_REJECTED",
+                live_rejected,
+            ), patch.object(
+                live_dashboard.threading,
+                "Thread",
+                NoopThread,
+            ), patch.object(
+                live_dashboard,
+                "check_master_leads",
+                side_effect=check_master_leads_without_external_state,
+            ), patch.object(
+                live_dashboard,
+                "_run_auto_fast_triage_after_check",
+                side_effect=lambda job: job,
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[SimpleNamespace(name="sendgrid_annette", runtime_state="running")],
+            ):
+                job = live_dashboard._start_important_check_job(
+                    input_path=input_path,
+                    output_path=live_output,
+                    rejected_path=live_rejected,
+                    effective_input_path=input_path,
+                    source_label="uploaded.csv",
+                    source_mode="uploaded_file",
+                    total_input_rows=1,
+                )
+                live_dashboard._run_important_check_job(job["job_id"])
+
+            saved_job = json.loads((jobs_dir / f"{job['job_id']}.json").read_text(encoding="utf-8"))
+            staged_output = Path(saved_job["output_path"])
+            staged_rejected = Path(saved_job["rejected_path"])
+            self.assertEqual(runs_dir / job["job_id"] / "leads.csv", staged_output)
+            self.assertEqual(runs_dir / job["job_id"] / "leads_rejected.csv", staged_rejected)
+            self.assertEqual(1, live_dashboard._count_csv_rows(staged_output))
+            self.assertEqual(live_output_before, live_output.read_text(encoding="utf-8"))
+            self.assertEqual(live_rejected_before, live_rejected.read_text(encoding="utf-8"))
+
     def test_check_important_leads_upload_rejects_declared_size_over_check_upload_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -1329,6 +1456,10 @@ class LiveDashboardTests(unittest.TestCase):
                 check_runs_dir,
             ), patch.object(
                 live_dashboard,
+                "IMPORTANT_LEADS_RUNS",
+                tmp / "runs",
+            ), patch.object(
+                live_dashboard,
                 "timestamp_slug",
                 return_value="20260409_120000",
             ), patch.object(
@@ -1351,8 +1482,11 @@ class LiveDashboardTests(unittest.TestCase):
             run_input_path = check_runs_dir / "leadschecker_20260409_120000.csv"
             self.assertEqual("first_name;email\nJane;jane@example.com\n", run_input_path.read_text(encoding="utf-8"))
             self.assertEqual(run_input_path.resolve(), kwargs["input_path"])
-            self.assertEqual(output_path.resolve(), kwargs["output_path"])
-            self.assertEqual(rejected_path.resolve(), kwargs["rejected_path"])
+            self.assertEqual(tmp / "runs", kwargs["output_path"].parent.parent)
+            self.assertEqual("leads.csv", kwargs["output_path"].name)
+            self.assertEqual(kwargs["output_path"].with_name("leads_rejected.csv"), kwargs["rejected_path"])
+            self.assertEqual(str(output_path), body["live_output_path"])
+            self.assertEqual(str(rejected_path), body["live_rejected_path"])
             save_state.assert_called()
 
     def test_check_important_leads_adds_header_for_simple_name_email_paste(self) -> None:
@@ -3221,6 +3355,10 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "IMPORTANT_LEADS_CHECK_JOBS",
                 jobs_dir,
+            ), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_RUNS",
+                important_dir / "runs",
             ), patch.object(live_dashboard.settings, "STATE_DIR", state_dir), patch.object(
                 live_dashboard.settings,
                 "LEAD_LEDGER_DB_PATH",
@@ -3256,17 +3394,25 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual("completed", saved_job["auto_triage_status"])
             self.assertEqual("completed", saved_job["auto_dispatch_preview_status"])
             self.assertEqual(3, live_dashboard._count_csv_rows(output_path))
-            self.assertEqual(2, live_dashboard._count_csv_rows(keep_path))
-            self.assertEqual(1, live_dashboard._count_csv_rows(triage_reject_path))
-            self.assertTrue(quarantine_path.exists())
-            keep_rows = self._read_csv_rows(keep_path)
+            staged_keep_path = Path(saved_job["auto_triage_keep_path"])
+            staged_reject_path = Path(saved_job["auto_triage_rejected_path"])
+            staged_quarantine_path = Path(saved_job["auto_triage_quarantine_path"])
+            self.assertEqual(2, live_dashboard._count_csv_rows(staged_keep_path))
+            self.assertEqual(1, live_dashboard._count_csv_rows(staged_reject_path))
+            self.assertTrue(staged_quarantine_path.exists())
+            self.assertFalse(keep_path.exists())
+            self.assertFalse(triage_reject_path.exists())
+            self.assertFalse(quarantine_path.exists())
+            keep_rows = self._read_csv_rows(staged_keep_path)
             self.assertEqual("Signals at Dawn", keep_rows[0]["BookTitle"])
             self.assertEqual("Alpha Baker", keep_rows[0]["AuthorName"])
             self.assertEqual("Synthetic opening.", keep_rows[0]["PersonalizedOpeningLine"])
             self.assertEqual("Synthetic fit.", keep_rows[0]["WhyAstraFit"])
             self.assertEqual(shard_before, shard_path.read_text(encoding="utf-8"))
             preview_dispatch.assert_called_once()
-            self.assertEqual(keep_path, preview_dispatch.call_args.kwargs["triaged_keep_path"])
+            self.assertEqual(output_path, preview_dispatch.call_args.kwargs["master_path"])
+            self.assertEqual(staged_keep_path, preview_dispatch.call_args.kwargs["triaged_keep_path"])
+            self.assertEqual(important_dir / "runs" / job["job_id"] / "dispatch_previews", preview_dispatch.call_args.kwargs["preview_dir"])
             confirm_dispatch.assert_not_called()
             start_sender.assert_not_called()
             send_via_sendgrid.assert_not_called()

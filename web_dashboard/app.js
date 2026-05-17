@@ -81,6 +81,7 @@ const els = {
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
   leadsRunSafetyCard: document.getElementById("leads-run-safety-card"),
+  nextBatchPrepCard: document.getElementById("next-batch-prep-card"),
   leadsPipelineSteps: document.getElementById("leads-pipeline-steps"),
   leadsUploadInput: document.getElementById("leads-upload-input"),
   leadsUploadBtn: document.getElementById("leads-upload-btn"),
@@ -847,6 +848,7 @@ function recipientQueueBookTitleStatus(status = lastLeadsStatus) {
 }
 
 function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  const backendCurrentSafety = status?.current_send_safety || {};
   const activeCheckJob = currentImportantCheckJob(status);
   const checkRunning = isActiveImportantLeadCheckJob(activeCheckJob);
   const activeSenders = activeSenderProfiles(snapshot);
@@ -856,7 +858,9 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   const latestCheckTime = safeTimestampMs(latestCheck.generated_at_utc);
   const latestTriageTime = safeTimestampMs(latestTriage.generated_at_utc);
   const previewTime = safeTimestampMs(latestPreview.generated_at_utc || latestPreview.completed_at_utc || latestPreview.created_at_utc);
-  const queueUnsafe = queueSafetyBlocked(snapshot) || latestPreview?.queue_safety?.safe === false;
+  const queueUnsafe = Object.prototype.hasOwnProperty.call(backendCurrentSafety, "blocked")
+    ? Boolean(backendCurrentSafety.blocked)
+    : queueSafetyBlocked(snapshot);
   const bookTitleStatus = recipientQueueBookTitleStatus(status);
   const progress = importantCheckJobProgress(activeCheckJob);
 
@@ -869,23 +873,17 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
       : null);
 
   const reasons = [];
-  if (checkRunning) reasons.push("Check Leads is running.");
-  if (activeSenders.length) {
-    reasons.push(`Active senders are running: ${activeSenders.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`);
+  if (Array.isArray(backendCurrentSafety.reasons) && backendCurrentSafety.reasons.length) {
+    reasons.push(...backendCurrentSafety.reasons.map((reason) => String(reason || "")).filter(Boolean));
   }
-  if (!leadsFresh) reasons.push("Current leads.csv has not been published for this run.");
-  if (triageFresh === false) reasons.push("Triage output is stale.");
-  if (previewFresh === false) reasons.push("Dispatch preview is stale.");
   if (bookTitleStatus.missing.length) {
     reasons.push(`Recipient queues are missing BookTitle: ${bookTitleStatus.missing.join(", ")}.`);
   }
   if (queueUnsafe) reasons.push(queueSafetyBlockMessage(snapshot) || "Queue safety is unsafe.");
 
-  let statusLabel = "SAFE TO CONTINUE";
+  let statusLabel = "READY";
   if (queueUnsafe) {
     statusLabel = "BLOCKED";
-  } else if (checkRunning || activeSenders.length || !leadsFresh || triageFresh === false || previewFresh === false) {
-    statusLabel = "WAIT";
   }
 
   const uploadFilename = activeCheckJob?.selected_filename
@@ -909,6 +907,7 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
     triageFresh,
     previewFresh,
     bookTitleStatus,
+    nextBatchPrep: status?.next_batch_prep || {},
   };
 }
 
@@ -2890,14 +2889,14 @@ function renderShardWriteGuard() {
 function renderLeadsRunSafety(status = lastLeadsStatus) {
   if (!els.leadsRunSafetyCard) return;
   const safety = leadsRunSafety(status);
-  const tone = safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
+  const tone = safety.statusLabel === "READY" ? "safe-to-continue" : safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
   const progress = safety.progress || {};
   const progressText = progress.total > 0
     ? `${progress.processed} / ${progress.total} (${progress.percent.toFixed(1)}%)`
     : "n/a";
   const reasons = safety.reasons.length
     ? safety.reasons
-    : ["Current outputs look fresh and no active sender/check blocker is visible."];
+    : ["Live recipient queues are approved for current sending."];
   setNodeHtml(
     els.leadsRunSafetyCard,
     `
@@ -2906,7 +2905,7 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
           <p class="eyebrow">Current Run Safety</p>
           <strong>${escapeHtml(safety.statusLabel)}</strong>
         </div>
-        <span class="mini-pill">${escapeHtml(safety.queueUnsafe ? "Queue blocked" : safety.checkRunning ? "Check running" : safety.activeSenders.length ? "Senders active" : "Ready state")}</span>
+        <span class="mini-pill">${escapeHtml(safety.queueUnsafe ? "Queue blocked" : "Live lane")}</span>
       </div>
       <div class="leads-run-safety-body">
         <div class="leads-run-safety-reasons">
@@ -2924,6 +2923,45 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
     `,
   );
   els.leadsRunSafetyCard.className = `leads-run-safety-card leads-run-safety-card-${tone}`;
+
+  if (els.nextBatchPrepCard) {
+    const prep = safety.nextBatchPrep || {};
+    const prepStatus = String(prep.status || (safety.checkRunning ? "WAIT" : "NOT READY"));
+    const prepTone = prepStatus === "SAFE TO PROMOTE"
+      ? "safe-to-continue"
+      : prepStatus === "NOT READY"
+        ? "wait"
+        : prepStatus.toLowerCase().replace(/\s+/g, "-");
+    const prepReasons = Array.isArray(prep.reasons) && prep.reasons.length
+      ? prep.reasons
+      : [safety.checkRunning ? "Check Leads is running for the next batch." : "No staged next-batch blocker is visible."];
+    setNodeHtml(
+      els.nextBatchPrepCard,
+      `
+        <div class="leads-run-safety-head">
+          <div>
+            <p class="eyebrow">Next Batch Prep Status</p>
+            <strong>${escapeHtml(prepStatus)}</strong>
+          </div>
+          <span class="mini-pill">${escapeHtml(prep.blocks_current_send === false ? "Display only" : "Prep lane")}</span>
+        </div>
+        <div class="leads-run-safety-body">
+          <div class="leads-run-safety-reasons">
+            ${prepReasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}
+          </div>
+          ${renderOperatorMetricStrip([
+            { label: "Upload", value: safety.uploadFilename },
+            { label: "Check Job", value: safety.checkJobId },
+            { label: "Progress", value: progressText },
+            { label: "Staged leads.csv", value: outputFreshnessLabel(safety.leadsFresh), tone: safety.leadsFresh === false ? "warn" : safety.leadsFresh === true ? "good" : "" },
+            { label: "Staged Triage", value: outputFreshnessLabel(safety.triageFresh), tone: safety.triageFresh === false ? "warn" : safety.triageFresh === true ? "good" : "" },
+            { label: "Staged Preview", value: outputFreshnessLabel(safety.previewFresh), tone: safety.previewFresh === false ? "warn" : safety.previewFresh === true ? "good" : "" },
+          ], "leads-run-safety-metrics")}
+        </div>
+      `,
+    );
+    els.nextBatchPrepCard.className = `leads-run-safety-card leads-run-safety-card-${prepTone}`;
+  }
 }
 
 function renderLeadsStatus(status) {
@@ -3618,6 +3656,7 @@ function updateSelectOptionNode(node, value, label) {
 
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
+  const total_awaiting_outcome = Number(summary.total_awaiting_outcome || 0);
   const alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
   const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
   const fleetOrder = ["private_jc", "sendgrid_annette", "sendgrid_jordan", "sendgrid_jodi", "sendgrid_alison", "sendgrid_fiorela"];
@@ -3641,9 +3680,11 @@ function renderSummary(snapshot) {
     },
     {
       key: "alerts",
-      label: "Alerts",
+      label: "Critical Alerts",
       value: summary.active_alerts || alerts.length || 0,
-      note: Number(summary.active_alerts || alerts.length || 0) > 0 ? "Needs review" : "Clear",
+      note: Number(summary.active_alerts || alerts.length || 0) > 0
+        ? `Needs review · awaiting ${total_awaiting_outcome.toLocaleString()}`
+        : "Clear",
       tone: Number(summary.active_alerts || alerts.length || 0) > 0 ? "bad" : "good",
     },
   ];
@@ -3805,6 +3846,7 @@ function updateAlertCardNode(node, alert) {
   };
   node._refs = refs;
   const severity = alert?.severity || "warn";
+  const blocksSending = Boolean(alert?.blocks_sending);
   const alertProfile = String(alert?.profile || alert?.profile_name || "").trim();
   const alertMessage = String(alert?.message || "").trim();
   const messageWithProfile = alertProfile
@@ -3812,7 +3854,14 @@ function updateAlertCardNode(node, alert) {
     : alertMessage;
   node.className = `alert-card alert-card-compact alert-row alert-${severity}`;
   refs.pill.className = `alert-pill alert-pill-${severity}`;
-  setNodeText(refs.pill, severity === "critical" ? "Critical" : severity === "ok" ? "Healthy" : "Watch");
+  setNodeText(
+    refs.pill,
+    severity === "ok"
+      ? "Healthy"
+      : blocksSending
+        ? "Blocks Start"
+        : "Non-blocking",
+  );
   setNodeText(refs.title, alert?.title || "Alert");
   setNodeText(refs.message, messageWithProfile);
 }
@@ -3918,10 +3967,12 @@ function renderAlerts(snapshot) {
     (node, alert) => updateAlertCardNode(node, alert),
   );
   if (els.alertsCaption) {
+    const blockingCount = activeAlerts.filter((alert) => Boolean(alert?.blocks_sending)).length;
+    const nonBlockingCount = Math.max(0, activeAlerts.length - blockingCount);
     setNodeText(
       els.alertsCaption,
       activeAlerts.length
-        ? `${activeAlerts.length} active now`
+        ? `${activeAlerts.length} active now · ${blockingCount} blocking · ${nonBlockingCount} non-blocking`
         : "All thresholds clear",
     );
   }
@@ -5184,6 +5235,10 @@ function createProfileDetailNode() {
 
       <div class="detail-feedback-slot"></div>
 
+      <section class="detail-section detail-message-readiness-section">
+        <div class="detail-message-readiness-slot"></div>
+      </section>
+
       <section class="detail-section detail-core-section">
         <div class="detail-section-head">
           <strong>Core Runtime</strong>
@@ -5291,6 +5346,7 @@ function createProfileDetailNode() {
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
+    messageReadiness: node.querySelector(".detail-message-readiness-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
     advancedDisclosure: node.querySelector(".detail-advanced-disclosure"),
@@ -5368,6 +5424,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
+    messageReadiness: node.querySelector(".detail-message-readiness-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
     advancedDisclosure: node.querySelector(".detail-advanced-disclosure"),
@@ -5475,6 +5532,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.stopButton, pendingAction === "stop" ? "Stopping..." : "Stop");
 
   setNodeHtml(refs.feedback, renderProfileActionFeedback(profile));
+  setNodeHtml(refs.messageReadiness, renderMessageReadiness(profile));
   setNodeHtml(refs.primaryWarning, renderDetailPrimaryWarning(profile));
   setNodeHtml(refs.coreRuntime, renderDetailCoreRuntime(profile));
 
@@ -5660,6 +5718,13 @@ function handleOverviewClick(event) {
 }
 
 async function handleProfileDetailClick(event) {
+  const previewButton = event.target.closest(".preview-validate-profile-btn[data-profile]");
+  if (previewButton && els.profileDetail.contains(previewButton)) {
+    if (previewButton.disabled) return;
+    void runProfilePreviewValidation(previewButton.getAttribute("data-profile") || "");
+    return;
+  }
+
   const startButton = event.target.closest(".start-profile-btn[data-profile]");
   if (startButton && els.profileDetail.contains(startButton)) {
     if (startButton.disabled) return;

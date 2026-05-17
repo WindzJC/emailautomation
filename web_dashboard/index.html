@@ -21,10 +21,9 @@
         min-height: 0;
         padding: 10px 12px;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(220px, 1fr) auto minmax(360px, auto);
         grid-template-areas:
-          "brand tabs"
-          "status status";
+          "brand tabs status";
         gap: 8px 12px;
         align-items: center;
         overflow: visible;
@@ -64,6 +63,7 @@
         display: flex;
         flex-wrap: wrap;
         align-items: center;
+        justify-content: flex-end;
         gap: 8px;
         padding: 8px 10px;
       }
@@ -84,14 +84,11 @@
 
       .workspace-controls {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        grid-template-areas:
-          "window cap"
-          "note note"
-          "actions actions";
-        gap: 8px;
-        align-items: start;
-        padding: 10px;
+        grid-template-columns: 120px 150px minmax(220px, 1fr) auto;
+        grid-template-areas: "window cap note actions";
+        gap: 10px;
+        align-items: end;
+        padding: 10px 12px;
       }
 
       .workspace-controls label {
@@ -130,8 +127,8 @@
       .workspace-controls .toolbar-actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 6px;
-        justify-content: flex-start;
+        gap: 8px;
+        justify-content: flex-end;
         align-items: center;
         grid-area: actions;
       }
@@ -147,6 +144,7 @@
       .workspace-controls-card {
         display: grid;
         gap: 8px;
+        border-radius: 16px;
       }
 
       .workspace-controls-card .workspace-controls {
@@ -154,13 +152,13 @@
       }
 
       .workspace-view {
-        gap: 10px;
+        gap: 8px;
       }
 
       .workspace-status-row {
         display: grid;
-        grid-template-columns: minmax(300px, 348px) minmax(360px, 1fr) minmax(300px, 420px);
-        grid-template-areas: "controls progress alerts";
+        grid-template-columns: 1fr;
+        grid-template-areas: "controls";
         gap: 10px;
         align-items: start;
       }
@@ -169,12 +167,11 @@
         grid-area: controls;
       }
 
-      .ops-progress-shell {
-        grid-area: progress;
-      }
-
-      .ops-alerts-strip {
-        grid-area: alerts;
+      .workspace-metrics-row {
+        display: grid;
+        grid-template-columns: minmax(360px, 0.9fr) minmax(300px, 0.65fr);
+        gap: 10px;
+        align-items: start;
       }
 
       .workspace-primary {
@@ -182,7 +179,7 @@
       }
 
       .workspace-summary-strip {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 10px;
         align-items: stretch;
       }
@@ -336,9 +333,11 @@
         .workspace-status-row {
           grid-template-columns: 1fr;
           grid-template-areas:
-            "controls"
-            "progress"
-            "alerts";
+            "controls";
+        }
+
+        .workspace-metrics-row {
+          grid-template-columns: 1fr;
         }
 
         .workspace-controls {
@@ -433,20 +432,35 @@
                     </select>
                   </label>
                   <label class="toolbar-field toolbar-field-cap">
-                    Cap
-                    <input id="send-cap-input" type="number" min="1" step="1" inputmode="numeric" />
+                    Send target
+                    <select id="send-cap-input">
+                      <option value="5000">5,000</option>
+                      <option value="10000">10,000</option>
+                    </select>
                   </label>
-                  <div id="send-cap-note" class="toolbar-field-note muted">Applies to all active senders</div>
+                  <div id="send-cap-note" class="toolbar-field-note muted">6 PM today to 12 PM tomorrow</div>
                   <div class="toolbar-actions">
-                    <button id="send-cap-save-btn" class="btn btn-secondary" type="button">Save</button>
-                    <button id="refresh-btn" class="btn btn-secondary" type="button">Refresh</button>
                     <button id="start-btn" class="btn btn-primary" type="button">Start All</button>
                     <button id="stop-btn" class="btn btn-danger" type="button">Stop All</button>
+                    <button id="refresh-btn" class="btn btn-secondary" type="button">Refresh</button>
+                    <button id="send-cap-save-btn" class="btn btn-secondary btn-quiet" type="button">Save</button>
                   </div>
                 </section>
                 <section id="message-bar" class="message-bar hidden"></section>
               </header>
+            </section>
 
+          <section class="queue-health-section">
+            <div class="ops-strip-head queue-health-head">
+              <div>
+                <p class="eyebrow">Queue Health</p>
+                <p class="muted">Pending work, active senders, outcomes, and alert state</p>
+              </div>
+            </div>
+            <section id="summary-grid" class="summary-grid summary-strip workspace-summary-strip"></section>
+          </section>
+
+          <section class="workspace-metrics-row">
             <section class="panel-shell ops-progress-shell workspace-metric-block">
               <div class="ops-strip-head">
                 <div>
@@ -468,8 +482,6 @@
             </section>
           </section>
 
-          <section id="summary-grid" class="summary-grid summary-strip workspace-summary-strip"></section>
-
             <section class="workspace-primary">
               <section id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main">
                 <div class="panel-header panel-header-compact">
@@ -489,6 +501,15 @@
                 <div id="profile-detail" class="detail-stage"></div>
               </section>
             </section>
+            <section class="panel panel-shell workspace-card campaign-history-panel">
+              <div class="panel-header panel-header-compact">
+                <div>
+                  <h2>Campaign Run History</h2>
+                  <span class="muted">Recent preview, validation, and start activity.</span>
+                </div>
+              </div>
+              <div id="campaign-run-history" class="campaign-run-history"></div>
+            </section>
           </section>
 
           <section id="leads-view" class="dashboard-view workspace-view leads-workspace hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
@@ -499,6 +520,26 @@
                   <h2>Run Readiness</h2>
                   <span id="leads-pipeline-meta" class="muted">Next: Check New Leads. Waiting for latest counts.</span>
                 </div>
+              </div>
+              <div id="leads-run-safety-card" class="leads-run-safety-card leads-run-safety-card-wait">
+                <div class="leads-run-safety-head">
+                  <div>
+                    <p class="eyebrow">Current Run Safety</p>
+                    <strong>WAIT</strong>
+                  </div>
+                  <span class="mini-pill">Refreshing</span>
+                </div>
+                <p class="muted">Waiting for the latest dashboard status.</p>
+              </div>
+              <div id="next-batch-prep-card" class="leads-run-safety-card leads-run-safety-card-wait">
+                <div class="leads-run-safety-head">
+                  <div>
+                    <p class="eyebrow">Next Batch Prep Status</p>
+                    <strong>WAIT</strong>
+                  </div>
+                  <span class="mini-pill">Refreshing</span>
+                </div>
+                <p class="muted">Waiting for staged check, triage, and preview status.</p>
               </div>
               <div id="leads-pipeline-steps" class="leads-pipeline-steps"></div>
             </section>
