@@ -12,6 +12,7 @@ from tools.rebuild_recipient_queues import (
     QUEUE_FILENAMES,
     build_queue_safety_report,
     default_queue_paths,
+    quarantine_malformed_stale_shard,
     rebuild_recipient_queues,
 )
 
@@ -30,6 +31,93 @@ def read_rows(path: Path) -> list[dict[str, str]]:
 
 
 class RebuildRecipientQueuesTests(unittest.TestCase):
+    def test_quarantine_malformed_stale_sendgrid_shard_clears_safety_without_readding_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            keep = tmp / "leads_triaged_keep.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_sendgrid_5.csv"
+            archive_root = tmp / "queue_quarantine"
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            safe_rows = [
+                {
+                    "Email": "keep@example.test",
+                    "FirstName": "Keep",
+                    "AuthorEmail": "author@example.test",
+                    "AuthorName": "Keep Writer",
+                    "BookTitle": "Keep Book",
+                }
+            ]
+            write_csv(checked, headers, safe_rows)
+            write_csv(keep, headers, safe_rows)
+            write_csv(reject, headers, [])
+            write_csv(
+                shard,
+                ["Email", "FirstName"],
+                [
+                    {"Email": "stale1@example.test", "FirstName": "Old"},
+                    {"Email": "stale2@example.test", "FirstName": "Older"},
+                ],
+            )
+
+            before = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=keep,
+                checked_path=checked,
+                triaged_keep_path=keep,
+                triaged_reject_path=reject,
+            )
+            result = quarantine_malformed_stale_shard(
+                shard_path=shard,
+                intended_source_path=keep,
+                checked_path=checked,
+                triaged_reject_path=reject,
+                archive_root=archive_root,
+            )
+            after_headers, after_rows = rebuild_tool.read_csv(shard)
+            archived_rows = read_rows(Path(str(result["archived_file"])))
+            report_json_exists = Path(str(result["report_json"])).exists()
+            report_csv_exists = Path(str(result["report_csv"])).exists()
+
+        self.assertFalse(before["safe"])
+        self.assertIn("MISSING_REQUIRED_HEADERS", before["unsafe_reasons"])
+        self.assertEqual(2, before["outside_checked_output_count"])
+        self.assertEqual(2, before["outside_intended_source_count"])
+        self.assertEqual("outside_current_source_and_missing_required_headers", result["reason"])
+        self.assertEqual(2, result["row_count"])
+        self.assertEqual(["AuthorEmail", "AuthorName", "BookTitle"], result["missing_required_headers"])
+        self.assertEqual(list(rebuild_tool.SENDGRID_REQUIRED_HEADERS), after_headers)
+        self.assertEqual([], after_rows)
+        self.assertEqual(2, len(archived_rows))
+        self.assertTrue(report_json_exists)
+        self.assertTrue(report_csv_exists)
+        self.assertTrue(result["after"]["safe"])
+        self.assertEqual(0, result["after"]["outside_checked_output_count"])
+        self.assertEqual(0, result["after"]["outside_intended_source_count"])
+        self.assertEqual(0, result["after"]["overlap_with_triaged_reject"])
+
+    def test_quarantine_malformed_stale_shard_refuses_current_source_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            keep = tmp / "leads_triaged_keep.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_sendgrid_5.csv"
+            write_csv(checked, ["Email", "FirstName"], [{"Email": "keep@example.test", "FirstName": "Keep"}])
+            write_csv(keep, ["Email", "FirstName"], [{"Email": "keep@example.test", "FirstName": "Keep"}])
+            write_csv(reject, ["Email", "FirstName"], [])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": "keep@example.test", "FirstName": "Keep"}])
+
+            with self.assertRaises(ValueError):
+                quarantine_malformed_stale_shard(
+                    shard_path=shard,
+                    intended_source_path=keep,
+                    checked_path=checked,
+                    triaged_reject_path=reject,
+                    archive_root=tmp / "queue_quarantine",
+                )
+
     def test_dry_run_detects_mixed_stale_queue_without_exposing_emails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

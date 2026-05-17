@@ -104,7 +104,7 @@ def write_csv_atomic(path: Path, headers: Sequence[str], rows: Iterable[Dict[str
         delete=False,
     ) as handle:
         tmp_path = Path(handle.name)
-        writer = csv.DictWriter(handle, fieldnames=list(headers), extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=list(headers), extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     tmp_path.replace(path)
@@ -360,6 +360,100 @@ def build_queue_safety_report(
         "outside_checked_output_fingerprint": set_fingerprint(outside_checked) if outside_checked else "",
         "triaged_reject_overlap_fingerprint": set_fingerprint(reject_overlap) if reject_overlap else "",
     }
+
+
+def quarantine_malformed_stale_shard(
+    *,
+    shard_path: Path,
+    intended_source_path: Path,
+    checked_path: Path,
+    triaged_reject_path: Path,
+    archive_root: Path | None = None,
+    replacement_headers: Sequence[str] = SENDGRID_REQUIRED_HEADERS,
+) -> Dict[str, object]:
+    headers, rows = read_csv(shard_path)
+    missing_required = _missing_required_headers(headers)
+    email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+    emails = {email for email in (norm_email(row.get(email_header or "")) for row in rows) if email}
+    checked_emails = email_set(checked_path)
+    intended_emails = email_set(intended_source_path)
+    reject_emails = email_set(triaged_reject_path)
+    outside_checked = emails - checked_emails if checked_emails else set(emails)
+    outside_intended = emails - intended_emails if intended_emails else set(emails)
+    reject_overlap = emails & reject_emails
+
+    if not shard_path.exists():
+        raise FileNotFoundError(shard_path)
+    if not missing_required:
+        raise ValueError(f"Shard is not missing required headers: {shard_path}")
+    if emails != outside_checked or emails != outside_intended:
+        raise ValueError("Refusing quarantine: shard contains email(s) still present in current source.")
+    if reject_overlap:
+        raise ValueError("Refusing quarantine: shard overlaps triaged reject.")
+
+    timestamp = datetime.now(timezone.utc).strftime("queue_quarantine_%Y%m%d_%H%M%S_%f")
+    archive_dir = (archive_root or (settings.BACKUPS_DIR / "queue_quarantine")) / timestamp
+    archive_dir.mkdir(parents=True, exist_ok=False)
+    settings.secure_private_dir(archive_dir)
+
+    archived_shard = archive_dir / shard_path.name
+    shutil.copy2(shard_path, archived_shard)
+    settings.secure_private_file(archived_shard)
+
+    fingerprint = set_fingerprint(emails) if emails else ""
+    report = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_file": str(shard_path),
+        "archived_file": str(archived_shard),
+        "row_count": len(rows),
+        "unique_emails": len(emails),
+        "reason": "outside_current_source_and_missing_required_headers",
+        "missing_required_headers": missing_required,
+        "outside_checked_output_count": len(outside_checked),
+        "outside_intended_source_count": len(outside_intended),
+        "overlap_with_triaged_reject": len(reject_overlap),
+        "fingerprint": fingerprint,
+        "replacement_headers": list(replacement_headers),
+    }
+    report_json = archive_dir / "quarantine_report.json"
+    report_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    settings.secure_private_file(report_json)
+
+    report_csv = archive_dir / "quarantine_report.csv"
+    write_csv_atomic(
+        report_csv,
+        [
+            "source_file",
+            "archived_file",
+            "row_count",
+            "unique_emails",
+            "reason",
+            "missing_required_headers",
+            "outside_checked_output_count",
+            "outside_intended_source_count",
+            "overlap_with_triaged_reject",
+            "fingerprint",
+        ],
+        [
+            {
+                **report,
+                "missing_required_headers": "|".join(missing_required),
+            }
+        ],
+    )
+
+    write_csv_atomic(shard_path, replacement_headers, [])
+    after = build_queue_safety_report(
+        shard_paths=[shard_path],
+        intended_source_path=intended_source_path,
+        checked_path=checked_path,
+        triaged_keep_path=intended_source_path,
+        triaged_reject_path=triaged_reject_path,
+    )
+    report["report_json"] = str(report_json)
+    report["report_csv"] = str(report_csv)
+    report["after"] = after
+    return report
 
 
 def archive_inputs(
