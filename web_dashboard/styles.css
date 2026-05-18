@@ -517,62 +517,103 @@ h3 {
   color: #f7fbff;
 }
 
-.lead-funnel-cards,
 .leads-run-safety-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
-.lead-funnel-card {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid rgba(182, 203, 232, 0.12);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
+.lead-funnel-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
 }
 
-.lead-funnel-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+.lead-funnel-table th,
+.lead-funnel-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(182, 203, 232, 0.1);
+  text-align: left;
+  vertical-align: middle;
 }
 
-.lead-funnel-metric {
-  min-width: 0;
-  padding: 9px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.lead-funnel-metric-good {
-  border-color: rgba(72, 187, 120, 0.24);
-}
-
-.lead-funnel-metric-warn {
-  border-color: rgba(245, 158, 11, 0.34);
-}
-
-.lead-funnel-label {
+.lead-funnel-table th {
   color: var(--muted);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.055);
 }
 
-.lead-funnel-value {
-  margin-top: 5px;
+.lead-funnel-table th:nth-child(2),
+.lead-funnel-table th:nth-child(3),
+.lead-funnel-table td:nth-child(2),
+.lead-funnel-table td:nth-child(3) {
+  text-align: center;
+}
+
+.lead-funnel-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.lead-funnel-cell {
+  min-width: 0;
+}
+
+.lead-funnel-cell > .lead-funnel-pill,
+.lead-funnel-cell > .lead-funnel-path {
+  margin-inline: auto;
+}
+
+.lead-funnel-cell {
+  min-width: 0;
+}
+
+.lead-funnel-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.lead-funnel-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid rgba(182, 203, 232, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
   color: #f7fbff;
-  font-size: 1.05rem;
+  font-size: 12px;
   font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
 }
 
-.lead-funnel-foot {
-  margin-top: 6px;
+.lead-funnel-cell-good .lead-funnel-pill {
+  border-color: rgba(72, 187, 120, 0.38);
+  background: rgba(18, 107, 77, 0.16);
+}
+
+.lead-funnel-cell-warn .lead-funnel-pill {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.lead-funnel-path {
+  min-width: 0;
+  max-width: 54%;
+}
+
+.lead-funnel-stage,
+.lead-funnel-table td:first-child {
+  color: #dce8fb;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .lead-funnel-pass {
@@ -596,19 +637,18 @@ h3 {
 }
 
 @media (max-width: 1100px) {
-  .lead-funnel-cards,
   .leads-run-safety-grid {
     grid-template-columns: 1fr;
-  }
-
-  .lead-funnel-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 640px) {
-  .lead-funnel-grid {
-    grid-template-columns: 1fr;
+  .lead-funnel-summary {
+    overflow-x: auto;
+  }
+
+  .lead-funnel-table {
+    min-width: 520px;
   }
 
   .path-ellipsis {
@@ -647,10 +687,17 @@ h3 {
   gap: 12px;
 }
 
+.leads-run-safety-head h3 {
+  margin: 2px 0 5px;
+  color: #f7fbff;
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
 .leads-run-safety-head strong {
   display: block;
   color: #f7fbff;
-  font-size: 24px;
+  font-size: 20px;
   line-height: 1.1;
 }
 
@@ -986,12 +1033,29 @@ h3 {
 .quarantine-pill {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-width: max-content;
   max-width: 100%;
   padding: 4px 8px;
   color: #dce8fb;
   font-size: 11px;
   font-weight: 800;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.operator-table-disclosure .mini-pill {
+  min-width: 48px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 92px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .operator-pill-strip,

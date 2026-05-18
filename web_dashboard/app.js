@@ -201,7 +201,13 @@ function currentTailLines() {
 
 function setConnectionState(live) {
   els.wsIndicator.className = `dot ${live ? "dot-live" : "dot-off"}`;
-  els.wsLabel.textContent = live ? "Live" : "Disconnected";
+  if (live) {
+    els.wsLabel.textContent = "Ops socket live";
+  } else if (isLeadsTabVisible() && lastLeadsStatus) {
+    els.wsLabel.textContent = "Leads local snapshot loaded";
+  } else {
+    els.wsLabel.textContent = "Ops socket disconnected";
+  }
 }
 
 function showMessage(message, kind = "success") {
@@ -2950,54 +2956,38 @@ function renderFunnelPath(stage) {
   return `<span class="path-ellipsis" title="${escapeHtml(path)}">${escapeHtml(funnelPathLabel(stage))}</span>`;
 }
 
-function renderFunnelMetric(label, stage) {
+function renderFunnelCell(stage) {
   const display = funnelStageDisplay(stage || {});
+  const path = renderFunnelPath(stage);
   return `
-    <div class="lead-funnel-metric lead-funnel-metric-${escapeHtml(display.tone)}">
-      <div class="lead-funnel-label">${escapeHtml(label)}</div>
-      <div class="lead-funnel-value">${escapeHtml(display.text)}</div>
-      <div class="lead-funnel-foot">
-        <span class="mini-pill">${escapeHtml(display.badge)}</span>
-        ${renderFunnelPath(stage)}
-      </div>
-    </div>
+    <td class="lead-funnel-cell lead-funnel-cell-${escapeHtml(display.tone)}">
+      <span class="lead-funnel-pill">${escapeHtml(display.text)}</span>
+      ${path ? `<span class="lead-funnel-path">${path}</span>` : ""}
+    </td>
   `;
 }
 
-function renderLeadFunnelCard(summary, fallbackLabel) {
-  const passThrough = summary?.pass_through_rate?.status === "ready" && summary?.pass_through_rate?.value !== null
+function funnelPassThrough(summary) {
+  return summary?.pass_through_rate?.status === "ready" && summary?.pass_through_rate?.value !== null
     ? `${Number(summary.pass_through_rate.value || 0).toFixed(1)}%`
     : "Pending";
-  const runId = String(summary?.run_id || "").trim();
+}
+
+function renderFunnelComparisonRow(label, currentStage, nextStage) {
   return `
-    <article class="lead-funnel-card">
-      <div class="lead-funnel-head">
-        <div>
-          <p class="eyebrow">${escapeHtml(summary?.source === "latest_staged_run" ? "Next Batch" : "Current Live")}</p>
-          <h3>${escapeHtml(summary?.label || fallbackLabel)}</h3>
-        </div>
-        <span class="mini-pill">${escapeHtml(runId || "Live")}</span>
-      </div>
-      <div class="lead-funnel-grid">
-        ${renderFunnelMetric("Raw input", summary?.raw_input)}
-        ${renderFunnelMetric("After cleanup", summary?.cleaned_after_check)}
-        ${renderFunnelMetric("Check rejected", summary?.check_rejected)}
-        ${renderFunnelMetric("Triage keep", summary?.triage_keep)}
-        ${renderFunnelMetric("Triage reject", summary?.triage_reject)}
-        ${renderFunnelMetric("Triage quarantine", summary?.triage_quarantine)}
-        ${renderFunnelMetric("Final eligible", summary?.final_eligible)}
-        ${renderFunnelMetric("Removed/excluded", summary?.total_removed_excluded)}
-      </div>
-      <div class="lead-funnel-pass">
-        <span>Pass-through</span>
-        <strong>${escapeHtml(passThrough)}</strong>
-      </div>
-    </article>
+    <tr>
+      <td class="lead-funnel-stage">${escapeHtml(label)}</td>
+      ${renderFunnelCell(currentStage)}
+      ${renderFunnelCell(nextStage)}
+    </tr>
   `;
 }
 
 function renderLeadFunnelSummary(funnel) {
   if (!els.leadFunnelSummary) return;
+  const current = funnel?.current_live || {};
+  const next = funnel?.next_batch || {};
+  const nextRunId = String(next?.run_id || "").trim();
   setNodeHtml(
     els.leadFunnelSummary,
     `
@@ -3006,12 +2996,32 @@ function renderLeadFunnelSummary(funnel) {
           <p class="eyebrow">Lead Funnel Summary</p>
           <h3>Raw leads → cleaned → triaged → eligible</h3>
         </div>
-        <span class="mini-pill">Counts only</span>
+        <span class="mini-pill">${escapeHtml(nextRunId ? `Next ${nextRunId}` : "Counts only")}</span>
       </div>
-      <div class="lead-funnel-cards">
-        ${renderLeadFunnelCard(funnel?.current_live || {}, "Current Live Funnel")}
-        ${renderLeadFunnelCard(funnel?.next_batch || {}, "Next Batch Funnel")}
-      </div>
+      <table class="lead-funnel-table" aria-label="Lead Funnel Summary">
+        <thead>
+          <tr>
+            <th>Stage</th>
+            <th>Current live</th>
+            <th>Next batch</th>
+          </tr>
+        </thead>
+        <tbody>
+        ${renderFunnelComparisonRow("Raw input", current.raw_input, next.raw_input)}
+        ${renderFunnelComparisonRow("After cleanup", current.cleaned_after_check, next.cleaned_after_check)}
+        ${renderFunnelComparisonRow("Check rejected", current.check_rejected, next.check_rejected)}
+        ${renderFunnelComparisonRow("Triage keep", current.triage_keep, next.triage_keep)}
+        ${renderFunnelComparisonRow("Triage reject", current.triage_reject, next.triage_reject)}
+        ${renderFunnelComparisonRow("Triage quarantine", current.triage_quarantine, next.triage_quarantine)}
+        ${renderFunnelComparisonRow("Final eligible", current.final_eligible, next.final_eligible)}
+        ${renderFunnelComparisonRow("Removed/excluded", current.total_removed_excluded, next.total_removed_excluded)}
+        <tr>
+          <td class="lead-funnel-stage">Pass-through</td>
+          <td class="lead-funnel-cell"><span class="lead-funnel-pill">${escapeHtml(funnelPassThrough(current))}</span></td>
+          <td class="lead-funnel-cell"><span class="lead-funnel-pill">${escapeHtml(funnelPassThrough(next))}</span></td>
+        </tr>
+        </tbody>
+      </table>
     `,
   );
 }
@@ -3027,15 +3037,18 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
   const reasons = safety.reasons.length
     ? safety.reasons
     : ["Live recipient queues are approved for current sending."];
+  const currentSafetyTitle = safety.queueUnsafe ? "Current live queue blocked" : "Current live queue ready";
+  const currentSafetyScope = "Current approved live queues only";
   setNodeHtml(
     els.leadsRunSafetyCard,
     `
       <div class="leads-run-safety-head">
         <div>
           <p class="eyebrow">Current Run Safety</p>
+          <h3>${escapeHtml(currentSafetyTitle)}</h3>
           <strong>${escapeHtml(safety.statusLabel)}</strong>
         </div>
-        <span class="mini-pill">${escapeHtml(safety.queueUnsafe ? "Queue blocked" : "Live lane")}</span>
+        <span class="mini-pill">${escapeHtml(currentSafetyScope)}</span>
       </div>
       <div class="leads-run-safety-body">
         <div class="leads-run-safety-reasons">
@@ -3063,15 +3076,21 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
     const prepReasons = Array.isArray(prep.reasons) && prep.reasons.length
       ? prep.reasons
       : [safety.checkRunning ? "Check Leads is running for the next batch." : "No staged next-batch blocker is visible."];
+    const prepTitle = prepStatus === "SAFE TO PROMOTE"
+      ? "Staged next batch safe to promote"
+      : prepStatus === "WAIT"
+        ? "Staged next batch running"
+        : "Staged next batch not ready";
     setNodeHtml(
       els.nextBatchPrepCard,
       `
         <div class="leads-run-safety-head">
           <div>
             <p class="eyebrow">Next Batch Prep Status</p>
+            <h3>${escapeHtml(prepTitle)}</h3>
             <strong>${escapeHtml(prepStatus)}</strong>
           </div>
-          <span class="mini-pill">${escapeHtml(prep.blocks_current_send === false ? "Display only" : "Prep lane")}</span>
+          <span class="mini-pill">${escapeHtml(prep.blocks_current_send === false ? "Staged lane only" : "Prep lane")}</span>
         </div>
         <div class="leads-run-safety-body">
           <div class="leads-run-safety-reasons">
@@ -3093,6 +3112,12 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
 
 function renderLeadsStatus(status) {
   lastLeadsStatus = status || lastLeadsStatus;
+  if (isLeadsTabVisible()) {
+    setConnectionState(false);
+    if (els.toolbarGeneratedAt) {
+      setNodeText(els.toolbarGeneratedAt, "Leads local snapshot loaded");
+    }
+  }
   const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
   const activeVerifyJob = lastLeadsStatus?.active_important_verify_job || null;
   const activeDispatchJob = lastLeadsStatus?.active_important_dispatch_job || null;

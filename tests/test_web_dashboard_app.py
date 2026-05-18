@@ -84,12 +84,134 @@ class WebDashboardAppTests(unittest.TestCase):
             "/api/leads/dispatch-important/preview",
             "/api/leads/dispatch-important/confirm",
             "Dispatch blocked: stop active senders first",
+            "Confirm Dispatch blocked",
             "activeSenderSummary",
             "Preflight",
-            "leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive",
+            "leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive || activeCheck",
             "rows_to_add_sendgrid_5",
         ]:
             self.assertIn(expected, source)
+
+    def test_leads_run_safety_card_reports_wait_blocked_freshness_and_stale_pipeline(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "leads-run-safety-card",
+            "Current Run Safety",
+            "WAIT",
+        ]:
+            self.assertIn(expected, markup)
+
+        for expected in [
+            "function leadsRunSafety",
+            "<table class=\"lead-funnel-table\"",
+            "<th>Stage</th>",
+            "<th>Current live</th>",
+            "<th>Next batch</th>",
+            "<tr>",
+            "<td class=\"lead-funnel-stage\">",
+            "SAFE TO CONTINUE",
+            "BLOCKED",
+            "Check Leads is running.",
+            "Current leads.csv has not been published for this run.",
+            "Triage output is stale.",
+            "Dispatch preview is stale.",
+            "Recipient queues are missing BookTitle",
+            "leads.csv",
+            "Triaged Keep",
+            "Dispatch Preview",
+            "STALE",
+            "Confirm Dispatch blocked",
+            "Check Leads is running for job",
+        ]:
+            self.assertIn(expected, source)
+
+        for unexpected in [
+            "renderLeadFunnelCard",
+            "lead-funnel-cards",
+            "lead-funnel-compare-row",
+            "Current Live Funnel",
+            "Next Batch Funnel",
+        ]:
+            self.assertNotIn(unexpected, source)
+            self.assertNotIn(unexpected, styles)
+
+        for expected in [
+            ".lead-funnel-table",
+            "border-collapse: collapse",
+            "table-layout: fixed",
+            ".leads-run-safety-card-wait",
+            ".leads-run-safety-card-blocked",
+            ".leads-run-safety-card-safe-to-continue",
+            ".leads-pipeline-step-stale",
+        ]:
+            self.assertIn(expected, styles)
+
+    def test_sender_cards_render_message_readiness_fields(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        for expected in [
+            "renderMessageReadiness",
+            "runProfilePreviewValidation",
+            "Message Readiness",
+            "Run Preview + Validate",
+            "/api/profiles/",
+            "/preview-validate",
+            "preview-validate-profile-btn",
+            "Generating preview and validating",
+            "BookTitle column",
+            "BookTitle rows",
+            "Fallback rows",
+            "Invalid emails",
+            "Duplicate emails",
+            "Preview CSV",
+            "Validation",
+            "Expected mode",
+            "Actual mode",
+            "message_readiness",
+            "overview-message-readiness",
+            "detail-message-readiness-slot",
+            "els.profileDetail.contains(previewButton)",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            ".message-readiness-pass",
+            ".message-readiness-fail",
+            ".message-readiness-stale",
+            ".message-readiness-not-run",
+            ".message-readiness-grid",
+            ".message-readiness-feedback-success",
+            ".message-readiness-feedback-error",
+        ]:
+            self.assertIn(expected, styles)
+
+    def test_campaign_run_history_panel_renders_recent_records(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        for expected in [
+            "campaign-run-history",
+            "Campaign Run History",
+        ]:
+            self.assertIn(expected, markup)
+        for expected in [
+            "renderCampaignRunHistory",
+            "campaign_run_history",
+            "campaignHistoryEventLabel",
+            "campaignHistoryReason",
+            "Readiness",
+            "Validation",
+            "Result / Reason",
+        ]:
+            self.assertIn(expected, source)
+        for expected in [
+            ".campaign-history-panel",
+            ".campaign-history-table",
+        ]:
+            self.assertIn(expected, styles)
 
     def test_quarantine_review_inbox_wires_filters_selection_and_actions(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -290,6 +412,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "renderAlertsProgress",
             "summarizeAlertProgress",
             "messageWithProfile",
+            "blocks_sending",
+            "Blocks Start",
+            "Non-blocking",
             "alerts-progress-row",
             "Private Email",
             "SendGrid",
