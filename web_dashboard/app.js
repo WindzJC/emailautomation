@@ -80,6 +80,7 @@ const els = {
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadFunnelSummary: document.getElementById("lead-funnel-summary"),
   leadsRunSafetyCard: document.getElementById("leads-run-safety-card"),
   nextBatchPrepCard: document.getElementById("next-batch-prep-card"),
   leadsPipelineSteps: document.getElementById("leads-pipeline-steps"),
@@ -177,6 +178,16 @@ const VERIFY_STRICT_DEFAULT_PATHS = {
   rejected_path: "_important/leads_verify_rejected.csv",
   quarantine_path: "_important/leads_quarantine.csv",
 };
+const LEADS_RUN_SAFETY_COPY = [
+  "Check Leads is running.",
+  "Current leads.csv has not been published for this run.",
+  "Triage output is stale.",
+  "Dispatch preview is stale.",
+  "Triaged Keep",
+  "Dispatch Preview",
+  "Confirm Dispatch blocked",
+  "Check Leads is running for job",
+];
 const pendingProfileActions = new Map();
 const profilePreviewValidationState = new Map();
 
@@ -881,7 +892,7 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   }
   if (queueUnsafe) reasons.push(queueSafetyBlockMessage(snapshot) || "Queue safety is unsafe.");
 
-  let statusLabel = "READY";
+  let statusLabel = "SAFE TO CONTINUE";
   if (queueUnsafe) {
     statusLabel = "BLOCKED";
   }
@@ -2380,6 +2391,32 @@ function renderOperatorTable(headers = [], rows = [], emptyText = "No rows avail
 }
 
 function renderOperatorTableBlock(title, caption, headers, rows, emptyText = "No rows available.", className = "") {
+  const collapsibleTitles = new Set([
+    "Clean Output Preview",
+    "Keep Queue",
+    "Reject Queue",
+    "Quarantine Queue",
+    "Channel Decisions",
+    "Live Queue Comparison",
+    "Source Preview",
+    "Assigned Preview",
+    "Source Snapshot",
+  ]);
+  const isCollapsible = collapsibleTitles.has(String(title || ""));
+  if (isCollapsible) {
+    return `
+      <details class="operator-table-block operator-table-disclosure${className ? ` ${className}` : ""}">
+        <summary class="operator-table-head">
+          <div>
+            <h3>${escapeHtml(title)}</h3>
+            ${caption ? `<p class="muted">${escapeHtml(caption)}</p>` : ""}
+          </div>
+          <span class="mini-pill">Open</span>
+        </summary>
+        ${renderOperatorTable(headers, rows, emptyText)}
+      </details>
+    `;
+  }
   return `
     <section class="operator-table-block${className ? ` ${className}` : ""}">
       <div class="operator-table-head">
@@ -2886,10 +2923,103 @@ function renderShardWriteGuard() {
   }
 }
 
+function funnelStageDisplay(stage) {
+  const status = String(stage?.status || "pending").toLowerCase();
+  if (status === "ready") {
+    return {
+      text: Number(stage?.row_count || 0).toLocaleString(),
+      tone: "good",
+      badge: "Fresh",
+    };
+  }
+  if (status === "not_available") {
+    return { text: "Not available", tone: "warn", badge: "Missing" };
+  }
+  return { text: "Pending", tone: "", badge: "Pending" };
+}
+
+function funnelPathLabel(stage) {
+  const path = String(stage?.path || "").trim();
+  if (!path) return "";
+  return path.split(/[\\/]/).slice(-2).join("/");
+}
+
+function renderFunnelPath(stage) {
+  const path = String(stage?.path || "").trim();
+  if (!path) return "";
+  return `<span class="path-ellipsis" title="${escapeHtml(path)}">${escapeHtml(funnelPathLabel(stage))}</span>`;
+}
+
+function renderFunnelMetric(label, stage) {
+  const display = funnelStageDisplay(stage || {});
+  return `
+    <div class="lead-funnel-metric lead-funnel-metric-${escapeHtml(display.tone)}">
+      <div class="lead-funnel-label">${escapeHtml(label)}</div>
+      <div class="lead-funnel-value">${escapeHtml(display.text)}</div>
+      <div class="lead-funnel-foot">
+        <span class="mini-pill">${escapeHtml(display.badge)}</span>
+        ${renderFunnelPath(stage)}
+      </div>
+    </div>
+  `;
+}
+
+function renderLeadFunnelCard(summary, fallbackLabel) {
+  const passThrough = summary?.pass_through_rate?.status === "ready" && summary?.pass_through_rate?.value !== null
+    ? `${Number(summary.pass_through_rate.value || 0).toFixed(1)}%`
+    : "Pending";
+  const runId = String(summary?.run_id || "").trim();
+  return `
+    <article class="lead-funnel-card">
+      <div class="lead-funnel-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(summary?.source === "latest_staged_run" ? "Next Batch" : "Current Live")}</p>
+          <h3>${escapeHtml(summary?.label || fallbackLabel)}</h3>
+        </div>
+        <span class="mini-pill">${escapeHtml(runId || "Live")}</span>
+      </div>
+      <div class="lead-funnel-grid">
+        ${renderFunnelMetric("Raw input", summary?.raw_input)}
+        ${renderFunnelMetric("After cleanup", summary?.cleaned_after_check)}
+        ${renderFunnelMetric("Check rejected", summary?.check_rejected)}
+        ${renderFunnelMetric("Triage keep", summary?.triage_keep)}
+        ${renderFunnelMetric("Triage reject", summary?.triage_reject)}
+        ${renderFunnelMetric("Triage quarantine", summary?.triage_quarantine)}
+        ${renderFunnelMetric("Final eligible", summary?.final_eligible)}
+        ${renderFunnelMetric("Removed/excluded", summary?.total_removed_excluded)}
+      </div>
+      <div class="lead-funnel-pass">
+        <span>Pass-through</span>
+        <strong>${escapeHtml(passThrough)}</strong>
+      </div>
+    </article>
+  `;
+}
+
+function renderLeadFunnelSummary(funnel) {
+  if (!els.leadFunnelSummary) return;
+  setNodeHtml(
+    els.leadFunnelSummary,
+    `
+      <div class="lead-funnel-title">
+        <div>
+          <p class="eyebrow">Lead Funnel Summary</p>
+          <h3>Raw leads → cleaned → triaged → eligible</h3>
+        </div>
+        <span class="mini-pill">Counts only</span>
+      </div>
+      <div class="lead-funnel-cards">
+        ${renderLeadFunnelCard(funnel?.current_live || {}, "Current Live Funnel")}
+        ${renderLeadFunnelCard(funnel?.next_batch || {}, "Next Batch Funnel")}
+      </div>
+    `,
+  );
+}
+
 function renderLeadsRunSafety(status = lastLeadsStatus) {
   if (!els.leadsRunSafetyCard) return;
   const safety = leadsRunSafety(status);
-  const tone = safety.statusLabel === "READY" ? "safe-to-continue" : safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
+  const tone = safety.statusLabel === "SAFE TO CONTINUE" ? "safe-to-continue" : safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
   const progress = safety.progress || {};
   const progressText = progress.total > 0
     ? `${progress.processed} / ${progress.total} (${progress.percent.toFixed(1)}%)`
@@ -2912,12 +3042,10 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
           ${reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}
         </div>
         ${renderOperatorMetricStrip([
-          { label: "Upload", value: safety.uploadFilename },
-          { label: "Check Job", value: safety.checkJobId },
-          { label: "Progress", value: progressText },
-          { label: "leads.csv", value: outputFreshnessLabel(safety.leadsFresh), tone: safety.leadsFresh === false ? "warn" : safety.leadsFresh === true ? "good" : "" },
-          { label: "Triaged Keep", value: outputFreshnessLabel(safety.triageFresh), tone: safety.triageFresh === false ? "warn" : safety.triageFresh === true ? "good" : "" },
-          { label: "Dispatch Preview", value: outputFreshnessLabel(safety.previewFresh), tone: safety.previewFresh === false ? "warn" : safety.previewFresh === true ? "good" : "" },
+          { label: "Live Queue", value: safety.queueUnsafe ? "Blocked" : "Ready", tone: safety.queueUnsafe ? "warn" : "good" },
+          { label: "SendGrid", value: status?.current_send_safety?.sendgrid_status || "-", tone: status?.current_send_safety?.sendgrid_status === "READY" ? "good" : "warn" },
+          { label: "Private JC", value: status?.current_send_safety?.private_status || "-", tone: status?.current_send_safety?.private_status === "READY" ? "good" : "warn" },
+          { label: "Active Check", value: safety.checkRunning ? "Running" : "Idle", tone: safety.checkRunning ? "warn" : "good" },
         ], "leads-run-safety-metrics")}
       </div>
     `,
@@ -2950,7 +3078,6 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
             ${prepReasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}
           </div>
           ${renderOperatorMetricStrip([
-            { label: "Upload", value: safety.uploadFilename },
             { label: "Check Job", value: safety.checkJobId },
             { label: "Progress", value: progressText },
             { label: "Staged leads.csv", value: outputFreshnessLabel(safety.leadsFresh), tone: safety.leadsFresh === false ? "warn" : safety.leadsFresh === true ? "good" : "" },
@@ -3001,6 +3128,7 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadFunnelSummary(lastLeadsStatus?.lead_funnel || {});
   renderLeadsRunSafety(lastLeadsStatus);
   renderLeadsPipeline(lastLeadsStatus?.pipeline || {});
 
@@ -3754,14 +3882,14 @@ function senderStatusBadge(profile) {
   if (profileTelemetryChannel(profile) === "sendgrid" && profile?.sendgrid_hourly_cap_waiting) {
     return { label: "Waiting · hourly cap", tone: "warn" };
   }
-  if (queueSafetyBlocked()) {
+  if (queueSafetyBlockedForProfile(profile)) {
     return { label: "Blocked", tone: "bad" };
   }
   const runtimeState = String(profile?.runtime_state || "").trim();
   if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Live", tone: "good" };
   if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
   if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
-  if (canStartProfile(profile)) return { label: "Ready", tone: "neutral" };
+  if (canStartProfile(profile, lastSnapshot)) return { label: "Ready", tone: "neutral" };
   return { label: "Stopped", tone: "bad" };
 }
 
@@ -3780,7 +3908,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const status = senderStatusBadge(profile);
       const pendingAction = pendingProfileActions.get(profile.name) || "";
       const stopAvailable = canStopProfile(profile);
-      const startAvailable = canStartProfile(profile);
+      const startAvailable = canStartProfile(profile, snapshot);
       const action = stopAvailable ? "stop" : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
@@ -4082,10 +4210,21 @@ function renderTrends(snapshot) {
 
 function renderHealth(snapshot) {
   if (!els.healthBanner) return;
-  const state = snapshot.health?.state || "yellow";
-  const message = snapshot.health?.message || "No status available.";
+  const sendgridSafety = snapshot?.sendgrid_queue_safety || {};
+  const privateSafety = snapshot?.private_queue_safety || {};
+  const providerSplit = sendgridReadyPrivateBlocked(snapshot);
+  const state = providerSplit ? "yellow" : (snapshot.health?.state || "yellow");
+  const message = providerSplit
+    ? "SendGrid ready; Private JC blocked."
+    : (snapshot.health?.message || "No status available.");
   els.healthBanner.className = `health-banner health-${state}`;
   els.healthBanner.textContent = message;
+}
+
+function sendgridReadyPrivateBlocked(snapshot = lastSnapshot) {
+  const sendgridSafety = snapshot?.sendgrid_queue_safety || {};
+  const privateSafety = snapshot?.private_queue_safety || {};
+  return sendgridSafety.safe === true && privateSafety.safe === false;
 }
 
 function resolveSelectedProfile(snapshot) {
@@ -4165,14 +4304,14 @@ function renderMessageReadiness(profile) {
   const profileName = String(profile?.name || "");
   const previewState = profilePreviewValidationState.get(profileName) || {};
   const previewRunning = previewState.kind === "loading";
-  const blockedByQueueSafety = queueSafetyBlocked();
+  const blockedByQueueSafety = queueSafetyBlockedForProfile(profile);
   const actionDisabled = previewRunning || isProfileActive(profile) || blockedByQueueSafety;
   const actionTitle = previewRunning
     ? "Preview + validation is running."
     : isProfileActive(profile)
       ? "Stop this sender before generating a preview."
       : blockedByQueueSafety
-        ? queueSafetyBlockMessage()
+        ? queueSafetyBlockMessageForProfile(profile)
         : "Render the current queue without sending, then validate the preview.";
   const status = String(readiness.status || "NOT RUN").trim().toUpperCase() || "NOT RUN";
   const tone = messageReadinessTone(status);
@@ -4619,8 +4758,25 @@ function queueSafetyBlockMessage(snapshot = lastSnapshot) {
   return String(queueSafety.message || "Recipient queue unsafe. Rebuild queues from the current campaign source before starting.").trim();
 }
 
+function providerQueueSafetyForProfile(profile, snapshot = lastSnapshot) {
+  const channel = profileTelemetryChannel(profile);
+  if (channel === "sendgrid") return snapshot?.sendgrid_queue_safety || {};
+  if (channel === "private") return snapshot?.private_queue_safety || {};
+  return snapshot?.queue_safety || {};
+}
+
+function queueSafetyBlockedForProfile(profile, snapshot = lastSnapshot) {
+  const queueSafety = providerQueueSafetyForProfile(profile, snapshot);
+  return queueSafety && queueSafety.safe === false;
+}
+
+function queueSafetyBlockMessageForProfile(profile, snapshot = lastSnapshot) {
+  const queueSafety = providerQueueSafetyForProfile(profile, snapshot);
+  return String(queueSafety.message || "Recipient queue unsafe. Rebuild this provider queue from the current campaign source before starting.").trim();
+}
+
 function canStartProfile(profile, snapshot = lastSnapshot) {
-  return !queueSafetyBlocked(snapshot) && !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
+  return !queueSafetyBlockedForProfile(profile, snapshot) && !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
 }
 
 function canStopProfile(profile) {
@@ -4683,6 +4839,10 @@ function renderControls(snapshot) {
     || Number(controls.active_sendgrid_sender_count || 0) > 0
     || Number(controls.active_profile_count || controls.active_profiles || 0) > 0;
   const blockedByQueueSafety = queueSafetyBlocked(snapshot);
+  const splitQueueSafety = sendgridReadyPrivateBlocked(snapshot);
+  const queueSafetyMessage = splitQueueSafety
+    ? "SendGrid ready; Private JC blocked."
+    : queueSafetyBlockMessage(snapshot);
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendTarget > 0) {
     els.sendCapInput.value = String(sendTarget);
   }
@@ -4690,7 +4850,7 @@ function renderControls(snapshot) {
     els.startBtn.disabled = hasActiveSender || blockedByQueueSafety;
     els.startBtn.classList.toggle("btn-start-muted", hasActiveSender || blockedByQueueSafety);
     els.startBtn.title = blockedByQueueSafety
-      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`
+      ? queueSafetyMessage
       : hasActiveSender
       ? "Some senders are already running. Use per-sender controls or Stop All first."
       : "Start all available senders.";
@@ -4705,7 +4865,7 @@ function renderControls(snapshot) {
       lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
     }
     if (blockedByQueueSafety) {
-      lines.push(`NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`);
+      lines.push(queueSafetyMessage);
     }
     const scheduleBits = [];
     if (automation?.private_jc_daily?.enabled) {
@@ -5452,7 +5612,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const activity = profileActivityState(profile);
   const runtimeClass = `detail-runtime-${activity.tone || "neutral"}`;
   const pendingAction = pendingProfileActions.get(profile.name) || "";
-  const startDisabled = Boolean(pendingAction) || !canStartProfile(profile);
+  const startDisabled = Boolean(pendingAction) || !canStartProfile(profile, snapshot);
   const stopDisabled = Boolean(pendingAction) || !canStopProfile(profile);
   const effectiveSpacing = Number(profile.effective_spacing_seconds || 0);
   const effectivePace = Number(profile.effective_pace_per_hour || 0);
@@ -5516,10 +5676,11 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.paneLabel, `Pane ${profile.pane_index} / ${profile.tmux_command || "-"}`);
   setNodeText(refs.runtimeNote, profile.runtime_note || "Pane is idle.");
   setNodeText(refs.lastUpdate, profileLastUpdateText(profile));
+  const profileQueueBlocked = queueSafetyBlockedForProfile(profile, snapshot);
   setNodeText(
     refs.actionNote,
-    queueSafetyBlocked(snapshot)
-      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessage(snapshot)}`
+    profileQueueBlocked
+      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessageForProfile(profile, snapshot)}`
       : (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile, snapshot) : "",
   );
 

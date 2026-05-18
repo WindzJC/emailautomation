@@ -274,6 +274,108 @@ class LiveDashboardTests(unittest.TestCase):
         review_step = next(step for step in pipeline["steps"] if step["key"] == "quarantine")
         self.assertEqual("warn", review_step["state"])
 
+    def test_lead_funnel_summary_calculates_current_live_counts(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            raw = tmp / "leadschecker.csv"
+            checked = tmp / "leads.csv"
+            rejected = tmp / "leads_rejected.csv"
+            keep = tmp / "leads_triaged_keep.csv"
+            triage_reject = tmp / "leads_triaged_reject.csv"
+            quarantine = tmp / "leads_triaged_quarantine.csv"
+            self._write_csv(raw, ["Email"], [{"Email": f"raw{i}@example.test"} for i in range(10)])
+            self._write_csv(checked, ["Email"], [{"Email": f"clean{i}@example.test"} for i in range(8)])
+            self._write_csv(rejected, ["Email"], [{"Email": f"reject{i}@example.test"} for i in range(2)])
+            self._write_csv(keep, ["Email"], [{"Email": f"keep{i}@example.test"} for i in range(5)])
+            self._write_csv(triage_reject, ["Email"], [{"Email": f"triage-reject{i}@example.test"} for i in range(2)])
+            self._write_csv(quarantine, ["Email"], [{"Email": "hold@example.test"}])
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_INPUT", raw), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_OUTPUT",
+                checked,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_REJECTED", rejected), patch.object(
+                live_dashboard,
+                "TRIAGED_KEEP_PATH",
+                keep,
+            ), patch.object(live_dashboard, "_latest_important_check_job", return_value=None):
+                summary = live_dashboard._build_lead_funnel_summary({})
+
+        current = summary["current_live"]
+        self.assertEqual(10, current["raw_input"]["row_count"])
+        self.assertEqual(8, current["cleaned_after_check"]["row_count"])
+        self.assertEqual(5, current["triage_keep"]["row_count"])
+        self.assertEqual(5, current["total_removed_excluded"]["row_count"])
+        self.assertEqual(50.0, current["pass_through_rate"]["value"])
+
+    def test_lead_funnel_summary_marks_missing_staged_stage_pending(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            staged = tmp / "runs" / "check_next"
+            checked = staged / "leads.csv"
+            rejected = staged / "leads_rejected.csv"
+            self._write_csv(checked, ["Email"], [{"Email": "one@example.test"}])
+            self._write_csv(rejected, ["Email"], [])
+            job = {
+                "job_id": "check_next",
+                "staged_run_dir": str(staged),
+                "total_input_rows": 2,
+                "output_path": str(checked),
+                "rejected_path": str(rejected),
+            }
+
+            with patch.object(live_dashboard, "_latest_important_check_job", return_value=job):
+                summary = live_dashboard._build_lead_funnel_summary({})
+
+        next_batch = summary["next_batch"]
+        self.assertEqual(2, next_batch["raw_input"]["row_count"])
+        self.assertEqual(1, next_batch["cleaned_after_check"]["row_count"])
+        self.assertEqual("pending", next_batch["triage_keep"]["status"])
+        self.assertEqual("pending", next_batch["final_eligible"]["status"])
+
+    def test_lead_funnel_summary_keeps_staged_counts_separate_from_current_live(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            live_raw = tmp / "live" / "leadschecker.csv"
+            live_checked = tmp / "live" / "leads.csv"
+            live_rejected = tmp / "live" / "leads_rejected.csv"
+            live_keep = tmp / "live" / "leads_triaged_keep.csv"
+            staged = tmp / "runs" / "check_staged"
+            staged_checked = staged / "leads.csv"
+            staged_rejected = staged / "leads_rejected.csv"
+            staged_keep = staged / "leads_triaged_keep.csv"
+            self._write_csv(live_raw, ["Email"], [{"Email": f"live-raw{i}@example.test"} for i in range(4)])
+            self._write_csv(live_checked, ["Email"], [{"Email": f"live-clean{i}@example.test"} for i in range(3)])
+            self._write_csv(live_rejected, ["Email"], [{"Email": "live-reject@example.test"}])
+            self._write_csv(live_keep, ["Email"], [{"Email": f"live-keep{i}@example.test"} for i in range(2)])
+            self._write_csv(staged_checked, ["Email"], [{"Email": f"stage-clean{i}@example.test"} for i in range(5)])
+            self._write_csv(staged_rejected, ["Email"], [{"Email": "stage-reject@example.test"}])
+            self._write_csv(staged_keep, ["Email"], [{"Email": f"stage-keep{i}@example.test"} for i in range(3)])
+            job = {
+                "job_id": "check_staged",
+                "staged_run_dir": str(staged),
+                "total_input_rows": 6,
+                "output_path": str(staged_checked),
+                "rejected_path": str(staged_rejected),
+                "auto_triage_keep_path": str(staged_keep),
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_INPUT", live_raw), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_OUTPUT",
+                live_checked,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_REJECTED", live_rejected), patch.object(
+                live_dashboard,
+                "TRIAGED_KEEP_PATH",
+                live_keep,
+            ), patch.object(live_dashboard, "_latest_important_check_job", return_value=job):
+                summary = live_dashboard._build_lead_funnel_summary({})
+
+        self.assertEqual(2, summary["current_live"]["final_eligible"]["row_count"])
+        self.assertEqual(3, summary["next_batch"]["final_eligible"]["row_count"])
+        self.assertEqual(50.0, summary["current_live"]["pass_through_rate"]["value"])
+        self.assertEqual(50.0, summary["next_batch"]["pass_through_rate"]["value"])
+
     def test_check_leads_running_is_next_batch_status_not_current_send_blocker(self) -> None:
         status = {
             "active_important_check_job": {
@@ -394,6 +496,124 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertEqual("sendgrid_annette", body["profile"])
         self.assertEqual("queue_safety_unsafe", body["error"])
+        start_sender.assert_not_called()
+
+    def test_private_queue_unsafe_does_not_block_sendgrid_profile_start(self) -> None:
+        reports = {
+            "sendgrid": {"safe": True, "unsafe_reasons": [], "affected_provider": "sendgrid"},
+            "private_jc": {"safe": False, "unsafe_reasons": ["OUTSIDE_INTENDED_SOURCE"], "affected_provider": "private_jc"},
+            "all": {"safe": False, "unsafe_reasons": ["OUTSIDE_INTENDED_SOURCE"], "affected_provider": "all"},
+        }
+
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            side_effect=lambda provider="all": reports[str(provider or "all")],
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "started"),
+        ) as start_sender, patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(200, response.status_code)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("sendgrid", body["preconditions"]["queue_safety_provider"])
+        start_sender.assert_called_once_with("sendgrid_annette")
+
+    def test_sendgrid_queue_unsafe_blocks_sendgrid_profile_start(self) -> None:
+        reports = {
+            "sendgrid": {"safe": False, "unsafe_reasons": ["OUTSIDE_CHECKED_OUTPUT"], "affected_provider": "sendgrid"},
+            "all": {"safe": False, "unsafe_reasons": ["OUTSIDE_CHECKED_OUTPUT"], "affected_provider": "all"},
+        }
+
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            side_effect=lambda provider="all": reports.get(str(provider or "all"), reports["all"]),
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender:
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("sendgrid", body["queue_safety"]["affected_provider"])
+        start_sender.assert_not_called()
+
+    def test_private_queue_unsafe_blocks_private_profile_start(self) -> None:
+        reports = {
+            "private_jc": {"safe": False, "unsafe_reasons": ["OUTSIDE_INTENDED_SOURCE"], "affected_provider": "private_jc"},
+            "all": {"safe": False, "unsafe_reasons": ["OUTSIDE_INTENDED_SOURCE"], "affected_provider": "all"},
+        }
+
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            side_effect=lambda provider="all": reports.get(str(provider or "all"), reports["all"]),
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender:
+            response = live_dashboard.start_profile("private_jc")
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("private_jc", body["queue_safety"]["affected_provider"])
         start_sender.assert_not_called()
 
     def test_start_profile_allows_safe_queue_and_calls_runtime_start(self) -> None:

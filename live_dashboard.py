@@ -1576,6 +1576,163 @@ def _csv_count_from_status_label(status: dict[str, object], key: str, default_pa
     return _count_csv_rows(path)
 
 
+def _csv_funnel_stage(path: Path, *, missing_status: str = "not_available") -> dict[str, object]:
+    if not path.is_absolute():
+        path = settings.APP_ROOT / path
+    payload: dict[str, object] = {
+        "path": str(path),
+        "row_count": None,
+        "status": missing_status,
+    }
+    if path.exists():
+        payload["row_count"] = _count_csv_rows(path)
+        payload["status"] = "ready"
+    return payload
+
+
+def _number_funnel_stage(row_count: object, *, path: object = "", missing_status: str = "pending") -> dict[str, object]:
+    try:
+        value = int(row_count) if row_count not in ("", None) else None
+    except Exception:
+        value = None
+    return {
+        "path": str(path or ""),
+        "row_count": value,
+        "status": "ready" if value is not None else missing_status,
+    }
+
+
+def _latest_important_check_job() -> dict[str, object] | None:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return None
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        candidates.append((_check_job_created_sort_key(job, path), _job_progress_payload(job)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _funnel_stage_count(stage: dict[str, object]) -> int | None:
+    if str(stage.get("status") or "") != "ready":
+        return None
+    try:
+        return int(stage.get("row_count")) if stage.get("row_count") is not None else None
+    except Exception:
+        return None
+
+
+def _finish_funnel_summary(summary: dict[str, object]) -> dict[str, object]:
+    raw_count = _funnel_stage_count(summary["raw_input"]) if isinstance(summary.get("raw_input"), dict) else None
+    final_count = _funnel_stage_count(summary["final_eligible"]) if isinstance(summary.get("final_eligible"), dict) else None
+    component_removed = 0
+    component_ready = False
+    for key in ("check_rejected", "triage_reject", "triage_quarantine"):
+        stage = summary.get(key)
+        if isinstance(stage, dict):
+            count = _funnel_stage_count(stage)
+            if count is not None:
+                component_removed += count
+                component_ready = True
+
+    removed_count: int | None = None
+    if raw_count is not None and final_count is not None:
+        removed_count = max(0, raw_count - final_count)
+    elif component_ready:
+        removed_count = component_removed
+
+    summary["total_removed_excluded"] = _number_funnel_stage(removed_count)
+    pass_through: float | None = None
+    if raw_count and final_count is not None:
+        pass_through = round((final_count / raw_count) * 100, 1)
+    summary["pass_through_rate"] = {
+        "value": pass_through,
+        "status": "ready" if pass_through is not None else "pending",
+    }
+    return summary
+
+
+def _build_current_live_funnel_summary() -> dict[str, object]:
+    checked = _csv_funnel_stage(IMPORTANT_LEADS_OUTPUT)
+    triage_keep = _csv_funnel_stage(TRIAGED_KEEP_PATH)
+    summary: dict[str, object] = {
+        "label": "Current Live Funnel",
+        "source": "live_current_files",
+        "raw_input": _csv_funnel_stage(IMPORTANT_LEADS_INPUT),
+        "cleaned_after_check": checked,
+        "check_rejected": _csv_funnel_stage(IMPORTANT_LEADS_REJECTED),
+        "triage_keep": triage_keep,
+        "triage_reject": _csv_funnel_stage(TRIAGED_KEEP_PATH.with_name("leads_triaged_reject.csv")),
+        "triage_quarantine": _csv_funnel_stage(IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_quarantine.csv")),
+        "final_eligible": dict(triage_keep) if triage_keep.get("status") == "ready" else _number_funnel_stage(None),
+    }
+    return _finish_funnel_summary(summary)
+
+
+def _build_next_batch_funnel_summary(status: dict[str, object]) -> dict[str, object]:
+    active_job = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    latest_job = active_job or _latest_important_check_job()
+    if not latest_job:
+        pending = _number_funnel_stage(None)
+        summary: dict[str, object] = {
+            "label": "Next Batch Funnel",
+            "source": "latest_staged_run",
+            "run_id": "",
+            "staged_run_dir": "",
+            "raw_input": pending,
+            "cleaned_after_check": pending,
+            "check_rejected": pending,
+            "triage_keep": pending,
+            "triage_reject": pending,
+            "triage_quarantine": pending,
+            "final_eligible": pending,
+        }
+        return _finish_funnel_summary(summary)
+
+    staged_dir = Path(str(latest_job.get("staged_run_dir") or "")) if latest_job.get("staged_run_dir") else IMPORTANT_LEADS_RUNS / str(latest_job.get("job_id") or "")
+    if not staged_dir.is_absolute():
+        staged_dir = settings.APP_ROOT / staged_dir
+    preview = latest_job.get("auto_dispatch_preview") if isinstance(latest_job.get("auto_dispatch_preview"), dict) else {}
+    keep_path = Path(str(latest_job.get("auto_triage_keep_path") or staged_dir / "leads_triaged_keep.csv"))
+    if not keep_path.is_absolute():
+        keep_path = settings.APP_ROOT / keep_path
+    final_rows = preview.get("dispatch_eligible_row_count") if preview else None
+    if final_rows in {"", None}:
+        keep_stage = _csv_funnel_stage(keep_path, missing_status="pending")
+        final_stage = dict(keep_stage) if keep_stage.get("status") == "ready" else _number_funnel_stage(None)
+    else:
+        final_stage = _number_funnel_stage(final_rows, path=preview.get("source_path") or keep_path)
+
+    summary = {
+        "label": "Next Batch Funnel",
+        "source": "latest_staged_run",
+        "run_id": str(latest_job.get("job_id") or ""),
+        "staged_run_dir": str(staged_dir),
+        "raw_input": _number_funnel_stage(latest_job.get("total_input_rows"), path=latest_job.get("effective_input_path") or latest_job.get("input_path")),
+        "cleaned_after_check": _csv_funnel_stage(Path(str(latest_job.get("output_path") or staged_dir / "leads.csv")), missing_status="pending"),
+        "check_rejected": _csv_funnel_stage(Path(str(latest_job.get("rejected_path") or staged_dir / "leads_rejected.csv")), missing_status="pending"),
+        "triage_keep": _csv_funnel_stage(keep_path, missing_status="pending"),
+        "triage_reject": _csv_funnel_stage(Path(str(latest_job.get("auto_triage_rejected_path") or staged_dir / "leads_triaged_reject.csv")), missing_status="pending"),
+        "triage_quarantine": _csv_funnel_stage(Path(str(latest_job.get("auto_triage_quarantine_path") or staged_dir / "leads_triaged_quarantine.csv")), missing_status="pending"),
+        "final_eligible": final_stage,
+    }
+    return _finish_funnel_summary(summary)
+
+
+def _build_lead_funnel_summary(status: dict[str, object]) -> dict[str, object]:
+    return {
+        "current_live": _build_current_live_funnel_summary(),
+        "next_batch": _build_next_batch_funnel_summary(status),
+    }
+
+
 def _build_leads_pipeline_status(status: dict[str, object]) -> dict[str, object]:
     active_check = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
     active_verify = status.get("active_important_verify_job") if isinstance(status.get("active_important_verify_job"), dict) else None
@@ -1665,7 +1822,9 @@ def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
 
 
 def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, object]:
-    queue_safety = build_dashboard_queue_safety_report()
+    queue_safety = build_dashboard_queue_safety_report("all")
+    sendgrid_queue_safety = build_dashboard_queue_safety_report("sendgrid")
+    private_queue_safety = build_dashboard_queue_safety_report("private_jc")
     reasons: list[str] = []
     if not bool(queue_safety.get("safe")):
         raw_reasons = queue_safety.get("unsafe_reasons")
@@ -1678,9 +1837,14 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
         reasons.append(f"Live recipient queues are missing BookTitle: {', '.join(missing_booktitle)}.")
     return {
         "status": "BLOCKED" if reasons else "READY",
+        "sendgrid_status": "READY" if bool(sendgrid_queue_safety.get("safe")) else "BLOCKED",
+        "private_status": "READY" if bool(private_queue_safety.get("safe")) else "BLOCKED",
         "blocked": bool(reasons),
         "reasons": reasons,
         "queue_safety": queue_safety,
+        "combined_queue_safety": queue_safety,
+        "sendgrid_queue_safety": sendgrid_queue_safety,
+        "private_queue_safety": private_queue_safety,
         "missing_booktitle_queues": missing_booktitle,
     }
 
@@ -1721,6 +1885,7 @@ def _combined_leads_status() -> dict[str, object]:
         "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
     }
     status["pipeline"] = _build_leads_pipeline_status(status)
+    status["lead_funnel"] = _build_lead_funnel_summary(status)
     status["current_send_safety"] = _build_current_send_safety_status(status)
     status["next_batch_prep"] = _build_next_batch_prep_status(status)
     return status
@@ -2367,6 +2532,14 @@ def _start_precondition_profiles(profile_name: str = "") -> list[str]:
     return [str(profile) for profile in SENDGRID_PROFILES]
 
 
+def _queue_safety_provider_for_start(profile_name: str = "") -> str:
+    requested = str(profile_name or "").strip()
+    if requested:
+        cfg = PROFILES.get(requested) or {}
+        return "sendgrid" if str(cfg.get("provider") or "").strip().lower() == "sendgrid" else "private_jc"
+    return "all"
+
+
 def _profile_readiness_from_snapshot(snapshot: dict[str, object], profile_name: str) -> dict[str, object]:
     profiles = snapshot.get("profiles")
     if isinstance(profiles, list):
@@ -2508,7 +2681,8 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
     requested_profile = str(profile_name or "").strip()
     profiles = _start_precondition_profiles(requested_profile)
     snapshot = _build_live_snapshot()
-    queue_safety = build_dashboard_queue_safety_report()
+    queue_safety_provider = _queue_safety_provider_for_start(requested_profile)
+    queue_safety = build_dashboard_queue_safety_report(queue_safety_provider)
     active_profiles = _active_sender_names()
     active_preview_profiles = _active_preview_names(profiles if requested_profile else None)
     blocked_reasons: list[str] = []
@@ -2569,6 +2743,7 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
         "profile": requested_profile,
         "profiles": profiles,
         "queue_safety": queue_safety,
+        "queue_safety_provider": queue_safety_provider,
         "queue_safety_status": queue_safety_status,
         "safety_status": queue_safety_status,
         "message_readiness": readiness_by_profile,
@@ -2891,6 +3066,7 @@ def start() -> JSONResponse:
         "status": "STARTED" if ok else "PARTIALLY_STARTED" if partially_started else "BLOCKED",
         "message": message,
         "warnings": preconditions.get("warning_reasons") or [],
+        "preconditions": preconditions,
         "snapshot": _build_live_snapshot(),
     })
 
@@ -2917,6 +3093,7 @@ def start_profile(profile_name: str) -> JSONResponse:
         "ok": ok,
         "message": message,
         "warnings": preconditions.get("warning_reasons") or [],
+        "preconditions": preconditions,
         "snapshot": _build_live_snapshot(),
     })
 
