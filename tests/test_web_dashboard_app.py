@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -106,12 +107,17 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             "function leadsRunSafety",
+            "lead-funnel-table-wrap",
             "<table class=\"lead-funnel-table\"",
+            "<col class=\"lead-funnel-stage-col\"",
+            "<col class=\"lead-funnel-value-col\"",
             "<th>Stage</th>",
             "<th>Current live</th>",
             "<th>Next batch</th>",
             "<tr>",
             "<td class=\"lead-funnel-stage\">",
+            "<td class=\"lead-funnel-value\">",
+            "status-pill",
             "SAFE TO CONTINUE",
             "BLOCKED",
             "Check Leads is running.",
@@ -140,14 +146,60 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             ".lead-funnel-table",
+            ".lead-funnel-table-wrap",
             "border-collapse: collapse",
             "table-layout: fixed",
+            ".lead-funnel-stage-col",
+            "width: 40%",
+            ".lead-funnel-value-col",
+            "width: 30%",
+            ".status-pill",
             ".leads-run-safety-card-wait",
             ".leads-run-safety-card-blocked",
             ".leads-run-safety-card-safe-to-continue",
             ".leads-pipeline-step-stale",
         ]:
             self.assertIn(expected, styles)
+
+    def test_leads_funnel_table_rows_keep_three_native_cells(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        cell_match = re.search(r"function renderFunnelCell\(stage\) \{.*?\n\}", source, re.DOTALL)
+        self.assertIsNotNone(cell_match)
+        cell_source = cell_match.group(0)
+        self.assertIn('<td class="lead-funnel-value">', cell_source)
+        self.assertEqual(1, cell_source.count("<td"))
+        self.assertEqual(1, cell_source.count('<span class="status-pill'))
+        self.assertNotIn("lead-funnel-cell", cell_source)
+
+        row_match = re.search(r"function renderFunnelComparisonRow\(label, currentStage, nextStage\) \{.*?\n\}", source, re.DOTALL)
+        self.assertIsNotNone(row_match)
+        row_source = row_match.group(0)
+        self.assertIn("<tr>", row_source)
+        self.assertIn('<td class="lead-funnel-stage">', row_source)
+        self.assertEqual(2, row_source.count("renderFunnelCell("))
+        self.assertNotIn("colspan", row_source)
+        self.assertNotIn("rowspan", row_source)
+
+        summary_match = re.search(r"function renderLeadFunnelSummary\(funnel\) \{.*?function renderLeadsRunSafety", source, re.DOTALL)
+        self.assertIsNotNone(summary_match)
+        summary_source = summary_match.group(0)
+        self.assertIn('<table class="lead-funnel-table"', summary_source)
+        self.assertIn("<tbody>", summary_source)
+        self.assertEqual(8, summary_source.count("renderFunnelComparisonRow("))
+        self.assertEqual(2, summary_source.count('<td class="lead-funnel-value"><span class="status-pill">'))
+        self.assertNotIn("colspan", summary_source)
+        self.assertNotIn("rowspan", summary_source)
+
+        forbidden_display_selectors = [
+            ".lead-funnel-table tr",
+            ".lead-funnel-table td {\n  display",
+            ".lead-funnel-table th {\n  display",
+            ".lead-funnel-value {\n  display",
+        ]
+        for selector in forbidden_display_selectors:
+            self.assertNotIn(selector, styles)
 
     def test_sender_cards_render_message_readiness_fields(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

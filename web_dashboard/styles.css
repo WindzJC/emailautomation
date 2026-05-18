@@ -493,11 +493,12 @@ h3 {
 
 .lead-funnel-summary {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid rgba(182, 203, 232, 0.12);
+  gap: 14px;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid rgba(182, 203, 232, 0.14);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .lead-funnel-title,
@@ -523,27 +524,56 @@ h3 {
   gap: 10px;
 }
 
+.lead-funnel-table-wrap {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(182, 203, 232, 0.12);
+  border-radius: 8px;
+  background: rgba(10, 18, 32, 0.45);
+}
+
 .lead-funnel-table {
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
 }
 
+.lead-funnel-stage-col {
+  width: 40%;
+}
+
+.lead-funnel-value-col {
+  width: 30%;
+}
+
 .lead-funnel-table th,
 .lead-funnel-table td {
-  padding: 9px 10px;
-  border-bottom: 1px solid rgba(182, 203, 232, 0.1);
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(182, 203, 232, 0.11);
   text-align: left;
   vertical-align: middle;
 }
 
 .lead-funnel-table th {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  background: rgba(255, 255, 255, 0.055);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.lead-funnel-table tbody tr {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.lead-funnel-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.032);
+}
+
+.lead-funnel-table tbody tr:hover {
+  background: rgba(123, 183, 255, 0.06);
 }
 
 .lead-funnel-table th:nth-child(2),
@@ -557,56 +587,37 @@ h3 {
   border-bottom: 0;
 }
 
-.lead-funnel-cell {
-  min-width: 0;
+.lead-funnel-value {
+  text-align: center;
 }
 
-.lead-funnel-cell > .lead-funnel-pill,
-.lead-funnel-cell > .lead-funnel-path {
-  margin-inline: auto;
-}
-
-.lead-funnel-cell {
-  min-width: 0;
-}
-
-.lead-funnel-cell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-}
-
-.lead-funnel-pill {
+.status-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 76px;
+  min-width: 92px;
   max-width: 100%;
-  padding: 4px 8px;
-  border: 1px solid rgba(182, 203, 232, 0.12);
+  min-height: 28px;
+  padding: 5px 11px;
+  border: 1px solid rgba(182, 203, 232, 0.18);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
+  background: rgba(255, 255, 255, 0.075);
   color: #f7fbff;
   font-size: 12px;
   font-weight: 800;
+  line-height: 1;
   text-align: center;
   white-space: nowrap;
 }
 
-.lead-funnel-cell-good .lead-funnel-pill {
-  border-color: rgba(72, 187, 120, 0.38);
-  background: rgba(18, 107, 77, 0.16);
+.status-pill-good {
+  border-color: rgba(72, 187, 120, 0.42);
+  background: rgba(18, 107, 77, 0.22);
 }
 
-.lead-funnel-cell-warn .lead-funnel-pill {
-  border-color: rgba(245, 158, 11, 0.38);
-  background: rgba(245, 158, 11, 0.08);
-}
-
-.lead-funnel-path {
-  min-width: 0;
-  max-width: 54%;
+.status-pill-warn {
+  border-color: rgba(245, 158, 11, 0.42);
+  background: rgba(245, 158, 11, 0.12);
 }
 
 .lead-funnel-stage,
@@ -643,7 +654,7 @@ h3 {
 }
 
 @media (max-width: 640px) {
-  .lead-funnel-summary {
+  .lead-funnel-table-wrap {
     overflow-x: auto;
   }
 

@@ -2958,11 +2958,9 @@ function renderFunnelPath(stage) {
 
 function renderFunnelCell(stage) {
   const display = funnelStageDisplay(stage || {});
-  const path = renderFunnelPath(stage);
   return `
-    <td class="lead-funnel-cell lead-funnel-cell-${escapeHtml(display.tone)}">
-      <span class="lead-funnel-pill">${escapeHtml(display.text)}</span>
-      ${path ? `<span class="lead-funnel-path">${path}</span>` : ""}
+    <td class="lead-funnel-value">
+      <span class="status-pill status-pill-${escapeHtml(display.tone || "pending")}">${escapeHtml(display.text)}</span>
     </td>
   `;
 }
@@ -2998,30 +2996,37 @@ function renderLeadFunnelSummary(funnel) {
         </div>
         <span class="mini-pill">${escapeHtml(nextRunId ? `Next ${nextRunId}` : "Counts only")}</span>
       </div>
-      <table class="lead-funnel-table" aria-label="Lead Funnel Summary">
-        <thead>
+      <div class="lead-funnel-table-wrap">
+        <table class="lead-funnel-table" aria-label="Lead Funnel Summary">
+          <colgroup>
+            <col class="lead-funnel-stage-col" />
+            <col class="lead-funnel-value-col" />
+            <col class="lead-funnel-value-col" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Stage</th>
+              <th>Current live</th>
+              <th>Next batch</th>
+            </tr>
+          </thead>
+          <tbody>
+          ${renderFunnelComparisonRow("Raw input", current.raw_input, next.raw_input)}
+          ${renderFunnelComparisonRow("After cleanup", current.cleaned_after_check, next.cleaned_after_check)}
+          ${renderFunnelComparisonRow("Check rejected", current.check_rejected, next.check_rejected)}
+          ${renderFunnelComparisonRow("Triage keep", current.triage_keep, next.triage_keep)}
+          ${renderFunnelComparisonRow("Triage reject", current.triage_reject, next.triage_reject)}
+          ${renderFunnelComparisonRow("Triage quarantine", current.triage_quarantine, next.triage_quarantine)}
+          ${renderFunnelComparisonRow("Final eligible", current.final_eligible, next.final_eligible)}
+          ${renderFunnelComparisonRow("Removed/excluded", current.total_removed_excluded, next.total_removed_excluded)}
           <tr>
-            <th>Stage</th>
-            <th>Current live</th>
-            <th>Next batch</th>
+            <td class="lead-funnel-stage">Pass-through</td>
+            <td class="lead-funnel-value"><span class="status-pill">${escapeHtml(funnelPassThrough(current))}</span></td>
+            <td class="lead-funnel-value"><span class="status-pill">${escapeHtml(funnelPassThrough(next))}</span></td>
           </tr>
-        </thead>
-        <tbody>
-        ${renderFunnelComparisonRow("Raw input", current.raw_input, next.raw_input)}
-        ${renderFunnelComparisonRow("After cleanup", current.cleaned_after_check, next.cleaned_after_check)}
-        ${renderFunnelComparisonRow("Check rejected", current.check_rejected, next.check_rejected)}
-        ${renderFunnelComparisonRow("Triage keep", current.triage_keep, next.triage_keep)}
-        ${renderFunnelComparisonRow("Triage reject", current.triage_reject, next.triage_reject)}
-        ${renderFunnelComparisonRow("Triage quarantine", current.triage_quarantine, next.triage_quarantine)}
-        ${renderFunnelComparisonRow("Final eligible", current.final_eligible, next.final_eligible)}
-        ${renderFunnelComparisonRow("Removed/excluded", current.total_removed_excluded, next.total_removed_excluded)}
-        <tr>
-          <td class="lead-funnel-stage">Pass-through</td>
-          <td class="lead-funnel-cell"><span class="lead-funnel-pill">${escapeHtml(funnelPassThrough(current))}</span></td>
-          <td class="lead-funnel-cell"><span class="lead-funnel-pill">${escapeHtml(funnelPassThrough(next))}</span></td>
-        </tr>
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
     `,
   );
 }
