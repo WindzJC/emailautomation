@@ -190,6 +190,7 @@ const LEADS_RUN_SAFETY_COPY = [
 ];
 const pendingProfileActions = new Map();
 const profilePreviewValidationState = new Map();
+const privateJcQueueRepairState = { kind: "", message: "", summary: null };
 
 function currentActivityHours() {
   return els.hoursSelect?.value || "24";
@@ -4867,6 +4868,52 @@ function renderProfileActionFeedback(profile) {
   return `<div class="profile-action-feedback ${feedback.kind}">${escapeHtml(feedback.message)}</div>`;
 }
 
+function renderPrivateJcQueueRepair(profile, snapshot = lastSnapshot) {
+  if (!profile || profile.name !== "private_jc") return "";
+  const queueSafety = snapshot?.private_queue_safety || {};
+  if (queueSafety.safe !== false) return "";
+  const summary = privateJcQueueRepairState.summary || {};
+  const feedback = privateJcQueueRepairState.message
+    ? `<div class="private-jc-repair-feedback private-jc-repair-feedback-${escapeHtml(privateJcQueueRepairState.kind || "info")}">${escapeHtml(privateJcQueueRepairState.message)}</div>`
+    : "";
+  const summaryRows = privateJcQueueRepairState.summary ? `
+    <div class="private-jc-repair-summary">
+      <span>Unsafe rows archived <strong>${Number(summary.unsafe_queue_rows_archived || 0).toLocaleString()}</strong></span>
+      <span>Reject-overlap rows removed <strong>${Number(summary.reject_overlap_rows_removed || 0).toLocaleString()}</strong></span>
+      <span>Outside-source rows removed <strong>${Number(summary.outside_source_rows_removed || 0).toLocaleString()}</strong></span>
+      <span>Rebuilt queue rows <strong>${Number(summary.rebuilt_queue_rows || 0).toLocaleString()}</strong></span>
+      <span class="private-jc-repair-backup" title="${escapeHtml(summary.backup_path || "")}">Backup <strong>${escapeHtml(truncateMiddle(summary.backup_path || "-", 72))}</strong></span>
+    </div>
+  ` : "";
+  const active = isProfileActive(profile);
+  const loading = privateJcQueueRepairState.kind === "loading";
+  const reasonBits = [
+    Number(queueSafety.overlap_with_triaged_reject || 0) ? `${Number(queueSafety.overlap_with_triaged_reject || 0).toLocaleString()} reject overlap` : "",
+    Number(queueSafety.outside_intended_source_count || 0) ? `${Number(queueSafety.outside_intended_source_count || 0).toLocaleString()} outside approved source` : "",
+    Number(queueSafety.outside_checked_output_count || 0) ? `${Number(queueSafety.outside_checked_output_count || 0).toLocaleString()} outside checked output` : "",
+  ].filter(Boolean);
+  return `
+    <section class="private-jc-repair-panel">
+      <div class="private-jc-repair-head">
+        <div>
+          <strong>Repair Private JC Queue</strong>
+          <p>Private JC queue is blocked because the live queue contains recipients that overlap rejected leads or are outside the current approved source.</p>
+          ${reasonBits.length ? `<p class="muted">${escapeHtml(reasonBits.join(" · "))}</p>` : ""}
+        </div>
+        <button
+          class="btn btn-secondary btn-sm repair-private-jc-queue-btn"
+          type="button"
+          ${active || loading ? "disabled" : ""}
+          title="${escapeHtml(active ? "Stop Private JC before repairing its queue." : "Archive the unsafe JC queue and rebuild from the latest confirmed dispatch preview.")}"
+        >${escapeHtml(loading ? "Repairing..." : "Repair Private JC Queue")}</button>
+      </div>
+      <p class="private-jc-repair-note">Repair archives the current JC queue, clears the unsafe live file, and rebuilds JC recipients only from the current approved dispatch source. It does not start JC.</p>
+      ${feedback}
+      ${summaryRows}
+    </section>
+  `;
+}
+
 function renderSignals(snapshot) {
   const runStatus = snapshot.run_status_items || snapshot.attention_items || [];
   const telemetryNotes = snapshot.telemetry_notes || [];
@@ -5462,6 +5509,7 @@ function createProfileDetailNode() {
       </div>
 
       <div class="detail-feedback-slot"></div>
+      <div class="detail-private-jc-repair-slot"></div>
 
       <section class="detail-section detail-message-readiness-section">
         <div class="detail-message-readiness-slot"></div>
@@ -5574,6 +5622,7 @@ function createProfileDetailNode() {
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
+    privateJcRepair: node.querySelector(".detail-private-jc-repair-slot"),
     messageReadiness: node.querySelector(".detail-message-readiness-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
@@ -5652,6 +5701,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
     startButton: node.querySelector(".start-profile-btn"),
     stopButton: node.querySelector(".stop-profile-btn"),
     feedback: node.querySelector(".detail-feedback-slot"),
+    privateJcRepair: node.querySelector(".detail-private-jc-repair-slot"),
     messageReadiness: node.querySelector(".detail-message-readiness-slot"),
     primaryWarning: node.querySelector(".detail-primary-warning-slot"),
     coreRuntime: node.querySelector(".detail-core-runtime"),
@@ -5761,6 +5811,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
   setNodeText(refs.stopButton, pendingAction === "stop" ? "Stopping..." : "Stop");
 
   setNodeHtml(refs.feedback, renderProfileActionFeedback(profile));
+  setNodeHtml(refs.privateJcRepair, renderPrivateJcQueueRepair(profile, snapshot));
   setNodeHtml(refs.messageReadiness, renderMessageReadiness(profile));
   setNodeHtml(refs.primaryWarning, renderDetailPrimaryWarning(profile));
   setNodeHtml(refs.coreRuntime, renderDetailCoreRuntime(profile));
@@ -5933,6 +5984,31 @@ async function runProfilePreviewValidation(profileName) {
   }
 }
 
+async function repairPrivateJcQueue() {
+  privateJcQueueRepairState.kind = "loading";
+  privateJcQueueRepairState.message = "Repairing Private JC queue...";
+  privateJcQueueRepairState.summary = null;
+  rerenderCurrentSelection();
+  try {
+    const data = await fetchJson("/api/profiles/private_jc/repair-queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    privateJcQueueRepairState.kind = data.ok ? "success" : "error";
+    privateJcQueueRepairState.message = data.message || (data.ok ? "Private JC queue repaired." : "Private JC queue repair failed.");
+    privateJcQueueRepairState.summary = data.summary || null;
+    if (data.snapshot) renderSnapshot(data.snapshot);
+    else await fetchSnapshot();
+    showMessage(privateJcQueueRepairState.message, data.ok ? "success" : "error");
+  } catch (err) {
+    privateJcQueueRepairState.kind = "error";
+    privateJcQueueRepairState.message = `Private JC queue repair failed: ${err}`;
+    privateJcQueueRepairState.summary = null;
+    rerenderCurrentSelection();
+    showMessage(privateJcQueueRepairState.message, "error");
+  }
+}
+
 function handleOverviewClick(event) {
   if (wallboardMode) return;
   const previewButton = event.target.closest(".preview-validate-profile-btn[data-profile]");
@@ -5947,6 +6023,13 @@ function handleOverviewClick(event) {
 }
 
 async function handleProfileDetailClick(event) {
+  const repairPrivateJcButton = event.target.closest(".repair-private-jc-queue-btn");
+  if (repairPrivateJcButton && els.profileDetail.contains(repairPrivateJcButton)) {
+    if (repairPrivateJcButton.disabled) return;
+    await repairPrivateJcQueue();
+    return;
+  }
+
   const previewButton = event.target.closest(".preview-validate-profile-btn[data-profile]");
   if (previewButton && els.profileDetail.contains(previewButton)) {
     if (previewButton.disabled) return;

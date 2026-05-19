@@ -1573,6 +1573,128 @@ class LiveDashboardTests(unittest.TestCase):
             confirm_dispatch_preview.assert_not_called()
             save_state.assert_not_called()
 
+    def test_repair_private_jc_queue_requires_confirmed_dispatch_before_queue_write(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            shards = tmp / "shards"
+            backups = tmp / "backups"
+            queue_path = shards / "recipients_private_jc.csv"
+            self._write_csv(queue_path, ["Email", "FirstName"], [{"Email": "stale@example.com", "FirstName": "Stale"}])
+            original = queue_path.read_text(encoding="utf-8")
+
+            with patch.object(live_dashboard.settings, "SHARDS_DIR", shards), patch.object(
+                live_dashboard.settings, "BACKUPS_DIR", backups
+            ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+                live_dashboard,
+                "_dispatch_preflight_block_response",
+                return_value=None,
+            ), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": False, "shard_row_count_total": 1},
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={},
+            ):
+                response = live_dashboard.repair_private_jc_queue()
+
+            body = json.loads(response.body)
+            self.assertEqual(409, response.status_code)
+            self.assertFalse(body["ok"])
+            self.assertEqual("private_jc_repair_blocked", body["error"])
+            self.assertIn("Preview Dispatch and Confirm Dispatch", body["message"])
+            self.assertEqual(original, queue_path.read_text(encoding="utf-8"))
+            self.assertFalse(backups.exists())
+
+    def test_repair_private_jc_queue_archives_and_rebuilds_from_confirmed_preview_only(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            shards = tmp / "shards"
+            backups = tmp / "backups"
+            previews = tmp / "previews"
+            queue_path = shards / "recipients_private_jc.csv"
+            self._write_csv(
+                queue_path,
+                ["Email", "FirstName"],
+                [
+                    {"Email": "outside@example.com", "FirstName": "Outside"},
+                    {"Email": "reject@example.com", "FirstName": "Reject"},
+                ],
+            )
+            latest_dispatch = {
+                "status": "completed",
+                "run_id": "dispatch_run_1",
+                "preview_id": "preview_1",
+                "generated_at_utc": "2026-05-20T00:00:00+00:00",
+            }
+            preview = {
+                "status": "confirmed",
+                "preview_id": "preview_1",
+                "confirmed_run_id": "dispatch_run_1",
+                "queue_headers": ["Email", "FirstName", "AuthorName", "BookTitle"],
+                "queue_paths": {"private_jc": str(queue_path)},
+                "plan_rows_by_queue": {
+                    "private_jc": [
+                        {
+                            "Email": "safe1@example.com",
+                            "FirstName": "Safe",
+                            "AuthorName": "Safe Author",
+                            "BookTitle": "Safe Book",
+                        },
+                        {
+                            "Email": "safe2@example.com",
+                            "FirstName": "Ready",
+                            "AuthorName": "Ready Author",
+                            "BookTitle": "Ready Book",
+                        },
+                    ]
+                },
+            }
+            before = {
+                "safe": False,
+                "shard_row_count_total": 2,
+                "overlap_with_triaged_reject": 1,
+                "outside_intended_source_count": 2,
+                "outside_checked_output_count": 2,
+            }
+            after = {"safe": True, "shard_row_count_total": 2}
+
+            with patch.object(live_dashboard.settings, "SHARDS_DIR", shards), patch.object(
+                live_dashboard.settings, "BACKUPS_DIR", backups
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", previews), patch.object(
+                live_dashboard, "_build_live_snapshot", return_value={}
+            ), patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                side_effect=[before, after],
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
+            ), patch.object(
+                live_dashboard,
+                "validate_dispatch_preview",
+                return_value=preview,
+            ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                response = live_dashboard.repair_private_jc_queue()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["repaired"])
+            self.assertEqual(2, body["summary"]["unsafe_queue_rows_archived"])
+            self.assertEqual(1, body["summary"]["reject_overlap_rows_removed"])
+            self.assertEqual(2, body["summary"]["outside_source_rows_removed"])
+            self.assertEqual(2, body["summary"]["rebuilt_queue_rows"])
+            backup_path = Path(body["summary"]["backup_path"])
+            self.assertTrue(backup_path.exists())
+            self.assertIn("outside@example.com", backup_path.read_text(encoding="utf-8"))
+            rebuilt_rows = self._read_csv_rows(queue_path)
+            self.assertEqual(["safe1@example.com", "safe2@example.com"], [row["Email"] for row in rebuilt_rows])
+            self.assertEqual(["Email", "FirstName", "AuthorName", "BookTitle"], list(rebuilt_rows[0].keys()))
+            send_via_sendgrid.assert_not_called()
+
     def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
         class RequestStub:
             headers: dict[str, str] = {}

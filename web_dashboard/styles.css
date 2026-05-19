@@ -3695,6 +3695,73 @@ details summary {
   color: #ffd8de;
 }
 
+.private-jc-repair-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 14px;
+  padding: 14px;
+  border: 1px solid rgba(255, 139, 152, 0.24);
+  border-radius: 16px;
+  background: rgba(255, 139, 152, 0.08);
+}
+
+.private-jc-repair-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.private-jc-repair-head p,
+.private-jc-repair-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.private-jc-repair-feedback {
+  padding: 9px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.private-jc-repair-feedback-success {
+  background: rgba(124, 224, 183, 0.12);
+  color: #dffeed;
+}
+
+.private-jc-repair-feedback-error {
+  background: rgba(255, 139, 152, 0.12);
+  color: #ffd5db;
+}
+
+.private-jc-repair-feedback-loading,
+.private-jc-repair-feedback-info {
+  background: rgba(123, 183, 255, 0.1);
+  color: #dbeafe;
+}
+
+.private-jc-repair-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  font-size: 12px;
+}
+
+.private-jc-repair-summary span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.private-jc-repair-backup {
+  grid-column: 1 / -1;
+}
+
 /* Badges */
 .badge {
   display: inline-flex;

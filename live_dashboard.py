@@ -3716,6 +3716,133 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
     )
 
 
+def _write_private_jc_queue_repair_csv(path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({header: str(row.get(header, "") or "").strip() for header in headers})
+    tmp_path.replace(path)
+    settings.secure_private_file(path)
+
+
+def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, object]]:
+    state = load_state()
+    latest_dispatch = state.get(MASTER_DISPATCH_STATE_KEY) if isinstance(state, dict) else {}
+    if not isinstance(latest_dispatch, dict) or not latest_dispatch:
+        raise RuntimeError("Run Preview Dispatch and Confirm Dispatch before repairing the Private JC queue.")
+    if str(latest_dispatch.get("status") or "").strip().lower() not in {"completed", "confirmed"} and not latest_dispatch.get("generated_at_utc"):
+        raise RuntimeError("Confirm Dispatch has not completed. Repair is blocked.")
+    preview_id = str(latest_dispatch.get("preview_id") or "").strip()
+    if not preview_id:
+        raise RuntimeError("Latest dispatch does not reference a preview. Re-run Preview Dispatch and Confirm Dispatch.")
+    preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+    if str(preview.get("status") or "").strip().lower() != "confirmed":
+        raise RuntimeError("Latest dispatch preview is not confirmed. Run Confirm Dispatch before repairing the queue.")
+    confirmed_run_id = str(preview.get("confirmed_run_id") or "").strip()
+    dispatch_run_id = str(latest_dispatch.get("run_id") or "").strip()
+    if confirmed_run_id and dispatch_run_id and confirmed_run_id != dispatch_run_id:
+        raise RuntimeError("Latest dispatch preview does not match the confirmed dispatch run. Re-run Preview Dispatch and Confirm Dispatch.")
+    return latest_dispatch, preview
+
+
+@app.post("/api/profiles/private_jc/repair-queue")
+def repair_private_jc_queue() -> JSONResponse:
+    snapshot = _build_live_snapshot()
+    preflight_block = _dispatch_preflight_block_response(snapshot=snapshot)
+    if preflight_block is not None:
+        return preflight_block
+    try:
+        before = build_dashboard_queue_safety_report("private_jc")
+        if bool(before.get("safe")):
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "repaired": False,
+                    "message": "Private JC queue is already safe.",
+                    "summary": {
+                        "unsafe_rows_archived": 0,
+                        "reject_overlap_rows_removed": 0,
+                        "outside_source_rows_removed": 0,
+                        "rebuilt_queue_rows": int(before.get("shard_row_count_total") or 0),
+                        "backup_path": "",
+                    },
+                    "queue_safety": before,
+                    "snapshot": snapshot,
+                }
+            )
+        latest_dispatch, preview = _latest_confirmed_dispatch_preview()
+        queue_headers = [str(value or "").strip() for value in (preview.get("queue_headers") or []) if str(value or "").strip()]
+        if not queue_headers:
+            raise RuntimeError("Confirmed dispatch preview is missing queue headers. Re-run Preview Dispatch and Confirm Dispatch.")
+        queue_paths = preview.get("queue_paths") if isinstance(preview.get("queue_paths"), dict) else {}
+        preview_private_path = Path(str(queue_paths.get("private_jc") or settings.SHARDS_DIR / "recipients_private_jc.csv"))
+        private_queue_path = settings.SHARDS_DIR / "recipients_private_jc.csv"
+        if preview_private_path.name != private_queue_path.name:
+            raise RuntimeError("Confirmed dispatch preview does not target the Private JC queue. Re-run Preview Dispatch and Confirm Dispatch.")
+        plan_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+        planned_rows = [
+            {header: str(row.get(header, "") or "").strip() for header in queue_headers}
+            for row in (plan_rows_by_queue.get("private_jc") or [])
+            if isinstance(row, dict)
+        ]
+        repair_dir = settings.BACKUPS_DIR / "private_jc_queue_repair" / timestamp_slug()
+        repair_dir.mkdir(parents=True, exist_ok=True)
+        settings.secure_private_dir(repair_dir)
+        backup_path = repair_dir / private_queue_path.name
+        if private_queue_path.exists():
+            shutil.copy2(private_queue_path, backup_path)
+        else:
+            backup_path.write_text("", encoding="utf-8")
+        settings.secure_private_file(backup_path)
+        manifest = {
+            "created_at_utc": iso_utc(),
+            "purpose": "private_jc_queue_repair",
+            "source": "confirmed_dispatch_preview",
+            "preview_id": str(preview.get("preview_id") or latest_dispatch.get("preview_id") or ""),
+            "dispatch_run_id": str(latest_dispatch.get("run_id") or ""),
+            "live_queue_path": str(private_queue_path),
+            "backup_path": str(backup_path),
+            "unsafe_queue_rows_archived": int(before.get("shard_row_count_total") or 0),
+            "reject_overlap_rows_removed": int(before.get("overlap_with_triaged_reject") or 0),
+            "outside_source_rows_removed": max(
+                int(before.get("outside_intended_source_count") or 0),
+                int(before.get("outside_checked_output_count") or 0),
+            ),
+            "rebuilt_queue_rows": len(planned_rows),
+        }
+        manifest_path = repair_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        settings.secure_private_file(manifest_path)
+
+        _write_private_jc_queue_repair_csv(private_queue_path, queue_headers, planned_rows)
+        after = build_dashboard_queue_safety_report("private_jc")
+        summary = {
+            "unsafe_queue_rows_archived": manifest["unsafe_queue_rows_archived"],
+            "reject_overlap_rows_removed": manifest["reject_overlap_rows_removed"],
+            "outside_source_rows_removed": manifest["outside_source_rows_removed"],
+            "rebuilt_queue_rows": manifest["rebuilt_queue_rows"],
+            "backup_path": str(backup_path),
+        }
+        return JSONResponse(
+            {
+                "ok": True,
+                "repaired": True,
+                "message": "Private JC queue repaired from the latest confirmed dispatch preview. JC was not started.",
+                "summary": summary,
+                "queue_safety_before": before,
+                "queue_safety": after,
+                "snapshot": _build_live_snapshot(),
+            }
+        )
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "blocked": True, "error": "private_jc_repair_blocked", "message": str(exc), "snapshot": snapshot}, status_code=409)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": "private_jc_repair_failed", "message": f"Private JC queue repair failed: {exc}", "snapshot": snapshot}, status_code=500)
+
+
 @app.post("/api/leads/dispatch-important/confirm")
 def confirm_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     return _dispatch_confirm_response(payload)

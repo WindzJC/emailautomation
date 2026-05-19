@@ -404,6 +404,33 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
+    def test_private_jc_queue_repair_panel_explains_block_and_calls_repair_endpoint(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "renderPrivateJcQueueRepair",
+            "Private JC queue is blocked because the live queue contains recipients that overlap rejected leads or are outside the current approved source.",
+            "Repair archives the current JC queue, clears the unsafe live file, and rebuilds JC recipients only from the current approved dispatch source. It does not start JC.",
+            "repair-private-jc-queue-btn",
+            "/api/profiles/private_jc/repair-queue",
+            "unsafe_queue_rows_archived",
+            "reject_overlap_rows_removed",
+            "outside_source_rows_removed",
+            "rebuilt_queue_rows",
+            "backup_path",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            ".private-jc-repair-panel",
+            ".private-jc-repair-head",
+            ".private-jc-repair-summary",
+            ".private-jc-repair-feedback-success",
+            ".private-jc-repair-feedback-error",
+        ]:
+            self.assertIn(expected, styles)
+
     def test_dashboard_sender_workspace_uses_master_detail_layout_shell(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
         for expected in [
