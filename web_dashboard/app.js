@@ -4257,6 +4257,43 @@ function sendgridReadyPrivateBlocked(snapshot = lastSnapshot) {
   return sendgridSafety.safe === true && privateSafety.safe === false;
 }
 
+const SENDGRID_METRIC_DISCLAIMER_COPY = "SendGrid delivery status only. Delivered means accepted by the recipient server, not confirmed inbox placement. Non-bounced emails may still land in spam or be filtered. Astra/private JC sends are tracked separately and are not included in SendGrid totals.";
+
+function sendgridBounceRateFromSummary(summary = {}) {
+  const bounced = Number(summary.bounce || 0);
+  const processed = Number(summary.processed || 0);
+  if (!Number.isFinite(bounced) || !Number.isFinite(processed) || processed <= 0) return null;
+  return bounced / processed;
+}
+
+function sendgridBounceRateAlert(summary = {}) {
+  const bounceRate = sendgridBounceRateFromSummary(summary);
+  if (bounceRate == null) return null;
+  if (bounceRate > 0.25) {
+    return {
+      tone: "bad",
+      message: "SendGrid dispatch unsafe. Bounce rate is critically high.",
+    };
+  }
+  if (bounceRate > 0.10) {
+    return {
+      tone: "warn",
+      message: "High SendGrid bounce rate detected. Pause SendGrid dispatch until recipient queues are cleaned.",
+    };
+  }
+  return null;
+}
+
+function renderSendGridMetricDisclaimer(summary = {}) {
+  const alert = sendgridBounceRateAlert(summary);
+  return `
+    <div class="sendgrid-metric-disclaimer ${alert ? `sendgrid-metric-disclaimer-${escapeHtml(alert.tone)}` : ""}">
+      <span>${SENDGRID_METRIC_DISCLAIMER_COPY}</span>
+      ${alert ? `<strong class="sendgrid-metric-disclaimer-alert">${escapeHtml(alert.message)}</strong>` : ""}
+    </div>
+  `;
+}
+
 function resolveSelectedProfile(snapshot) {
   const profiles = snapshot.profiles || [];
   if (!profiles.length) return null;
@@ -5146,6 +5183,7 @@ function renderLiveDelivery(profile, hours) {
         <span class="muted">Compact delivery state for ${hours}h</span>
       </div>
       ${renderDiagnosticRows(rows)}
+      ${renderSendGridMetricDisclaimer(summary)}
       <div class="live-delivery-note">
         <span>${failureBits.length ? failureBits.join(" | ") : "No bounce, block, drop, or spam events in the selected window."}</span>
       </div>

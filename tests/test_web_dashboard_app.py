@@ -378,6 +378,32 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
+    def test_sendgrid_metric_disclaimer_and_bounce_warnings_render_from_existing_metrics(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "SENDGRID_METRIC_DISCLAIMER_COPY",
+            "SendGrid delivery status only. Delivered means accepted by the recipient server, not confirmed inbox placement. Non-bounced emails may still land in spam or be filtered. Astra/private JC sends are tracked separately and are not included in SendGrid totals.",
+            "function sendgridBounceRateFromSummary",
+            "summary.processed",
+            "summary.bounce",
+            "bounceRate > 0.10",
+            "bounceRate > 0.25",
+            "High SendGrid bounce rate detected. Pause SendGrid dispatch until recipient queues are cleaned.",
+            "SendGrid dispatch unsafe. Bounce rate is critically high.",
+            "renderSendGridMetricDisclaimer(summary)",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            ".sendgrid-metric-disclaimer",
+            ".sendgrid-metric-disclaimer-warn",
+            ".sendgrid-metric-disclaimer-bad",
+            ".sendgrid-metric-disclaimer-alert",
+        ]:
+            self.assertIn(expected, styles)
+
     def test_dashboard_sender_workspace_uses_master_detail_layout_shell(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
         for expected in [
