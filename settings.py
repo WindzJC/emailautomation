@@ -111,7 +111,16 @@ DASHBOARD_AUTH_COOKIE_NAME = _env("DASHBOARD_AUTH_COOKIE_NAME", "dashboard_sessi
 DASHBOARD_MAX_UPLOAD_BYTES = _env_int("DASHBOARD_MAX_UPLOAD_BYTES", 25 * 1024 * 1024, minimum=1)
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
-MANAGED_SHARD_HEADERS = ("Email", "FirstName", "BookTitle")
+MANAGED_SHARD_HEADERS = (
+    "Email",
+    "FirstName",
+    "AuthorEmail",
+    "AuthorName",
+    "BookTitle",
+    "source_file",
+    "source_sheet",
+    "source_row",
+)
 
 
 def ensure_dirs(paths: Iterable[Path] | None = None) -> None:

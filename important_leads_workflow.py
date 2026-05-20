@@ -81,6 +81,29 @@ BOOK_TITLE_HEADER_CANDIDATES = (
     "book_title",
     "title",
 )
+AUTHOR_EMAIL_HEADER_CANDIDATES = (
+    "authoremail",
+    "author_email",
+)
+AUTHOR_OUTREACH_HEADERS = (
+    "AuthorEmail",
+    "AuthorName",
+    "Website",
+    "SourceURL",
+    "Location",
+    "BookTitle",
+    "BookURL",
+    "RecentSignal",
+    "IndieOrSmallPressSignal",
+    "WebsitePresentationIssue",
+    "WhyAstraFit",
+    "PersonalizedOpeningLine",
+    "ConfidenceScore",
+)
+AUTHOR_OUTREACH_HEADER_BY_KEY = {
+    "".join(ch for ch in header.strip().lower() if ch.isalnum()): header
+    for header in AUTHOR_OUTREACH_HEADERS
+}
 
 COMMON_DOMAIN_FIXES = {
     "gamil.com": "gmail.com",
@@ -106,8 +129,11 @@ DISPATCH_SOURCE_CLEANED = "cleaned"
 DISPATCH_CAP_ALL = "all"
 DISPATCH_CAP_OPTIONS = ("100", "500", "1000", DISPATCH_CAP_ALL)
 TRIAGED_KEEP_PATH = IMPORTANT_DIR / "leads_triaged_keep.csv"
+TRIAGED_REJECT_PATH = IMPORTANT_DIR / "leads_triaged_reject.csv"
+TRIAGED_QUARANTINE_PATH = IMPORTANT_DIR / "leads_triaged_quarantine.csv"
 STRICT_VERIFIED_PATH = IMPORTANT_DIR / "leads_verified.csv"
 DISPATCH_PREVIEWS_DIR = STATE_DIR / "dispatch_previews"
+DISPATCH_CONFIRMED_DIR = STATE_DIR / "dispatch_confirmed"
 DISPATCH_RUN_HISTORY_PATH = STATE_DIR / "dispatch_run_history.json"
 DISPATCH_RUN_HISTORY_LIMIT = 100
 CHECK_PREVIEW_ROWS = 8
@@ -579,6 +605,7 @@ def _write_csv_atomic(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict
 def _detect_core_headers(fieldnames: Sequence[str]) -> Dict[str, str]:
     return {
         "Email": _pick_header(fieldnames, EMAIL_HEADER_CANDIDATES),
+        "AuthorEmail": _pick_header(fieldnames, AUTHOR_EMAIL_HEADER_CANDIDATES),
         "FullName": _pick_header(fieldnames, FULL_NAME_HEADER_CANDIDATES),
         "FirstName": _pick_header(fieldnames, FIRST_NAME_HEADER_CANDIDATES),
         "LastName": _pick_header(fieldnames, LAST_NAME_HEADER_CANDIDATES),
@@ -608,30 +635,42 @@ def _master_output_headers(fieldnames: Sequence[str], core_headers: Dict[str, st
         "first_name_status",
         "personalization_allowed",
         "cleanup_notes",
+        "last_name",
     ]
     used.update(output_headers)
     source_to_output: Dict[str, str] = {}
 
     full_source = core_headers.get("FullName", "")
     first_source = core_headers.get("FirstName", "")
+    last_source = core_headers.get("LastName", "")
     email_source = core_headers.get("Email", "")
-    book_source = core_headers.get("BookTitle", "")
 
     if full_source:
         source_to_output[full_source] = "FullName"
     if first_source:
         source_to_output[first_source] = "FirstName"
+    if last_source:
+        source_to_output[last_source] = "last_name"
     if email_source:
         source_to_output[email_source] = "Email"
-    if book_source:
-        output_headers.append("BookTitle")
-        used.add("BookTitle")
-        source_to_output[book_source] = "BookTitle"
+
+    for source in fieldnames:
+        canonical = AUTHOR_OUTREACH_HEADER_BY_KEY.get(_normalize_header_key(source))
+        if not canonical:
+            continue
+        if canonical not in used:
+            output_headers.append(canonical)
+            used.add(canonical)
+        # If AuthorEmail or AuthorName were also used as core Email/FullName,
+        # keep the original author outreach column in addition to normalized Email/FullName.
+        if source not in source_to_output:
+            source_to_output[source] = canonical
 
     for source in fieldnames:
         if source in source_to_output:
             continue
-        source_to_output[source] = _unique_header(source, used)
+        canonical = AUTHOR_OUTREACH_HEADER_BY_KEY.get(_normalize_header_key(source))
+        source_to_output[source] = canonical if canonical else _unique_header(source, used)
         output_headers.append(source_to_output[source])
     return output_headers, source_to_output
 
@@ -992,6 +1031,121 @@ def _dispatch_source_snapshot(
     }
 
 
+def _active_staged_batch_source_path(preview: Dict[str, object]) -> Path | None:
+    if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) != DISPATCH_SOURCE_TRIAGED_KEEP:
+        return None
+    source_path = Path(str(preview.get("dispatch_source_path") or ""))
+    if not str(source_path).strip():
+        return TRIAGED_KEEP_PATH
+    return source_path
+
+
+def _assert_active_staged_batch(preview: Dict[str, object]) -> None:
+    source_path = _active_staged_batch_source_path(preview)
+    if source_path is None:
+        return
+    if not source_path.exists():
+        raise RuntimeError(
+            f"No active staged Fast Triage batch found. Run Check Leads and Fast Triage before Confirm Dispatch: "
+            f"{_source_path_label(source_path)}"
+        )
+    headers, rows = _read_csv_rows(source_path)
+    if not headers or not rows:
+        raise RuntimeError(
+            f"Active staged Fast Triage batch is empty. Run Check Leads and Fast Triage before Confirm Dispatch: "
+            f"{_source_path_label(source_path)}"
+        )
+
+
+def _path_from_staged_label(label: object, default: Path) -> Path:
+    text = str(label or "").strip()
+    if not text:
+        return default
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    return settings.APP_ROOT / path
+
+
+def _staged_batch_paths_for_cleanup(preview: Dict[str, object]) -> Dict[str, Path]:
+    keep_path = _active_staged_batch_source_path(preview) or TRIAGED_KEEP_PATH
+    return {
+        "cleaned": _path_from_staged_label(preview.get("master_label"), MASTER_OUTPUT_PATH),
+        "rejected": _path_from_staged_label(preview.get("rejected_label"), MASTER_REJECTED_PATH),
+        "triaged_keep": keep_path,
+        "triaged_reject": keep_path.with_name(TRIAGED_REJECT_PATH.name),
+        "triaged_quarantine": keep_path.with_name(TRIAGED_QUARANTINE_PATH.name),
+    }
+
+
+def _staged_batch_archive_dir(backup_root: Path, run_id: str) -> Path:
+    match = re.search(r"(\d{8}_\d{6})", str(run_id or ""))
+    slug = match.group(1) if match else timestamp_slug()
+    archive_dir = backup_root / "staged_batches" / f"dispatch_{slug}"
+    if archive_dir.exists():
+        archive_dir = backup_root / "staged_batches" / f"dispatch_{slug}_{uuid.uuid4().hex[:8]}"
+    return archive_dir
+
+
+def _archive_and_clear_staged_batch(
+    *,
+    preview: Dict[str, object],
+    report: Dict[str, object],
+    backup_root: Path,
+) -> Dict[str, object]:
+    if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) != DISPATCH_SOURCE_TRIAGED_KEEP:
+        return {
+            "archived": False,
+            "cleared": False,
+            "reason": "dispatch_source_not_fast_triage_keep",
+            "archive_path": "",
+            "files": [],
+        }
+
+    paths_by_key = _staged_batch_paths_for_cleanup(preview)
+    existing = [(key, path) for key, path in paths_by_key.items() if path.exists()]
+    archive_dir = _staged_batch_archive_dir(backup_root, str(report.get("run_id") or ""))
+    archived_files: List[Dict[str, object]] = []
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    for key, path in existing:
+        target = archive_dir / path.name
+        shutil.copy2(path, target)
+        archived_files.append(
+            {
+                "key": key,
+                "source_path": str(path),
+                "archive_path": str(target),
+                "size": int(target.stat().st_size),
+            }
+        )
+
+    metadata = {
+        "dispatch_id": str(report.get("run_id") or ""),
+        "timestamp": iso_utc(),
+        "source_path": str(report.get("dispatch_source_path") or preview.get("dispatch_source_path") or ""),
+        "source_row_count": int(report.get("dispatch_source_row_count") or preview.get("dispatch_source_row_count") or 0),
+        "added_astra": int(report.get("added_astra") or 0),
+        "added_sendgrid": int(report.get("added_sendgrid") or 0),
+        "skipped_rows": (
+            int(report.get("suppressed_skipped") or 0)
+            + int(report.get("duplicate_master_skipped") or 0)
+            + int(report.get("skipped_both") or 0)
+            + int(report.get("invalid_malformed_skipped") or 0)
+        ),
+        "archive_path": str(archive_dir),
+        "files": archived_files,
+    }
+    (archive_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    for _key, path in existing:
+        path.unlink()
+
+    metadata["archived"] = bool(archived_files)
+    metadata["cleared"] = bool(archived_files)
+    return metadata
+
+
 def _dispatch_source_display_name(mode: str) -> str:
     normalized = _normalize_dispatch_source_mode(mode)
     if normalized == DISPATCH_SOURCE_TRIAGED_KEEP:
@@ -1128,6 +1282,86 @@ def _save_dispatch_preview(preview: Dict[str, object], preview_dir: Path) -> Pat
     path = _dispatch_preview_path(preview_id, preview_dir)
     payload = dict(preview)
     payload["updated_at_utc"] = iso_utc()
+    write_json_atomic(path, payload)
+    return path
+
+
+def _unique_dispatch_archive_path(directory: Path, prefix: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    base = f"{prefix}_{timestamp_slug()}"
+    candidate = directory / f"{base}.json"
+    index = 2
+    while candidate.exists():
+        candidate = directory / f"{base}_{index}.json"
+        index += 1
+    return candidate
+
+
+def _archive_assigned_dispatch_preview(preview: Dict[str, object], archive_dir: Path = DISPATCH_PREVIEWS_DIR) -> Path:
+    path = _unique_dispatch_archive_path(archive_dir, "dispatch_preview")
+    queue_rows = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+    payload = {
+        "archived_at_utc": iso_utc(),
+        "preview_id": str(preview.get("preview_id") or ""),
+        "status": str(preview.get("status") or ""),
+        "source_path": str(preview.get("dispatch_source_path") or ""),
+        "source_row_count": int(preview.get("dispatch_source_row_count") or 0),
+        "eligible_row_count": int(preview.get("dispatch_eligible_row_count") or 0),
+        "selected_row_count": int(preview.get("dispatch_selected_row_count") or 0),
+        "private_jc_planned_rows": list(queue_rows.get("private_jc") or []),
+        "sendgrid_planned_rows": [
+            row
+            for key in [f"sendgrid_{index}" for index in range(1, 6)]
+            for row in list(queue_rows.get(key) or [])
+        ],
+        "per_shard_planned_rows": {
+            key: list(queue_rows.get(key) or [])
+            for key in ["private_jc", *[f"sendgrid_{index}" for index in range(1, 6)]]
+        },
+        "skipped_rows": int(preview.get("skipped_both") or 0),
+        "skipped_reasons": dict(preview.get("exclusion_reason_counts") or {}),
+        "suppressed_rows": int(preview.get("suppressed_skipped") or preview.get("skipped_suppressed") or 0),
+        "duplicate_or_already_queued_rows": int(preview.get("duplicate_master_skipped") or 0)
+        + int(preview.get("skipped_already_queued") or 0),
+        "counts": {
+            "private_jc": int(preview.get("rows_to_add_private_jc") or preview.get("added_astra") or 0),
+            "sendgrid": int(preview.get("rows_to_add_sendgrid") or preview.get("added_sendgrid") or 0),
+            "sg1": int(preview.get("rows_to_add_sendgrid_1") or preview.get("assigned_sg1") or 0),
+            "sg2": int(preview.get("rows_to_add_sendgrid_2") or preview.get("assigned_sg2") or 0),
+            "sg3": int(preview.get("rows_to_add_sendgrid_3") or preview.get("assigned_sg3") or 0),
+            "sg4": int(preview.get("rows_to_add_sendgrid_4") or preview.get("assigned_sg4") or 0),
+            "sg5": int(preview.get("rows_to_add_sendgrid_5") or preview.get("assigned_sg5") or 0),
+        },
+    }
+    write_json_atomic(path, payload)
+    return path
+
+
+def _archive_confirmed_dispatch_summary(report: Dict[str, object], archive_dir: Path = DISPATCH_CONFIRMED_DIR) -> Path:
+    path = _unique_dispatch_archive_path(archive_dir, "dispatch_confirmed")
+    payload = {
+        "confirmed_at": str(report.get("completed_at_utc") or report.get("generated_at_utc") or ""),
+        "confirmed_at_utc": str(report.get("completed_at_utc") or report.get("generated_at_utc") or ""),
+        "run_id": str(report.get("run_id") or ""),
+        "preview_id": str(report.get("preview_id") or ""),
+        "source_path": str(report.get("dispatch_source_path") or ""),
+        "source_rows": int(report.get("dispatch_source_row_count") or 0),
+        "eligible_rows": int(report.get("dispatch_eligible_row_count") or 0),
+        "selected_rows": int(report.get("dispatch_selected_row_count") or 0),
+        "private_jc_added": int(report.get("added_astra") or 0),
+        "sendgrid_added": int(report.get("added_sendgrid") or 0),
+        "sg1_added": int(report.get("assigned_sg1") or 0),
+        "sg2_added": int(report.get("assigned_sg2") or 0),
+        "sg3_added": int(report.get("assigned_sg3") or 0),
+        "sg4_added": int(report.get("assigned_sg4") or 0),
+        "sg5_added": int(report.get("assigned_sg5") or 0),
+        "skipped_both": int(report.get("skipped_both") or 0),
+        "suppressed": int(report.get("suppressed_skipped") or report.get("skipped_suppressed") or 0),
+        "backup_path": str(report.get("backup_dir") or ""),
+        "queue_paths_written": dict(report.get("queue_paths") or {}),
+        "assigned_preview_archive_path": str(report.get("assigned_preview_archive_path") or ""),
+        "report": report,
+    }
     write_json_atomic(path, payload)
     return path
 
@@ -1377,13 +1611,27 @@ def _build_dispatch_plan(
         suppressed_path=suppressed_path,
         unsubscribed_path=unsubscribed_path,
     )
-    default_jc_path, default_sendgrid_paths, default_jc_log_path, default_sendgrid_log_paths = _dispatch_profile_paths()
+    default_jc_path: Path | None = None
+    default_sendgrid_paths: List[Path] | None = None
+    default_jc_log_path: Path | None = None
+    default_sendgrid_log_paths: List[Path] | None = None
+    if (
+        jc_queue_path is None
+        or sendgrid_queue_paths is None
+        or jc_log_path is None
+        or sendgrid_log_paths is None
+    ):
+        default_jc_path, default_sendgrid_paths, default_jc_log_path, default_sendgrid_log_paths = _dispatch_profile_paths()
     jc_path = jc_queue_path or default_jc_path
-    sendgrid_paths = list(sendgrid_queue_paths or default_sendgrid_paths)
+    if jc_path is None:
+        raise ValueError("Dispatch requires a Private JC queue file.")
+    sendgrid_paths = list(sendgrid_queue_paths or default_sendgrid_paths or [])
     if len(sendgrid_paths) != 5:
         raise ValueError("Dispatch requires exactly 5 SendGrid queue files.")
     jc_log = jc_log_path or default_jc_log_path
-    sg_logs = list(sendgrid_log_paths or default_sendgrid_log_paths)
+    if jc_log is None:
+        raise ValueError("Dispatch requires a Private JC log file.")
+    sg_logs = list(sendgrid_log_paths or default_sendgrid_log_paths or [])
     if len(sg_logs) != len(sendgrid_paths):
         raise ValueError("Dispatch requires one SendGrid log file per SendGrid queue.")
     queue_paths = [jc_path, *sendgrid_paths]
@@ -1446,6 +1694,7 @@ def _build_dispatch_plan(
         skipped_both = 0
         outcome_counts: Counter[str] = Counter()
         exclusion_reason_counts: Counter[str] = Counter()
+        already_contacted_evidence: List[Dict[str, str]] = []
         plan_dispatch_events_by_queue: Dict[str, List[Dict[str, str]]] = {
             "private_jc": [],
             "sendgrid_1": [],
@@ -1472,6 +1721,8 @@ def _build_dispatch_plan(
             if lead_id in contacted_lead_ids:
                 already_contacted_skipped += 1
                 exclusion_reason_counts["already_contacted"] += 1
+                if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
+                    already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 continue
 
             if email in blocked_emails:
@@ -1606,6 +1857,7 @@ def _build_dispatch_plan(
             "skipped_suppressed": suppressed_skipped,
             "suppressed_skipped": suppressed_skipped,
             "skipped_already_contacted": already_contacted_skipped,
+            "already_contacted_evidence": already_contacted_evidence,
             "duplicate_master_skipped": duplicate_master_skipped,
             "skipped_astra_already_sent": skipped_astra_already_sent,
             "skipped_astra_already_queued": skipped_astra_already_queued,
@@ -1705,6 +1957,8 @@ def preview_dispatch_master_leads(
         "preview_path": str(_dispatch_preview_path(preview_id, preview_dir)),
         "lead_ledger_db_path": str(_lead_ledger_db_path(lead_ledger_db_path)),
     }
+    assigned_preview_archive_path = _archive_assigned_dispatch_preview(preview)
+    preview["assigned_preview_archive_path"] = str(assigned_preview_archive_path)
     _save_dispatch_preview(preview, preview_dir)
     return preview
 
@@ -1718,6 +1972,7 @@ def validate_dispatch_preview(
     status = str(preview.get("status") or "").strip().lower()
     if status not in {"previewed", "ready"}:
         raise RuntimeError("Dispatch preview was already used or is no longer valid. Re-run Preview Dispatch.")
+    _assert_active_staged_batch(preview)
 
     dependency_paths = preview.get("dependency_fingerprints") or {}
     if not isinstance(dependency_paths, dict):
@@ -1781,6 +2036,18 @@ def confirm_dispatch_preview(
     plan_rows_by_queue = preview.get("plan_rows_by_queue") or {}
     if not isinstance(plan_rows_by_queue, dict):
         raise RuntimeError("Dispatch preview is missing planned queue rows. Re-run Preview Dispatch.")
+    planned_row_count = sum(
+        len(value)
+        for value in plan_rows_by_queue.values()
+        if isinstance(value, list)
+    )
+    expected_write_count = int(preview.get("total_rows_would_write") or 0)
+    if expected_write_count > 0 and planned_row_count <= 0:
+        raise RuntimeError("Dispatch preview has no stored assigned rows. Re-run Preview Dispatch before confirming again.")
+    if expected_write_count == 0 and planned_row_count != 0:
+        raise RuntimeError("Dispatch preview count mismatch. Re-run Preview Dispatch before confirming again.")
+    if expected_write_count == 0 and not isinstance(preview.get("exclusion_reason_counts"), dict):
+        raise RuntimeError("Dispatch preview has no stored assigned rows or explicit zero-add reasons. Re-run Preview Dispatch before confirming again.")
 
     run_id = f"dispatch_run_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     started_at_utc = iso_utc()
@@ -1869,19 +2136,46 @@ def confirm_dispatch_preview(
         "assigned_sg5": int(preview.get("assigned_sg5") or 0),
         "skipped_both": int(preview.get("skipped_both") or 0),
         "rows_written_per_queue": dict(preview.get("rows_written_per_queue") or {}),
+        "queue_paths": dict(preview.get("queue_paths") or {}),
         "final_queue_counts": final_queue_counts,
         "queue_headers": queue_headers,
         "outcome_counts": dict(preview.get("outcome_counts") or {}),
         "exclusion_reason_counts": dict(preview.get("exclusion_reason_counts") or {}),
         "assigned_preview_rows": list(preview.get("assigned_preview_rows") or []),
+        "assigned_preview_archive_path": str(preview.get("assigned_preview_archive_path") or ""),
         "dispatch_source_preview_rows": list(preview.get("dispatch_source_preview_rows") or []),
         "total_rows_would_write": int(preview.get("total_rows_would_write") or 0),
         "skipped_already_contacted": int(preview.get("skipped_already_contacted") or 0),
+        "already_contacted_evidence": list(preview.get("already_contacted_evidence") or []),
         "skipped_invalid_source_row": int(preview.get("skipped_invalid_source_row") or 0),
         "dispatch_history_rows_created": int(dispatch_history_rows_created or 0),
         "dispatch_history_rows_per_queue": dict(dispatch_history_rows_per_queue),
     }
     report.update(_dispatch_alias_fields(report))
+    staged_batch_cleanup = _archive_and_clear_staged_batch(
+        preview=preview,
+        report=report,
+        backup_root=backup_root,
+    )
+    report["staged_batch_cleanup"] = staged_batch_cleanup
+    report["staged_batch_archive_path"] = str(staged_batch_cleanup.get("archive_path") or "")
+    report["message"] = (
+        "Dispatch confirmed. Staged batch archived and cleared. Run Check Leads and Fast Triage before previewing another batch."
+        if bool(staged_batch_cleanup.get("cleared"))
+        else "Dispatch confirmed."
+    )
+    if not str(report.get("assigned_preview_archive_path") or "").strip():
+        assigned_preview_archive_path = _archive_assigned_dispatch_preview(preview, report_dir / "dispatch_previews")
+        report["assigned_preview_archive_path"] = str(assigned_preview_archive_path)
+    report["private_jc_added"] = int(report.get("added_astra") or 0)
+    report["sendgrid_added"] = int(report.get("added_sendgrid") or 0)
+    report["sg1_added"] = int(report.get("assigned_sg1") or 0)
+    report["sg2_added"] = int(report.get("assigned_sg2") or 0)
+    report["sg3_added"] = int(report.get("assigned_sg3") or 0)
+    report["sg4_added"] = int(report.get("assigned_sg4") or 0)
+    report["sg5_added"] = int(report.get("assigned_sg5") or 0)
+    confirmed_summary_path = _archive_confirmed_dispatch_summary(report, report_dir / "dispatch_confirmed")
+    report["confirmed_summary_path"] = str(confirmed_summary_path)
 
     report_path = report_dir / f"important_leads_dispatch_{timestamp_slug()}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1973,6 +2267,10 @@ def check_master_leads(
         normalized_row = {header: "" for header in output_headers}
         for source, target in source_to_output.items():
             normalized_row[target] = _strip_cell(raw_row.get(source, ""))
+        for source in fieldnames:
+            canonical = AUTHOR_OUTREACH_HEADER_BY_KEY.get(_normalize_header_key(source))
+            if canonical and canonical in normalized_row:
+                normalized_row[canonical] = _strip_cell(raw_row.get(source, ""))
         normalized_row["FullName"] = _full_identity_value(raw_row, core_headers)
         first_name_source = _first_name_source(raw_row, normalized_row, core_headers)
         first_name_hygiene = _first_name_hygiene(first_name_source)
@@ -1987,8 +2285,11 @@ def check_master_leads(
             if first_raw and not normalized_row["FullName"]:
                 normalized_row["FullName"] = first_raw
 
+        email_raw = _strip_cell(raw_row.get(core_headers["Email"], "")) if core_headers.get("Email") else ""
+        if not email_raw and core_headers.get("AuthorEmail"):
+            email_raw = _strip_cell(raw_row.get(core_headers["AuthorEmail"], ""))
         validation = _email_validation_result(
-            raw_row.get(core_headers["Email"], ""),
+            email_raw,
             check_deliverability=deliverability_enabled,
         )
         normalized_email = validation["normalized_email"]
@@ -2158,6 +2459,42 @@ def _dispatch_profile_paths() -> tuple[Path, List[Path], Path, List[Path]]:
     return jc_path, shard_paths, jc_log_path, sendgrid_log_paths
 
 
+def _dispatch_history_evidence_for_lead(conn, lead_id: str, email: str) -> dict[str, str]:
+    try:
+        row = conn.execute(
+            """
+            SELECT run_id, dispatch_source, profile, queue_target, dispatched_at, result_status, result_reason, updated_at
+            FROM lead_dispatch_history
+            WHERE lead_id = ?
+            ORDER BY dispatched_at DESC, updated_at DESC
+            LIMIT 1
+            """,
+            (str(lead_id or "").strip(),),
+        ).fetchone()
+    except Exception:
+        row = None
+    if row is None:
+        return {
+            "matched_email": email,
+            "normalized_matched_email": email,
+            "contact_ledger_source_file": str(_lead_ledger_db_path()),
+            "matching_rule": "exact_normalized_email",
+        }
+    return {
+        "matched_email": email,
+        "normalized_matched_email": email,
+        "contact_ledger_source_file": str(_lead_ledger_db_path()),
+        "sent_at": str(row["dispatched_at"] or ""),
+        "contacted_at": str(row["dispatched_at"] or row["updated_at"] or ""),
+        "channel": str(row["queue_target"] or row["profile"] or ""),
+        "campaign": str(row["run_id"] or row["dispatch_source"] or ""),
+        "subject": "",
+        "matching_rule": "exact_normalized_email",
+        "result_status": str(row["result_status"] or ""),
+        "result_reason": str(row["result_reason"] or ""),
+    }
+
+
 def _read_queue_rows(path: Path) -> tuple[List[str], List[Dict[str, str]]]:
     if not path.exists():
         return [], []
@@ -2191,9 +2528,7 @@ def _queue_output_headers(existing_headers: Iterable[Sequence[str]], master_head
     seen = set(output)
 
     def maybe_add(value: str) -> None:
-        key = "FirstName" if value in {"FirstName", "AuthorName"} else value
-        if key == "FullName":
-            return
+        key = value
         if not key or key in seen or key == "Email":
             return
         seen.add(key)
@@ -2202,7 +2537,7 @@ def _queue_output_headers(existing_headers: Iterable[Sequence[str]], master_head
     for header in master_headers:
         if header == "Email":
             continue
-        if header in {"FirstName", "FullName", "AuthorName"}:
+        if header == "FirstName":
             continue
         maybe_add(header)
 

@@ -448,7 +448,10 @@ class SendShardTests(unittest.TestCase):
                 resolved = _resolve_shard_path("recipients_private_jc.csv")
                 self.assertEqual(shards / "recipients_private_jc.csv", resolved)
                 self.assertTrue(resolved.exists())
-                self.assertEqual("Email,FirstName,BookTitle\n", resolved.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    "Email,FirstName,AuthorEmail,AuthorName,BookTitle,source_file,source_sheet,source_row\n",
+                    resolved.read_text(encoding="utf-8"),
+                )
 
     def test_prioritize_always_send_rows_moves_probe_to_front(self) -> None:
         rows = [
@@ -606,10 +609,7 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn(
-            "My team works with independent authors to improve how their work is presented online, especially through clearer websites, stronger book visuals, and more polished launch materials.",
-            body_text,
-        )
+        self.assertIn("I came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
         self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("your book", body_text)
@@ -628,7 +628,7 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("My team works with independent authors", body_text)
+        self.assertIn("I came across your author profile", body_text)
         self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
@@ -646,11 +646,124 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Consignment review for The Quiet Harbor", subject_text)
-        self.assertIn("Our team came across The Quiet Harbor", body_text)
+        self.assertIn("I came across The Quiet Harbor", body_text)
+        self.assertNotIn("Our team came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
-        self.assertNotIn("My team works with independent authors", body_text)
+        self.assertNotIn("I came across your author profile", body_text)
         self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
+
+    def test_raw_title_alias_resolves_to_canonical_book_title_before_render(self) -> None:
+        row = {
+            "Email": "reader@example.test",
+            "FirstName": "Tina",
+            "AuthorName": "Tina Writer",
+            "Title": "The Alias Harbor",
+        }
+        merge_fields = send_shard.row_merge_fields(row, row["Email"], "Tina", "")
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email=row["Email"],
+            author="Tina",
+            book_title="",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            merge_fields=merge_fields,
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("The Alias Harbor", merge_fields["BookTitle"])
+        self.assertEqual("Consignment review for The Alias Harbor", subject_text)
+        self.assertIn("I came across The Alias Harbor", body_text)
+        self.assertNotIn("{Title}", body_text)
+
+    def test_unsafe_title_alias_is_blanked_and_uses_author_profile_fallback(self) -> None:
+        row = {
+            "Email": "reader@example.test",
+            "FirstName": "Tina",
+            "last_name": "Writer",
+            "AuthorName": "Tina Writer",
+            "Title": "Completed",
+            "Publication Title": "Tina Writer",
+            "Product Title": "https://example.test/book",
+        }
+        merge_fields = send_shard.row_merge_fields(row, row["Email"], "Tina", "")
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email=row["Email"],
+            author="Tina",
+            book_title="",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            merge_fields=merge_fields,
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("", merge_fields["BookTitle"])
+        self.assertEqual("Independent author consignment review", subject_text)
+        self.assertIn("I came across your author profile", body_text)
+        self.assertNotIn("Completed", body_text)
+        self.assertNotIn("Tina Writer", subject_text)
+
+    def test_title_matching_first_and_last_name_is_unsafe_without_author_name(self) -> None:
+        row = {
+            "Email": "reader@example.test",
+            "first_name": "Tina",
+            "last_name": "Writer",
+            "Title": "Tina Writer",
+        }
+        merge_fields = send_shard.row_merge_fields(row, row["Email"], "Tina", "")
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email=row["Email"],
+            author="Tina",
+            book_title="",
+            subject="Consignment review for {BookTitle}",
+            body_template=send_shard.PITCH_1_5_BODY,
+            unsub_email="annette@barnesnoblemarketing.com",
+            merge_fields=merge_fields,
+            subject_fallback="Independent author consignment review",
+        )
+
+        self.assertEqual("", merge_fields["BookTitle"])
+        self.assertEqual("Independent author consignment review", subject_text)
+        self.assertIn("I came across your author profile", body_text)
+        self.assertNotIn("I came across Tina Writer", body_text)
+
+    def test_title_template_placeholder_is_blocked(self) -> None:
+        with self.assertRaises(ValueError):
+            render_message_parts(
+                "Tina",
+                "The Alias Harbor",
+                "Consignment review for {Title}",
+                "Hi {FirstName},\n\nI came across {Title}.",
+                "unsubscribe@example.test",
+                signature_file=None,
+                merge_fields={"FirstName": "Tina", "BookTitle": "The Alias Harbor"},
+            )
+
+    def test_title_only_queue_passes_fallback_capable_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            csv_path.write_text(
+                "Email,FirstName,AuthorName,Title\n"
+                "reader@example.test,Tina,Tina Writer,The Alias Harbor\n",
+                encoding="utf-8",
+            )
+            rows = send_shard.read_rows(csv_path)
+
+            self.assertTrue(
+                send_shard.validate_book_title_queue_contract(
+                    csv_path=csv_path,
+                    rows=rows,
+                    subject="Consignment review for {BookTitle}",
+                    body_template=send_shard.PITCH_1_5_BODY,
+                    profile_name="sendgrid_annette",
+                    subject_fallback="Independent author consignment review",
+                )
+            )
 
     def test_placeholder_like_book_title_values_are_normalized_before_render(self) -> None:
         cases = [
@@ -760,7 +873,8 @@ class SendShardTests(unittest.TestCase):
                 subject_fallback="Independent author consignment review",
             )
             self.assertEqual("Consignment review for The Quiet Harbor", titled_subject)
-            self.assertIn("Our team came across The Quiet Harbor", titled_body)
+            self.assertIn("I came across The Quiet Harbor", titled_body)
+            self.assertNotIn("Our team came across The Quiet Harbor", titled_body)
             self.assertNotIn("My team came across The Quiet Harbor", titled_body)
             self.assertNotIn("{BookTitle}", titled_body)
             self.assertNotIn("your book", titled_body)
@@ -777,7 +891,7 @@ class SendShardTests(unittest.TestCase):
                 subject_fallback="Independent author consignment review",
             )
             self.assertEqual("Independent author consignment review", fallback_subject)
-            self.assertIn("My team works with independent authors", fallback_body)
+            self.assertIn("I came across your author profile", fallback_body)
             self.assertNotIn("My team came across", fallback_body)
             self.assertNotIn("Our team came across", fallback_body)
             self.assertNotIn("{BookTitle}", fallback_body)
@@ -840,7 +954,7 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("A trailer idea for independent authors", subject_text)
-        self.assertIn("My team works with independent authors", body_text)
+        self.assertIn("I came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
         self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
@@ -860,9 +974,10 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("A trailer idea for The Quiet Harbor", subject_text)
-        self.assertIn("My team came across The Quiet Harbor", body_text)
+        self.assertIn("I came across The Quiet Harbor", body_text)
+        self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
-        self.assertNotIn("My team works with independent authors", body_text)
+        self.assertNotIn("I came across your author profile", body_text)
         self.assertNotIn("{BookTitle}", body_text)
         self.assertNotIn("your book", body_text)
 

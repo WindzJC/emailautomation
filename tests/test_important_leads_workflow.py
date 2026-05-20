@@ -28,6 +28,177 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def test_author_outreach_fields_survive_check_triage_preview_and_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "authors.csv"
+            checked_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            strict_verified_path = tmp / "leads_verified.csv"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
+            ledger_path = tmp / "lead_ledger.sqlite3"
+            preview_dir = tmp / "previews"
+            backups_dir = tmp / "backups"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            jc_log = tmp / "private_jc_log.csv"
+            sg_logs = [tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]
+            author_headers = [
+                "AuthorName",
+                "AuthorEmail",
+                "Website",
+                "SourceURL",
+                "Location",
+                "BookTitle",
+                "BookURL",
+                "RecentSignal",
+                "IndieOrSmallPressSignal",
+                "WebsitePresentationIssue",
+                "WhyAstraFit",
+                "PersonalizedOpeningLine",
+                "ConfidenceScore",
+                "ExtraProofColumn",
+            ]
+            write_csv(
+                input_path,
+                author_headers,
+                [
+                    {
+                        "AuthorName": "Lisa Stone",
+                        "AuthorEmail": "lisa@stonebooks.com",
+                        "Website": "https://stonebooks.com",
+                        "SourceURL": "https://source.test/lisa",
+                        "Location": "Austin, TX",
+                        "BookTitle": "The Quiet Harbor",
+                        "BookURL": "https://books.test/quiet-harbor",
+                        "RecentSignal": "Recent author event",
+                        "IndieOrSmallPressSignal": "Small press imprint",
+                        "WebsitePresentationIssue": "Book page lacks trailer",
+                        "WhyAstraFit": "Strong visual fiction brand",
+                        "PersonalizedOpeningLine": "I noticed your recent event for The Quiet Harbor.",
+                        "ConfidenceScore": "91",
+                        "ExtraProofColumn": "keep this proof",
+                    }
+                ],
+            )
+            write_csv(suppressed_path, ["Email"], [])
+            write_csv(unsubscribed_path, ["Email"], [])
+            write_csv(sendgrid_suppressions_path, ["email", "state", "type"], [])
+            write_csv(strict_verified_path, ["Email", "FirstName"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            write_csv(jc_log, ["Email", "Status"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in sg_logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            check_master_leads(
+                input_path=input_path,
+                output_path=checked_path,
+                rejected_path=rejected_path,
+                sendgrid_suppressions_path=sendgrid_suppressions_path,
+                suppressed_path=suppressed_path,
+                unsubscribed_path=unsubscribed_path,
+                report_dir=tmp,
+                summary_dir=tmp / "check_runs",
+                validate_deliverability=False,
+                reject_role_accounts=False,
+                reject_disposable=False,
+                persist_state=False,
+            )
+            with checked_path.open(newline="", encoding="utf-8-sig") as handle:
+                checked_reader = csv.DictReader(handle)
+                checked_rows = list(checked_reader)
+            required_headers = {
+                "Email",
+                "AuthorEmail",
+                "AuthorName",
+                "FirstName",
+                "first_name_clean",
+                "BookTitle",
+                "PersonalizedOpeningLine",
+                "ConfidenceScore",
+                "Website",
+                "SourceURL",
+                "BookURL",
+                "Location",
+                "RecentSignal",
+                "IndieOrSmallPressSignal",
+                "WebsitePresentationIssue",
+                "WhyAstraFit",
+                "ExtraProofColumn",
+            }
+            self.assertTrue(required_headers.issubset(set(checked_reader.fieldnames or [])))
+            self.assertEqual("lisa@stonebooks.com", checked_rows[0]["Email"])
+            self.assertEqual("lisa@stonebooks.com", checked_rows[0]["AuthorEmail"])
+            self.assertEqual("Lisa Stone", checked_rows[0]["AuthorName"])
+            self.assertEqual("Lisa", checked_rows[0]["FirstName"])
+            self.assertEqual("Lisa", checked_rows[0]["first_name_clean"])
+            self.assertEqual("I noticed your recent event for The Quiet Harbor.", checked_rows[0]["PersonalizedOpeningLine"])
+
+            with patch.object(important_leads_verify, "_lead_ledger_db_path", return_value=ledger_path):
+                important_leads_verify.fast_triage_master_leads(
+                    input_path=checked_path,
+                    keep_path=triaged_keep_path,
+                    rejected_path=triaged_reject_path,
+                    quarantine_path=triaged_quarantine_path,
+                    persist_state=False,
+                    disposable_domains=set(),
+                )
+            with triaged_keep_path.open(newline="", encoding="utf-8-sig") as handle:
+                triage_reader = csv.DictReader(handle)
+                triage_rows = list(triage_reader)
+            self.assertEqual(1, len(triage_rows))
+            self.assertTrue(required_headers.issubset(set(triage_reader.fieldnames or [])))
+
+            preview = preview_dispatch_master_leads(
+                master_path=checked_path,
+                rejected_path=rejected_path,
+                verified_path=strict_verified_path,
+                triaged_keep_path=triaged_keep_path,
+                dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=jc_log,
+                sendgrid_log_paths=sg_logs,
+                sendgrid_suppressions_path=sendgrid_suppressions_path,
+                suppressed_path=suppressed_path,
+                unsubscribed_path=unsubscribed_path,
+                lead_ledger_db_path=ledger_path,
+                preview_dir=preview_dir,
+            )
+            self.assertIn("BookTitle", preview["queue_headers"])
+            self.assertIn("PersonalizedOpeningLine", preview["queue_headers"])
+            self.assertIn("AuthorName", preview["queue_headers"])
+            self.assertIn("AuthorEmail", preview["queue_headers"])
+            planned_sg_rows = [row for key, rows in preview["plan_rows_by_queue"].items() if key.startswith("sendgrid_") for row in rows]
+            self.assertEqual("The Quiet Harbor", planned_sg_rows[0]["BookTitle"])
+            self.assertEqual("I noticed your recent event for The Quiet Harbor.", planned_sg_rows[0]["PersonalizedOpeningLine"])
+
+            confirm_dispatch_preview(
+                preview["preview_id"],
+                require_stopped=False,
+                backup_root=backups_dir,
+                report_dir=tmp,
+                persist_state=False,
+                preview_dir=preview_dir,
+            )
+            queued_headers = set()
+            queued_rows: list[dict[str, str]] = []
+            for path in sg_queues:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    reader = csv.DictReader(handle)
+                    queued_headers.update(reader.fieldnames or [])
+                    queued_rows.extend(list(reader))
+            self.assertTrue({"BookTitle", "PersonalizedOpeningLine", "AuthorName", "AuthorEmail"}.issubset(queued_headers))
+            self.assertEqual("The Quiet Harbor", queued_rows[0]["BookTitle"])
+            self.assertEqual("I noticed your recent event for The Quiet Harbor.", queued_rows[0]["PersonalizedOpeningLine"])
+
     def test_saved_windows_paths_reset_to_local_important_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -173,6 +344,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     "first_name_status",
                     "personalization_allowed",
                     "cleanup_notes",
+                    "last_name",
+                    "AuthorEmail",
                     "Source",
                 ],
             )
@@ -187,6 +360,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(rows[0]["first_name_status"], "valid")
             self.assertEqual(rows[0]["personalization_allowed"], "true")
             self.assertEqual(rows[0]["Email"], "alice@gmail.com")
+            self.assertEqual(rows[0]["AuthorEmail"], "Alice@Gmial.com")
             self.assertEqual(rows[0]["Source"], "list-a")
             self.assertEqual(rows[1]["Email"], "bob@yahoo.com")
 
@@ -220,6 +394,130 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(summary["invalid_syntax_removed"], 1)
             self.assertEqual(summary["blank_rows"], 1)
             self.assertFalse(summary["deliverability_enabled"])
+
+    def test_lead_op_fields_preserved_in_cleaned_and_rejected_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "lead_op_upload.csv"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            headers = [
+                "AuthorName",
+                "AuthorEmail",
+                "BookTitle",
+                "PersonalizedOpeningLine",
+                "WhyAstraFit",
+                "Website",
+                "BookURL",
+                "ConfidenceScore",
+                "source_file",
+                "source_sheet",
+                "source_row",
+            ]
+            write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        "AuthorName": "Casey Vale",
+                        "AuthorEmail": "casey.vale@example.org",
+                        "BookTitle": "Harbor Signals",
+                        "PersonalizedOpeningLine": "I noticed the launch page for Harbor Signals.",
+                        "WhyAstraFit": "The book page would benefit from clearer retail links.",
+                        "Website": "https://casey.example.org",
+                        "BookURL": "https://books.example.org/harbor-signals",
+                        "ConfidenceScore": "94",
+                        "source_file": "synthetic_upload.csv",
+                        "source_sheet": "Authors",
+                        "source_row": "2",
+                    },
+                    {
+                        "AuthorName": "Morgan Reed",
+                        "AuthorEmail": "not-an-email",
+                        "BookTitle": "Broken Compass",
+                        "PersonalizedOpeningLine": "I noticed the listing for Broken Compass.",
+                        "WhyAstraFit": "Synthetic rejected-row proof.",
+                        "Website": "https://morgan.example.org",
+                        "BookURL": "https://books.example.org/broken-compass",
+                        "ConfidenceScore": "71",
+                        "source_file": "synthetic_upload.csv",
+                        "source_sheet": "Authors",
+                        "source_row": "3",
+                    },
+                ],
+            )
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+
+            report = check_master_leads(
+                input_path=input_path,
+                output_path=output_path,
+                rejected_path=rejected_path,
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                report_dir=tmp / "reports",
+                summary_dir=tmp / "check_runs",
+                validate_deliverability=False,
+                reject_role_accounts=False,
+                reject_disposable=False,
+                persist_state=False,
+            )
+
+            self.assertEqual(2, report["total_input_rows"])
+            self.assertEqual(1, report["cleaned_rows"])
+            self.assertEqual(1, report["rejected_rows"])
+            self.assertEqual(1, report["reason_counts"]["INVALID_EMAIL_SYNTAX"])
+            expected_headers = {
+                "FullName",
+                "FirstName",
+                "Email",
+                "first_name_clean",
+                "last_name_clean",
+                "first_name_status",
+                "personalization_allowed",
+                "cleanup_notes",
+                "last_name",
+                "BookTitle",
+                "AuthorName",
+                "AuthorEmail",
+                "PersonalizedOpeningLine",
+                "WhyAstraFit",
+                "Website",
+                "BookURL",
+                "ConfidenceScore",
+                "source_file",
+                "source_sheet",
+                "source_row",
+            }
+            self.assertTrue(expected_headers.issubset(set(report["output_fieldnames"])))
+
+            with output_path.open(newline="", encoding="utf-8-sig") as handle:
+                cleaned_reader = csv.DictReader(handle)
+                cleaned_rows = list(cleaned_reader)
+            self.assertTrue(expected_headers.issubset(set(cleaned_reader.fieldnames or [])))
+            self.assertEqual("Harbor Signals", cleaned_rows[0]["BookTitle"])
+            self.assertEqual("Casey Vale", cleaned_rows[0]["AuthorName"])
+            self.assertEqual("casey.vale@example.org", cleaned_rows[0]["AuthorEmail"])
+            self.assertEqual("I noticed the launch page for Harbor Signals.", cleaned_rows[0]["PersonalizedOpeningLine"])
+            self.assertEqual("The book page would benefit from clearer retail links.", cleaned_rows[0]["WhyAstraFit"])
+            self.assertEqual("https://casey.example.org", cleaned_rows[0]["Website"])
+            self.assertEqual("https://books.example.org/harbor-signals", cleaned_rows[0]["BookURL"])
+            self.assertEqual("94", cleaned_rows[0]["ConfidenceScore"])
+            self.assertEqual("synthetic_upload.csv", cleaned_rows[0]["source_file"])
+            self.assertEqual("Authors", cleaned_rows[0]["source_sheet"])
+            self.assertEqual("2", cleaned_rows[0]["source_row"])
+
+            with rejected_path.open(newline="", encoding="utf-8-sig") as handle:
+                rejected_reader = csv.DictReader(handle)
+                rejected_rows = list(rejected_reader)
+            self.assertTrue(expected_headers.issubset(set(rejected_reader.fieldnames or [])))
+            self.assertEqual("Broken Compass", rejected_rows[0]["BookTitle"])
+            self.assertEqual("Morgan Reed", rejected_rows[0]["AuthorName"])
+            self.assertEqual("not-an-email", rejected_rows[0]["AuthorEmail"])
+            self.assertEqual("Synthetic rejected-row proof.", rejected_rows[0]["WhyAstraFit"])
+            self.assertEqual("INVALID_EMAIL_SYNTAX", rejected_rows[0]["reject_code"])
 
     def test_check_master_leads_hardens_first_names_without_rejecting_valid_emails(self) -> None:
         invalid_cases = {
@@ -950,8 +1248,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             jc_queue = tmp / "recipients_private_jc.csv"
             sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
             logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
 
             write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
             write_csv(
                 triaged_keep_path,
                 ["FullName", "FirstName", "Email", "Status"],
@@ -961,6 +1263,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     {"FullName": "Gamma Person", "FirstName": "Gamma", "Email": "gamma@example.com", "Status": "KEEP"},
                 ],
             )
+            write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
             write_csv(jc_queue, ["Email", "FirstName"], [{"Email": "existing-jc@example.com", "FirstName": "Existing"}])
             for path in sg_queues:
                 write_csv(path, ["Email", "FirstName"], [])
@@ -970,7 +1274,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             preview = preview_dispatch_master_leads(
                 master_path=master_path,
                 triaged_keep_path=triaged_keep_path,
-                rejected_path=tmp / "leads_rejected.csv",
+                rejected_path=rejected_path,
                 dispatch_source_mode="triaged_keep",
                 jc_queue_path=jc_queue,
                 sendgrid_queue_paths=sg_queues,
@@ -999,6 +1303,26 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(preview["total_rows_that_would_be_written"], report["total_rows_that_would_be_written"])
             self.assertEqual(preview["rows_to_add_sendgrid_shards"], report["rows_written_sendgrid_shards"])
             self.assertEqual(preview["rows_to_add_private_jc"], report["rows_written_private_jc"])
+            self.assertEqual(
+                "Dispatch confirmed. Staged batch archived and cleared. Run Check Leads and Fast Triage before previewing another batch.",
+                report["message"],
+            )
+            cleanup = report["staged_batch_cleanup"]
+            self.assertTrue(cleanup["archived"])
+            self.assertTrue(cleanup["cleared"])
+            archive_path = Path(cleanup["archive_path"])
+            self.assertTrue(archive_path.exists())
+            self.assertTrue((archive_path / "metadata.json").exists())
+            self.assertTrue((archive_path / master_path.name).exists())
+            self.assertTrue((archive_path / rejected_path.name).exists())
+            self.assertTrue((archive_path / triaged_keep_path.name).exists())
+            self.assertTrue((archive_path / triaged_reject_path.name).exists())
+            self.assertTrue((archive_path / triaged_quarantine_path.name).exists())
+            self.assertFalse(master_path.exists())
+            self.assertFalse(rejected_path.exists())
+            self.assertFalse(triaged_keep_path.exists())
+            self.assertFalse(triaged_reject_path.exists())
+            self.assertFalse(triaged_quarantine_path.exists())
 
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 jc_rows = list(csv.DictReader(handle))
@@ -1018,6 +1342,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("triaged_keep", history[0]["source_key"])
             self.assertEqual("Fast Triage Keep", history[0]["source_label"])
             self.assertEqual("completed", history[0]["status"])
+            self.assertTrue(Path(report["report_path"]).exists())
             self.assertEqual(6, report["dispatch_history_rows_created"])
 
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
@@ -1034,6 +1359,138 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 self.assertEqual("sendgrid_1", alpha["last_profile"])
             finally:
                 conn.close()
+
+    def test_confirm_dispatch_preview_failure_preserves_staged_files_and_queues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            backup_root = tmp / "backups"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(
+                triaged_keep_path,
+                ["FullName", "FirstName", "Email", "Status"],
+                [{"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "Status": "KEEP"}],
+            )
+            write_csv(jc_queue, ["Email", "FirstName"], [{"Email": "existing@example.com", "FirstName": "Existing"}])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            staged_before = {path: path.read_text(encoding="utf-8") for path in [master_path, rejected_path, triaged_keep_path]}
+            queue_before = {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]}
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+
+            with patch.object(important_leads_workflow, "_record_dispatch_history_from_preview", side_effect=RuntimeError("ledger failed")):
+                with self.assertRaisesRegex(RuntimeError, "ledger failed"):
+                    confirm_dispatch_preview(
+                        preview["preview_id"],
+                        require_stopped=False,
+                        backup_root=backup_root,
+                        report_dir=tmp / "reports",
+                        persist_state=False,
+                        preview_dir=preview_dir,
+                    )
+
+            self.assertFalse((backup_root / "staged_batches").exists())
+            for path, content in staged_before.items():
+                self.assertTrue(path.exists())
+                self.assertEqual(content, path.read_text(encoding="utf-8"))
+            for path, content in queue_before.items():
+                self.assertEqual(content, path.read_text(encoding="utf-8"))
+
+    def test_preview_dispatch_master_leads_blocks_empty_triaged_keep_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], [])
+
+            with self.assertRaisesRegex(ValueError, "Fast Triage Keep dispatch source is empty"):
+                preview_dispatch_master_leads(
+                    master_path=master_path,
+                    triaged_keep_path=triaged_keep_path,
+                    rejected_path=tmp / "leads_rejected.csv",
+                    dispatch_source_mode="triaged_keep",
+                    jc_queue_path=tmp / "recipients_private_jc.csv",
+                    sendgrid_queue_paths=[tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)],
+                    jc_log_path=tmp / "private_jc_log.csv",
+                    sendgrid_log_paths=[tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)],
+                    sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                    suppressed_path=tmp / "suppressed.csv",
+                    unsubscribed_path=tmp / "unsubscribed.csv",
+                    lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                    preview_dir=tmp / "previews",
+                )
+
+    def test_confirm_dispatch_preview_blocks_when_staged_batch_missing_or_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(
+                triaged_keep_path,
+                ["FullName", "FirstName", "Email", "Status"],
+                [{"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "Status": "KEEP"}],
+            )
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+
+            triaged_keep_path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "No active staged Fast Triage batch found"):
+                confirm_dispatch_preview(preview["preview_id"], require_stopped=False, preview_dir=preview_dir)
+
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], [])
+            with self.assertRaisesRegex(RuntimeError, "Active staged Fast Triage batch is empty"):
+                confirm_dispatch_preview(preview["preview_id"], require_stopped=False, preview_dir=preview_dir)
 
     def test_confirm_dispatch_preview_blocks_when_senders_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1296,6 +1753,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(1, preview["rows_to_add_sendgrid"])
             self.assertEqual(1, preview["exclusion_reason_counts"]["already_contacted"])
+            evidence = preview["already_contacted_evidence"][0]
+            self.assertEqual("contacted@example.com", evidence["matched_email"])
+            self.assertEqual("contacted@example.com", evidence["normalized_matched_email"])
+            self.assertEqual("private_jc", evidence["channel"])
+            self.assertEqual("dispatch_run_prior", evidence["campaign"])
+            self.assertEqual("exact_normalized_email", evidence["matching_rule"])
 
 
 if __name__ == "__main__":

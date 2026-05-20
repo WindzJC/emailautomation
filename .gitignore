@@ -36,3 +36,5 @@ jc_autostart_*.sh
 _important/*
 !_important/.gitkeep
 !_important/README.md
+
+*.env

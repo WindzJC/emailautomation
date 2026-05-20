@@ -13,6 +13,7 @@ from unittest.mock import patch
 import dashboard_core
 import provider_pacing
 import sendgrid_hygiene
+from tools import rebuild_recipient_queues
 from sendgrid_launch_auth import SendGridKeyResolution
 
 
@@ -178,6 +179,141 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("Recipient queue unsafe", alert["title"])
         self.assertIn("Freeze sending", alert["message"])
         self.assertIn("5 email(s) overlap triaged_reject", alert["message"])
+        self.assertTrue(alert["blocks_sending"])
+        self.assertEqual("dashboard_core.queue_safety_alert", alert["source_function"])
+
+    def test_provider_queue_safety_uses_only_provider_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shards = Path(tmpdir)
+            for name in [
+                "recipients_private_jc.csv",
+                "recipients_sendgrid_1.csv",
+                "recipients_sendgrid_2.csv",
+                "recipients_sendgrid_3.csv",
+                "recipients_sendgrid_4.csv",
+                "recipients_sendgrid_5.csv",
+            ]:
+                (shards / name).write_text("Email,FirstName,AuthorEmail,AuthorName,BookTitle\n", encoding="utf-8")
+
+            captured: dict[str, list[str]] = {}
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                names = [path.name for path in (shard_paths or [])]
+                captured["last"] = names
+                return {"safe": True, "unsafe_reasons": [], "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])]}
+
+            with patch.multiple(dashboard_core, SHARDS_DIR=shards), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                sendgrid = dashboard_core.build_dashboard_queue_safety_report("sendgrid")
+                private = dashboard_core.build_dashboard_queue_safety_report("private_jc")
+
+        self.assertEqual("sendgrid", sendgrid["affected_provider"])
+        self.assertEqual(
+            [f"recipients_sendgrid_{index}.csv" for index in range(1, 6)],
+            [Path(path).name for path in sendgrid["validated_shard_paths"]],
+        )
+        self.assertNotIn("recipients_private_jc.csv", [Path(path).name for path in sendgrid["validated_shard_paths"]])
+        self.assertEqual("private_jc", private["affected_provider"])
+        self.assertEqual(["recipients_private_jc.csv"], [Path(path).name for path in private["validated_shard_paths"]])
+
+    def test_sendgrid_queue_safety_blocks_missing_required_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            keep = tmp / "leads_triaged_keep.csv"
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_sendgrid_2.csv"
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            rows = [
+                {
+                    "Email": "reader@example.test",
+                    "FirstName": "Ava",
+                    "AuthorEmail": "author@example.test",
+                    "AuthorName": "Ava Writer",
+                    "BookTitle": "Launch",
+                }
+            ]
+            for path, path_rows in ((keep, rows), (checked, rows), (reject, [])):
+                with path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=headers)
+                    writer.writeheader()
+                    writer.writerows(path_rows)
+            with shard.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
+                writer.writeheader()
+                writer.writerow({"Email": "reader@example.test", "FirstName": "Ava"})
+
+            report = rebuild_recipient_queues.build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=keep,
+                checked_path=checked,
+                triaged_keep_path=keep,
+                triaged_reject_path=reject,
+            )
+
+        self.assertFalse(report["safe"])
+        self.assertIn("MISSING_REQUIRED_HEADERS", report["unsafe_reasons"])
+        self.assertEqual(1, report["missing_required_header_shard_count"])
+        self.assertEqual(
+            ["AuthorEmail", "AuthorName", "BookTitle"],
+            report["missing_required_header_shards"][0]["missing_required_headers"],
+        )
+        alert = dashboard_core.queue_safety_alert(report)
+        self.assertIsNotNone(alert)
+        self.assertIn("recipients_sendgrid_2.csv", alert["message"])
+        self.assertIn("BookTitle", alert["message"])
+        self.assertTrue(alert["blocks_sending"])
+
+    def test_sendgrid_safe_rebuild_excludes_unsafe_rows_and_quarantines_reasons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            keep = tmp / "leads_triaged_keep.csv"
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard_paths = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            keep_rows = [
+                {"Email": "keep@example.test", "FirstName": "Keep", "AuthorEmail": "author-keep@example.test", "AuthorName": "Keep Writer", "BookTitle": "Keep Book"},
+                {"Email": "outside-checked@example.test", "FirstName": "Out", "AuthorEmail": "author-out@example.test", "AuthorName": "Out Writer", "BookTitle": "Out Book"},
+                {"Email": "missing-title@example.test", "FirstName": "Missing", "AuthorEmail": "author-missing@example.test", "AuthorName": "Missing Writer", "BookTitle": ""},
+            ]
+            reject_row = {"Email": "reject@example.test", "FirstName": "Reject", "AuthorEmail": "author-reject@example.test", "AuthorName": "Reject Writer", "BookTitle": "Reject Book"}
+            for path, path_rows in ((keep, keep_rows), (checked, [keep_rows[0], keep_rows[2], reject_row]), (reject, [reject_row])):
+                with path.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=headers)
+                    writer.writeheader()
+                    writer.writerows(path_rows)
+            for index, path in enumerate(shard_paths):
+                with path.open("w", newline="", encoding="utf-8") as handle:
+                    if index == 1:
+                        writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName"])
+                        writer.writeheader()
+                        writer.writerow({"Email": "outside-intended@example.test", "FirstName": "Old"})
+                    else:
+                        writer = csv.DictWriter(handle, fieldnames=headers)
+                        writer.writeheader()
+                        writer.writerow(reject_row if index == 2 else keep_rows[0])
+
+            result = rebuild_recipient_queues.rebuild_sendgrid_recipient_queues(
+                intended_source_path=keep,
+                checked_path=checked,
+                triaged_keep_path=keep,
+                triaged_reject_path=reject,
+                shard_paths=shard_paths,
+                apply=False,
+            )
+
+        self.assertEqual("dry-run", result["mode"])
+        self.assertFalse(result["before"]["safe"])
+        self.assertTrue(result["after"]["safe"])
+        self.assertEqual(1, result["included_rows"])
+        self.assertGreaterEqual(result["excluded_by_reason"].get("outside_intended_source", 0), 1)
+        self.assertGreaterEqual(result["excluded_by_reason"].get("outside_checked_output", 0), 1)
+        self.assertGreaterEqual(result["excluded_by_reason"].get("triaged_reject_overlap", 0), 1)
+        self.assertGreaterEqual(result["excluded_by_reason"].get("missing_required_field:BookTitle", 0), 1)
 
     def test_infer_runtime_state_detects_cooldown(self) -> None:
         state, label, note = dashboard_core.infer_runtime_state(
@@ -1584,6 +1720,11 @@ class DashboardCoreTests(unittest.TestCase):
             },
             titles,
         )
+        self.assertTrue(alerts)
+        for alert in alerts:
+            self.assertFalse(alert["blocks_sending"])
+            self.assertEqual("Non-blocking", alert["blocking_label"])
+            self.assertEqual("dashboard_core.build_threshold_alerts", alert["source_function"])
 
     def test_build_threshold_alerts_ignores_finished_run_errors_for_sender_api_alert(self) -> None:
         alerts = dashboard_core.build_threshold_alerts(

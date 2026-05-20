@@ -37,7 +37,7 @@ from sendgrid_hygiene import (
     parse_iso_utc,
 )
 from sendgrid_launch_auth import resolve_sendgrid_api_key
-from tools.rebuild_recipient_queues import build_queue_safety_report
+from tools.rebuild_recipient_queues import build_queue_safety_report, default_sendgrid_queue_paths
 
 ROOT = settings.APP_ROOT
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
@@ -2788,18 +2788,43 @@ def build_threshold_alerts(
             }
         )
 
+    for alert in alerts:
+        alert.setdefault("source_function", "dashboard_core.build_threshold_alerts")
+        alert.setdefault("blocks_sending", False)
+        alert.setdefault("blocking_label", "Non-blocking")
     return alerts
 
 
-def build_dashboard_queue_safety_report() -> Dict[str, object]:
+def _private_queue_paths() -> List[Path]:
+    return [SHARDS_DIR / "recipients_private_jc.csv"]
+
+
+def _queue_safety_provider_paths(provider: str) -> tuple[str, Optional[List[Path]]]:
+    normalized = str(provider or "all").strip().lower()
+    if normalized in {"sendgrid", "sg"}:
+        return "sendgrid", default_sendgrid_queue_paths(SHARDS_DIR)
+    if normalized in {"private", "private_jc", "jc"}:
+        return "private_jc", _private_queue_paths()
+    return "all", None
+
+
+def build_dashboard_queue_safety_report(provider: str = "all") -> Dict[str, object]:
+    provider_name, shard_paths = _queue_safety_provider_paths(provider)
     try:
-        return build_queue_safety_report()
+        report = build_queue_safety_report(shard_paths=shard_paths)
     except Exception as exc:
         return {
             "safe": False,
             "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
             "message": f"Queue safety check failed: {exc}",
+            "provider": provider_name,
+            "affected_provider": provider_name,
+            "validated_shard_paths": [str(path) for path in shard_paths] if shard_paths is not None else [],
         }
+    report["provider"] = provider_name
+    report["affected_provider"] = provider_name
+    report["validated_shard_paths"] = [str(item.get("path") or "") for item in report.get("shards", []) if isinstance(item, dict)]
+    return report
 
 
 def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
@@ -2808,6 +2833,20 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
     reject_overlap = int(report.get("overlap_with_triaged_reject") or 0)
     outside_checked = int(report.get("outside_checked_output_count") or 0)
     outside_intended = int(report.get("outside_intended_source_count") or 0)
+    missing_header_shards = report.get("missing_required_header_shards")
+    missing_header_text = ""
+    if isinstance(missing_header_shards, list) and missing_header_shards:
+        parts = []
+        for item in missing_header_shards:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            missing = item.get("missing_required_headers")
+            missing_text = ", ".join(str(value) for value in missing) if isinstance(missing, list) else str(missing or "")
+            if name:
+                parts.append(f"{name} missing {missing_text}")
+        if parts:
+            missing_header_text = " Required header issue(s): " + "; ".join(parts) + "."
     if str(report.get("message") or "").strip():
         message = str(report.get("message"))
     else:
@@ -2815,13 +2854,18 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
             "Live recipient queue is not safe to send. "
             f"{reject_overlap} email(s) overlap triaged_reject, "
             f"{outside_checked} are outside the latest checked output, and "
-            f"{outside_intended} are outside the intended source. "
+            f"{outside_intended} are outside the intended source."
+            f"{missing_header_text} "
             "Freeze sending and rebuild queues from the current campaign source."
         )
     return {
         "severity": "critical",
-        "title": "Recipient queue unsafe",
+        "title": "Recipient queue unsafe" if str(report.get("affected_provider") or "all") == "all" else f"{str(report.get('affected_provider')).replace('_', ' ').title()} queue unsafe",
         "message": message,
+        "source_function": "dashboard_core.queue_safety_alert",
+        "blocks_sending": True,
+        "blocking_label": "Blocks sending",
+        "affected_provider": str(report.get("affected_provider") or report.get("provider") or "all"),
     }
 
 
@@ -3588,7 +3632,9 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
             except Exception:
                 profile["run_sent_display"] = 0
 
-    queue_safety = build_dashboard_queue_safety_report()
+    queue_safety = build_dashboard_queue_safety_report("all")
+    sendgrid_queue_safety = build_dashboard_queue_safety_report("sendgrid")
+    private_queue_safety = build_dashboard_queue_safety_report("private_jc")
     run_status_items = build_run_status_items(
         session_label,
         profile_dicts,
@@ -3608,9 +3654,10 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         auto_stop_events=auto_stop_events,
         private_bounce_guard=private_bounce_guard,
     )
-    queue_alert = queue_safety_alert(queue_safety)
-    if queue_alert:
-        alerts.insert(0, queue_alert)
+    for provider_report in (private_queue_safety, sendgrid_queue_safety):
+        queue_alert = queue_safety_alert(provider_report)
+        if queue_alert:
+            alerts.insert(0, queue_alert)
     banner_state, banner_message = health_banner_state(
         session_label,
         active_profiles,
@@ -3659,6 +3706,9 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "telemetry_notes": telemetry_notes,
         "alerts": alerts,
         "queue_safety": queue_safety,
+        "combined_queue_safety": queue_safety,
+        "sendgrid_queue_safety": sendgrid_queue_safety,
+        "private_queue_safety": private_queue_safety,
         "webhook_health": webhook_health,
         "awaiting_age_buckets": {
             "labels": dict(AWAITING_BUCKET_LABELS),

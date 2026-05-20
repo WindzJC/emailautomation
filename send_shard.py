@@ -495,16 +495,16 @@ SIGNATURE_BY_PITCH = {
     }
 
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "My team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "I came across {BookTitle} and thought the book could benefit from a clearer, "
     "more polished online presentation for readers discovering your work."
 )
 SENDGRID_BOOK_TITLE_OPENING = (
-    "Our team came across {BookTitle} and thought the book could benefit from a clearer, "
+    "I came across {BookTitle} and thought the book could benefit from a clearer, "
     "more polished online presentation for readers discovering your work."
 )
 BOOK_TITLE_GENERIC_OPENING = (
-    "My team works with independent authors to improve how their work is presented online, "
-    "especially through clearer websites, stronger book visuals, and more polished launch materials."
+    "I came across your author profile and thought your online presentation could benefit from a clearer, "
+    "more polished experience for readers discovering your work."
 )
 
 PITCH_1_5_BODY = f"""Hi {{FirstName}},
@@ -603,11 +603,32 @@ BOOK_TITLE_FALLBACK_OPENINGS = (
     SENDGRID_BOOK_TITLE_OPENING,
 )
 UNRESOLVED_PLACEHOLDER_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}")
+BLOCKED_RENDER_PLACEHOLDER_RE = re.compile(r"{{?\s*(?:BookTitle|Title|FirstName|AuthorName)\s*}}?")
 PLACEHOLDER_LIKE_TOKEN_RE = re.compile(r"{[A-Za-z][A-Za-z0-9_]*}|\[[^\[\]\r\n]+\]|<<[^<>\r\n]+>>")
 BRACE_PLACEHOLDER_TOKEN_RE = re.compile(r"{([A-Za-z][A-Za-z0-9_]*)}")
 SQUARE_PLACEHOLDER_TOKEN_RE = re.compile(r"\[([^\[\]\r\n]+)\]")
 ANGLE_PLACEHOLDER_TOKEN_RE = re.compile(r"<<([^<>\r\n]+)>>")
 ALLOWED_RENDER_PLACEHOLDERS = {"{SIGIMG}"}
+BOOK_TITLE_SOURCE_COLUMNS = (
+    "BookTitle",
+    "book_title",
+    "book title",
+    "Title",
+    "title",
+    "Publication Title",
+    "PublicationTitle",
+    "publication_title",
+    "Product Title",
+    "product_title",
+    "Work Title",
+    "work_title",
+    "Manuscript Title",
+    "manuscript_title",
+    "Book Name",
+    "book_name",
+    "Project Title",
+    "project_title",
+)
 
 
 def placeholder_like_tokens(value: object) -> List[str]:
@@ -696,19 +717,38 @@ BOOK_TITLE_PHONE_RE = re.compile(r"^[+()\d\s.\-]{7,}$")
 BOOK_TITLE_PERCENT_RE = re.compile(r"^\s*\d+(?:\.\d+)?\s*%\s*$")
 BOOK_TITLE_URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 BOOK_TITLE_EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+BOOK_TITLE_PRICE_RE = re.compile(r"(?i)^\s*(?:[$€£]\s*\d+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?\s*(?:usd|eur|gbp|php|cad|aud))\s*$")
+BOOK_TITLE_DATE_RE = re.compile(r"^\s*(?:\d{1,4}[-/]\d{1,2}(?:[-/]\d{1,4})?|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s*$")
 
 
-def invalid_campaign_book_title(value: str) -> bool:
+def invalid_campaign_book_title(
+    value: str,
+    *,
+    author_name: str = "",
+    first_name: str = "",
+    last_name: str = "",
+) -> bool:
     raw = str(value or "").strip()
     if invalid_subject_book_title(raw):
         return True
     normalized = re.sub(r"[^a-z0-9]+", "", raw.lower())
     if normalized in BAD_BOOK_TITLE_KEYS:
         return True
+    blocked_person_values = {
+        re.sub(r"[^a-z0-9]+", "", text.lower())
+        for text in (author_name, first_name, last_name, f"{first_name} {last_name}".strip())
+        if str(text or "").strip()
+    }
+    if normalized and normalized in blocked_person_values:
+        return True
     digits = re.sub(r"\D+", "", raw)
     if BOOK_TITLE_PHONE_RE.match(raw) and len(digits) >= 7:
         return True
     if BOOK_TITLE_PERCENT_RE.match(raw):
+        return True
+    if BOOK_TITLE_PRICE_RE.match(raw):
+        return True
+    if BOOK_TITLE_DATE_RE.match(raw):
         return True
     if BOOK_TITLE_EMAIL_RE.match(raw.lower()):
         return True
@@ -794,8 +834,8 @@ def validate_book_title_queue_contract(
     bad_rows: List[str] = []
     unresolved_rows: List[str] = []
     for index, row in enumerate(rows, start=1):
-        book_title = get_row_value_ci(row, ["BookTitle"])
-        if not fallback_supported and invalid_campaign_book_title(book_title):
+        book_title = resolve_book_title(row, get_row_value_ci(row, ["BookTitle"]))
+        if not fallback_supported and not book_title:
             bad_rows.append(f"row={index} BookTitle=blank_or_unsafe")
             if len(bad_rows) >= 5:
                 break
@@ -806,6 +846,7 @@ def validate_book_title_queue_contract(
             author = choose_salutation_name(raw_author, email_addr)
             first_name = author.split()[0] if author else GENERIC_SALUTATION
             merge_fields = row_merge_fields(row, email_addr, first_name, normalized_book_title)
+            normalized_book_title = merge_fields.get("BookTitle", normalized_book_title)
             subject_text, body_text, _html_body, _cid = render_message_parts(
                 author,
                 normalized_book_title,
@@ -1239,12 +1280,36 @@ def get_personalization_name(row: Dict[str, str]) -> str:
     )
 
 
+def resolve_book_title(row: Dict[str, str], explicit_book_title: str = "") -> str:
+    author_name = get_row_value_ci(row, ["AuthorName", "author_name", "FullName", "full_name", "author", "name"])
+    first_name = get_row_value_ci(row, ["FirstName", "first_name", "first name", "first_name_clean", "firstname"])
+    last_name = get_row_value_ci(row, ["LastName", "last_name", "last name", "last_name_clean", "lastname"])
+    candidates = [explicit_book_title]
+    candidates.extend(get_row_value_ci(row, [column]) for column in BOOK_TITLE_SOURCE_COLUMNS)
+    seen: Set[str] = set()
+    for candidate in candidates:
+        normalized_title, _notes = normalize_render_field_value(candidate)
+        key = normalized_title.casefold()
+        if not normalized_title or key in seen:
+            continue
+        seen.add(key)
+        if not invalid_campaign_book_title(
+            normalized_title,
+            author_name=author_name,
+            first_name=first_name,
+            last_name=last_name,
+        ):
+            return normalized_title
+    return ""
+
+
 def row_merge_fields(row: Dict[str, str], to_email: str, first_name: str, book_title: str) -> Dict[str, str]:
+    resolved_book_title = resolve_book_title(row, book_title)
     return {
         "FirstName": (first_name or GENERIC_SALUTATION).strip() or GENERIC_SALUTATION,
         "AuthorName": get_row_value_ci(row, ["AuthorName", "author_name", "FullName", "full_name", "author", "name"]),
         "AuthorEmail": get_row_value_ci(row, ["AuthorEmail", "author_email"]) or to_email,
-        "BookTitle": (book_title or "").strip(),
+        "BookTitle": resolved_book_title,
         "PersonalizedOpeningLine": get_row_value_ci(
             row,
             ["PersonalizedOpeningLine", "personalized_opening_line", "personalized opening line"],
@@ -1646,6 +1711,8 @@ def render_message_parts(
     subject_fallback: str = "",
 ) -> Tuple[str, str, str, Optional[str]]:
     unsub_mailto = make_unsub_mailto(unsub_email)
+    if re.search(r"{{?\s*Title\s*}}?", subject or "") or re.search(r"{{?\s*Title\s*}}?", body_template or ""):
+        raise ValueError("Email template contains blocked unresolved placeholder.")
 
     author = (author or GENERIC_SALUTATION).strip()
     first_name = author.split()[0] if author else GENERIC_SALUTATION
@@ -1672,7 +1739,14 @@ def render_message_parts(
         raw_book_title, _book_title_normalization_notes = normalize_render_field_value(format_args.get("BookTitle") or "")
         format_args["BookTitle"] = raw_book_title
 
-    missing_or_unsafe_book_title = invalid_campaign_book_title(raw_book_title)
+    missing_or_unsafe_book_title = invalid_campaign_book_title(
+        raw_book_title,
+        author_name=str(format_args.get("AuthorName") or ""),
+        first_name=str(format_args.get("FirstName") or ""),
+    )
+    if not missing_or_unsafe_book_title:
+        for opening in BOOK_TITLE_FALLBACK_OPENINGS:
+            body_template = body_template.replace(opening, SENDGRID_BOOK_TITLE_OPENING)
     if missing_or_unsafe_book_title:
         format_args["BookTitle"] = ""
         for opening in BOOK_TITLE_FALLBACK_OPENINGS:
@@ -1684,6 +1758,8 @@ def render_message_parts(
         subject_text = subject_fallback
     else:
         subject_text = subject.format(**subject_args)
+    if BLOCKED_RENDER_PLACEHOLDER_RE.search(subject_text) or BLOCKED_RENDER_PLACEHOLDER_RE.search(body_text):
+        raise ValueError("Rendered email contains unresolved placeholder.")
 
     cid = SIGNATURE_CID if (signature_file and signature_file.exists()) else None
     html_body = text_to_html(body_text, unsub_mailto, cid=cid)

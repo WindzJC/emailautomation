@@ -46,6 +46,78 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
             self.assertEqual(0, report["reject_count"])
             self.assertEqual(0, report["quarantine_count"])
 
+    def test_fast_triage_preserves_lead_op_fields_in_keep_and_reject_outputs(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            keep_path = base / "leads_triaged_keep.csv"
+            rejected_path = base / "leads_triaged_reject.csv"
+            quarantine_path = base / "leads_triaged_quarantine.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            headers = [
+                "FullName",
+                "FirstName",
+                "Email",
+                "BookTitle",
+                "AuthorName",
+                "AuthorEmail",
+                "PersonalizedOpeningLine",
+                "WhyAstraFit",
+            ]
+            self._write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        "FullName": "Alpha Baker",
+                        "FirstName": "Alpha",
+                        "Email": "alpha.author@examplebooks.com",
+                        "BookTitle": "Signals at Dawn",
+                        "AuthorName": "Alpha Baker",
+                        "AuthorEmail": "alpha.author@examplebooks.com",
+                        "PersonalizedOpeningLine": "I noticed Signals at Dawn.",
+                        "WhyAstraFit": "Synthetic keep proof.",
+                    },
+                    {
+                        "FullName": "Alpha Baker",
+                        "FirstName": "Alpha",
+                        "Email": "alpha.author@examplebooks.com",
+                        "BookTitle": "Signals at Dawn Duplicate",
+                        "AuthorName": "Alpha Baker",
+                        "AuthorEmail": "alpha.author@examplebooks.com",
+                        "PersonalizedOpeningLine": "I noticed the duplicate row.",
+                        "WhyAstraFit": "Synthetic reject proof.",
+                    },
+                ],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=keep_path,
+                    rejected_path=rejected_path,
+                    quarantine_path=quarantine_path,
+                    persist_state=True,
+                    disposable_domains=set(),
+                )
+
+            self.assertEqual(1, report["keep_count"])
+            self.assertEqual(1, report["reject_count"])
+            keep_rows = self._read_csv_rows(keep_path)
+            reject_rows = self._read_csv_rows(rejected_path)
+            self.assertEqual("Signals at Dawn", keep_rows[0]["BookTitle"])
+            self.assertEqual("Alpha Baker", keep_rows[0]["AuthorName"])
+            self.assertEqual("I noticed Signals at Dawn.", keep_rows[0]["PersonalizedOpeningLine"])
+            self.assertEqual("Signals at Dawn Duplicate", reject_rows[0]["BookTitle"])
+            self.assertEqual("Alpha Baker", reject_rows[0]["AuthorName"])
+            self.assertEqual("DUPLICATE_EMAIL", reject_rows[0]["VerificationReason"])
+
     def test_fast_triage_rejects_missing_email_and_invalid_email(self) -> None:
         with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
             base = Path(tmpdir)
@@ -149,6 +221,124 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
             self.assertEqual(2, report["reject_count"])
             self.assertEqual(1, report["reason_counts"]["JUNK_NAME"])
             self.assertEqual(1, report["reason_counts"]["DISPOSABLE_DOMAIN"])
+
+    def test_manual_author_research_routes_soft_quality_issues_to_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            headers = ["FullName", "Email", "Website", "SourceURL", "BookURL", "ConfidenceScore", "IndieOrSmallPressSignal", "BookTitle"]
+            self._write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        "FullName": "Manual Baker",
+                        "Email": "manual.author@gmail.com",
+                        "Website": "Not found",
+                        "SourceURL": "",
+                        "BookURL": "",
+                        "ConfidenceScore": "2",
+                        "IndieOrSmallPressSignal": "No major-imprint signal found",
+                        "BookTitle": "",
+                    }
+                ],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=base / "triaged_keep.csv",
+                    rejected_path=base / "triaged_reject.csv",
+                    quarantine_path=base / "triaged_quarantine.csv",
+                    persist_state=True,
+                    disposable_domains=set(),
+                    mode=important_leads_verify.TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH,
+                )
+
+            self.assertEqual(important_leads_verify.TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH, report["mode"])
+            self.assertEqual(0, report["keep_count"])
+            self.assertEqual(0, report["reject_count"])
+            self.assertEqual(1, report["quarantine_count"])
+            self.assertIn("PERSONAL_EMAIL_PROVIDER", report["soft_warning_counts"])
+            self.assertEqual({}, report["hard_reject_counts"])
+            quarantine_rows = self._read_csv_rows(base / "triaged_quarantine.csv")
+            self.assertEqual("QUARANTINE", quarantine_rows[0]["Status"])
+            self.assertEqual("Manual Baker", quarantine_rows[0]["FullName"])
+            self.assertFalse(self._read_csv_rows(base / "triaged_keep.csv"))
+
+    def test_manual_author_research_keeps_clean_author_and_rejects_hard_blockers(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            headers = ["FullName", "Email", "Website", "SourceURL", "BookURL", "ConfidenceScore", "IndieOrSmallPressSignal", "BookTitle"]
+            self._write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        "FullName": "Clean Baker",
+                        "Email": "clean@examplebooks.com",
+                        "Website": "https://examplebooks.com",
+                        "SourceURL": "https://examplebooks.com/about",
+                        "BookURL": "https://examplebooks.com/book",
+                        "ConfidenceScore": "3",
+                        "IndieOrSmallPressSignal": "Independent author site",
+                        "BookTitle": "Safe Title",
+                    },
+                    {
+                        "FullName": "Bad Email",
+                        "Email": "not-an-email",
+                        "Website": "https://bad.example",
+                        "SourceURL": "https://bad.example/about",
+                        "BookURL": "https://bad.example/book",
+                        "ConfidenceScore": "3",
+                        "IndieOrSmallPressSignal": "Independent author site",
+                        "BookTitle": "Bad Book",
+                    },
+                    {
+                        "FullName": "Placeholder Title",
+                        "Email": "placeholder@examplebooks.com",
+                        "Website": "https://placeholder.examplebooks.com",
+                        "SourceURL": "https://placeholder.examplebooks.com/about",
+                        "BookURL": "https://placeholder.examplebooks.com/book",
+                        "ConfidenceScore": "3",
+                        "IndieOrSmallPressSignal": "Independent author site",
+                        "BookTitle": "Story {BookTitle}",
+                    },
+                ],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=base / "triaged_keep.csv",
+                    rejected_path=base / "triaged_reject.csv",
+                    quarantine_path=base / "triaged_quarantine.csv",
+                    persist_state=True,
+                    disposable_domains=set(),
+                    mode=important_leads_verify.TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH,
+                )
+
+            self.assertEqual(1, report["keep_count"])
+            self.assertEqual(2, report["reject_count"])
+            self.assertEqual(0, report["quarantine_count"])
+            self.assertEqual(1, report["hard_reject_counts"]["INVALID_EMAIL_SYNTAX"])
+            self.assertEqual(1, report["hard_reject_counts"]["UNSAFE_PLACEHOLDER_BOOKTITLE"])
+            self.assertEqual("Clean Baker", self._read_csv_rows(base / "triaged_keep.csv")[0]["FullName"])
 
     def test_fast_triage_resumes_from_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:

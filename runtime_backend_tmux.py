@@ -10,7 +10,7 @@ def backend_name() -> str:
 
 
 def sendgrid_profiles() -> List[str]:
-    return list(dashboard_core.DASHBOARD_PROFILES)
+    return list(dashboard_core.SENDGRID_PROFILES)
 
 
 def is_known_profile(profile_name: str) -> bool:

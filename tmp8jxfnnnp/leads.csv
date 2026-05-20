@@ -1,0 +1,3 @@
+FullName,FirstName,Email,BookTitle,AuthorName,AuthorEmail,PersonalizedOpeningLine,WhyAstraFit
+Alpha Author,Alpha,alpha.author@examplebooks.com,Signals at Dawn,Alpha Author,alpha.author@examplebooks.com,I noticed Signals at Dawn.,Synthetic keep proof.
+Alpha Author,Alpha,alpha.author@examplebooks.com,Signals at Dawn Duplicate,Alpha Author,alpha.author@examplebooks.com,I noticed the duplicate row.,Synthetic reject proof.

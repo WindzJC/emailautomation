@@ -53,6 +53,7 @@ EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 TRIAGE_MODE_FAST = "FAST_TRIAGE"
 TRIAGE_MODE_STRICT = "STRICT_PUBLIC_PROOF"
+TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH = "MANUAL_AUTHOR_RESEARCH"
 TRIAGE_ROLE_BLOCKLIST = set(ROLE_LOCALPART_BLOCKLIST) | {"admin", "contact", "hello", "info", "sales", "support"}
 TRIAGE_JUNK_NAME_TOKENS = {
     "admin",
@@ -225,6 +226,24 @@ LOCAL_QUALITY_SIGNAL_HEADER_CANDIDATES = (
     "source",
     "profile_url",
 )
+MANUAL_AUTHOR_SOFT_REASONS = {
+    "WEAK_PERSONAL_EMAIL_ONLY",
+    "PERSONAL_EMAIL_PROVIDER",
+    "MISSING_USABLE_PERSON_NAME",
+    "MISSING_FULL_NAME",
+    "WEAK_FULL_NAME",
+    "WEAK_FIRST_NAME",
+    "WEBSITE_MISSING",
+    "SOURCEURL_MISSING",
+    "BOOKURL_MISSING",
+    "LOW_CONFIDENCE_SCORE",
+    "NO_EXPLICIT_INDIE_PROOF",
+    "WEAK_LOCAL_CONFIDENCE",
+    "RETAILER_LED_PRESENCE",
+    "BASIC_AUTHOR_SITE",
+    "NO_AUTHOR_OWNED_WEBSITE_FOUND",
+    "BOOKTITLE_MISSING",
+}
 
 
 def _normalize(value: object) -> str:
@@ -492,6 +511,11 @@ def _book_title_value(row: dict[str, str], fieldnames: Sequence[str]) -> str:
     return _normalize_row_value(row, book_header) if book_header else ""
 
 
+def _field_value(row: dict[str, str], fieldnames: Sequence[str], candidates: Sequence[str]) -> str:
+    field = _pick_header(fieldnames, candidates)
+    return _normalize_row_value(row, field) if field else ""
+
+
 def _email_value(row: dict[str, str], fieldnames: Sequence[str]) -> str:
     email_header = _pick_header(fieldnames, EMAIL_HEADER_CANDIDATES)
     if email_header:
@@ -619,6 +643,66 @@ def _fast_triage_quality_gate(row: dict[str, str], fieldnames: Sequence[str], do
     return "KEEP", "FAST_TRIAGE_BUSINESS_DOMAIN", "Usable person identity with non-personal custom/business email domain."
 
 
+def _is_missingish(value: str) -> bool:
+    normalized = _normalize(value)
+    return not normalized or normalized in {"0", "false", "n", "na", "n/a", "no", "none", "not found", "null", "unknown"}
+
+
+def _confidence_score_value(row: dict[str, str], fieldnames: Sequence[str]) -> str:
+    return _field_value(row, fieldnames, ("ConfidenceScore", "Confidence Score", "confidence"))
+
+
+def _manual_author_booktitle_unsafe(value: str) -> bool:
+    text = _strip_cell(value)
+    if not text:
+        return False
+    return bool(re.search(r"(\{\{?[^{}]+\}?\}|<<[^<>]+>>)", text))
+
+
+def _manual_author_soft_issues(row: dict[str, str], fieldnames: Sequence[str], domain: str) -> list[tuple[str, str]]:
+    issues: list[tuple[str, str]] = []
+    normalized_domain = str(domain or "").strip().lower().rstrip(".")
+    if normalized_domain in TRIAGE_FREE_PERSONAL_DOMAINS:
+        issues.append(("PERSONAL_EMAIL_PROVIDER", "Personal email provider requires manual author-source review."))
+
+    website = _field_value(row, fieldnames, ("Website", "AuthorWebsite", "Author Website", "site", "url"))
+    if _is_missingish(website):
+        issues.append(("WEBSITE_MISSING", "Website is missing or marked not found."))
+    elif any(marker in _normalize(website) for marker in ("retailer", "amazon", "goodreads")):
+        issues.append(("RETAILER_LED_PRESENCE", "Online presence appears retailer-led."))
+
+    source_url = _field_value(row, fieldnames, ("SourceURL", "Source URL", "ProfileURL", "Profile URL", "source"))
+    if _is_missingish(source_url):
+        issues.append(("SOURCEURL_MISSING", "SourceURL is missing."))
+
+    book_url = _field_value(row, fieldnames, ("BookURL", "Book URL", "ProductURL", "Product URL"))
+    if _is_missingish(book_url):
+        issues.append(("BOOKURL_MISSING", "BookURL is missing."))
+
+    book_title = _book_title_value(row, fieldnames)
+    if _is_missingish(book_title):
+        issues.append(("BOOKTITLE_MISSING", "BookTitle is missing."))
+
+    confidence = _confidence_score_value(row, fieldnames)
+    if _normalize(confidence) == "2":
+        issues.append(("LOW_CONFIDENCE_SCORE", "ConfidenceScore is 2 and needs manual review."))
+
+    indie_signal = _field_value(row, fieldnames, ("IndieOrSmallPressSignal", "Indie Or Small Press Signal", "SmallPressSignal"))
+    if _is_missingish(indie_signal) or _normalize(indie_signal) == "no major-imprint signal found":
+        issues.append(("NO_EXPLICIT_INDIE_PROOF", "No explicit indie/small-press proof was found."))
+
+    combined_text = " | ".join(_normalize(row.get(field, "")) for field in fieldnames)
+    if "weak local confidence" in combined_text:
+        issues.append(("WEAK_LOCAL_CONFIDENCE", "Local confidence signal is weak."))
+    if "basic author site" in combined_text:
+        issues.append(("BASIC_AUTHOR_SITE", "Author site signal is basic."))
+    if "no author-owned website found" in combined_text:
+        issues.append(("NO_AUTHOR_OWNED_WEBSITE_FOUND", "No author-owned website was found."))
+    if "weak online presence" in combined_text:
+        issues.append(("WEAK_LOCAL_CONFIDENCE", "Online presence signal is weak."))
+    return issues
+
+
 def _row_has_bad_local_indicator(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[bool, str]:
     for field in fieldnames:
         header = _normalize_header_key(field)
@@ -645,7 +729,9 @@ def _classify_fast_triage_row(
     fieldnames: Sequence[str],
     *,
     disposable_domains: set[str] | None = None,
+    mode: str = TRIAGE_MODE_FAST,
 ) -> tuple[str, str, str]:
+    is_manual_author = str(mode or "").strip().upper() == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
     email_raw = _email_value(row, fieldnames)
     if not email_raw.strip():
         return "REJECT", "MISSING_EMAIL", "Row is missing an email address."
@@ -678,7 +764,20 @@ def _classify_fast_triage_row(
     identity_rejection = _fast_triage_identity_rejection(row, fieldnames)
     if identity_rejection:
         reason, evidence = identity_rejection
+        if is_manual_author and reason in MANUAL_AUTHOR_SOFT_REASONS:
+            return "QUARANTINE", reason, evidence
         return "REJECT", reason, evidence
+
+    if is_manual_author:
+        book_title = _book_title_value(row, fieldnames)
+        if _manual_author_booktitle_unsafe(book_title):
+            return "REJECT", "UNSAFE_PLACEHOLDER_BOOKTITLE", "BookTitle contains unsafe placeholder-like token syntax."
+        soft_issues = _manual_author_soft_issues(row, fieldnames, domain)
+        if soft_issues:
+            reason, _evidence = soft_issues[0]
+            evidence = "; ".join(f"{code}: {text}" for code, text in soft_issues)
+            return "QUARANTINE", reason, evidence
+        return "KEEP", "MANUAL_AUTHOR_RESEARCH_READY", "Manual Author Research found no hard blocker or material soft warning."
 
     return _fast_triage_quality_gate(row, fieldnames, domain)
 
@@ -1226,6 +1325,7 @@ def fast_triage_master_leads(
     progress_callback: Callable[[int, int], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     disposable_domains: set[str] | None = None,
+    mode: str = TRIAGE_MODE_FAST,
 ) -> dict[str, object]:
     input_path = Path(input_path)
     keep_path = Path(keep_path)
@@ -1241,6 +1341,9 @@ def fast_triage_master_leads(
         rejected_path = DEFAULT_TRIAGE_REJECTED_PATH
         quarantine_path = DEFAULT_TRIAGE_QUARANTINE_PATH
     input_headers, input_rows = _load_csv_rows(input_path)
+    normalized_mode = str(mode or TRIAGE_MODE_FAST).strip().upper()
+    if normalized_mode not in {TRIAGE_MODE_FAST, TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH}:
+        normalized_mode = TRIAGE_MODE_FAST
     if not input_headers:
         raise ValueError(f"Fast triage input is empty: {input_path}")
 
@@ -1256,6 +1359,7 @@ def fast_triage_master_leads(
     )
     resume_ok = (
         not checkpoint_uses_strict_outputs
+        and str(checkpoint.get("mode") or TRIAGE_MODE_FAST).strip().upper() == normalized_mode
         and str(checkpoint.get("input_fingerprint") or "") == input_fingerprint
         and str(checkpoint.get("input_path") or "") == str(input_path)
         and str(checkpoint.get("keep_path") or "") == str(keep_path)
@@ -1343,7 +1447,7 @@ def fast_triage_master_leads(
                             row,
                             base_headers,
                             input_path=input_path,
-                            stage=TRIAGE_MODE_FAST,
+                            stage=normalized_mode,
                             status=status,
                             reason=reason,
                             processed_at=str(output_row.get("VerifiedAtUtc") or iso_utc()),
@@ -1367,6 +1471,7 @@ def fast_triage_master_leads(
                         row,
                         base_headers,
                         disposable_domains=disposable_domain_set,
+                        mode=normalized_mode,
                     )
                     output_row = _build_output_row(
                         row,
@@ -1391,7 +1496,7 @@ def fast_triage_master_leads(
                         row,
                         base_headers,
                         input_path=input_path,
-                        stage=TRIAGE_MODE_FAST,
+                        stage=normalized_mode,
                         status=status,
                         reason=reason,
                         processed_at=str(output_row.get("VerifiedAtUtc") or iso_utc()),
@@ -1410,7 +1515,7 @@ def fast_triage_master_leads(
 
             checkpoint_next_index = chunk_end if chunk_complete else chunk_start
             checkpoint_payload = {
-                "mode": TRIAGE_MODE_FAST,
+                "mode": normalized_mode,
                 "input_path": str(input_path),
                 "input_fingerprint": input_fingerprint,
                 "keep_path": str(keep_path),
@@ -1442,13 +1547,24 @@ def fast_triage_master_leads(
     rejected_headers, rejected_rows = _load_output_rows(rejected_path)
     quarantine_headers, quarantine_rows = _load_output_rows(quarantine_path)
     reason_counts = Counter()
+    soft_warning_counts = Counter()
+    hard_reject_counts = Counter()
     for row in rejected_rows + quarantine_rows:
         reason = str(row.get("VerificationReason") or "").strip()
         if reason:
             reason_counts[reason] += 1
+    for row in quarantine_rows:
+        reason = str(row.get("VerificationReason") or "").strip()
+        if reason:
+            soft_warning_counts[reason] += 1
+    for row in rejected_rows:
+        reason = str(row.get("VerificationReason") or "").strip()
+        if reason:
+            hard_reject_counts[reason] += 1
 
     report = {
-        "mode": TRIAGE_MODE_FAST,
+        "mode": normalized_mode,
+        "intake_mode": normalized_mode,
         "generated_at_utc": iso_utc(),
         "input_label": _display_path_label(input_path),
         "verified_label": _display_path_label(keep_path),
@@ -1461,6 +1577,8 @@ def fast_triage_master_leads(
         "reject_count": len(rejected_rows),
         "quarantine_count": len(quarantine_rows),
         "reason_counts": dict(reason_counts),
+        "soft_warning_counts": dict(soft_warning_counts),
+        "hard_reject_counts": dict(hard_reject_counts),
         "keep_preview_rows": _derive_preview(keep_rows),
         "reject_preview_rows": _derive_preview(rejected_rows),
         "quarantine_preview_rows": _derive_preview(quarantine_rows),
@@ -1479,7 +1597,7 @@ def fast_triage_master_leads(
     if persist_state and not canceled:
         _save_triage_checkpoint_state(
             {
-                "mode": TRIAGE_MODE_FAST,
+                "mode": normalized_mode,
                 "input_path": str(input_path),
                 "input_fingerprint": input_fingerprint,
                 "keep_path": str(keep_path),

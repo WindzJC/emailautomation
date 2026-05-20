@@ -1695,6 +1695,269 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(["Email", "FirstName", "AuthorName", "BookTitle"], list(rebuilt_rows[0].keys()))
             send_via_sendgrid.assert_not_called()
 
+    def test_dispatch_preview_archives_assigned_plan_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            master = tmp / "leads.csv"
+            rejected = tmp / "leads_rejected.csv"
+            triaged_keep = tmp / "leads_triaged_keep.csv"
+            verified = tmp / "leads_verified.csv"
+            queues = [tmp / "recipients_private_jc.csv", *[tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]]
+            logs = [tmp / "private_jc_log.csv", *[tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]]
+            suppressions = tmp / "sendgrid_suppressions.csv"
+            suppressed = tmp / "suppressed.csv"
+            unsubscribed = tmp / "unsubscribed.csv"
+            preview_dir = tmp / "state" / "dispatch_previews"
+            ledger_db = tmp / "lead_ledger.sqlite3"
+            rows = [
+                {"Email": "alpha@example.com", "FirstName": "Alpha", "AuthorEmail": "alpha@example.com", "AuthorName": "Alpha Author", "BookTitle": "Alpha Book"},
+                {"Email": "beta@example.com", "FirstName": "Beta", "AuthorEmail": "beta@example.com", "AuthorName": "Beta Author", "BookTitle": "Beta Book"},
+            ]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            self._write_csv(master, headers, rows)
+            self._write_csv(triaged_keep, headers + ["Status"], [{**row, "Status": "KEEP"} for row in rows])
+            self._write_csv(rejected, headers, [])
+            self._write_csv(verified, headers, [])
+            for queue in queues:
+                self._write_csv(queue, headers, [])
+            for log in logs:
+                self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
+            for path in [suppressions, suppressed, unsubscribed]:
+                self._write_csv(path, ["Email"], [])
+
+            with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                preview = important_leads_workflow.preview_dispatch_master_leads(
+                    master_path=master,
+                    rejected_path=rejected,
+                    verified_path=verified,
+                    triaged_keep_path=triaged_keep,
+                    dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                    jc_queue_path=queues[0],
+                    sendgrid_queue_paths=queues[1:],
+                    jc_log_path=logs[0],
+                    sendgrid_log_paths=logs[1:],
+                    sendgrid_suppressions_path=suppressions,
+                    suppressed_path=suppressed,
+                    unsubscribed_path=unsubscribed,
+                    lead_ledger_db_path=ledger_db,
+                    preview_dir=preview_dir,
+                )
+
+            archive_path = Path(str(preview["assigned_preview_archive_path"]))
+            self.assertTrue(archive_path.exists())
+            archived = json.loads(archive_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, archived["source_row_count"])
+            self.assertEqual(2, archived["eligible_row_count"])
+            self.assertEqual(2, len(archived["private_jc_planned_rows"]))
+            self.assertEqual(2, len(archived["sendgrid_planned_rows"]))
+            self.assertEqual(1, len(archived["per_shard_planned_rows"]["sendgrid_1"]))
+            self.assertEqual(1, len(archived["per_shard_planned_rows"]["sendgrid_2"]))
+            send_via_sendgrid.assert_not_called()
+
+    def test_confirm_dispatch_archives_confirmed_summary_counts(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state = tmp / "state"
+            master = tmp / "leads.csv"
+            rejected = tmp / "leads_rejected.csv"
+            triaged_keep = tmp / "leads_triaged_keep.csv"
+            verified = tmp / "leads_verified.csv"
+            queues = [tmp / "recipients_private_jc.csv", *[tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]]
+            logs = [tmp / "private_jc_log.csv", *[tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]]
+            suppressions = tmp / "sendgrid_suppressions.csv"
+            suppressed = tmp / "suppressed.csv"
+            unsubscribed = tmp / "unsubscribed.csv"
+            preview_dir = state / "dispatch_previews"
+            ledger_db = state / "lead_ledger.sqlite3"
+            rows = [
+                {"Email": "alpha@example.com", "FirstName": "Alpha", "AuthorEmail": "alpha@example.com", "AuthorName": "Alpha Author", "BookTitle": "Alpha Book"},
+                {"Email": "beta@example.com", "FirstName": "Beta", "AuthorEmail": "beta@example.com", "AuthorName": "Beta Author", "BookTitle": "Beta Book"},
+            ]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            self._write_csv(master, headers, rows)
+            self._write_csv(triaged_keep, headers + ["Status"], [{**row, "Status": "KEEP"} for row in rows])
+            self._write_csv(rejected, headers, [])
+            self._write_csv(verified, headers, [])
+            for queue in queues:
+                self._write_csv(queue, headers, [])
+            for log in logs:
+                self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
+            for path in [suppressions, suppressed, unsubscribed]:
+                self._write_csv(path, ["Email"], [])
+
+            preview = important_leads_workflow.preview_dispatch_master_leads(
+                master_path=master,
+                rejected_path=rejected,
+                verified_path=verified,
+                triaged_keep_path=triaged_keep,
+                dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                jc_queue_path=queues[0],
+                sendgrid_queue_paths=queues[1:],
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=suppressions,
+                suppressed_path=suppressed,
+                unsubscribed_path=unsubscribed,
+                lead_ledger_db_path=ledger_db,
+                preview_dir=preview_dir,
+            )
+            with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                report = important_leads_workflow.confirm_dispatch_preview(
+                    str(preview["preview_id"]),
+                    require_stopped=False,
+                    backup_root=state / "backups",
+                    report_dir=state,
+                    persist_state=False,
+                    preview_dir=preview_dir,
+                )
+
+            confirmed_path = Path(str(report["confirmed_summary_path"]))
+            self.assertTrue(confirmed_path.exists())
+            confirmed = json.loads(confirmed_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, confirmed["private_jc_added"])
+            self.assertEqual(2, confirmed["sendgrid_added"])
+            self.assertEqual(1, confirmed["sg1_added"])
+            self.assertEqual(1, confirmed["sg2_added"])
+            self.assertEqual(0, confirmed["sg3_added"])
+            self.assertEqual(str(preview["assigned_preview_archive_path"]), confirmed["assigned_preview_archive_path"])
+            self.assertEqual(2, report["private_jc_added"])
+            self.assertEqual(2, report["sendgrid_added"])
+            self.assertTrue(Path(str(report["assigned_preview_archive_path"])).exists())
+            send_via_sendgrid.assert_not_called()
+
+    def test_zero_add_dispatch_archives_explicit_zero_summary(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state = tmp / "state"
+            master = tmp / "leads.csv"
+            rejected = tmp / "leads_rejected.csv"
+            triaged_keep = tmp / "leads_triaged_keep.csv"
+            verified = tmp / "leads_verified.csv"
+            queues = [tmp / "recipients_private_jc.csv", *[tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]]
+            logs = [tmp / "private_jc_log.csv", *[tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]]
+            suppressions = tmp / "sendgrid_suppressions.csv"
+            suppressed = tmp / "suppressed.csv"
+            unsubscribed = tmp / "unsubscribed.csv"
+            preview_dir = state / "dispatch_previews"
+            ledger_db = state / "lead_ledger.sqlite3"
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            self._write_csv(master, headers, [{"Email": "dupe@example.com", "FirstName": "Dupe", "AuthorEmail": "dupe@example.com", "AuthorName": "Dupe Author", "BookTitle": "Dupe Book"}])
+            self._write_csv(triaged_keep, headers + ["Status"], [{"Email": "dupe@example.com", "FirstName": "Dupe", "AuthorEmail": "dupe@example.com", "AuthorName": "Dupe Author", "BookTitle": "Dupe Book", "Status": "KEEP"}])
+            self._write_csv(rejected, headers, [])
+            self._write_csv(verified, headers, [])
+            for queue in queues:
+                self._write_csv(queue, headers, [{"Email": "dupe@example.com", "FirstName": "Dupe", "AuthorEmail": "dupe@example.com", "AuthorName": "Dupe Author", "BookTitle": "Dupe Book"}])
+            for log in logs:
+                self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
+            for path in [suppressions, suppressed, unsubscribed]:
+                self._write_csv(path, ["Email"], [])
+
+            preview = important_leads_workflow.preview_dispatch_master_leads(
+                master_path=master,
+                rejected_path=rejected,
+                verified_path=verified,
+                triaged_keep_path=triaged_keep,
+                dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                jc_queue_path=queues[0],
+                sendgrid_queue_paths=queues[1:],
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=suppressions,
+                suppressed_path=suppressed,
+                unsubscribed_path=unsubscribed,
+                lead_ledger_db_path=ledger_db,
+                preview_dir=preview_dir,
+            )
+            self.assertEqual(0, preview["total_rows_would_write"])
+            with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                report = important_leads_workflow.confirm_dispatch_preview(
+                    str(preview["preview_id"]),
+                    require_stopped=False,
+                    backup_root=state / "backups",
+                    report_dir=state,
+                    persist_state=False,
+                    preview_dir=preview_dir,
+                )
+
+            confirmed = json.loads(Path(str(report["confirmed_summary_path"])).read_text(encoding="utf-8"))
+            self.assertEqual(0, confirmed["private_jc_added"])
+            self.assertEqual(0, confirmed["sendgrid_added"])
+            self.assertIn("already_queued", confirmed["report"]["exclusion_reason_counts"])
+            send_via_sendgrid.assert_not_called()
+
+    def test_combined_leads_status_uses_latest_confirmed_dispatch_summary(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state = tmp / "state"
+            confirmed_dir = state / "dispatch_confirmed"
+            confirmed_dir.mkdir(parents=True)
+            confirmed_path = confirmed_dir / "dispatch_confirmed_20260520_010203.json"
+            confirmed_path.write_text(
+                json.dumps(
+                    {
+                        "confirmed_at_utc": "2026-05-20T01:02:03+00:00",
+                        "source_path": "_important/leads_triaged_keep.csv",
+                        "source_rows": 97,
+                        "eligible_rows": 97,
+                        "private_jc_added": 41,
+                        "sendgrid_added": 52,
+                        "sg1_added": 11,
+                        "sg2_added": 10,
+                        "sg3_added": 10,
+                        "sg4_added": 10,
+                        "sg5_added": 11,
+                        "skipped_both": 4,
+                        "suppressed": 3,
+                        "backup_path": "data/state/backups/dispatch_test",
+                        "assigned_preview_archive_path": "data/state/dispatch_previews/dispatch_preview_20260520_010200.json",
+                        "report": {
+                            "generated_at_utc": "2026-05-20T01:02:03+00:00",
+                            "dispatch_source_name": "Fast Triage Keep",
+                            "dispatch_source_path": "_important/leads_triaged_keep.csv",
+                            "dispatch_source_row_count": 97,
+                            "dispatch_eligible_row_count": 97,
+                            "dispatch_selected_row_count": 97,
+                            "added_astra": 41,
+                            "added_sendgrid": 52,
+                            "assigned_sg1": 11,
+                            "assigned_sg2": 10,
+                            "assigned_sg3": 10,
+                            "assigned_sg4": 10,
+                            "assigned_sg5": 11,
+                            "skipped_both": 4,
+                            "assigned_preview_rows": [{"Email": "synthetic@example.com"}],
+                            "queue_headers": ["Email"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(live_dashboard.settings, "STATE_DIR", state), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={"latest_dispatch": {}},
+            ), patch.object(live_dashboard, "important_leads_verify_status", return_value={}), patch.object(
+                live_dashboard,
+                "_find_active_important_check_job",
+                return_value=None,
+            ), patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": True},
+            ):
+                status = live_dashboard._combined_leads_status()
+
+            latest = status["latest_dispatch"]
+            self.assertEqual(41, latest["private_jc_added"])
+            self.assertEqual(52, latest["sendgrid_added"])
+            self.assertEqual(11, latest["sg1_added"])
+            self.assertEqual(97, latest["dispatch_source_row_count"])
+            self.assertEqual(str(confirmed_path), latest["confirmed_summary_path"])
+
     def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
         class RequestStub:
             headers: dict[str, str] = {}
@@ -3779,6 +4042,66 @@ class LiveDashboardTests(unittest.TestCase):
             with patch.object(live_dashboard, "fast_triage_master_leads") as fast_triage:
                 live_dashboard._run_auto_fast_triage_after_check(saved_job)
             fast_triage.assert_not_called()
+
+    def test_auto_triage_uses_manual_author_research_intake_mode(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            important_dir = tmp / "_important"
+            state_dir = tmp / "state"
+            jobs_dir = important_dir / "check_runs" / "jobs"
+            output_path = important_dir / "runs" / "check_manual" / "leads.csv"
+            rejected_path = important_dir / "runs" / "check_manual" / "leads_rejected.csv"
+            self._write_csv(output_path, ["FullName", "Email"], [{"FullName": "Manual Author", "Email": "manual@example.com"}])
+            self._write_csv(rejected_path, ["FullName", "Email"], [])
+            job = {
+                "job_id": "check_manual",
+                "status": "completed",
+                "source_mode": "uploaded_file",
+                "intake_mode": "MANUAL_AUTHOR_RESEARCH",
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "staged_run_dir": str(output_path.parent),
+            }
+            report = {
+                "mode": "MANUAL_AUTHOR_RESEARCH",
+                "generated_at_utc": "2026-05-20T00:00:00+00:00",
+                "input_label": str(output_path),
+                "verified_label": str(output_path.parent / "leads_triaged_keep.csv"),
+                "rejected_label": str(output_path.parent / "leads_triaged_reject.csv"),
+                "quarantine_label": str(output_path.parent / "leads_triaged_quarantine.csv"),
+                "total_input_rows": 1,
+                "input_rows": 1,
+                "processed_rows": 1,
+                "keep_count": 0,
+                "reject_count": 0,
+                "quarantine_count": 1,
+                "soft_warning_counts": {"PERSONAL_EMAIL_PROVIDER": 1},
+                "hard_reject_counts": {},
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_RUNS",
+                important_dir / "runs",
+            ), patch.object(live_dashboard.settings, "STATE_DIR", state_dir), patch.object(
+                live_dashboard,
+                "fast_triage_master_leads",
+                return_value=report,
+            ) as fast_triage, patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                return_value={"preview_id": "preview_manual", "rows_written_per_queue": {}, "suppressed_skipped": 0, "dispatch_source_row_count": 0},
+            ), patch.object(live_dashboard, "build_queue_safety_report", return_value={"safe": True}), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[],
+            ):
+                live_dashboard._save_important_check_job(job)
+                saved_job = live_dashboard._run_auto_fast_triage_after_check(job)
+
+            self.assertEqual("MANUAL_AUTHOR_RESEARCH", fast_triage.call_args.kwargs["mode"])
+            self.assertEqual("Manual Author Research", saved_job["auto_triage_report"]["intake_mode_label"])
+            self.assertEqual({"PERSONAL_EMAIL_PROVIDER": 1}, saved_job["auto_triage_report"]["soft_warning_counts"])
 
     def test_upload_check_failure_and_cancel_skip_auto_triage(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:

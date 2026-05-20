@@ -1,0 +1,57 @@
+{
+  "canceled": false,
+  "checkpoint_completed": true,
+  "checkpoint_input_fingerprint": "ce5757053c9c11fb17bdbf60a641b4a858d1513de8cbe18649cc628d4954a9fb",
+  "checkpoint_next_row_index": 2,
+  "checkpoint_path": "/mnt/d/VS/email automation/tmp8jxfnnnp/state/important_leads_triage_state.json",
+  "checkpoint_total_input_rows": 2,
+  "generated_at_utc": "2026-05-12T13:19:13+00:00",
+  "input_label": "leads.csv",
+  "input_rows": 2,
+  "keep_count": 0,
+  "keep_preview_rows": [],
+  "mode": "FAST_TRIAGE",
+  "processed_rows": 2,
+  "quarantine_count": 0,
+  "quarantine_label": "quar.csv",
+  "quarantine_preview_rows": [],
+  "reason_counts": {
+    "DUPLICATE_EMAIL": 1,
+    "MISSING_USABLE_PERSON_NAME": 1
+  },
+  "reject_count": 2,
+  "reject_preview_rows": [
+    {
+      "AuthorEmail": "alpha.author@examplebooks.com",
+      "AuthorName": "Alpha Author",
+      "BookTitle": "Signals at Dawn",
+      "Email": "alpha.author@examplebooks.com",
+      "FirstName": "Alpha",
+      "FullName": "Alpha Author",
+      "PersonalizedOpeningLine": "I noticed Signals at Dawn.",
+      "Status": "REJECT",
+      "VerificationEvidence": "FullName does not contain a strong usable person identity.",
+      "VerificationReason": "MISSING_USABLE_PERSON_NAME",
+      "VerifiedAtUtc": "2026-05-12T13:19:13+00:00",
+      "WhyAstraFit": "Synthetic keep proof."
+    },
+    {
+      "AuthorEmail": "alpha.author@examplebooks.com",
+      "AuthorName": "Alpha Author",
+      "BookTitle": "Signals at Dawn Duplicate",
+      "Email": "alpha.author@examplebooks.com",
+      "FirstName": "Alpha",
+      "FullName": "Alpha Author",
+      "PersonalizedOpeningLine": "I noticed the duplicate row.",
+      "Status": "REJECT",
+      "VerificationEvidence": "Email already appeared earlier in Fast Triage input/output.",
+      "VerificationReason": "DUPLICATE_EMAIL",
+      "VerifiedAtUtc": "2026-05-12T13:19:13+00:00",
+      "WhyAstraFit": "Synthetic reject proof."
+    }
+  ],
+  "rejected_label": "reject.csv",
+  "resume_supported": true,
+  "total_input_rows": 2,
+  "verified_label": "keep.csv"
+}

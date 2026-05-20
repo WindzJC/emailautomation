@@ -70,6 +70,7 @@ from dashboard_core import (
 )
 from important_leads_verify import (
     TRIAGE_MODE_FAST,
+    TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH,
     TRIAGE_MODE_STRICT,
     TRIAGE_PATHS_STATE_KEY,
     TRIAGE_STATE_KEY,
@@ -256,6 +257,7 @@ class ImportantLeadPathsPayload(BaseModel):
     rejected_path: str = ""
     dispatch_source_mode: str = DISPATCH_SOURCE_TRIAGED_KEEP
     input_text: str = ""
+    intake_mode: str = "standard"
 
 
 class ImportantLeadVerifyPayload(BaseModel):
@@ -264,6 +266,22 @@ class ImportantLeadVerifyPayload(BaseModel):
     rejected_path: str = ""
     quarantine_path: str = ""
     mode: str = TRIAGE_MODE_FAST
+
+
+def _normalize_intake_mode(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if text in {"manual_author_research", "author_research", "manual"}:
+        return TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+    return "STANDARD"
+
+
+def _triage_mode_label(mode: object) -> str:
+    normalized = str(mode or "").strip().upper()
+    if normalized == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+        return "Manual Author Research"
+    if normalized == TRIAGE_MODE_STRICT:
+        return "Strict Public Proof"
+    return "Fast Triage"
 
 
 class ImportantLeadDispatchPayload(BaseModel):
@@ -522,7 +540,7 @@ def _has_newer_important_check_job(job: dict[str, object]) -> bool:
 
 def _auto_triage_already_running(exclude_check_job_id: str = "") -> bool:
     active_verify = _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS)
-    if active_verify and str(active_verify.get("mode") or "").upper() == TRIAGE_MODE_FAST:
+    if active_verify and str(active_verify.get("mode") or "").upper() in {TRIAGE_MODE_FAST, TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH}:
         return True
     if not IMPORTANT_LEADS_CHECK_JOBS.exists():
         return False
@@ -830,6 +848,7 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         return _has_newer_important_check_job(job)
 
     try:
+        triage_mode = TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH if _normalize_intake_mode(job.get("intake_mode")) == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else TRIAGE_MODE_FAST
         report = fast_triage_master_leads(
             input_path=output_path,
             keep_path=staged_keep_path,
@@ -838,6 +857,7 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
             persist_state=False,
             progress_callback=save_auto_triage_progress,
             should_cancel=should_cancel_auto_triage,
+            mode=triage_mode,
         )
         if bool(report.get("canceled")) or should_cancel_auto_triage():
             job["status"] = "completed"
@@ -862,6 +882,8 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         final_report["rejected_label"] = str(triage_rejected_path)
         final_report["quarantine_label"] = str(quarantine_path)
         final_report["auto_triage_source_check_job_id"] = job_id
+        final_report["intake_mode"] = triage_mode
+        final_report["intake_mode_label"] = "Manual Author Research" if triage_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "Standard"
         save_state(
             **{
                 TRIAGE_PATHS_STATE_KEY: _triage_path_state_labels(
@@ -1047,15 +1069,20 @@ def _execute_important_check(
     output_path: Path,
     rejected_path: Path,
     effective_input_path: Path,
+    intake_mode: str = "STANDARD",
     progress_callback=None,
 ) -> dict[str, object]:
     save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
-    return check_master_leads(
+    report = check_master_leads(
         input_path=effective_input_path,
         output_path=output_path,
         rejected_path=rejected_path,
         progress_callback=progress_callback,
     )
+    report["intake_mode"] = _normalize_intake_mode(intake_mode)
+    report["intake_mode_label"] = "Manual Author Research" if report["intake_mode"] == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "Standard"
+    save_state(latest_master_check=report)
+    return report
 
 
 def _check_important_leads_response(
@@ -1065,6 +1092,7 @@ def _check_important_leads_response(
     rejected_path: Path,
     effective_input_path: Path,
     source_label: str | None = None,
+    intake_mode: str = "STANDARD",
 ) -> JSONResponse:
     run_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     staged_run_dir = IMPORTANT_LEADS_RUNS / run_id
@@ -1079,6 +1107,7 @@ def _check_important_leads_response(
             output_path=output_path,
             rejected_path=rejected_path,
             effective_input_path=effective_input_path,
+            intake_mode=intake_mode,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
@@ -1162,6 +1191,7 @@ def _run_important_check_job(job_id: str) -> None:
             output_path=Path(str(job.get("output_path") or "")),
             rejected_path=Path(str(job.get("rejected_path") or "")),
             effective_input_path=Path(str(job.get("effective_input_path") or "")),
+            intake_mode=str(job.get("intake_mode") or "STANDARD"),
             progress_callback=save_progress,
         )
         if job.get("cancel_requested"):
@@ -1220,7 +1250,8 @@ def _start_important_check_job(
     selected_size_bytes: int = 0,
     selected_extension: str = "",
     source_sheet: str = "",
-    total_input_rows: int,
+    intake_mode: str = "STANDARD",
+    total_input_rows: int = 0,
 ) -> dict[str, object]:
     job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     staged_run_dir = IMPORTANT_LEADS_RUNS / job_id
@@ -1242,6 +1273,8 @@ def _start_important_check_job(
         "selected_size_bytes": int(selected_size_bytes or 0),
         "selected_extension": str(selected_extension or "").strip(),
         "source_sheet": str(source_sheet or "").strip(),
+        "intake_mode": _normalize_intake_mode(intake_mode),
+        "intake_mode_label": "Manual Author Research" if _normalize_intake_mode(intake_mode) == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "Standard",
         "current_sheet": str(source_sheet or "").strip(),
         "input_path": str(input_path),
         "saved_input_path": str(effective_input_path),
@@ -1307,11 +1340,13 @@ def _run_important_verify_job(job_id: str) -> None:
         return
     try:
         mode = str(job.get("mode") or TRIAGE_MODE_FAST).strip().upper()
+        if mode not in {TRIAGE_MODE_FAST, TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH, TRIAGE_MODE_STRICT}:
+            mode = TRIAGE_MODE_FAST
         is_fast_triage = mode != TRIAGE_MODE_STRICT
         job["status"] = "running"
-        job["mode"] = TRIAGE_MODE_FAST if is_fast_triage else TRIAGE_MODE_STRICT
-        job["stage"] = "fast_triage" if is_fast_triage else "strict_public_proof"
-        job["phase"] = "fast_triage" if is_fast_triage else "strict_public_proof"
+        job["mode"] = mode
+        job["stage"] = "manual_author_research" if mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "fast_triage" if is_fast_triage else "strict_public_proof"
+        job["phase"] = job["stage"]
         job["eta_seconds"] = ""
         job["progress_percent"] = float(job.get("progress_percent") or 0)
         _save_important_verify_job(job)
@@ -1355,6 +1390,7 @@ def _run_important_verify_job(job_id: str) -> None:
                 quarantine_path=Path(str(job.get("quarantine_path") or "")),
                 progress_callback=save_progress,
                 should_cancel=should_cancel,
+                mode=mode,
             )
         else:
             report = verify_master_leads(
@@ -1383,7 +1419,7 @@ def _run_important_verify_job(job_id: str) -> None:
             job["message"] = f"Verify stopped safely at row {processed} of {total}. Checkpoint/output files were preserved."
         else:
             job["progress_percent"] = 100
-            mode_label = "Fast triaged" if is_fast_triage else "Strict verified"
+            mode_label = _triage_mode_label(mode)
             job["message"] = (
                 f"{mode_label} {report['input_label']} into {report['verified_label']}. "
                 f"KEEP {int(report['keep_count'] or 0)}, REJECT {int(report['reject_count'] or 0)}, "
@@ -1409,7 +1445,13 @@ def _start_important_verify_job(
 ) -> dict[str, object]:
     job_id = f"verify_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     total_rows = _count_csv_rows(input_path)
-    mode = TRIAGE_MODE_STRICT if str(mode or "").strip().upper() == TRIAGE_MODE_STRICT else TRIAGE_MODE_FAST
+    raw_mode = str(mode or "").strip().upper()
+    if raw_mode == TRIAGE_MODE_STRICT:
+        mode = TRIAGE_MODE_STRICT
+    elif raw_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+        mode = TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+    else:
+        mode = TRIAGE_MODE_FAST
     job = {
         "job_id": job_id,
         "mode": mode,
@@ -1873,8 +1915,60 @@ def _build_next_batch_prep_status(status: dict[str, object]) -> dict[str, object
     }
 
 
+def _load_latest_confirmed_dispatch_summary() -> dict[str, object]:
+    confirmed_dir = settings.STATE_DIR / "dispatch_confirmed"
+    if not confirmed_dir.exists():
+        return {}
+    candidates = sorted(
+        confirmed_dir.glob("dispatch_confirmed_*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        summary = dict(report or {})
+        summary.update(
+            {
+                "confirmed_summary_path": str(path),
+                "confirmed_at": str(payload.get("confirmed_at") or payload.get("confirmed_at_utc") or ""),
+                "private_jc_added": int(payload.get("private_jc_added") or summary.get("added_astra") or 0),
+                "sendgrid_added": int(payload.get("sendgrid_added") or summary.get("added_sendgrid") or 0),
+                "sg1_added": int(payload.get("sg1_added") or summary.get("assigned_sg1") or 0),
+                "sg2_added": int(payload.get("sg2_added") or summary.get("assigned_sg2") or 0),
+                "sg3_added": int(payload.get("sg3_added") or summary.get("assigned_sg3") or 0),
+                "sg4_added": int(payload.get("sg4_added") or summary.get("assigned_sg4") or 0),
+                "sg5_added": int(payload.get("sg5_added") or summary.get("assigned_sg5") or 0),
+                "backup_path": str(payload.get("backup_path") or summary.get("backup_dir") or ""),
+                "assigned_preview_archive_path": str(payload.get("assigned_preview_archive_path") or summary.get("assigned_preview_archive_path") or ""),
+            }
+        )
+        if not summary.get("generated_at_utc"):
+            summary["generated_at_utc"] = summary.get("confirmed_at") or payload.get("confirmed_at_utc") or ""
+        if not summary.get("dispatch_source_path"):
+            summary["dispatch_source_path"] = payload.get("source_path") or ""
+        if not summary.get("dispatch_source_row_count"):
+            summary["dispatch_source_row_count"] = int(payload.get("source_rows") or 0)
+        if not summary.get("dispatch_eligible_row_count"):
+            summary["dispatch_eligible_row_count"] = int(payload.get("eligible_rows") or 0)
+        if not summary.get("added_astra"):
+            summary["added_astra"] = summary["private_jc_added"]
+        if not summary.get("added_sendgrid"):
+            summary["added_sendgrid"] = summary["sendgrid_added"]
+        for index in range(1, 6):
+            summary.setdefault(f"assigned_sg{index}", summary.get(f"sg{index}_added") or 0)
+        return summary
+    return {}
+
+
 def _combined_leads_status() -> dict[str, object]:
     state = load_state()
+    latest_confirmed_dispatch = _load_latest_confirmed_dispatch_summary()
     status = {
         **shard_status(),
         **important_leads_status(),
@@ -1883,7 +1977,10 @@ def _combined_leads_status() -> dict[str, object]:
         "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
         "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
         "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
+        "latest_confirmed_dispatch": latest_confirmed_dispatch,
     }
+    if latest_confirmed_dispatch:
+        status["latest_dispatch"] = latest_confirmed_dispatch
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
     status["current_send_safety"] = _build_current_send_safety_status(status)
@@ -3172,6 +3269,7 @@ async def check_important_leads_upload(
     client_selected_extension: str = Form(""),
     output_path: str = Form(""),
     rejected_path: str = Form(""),
+    intake_mode: str = Form("standard"),
 ) -> JSONResponse:
     current_paths = important_leads_path_state()
     resolved_output_path = _resolve_dashboard_csv_path_or_default(
@@ -3319,6 +3417,7 @@ async def check_important_leads_upload(
         selected_size_bytes=selected_size_bytes,
         selected_extension=str(client_selected_extension or normalized_extension or extension or "").strip().lower() or normalized_extension or extension,
         source_sheet=source_sheet,
+        intake_mode=_normalize_intake_mode(intake_mode),
         total_input_rows=total_input_rows,
     )
     return JSONResponse(
@@ -3442,6 +3541,7 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
         output_path=output_path,
         rejected_path=rejected_path,
         effective_input_path=effective_input_path,
+        intake_mode=_normalize_intake_mode(payload.intake_mode if payload else "standard"),
     )
 
 
@@ -3449,8 +3549,13 @@ def check_important_leads(payload: ImportantLeadPathsPayload | None = None) -> J
 def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) -> JSONResponse:
     try:
         mode = str(payload.mode if payload else TRIAGE_MODE_FAST).strip().upper()
-        mode = TRIAGE_MODE_STRICT if mode == TRIAGE_MODE_STRICT else TRIAGE_MODE_FAST
-        if mode == TRIAGE_MODE_FAST:
+        if mode == TRIAGE_MODE_STRICT:
+            mode = TRIAGE_MODE_STRICT
+        elif mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+            mode = TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+        else:
+            mode = TRIAGE_MODE_FAST
+        if mode != TRIAGE_MODE_STRICT:
             current_paths = important_leads_triage_path_state()
             default_keep_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_keep.csv")
             default_rejected_path = IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_reject.csv")
@@ -3466,7 +3571,7 @@ def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) ->
             payload.input_path if payload else current_paths["input_path"],
             IMPORTANT_LEADS_OUTPUT,
         )
-        if mode == TRIAGE_MODE_FAST:
+        if mode != TRIAGE_MODE_STRICT:
             verified_path = default_keep_path.resolve(strict=False)
             rejected_path = default_rejected_path.resolve(strict=False)
             quarantine_path = default_quarantine_path.resolve(strict=False)
@@ -3518,7 +3623,7 @@ def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) ->
     return JSONResponse(
         {
             "ok": True,
-            "message": f"Queued {'fast triage' if mode == TRIAGE_MODE_FAST else 'strict public proof'} job {job['job_id']}.",
+            "message": f"Queued {_triage_mode_label(mode)} job {job['job_id']}.",
             "job": job,
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
         },
