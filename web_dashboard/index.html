@@ -513,7 +513,7 @@
           </section>
 
           <section id="leads-view" class="dashboard-view workspace-view leads-workspace hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
-            <section class="panel panel-shell leads-panel leads-pipeline-panel">
+            <section class="panel panel-shell leads-panel leads-pipeline-panel operator-workflow-section">
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Leads Workspace</p>
@@ -521,6 +521,8 @@
                   <span id="leads-pipeline-meta" class="muted">Next: Check New Leads. Waiting for latest counts.</span>
                 </div>
               </div>
+              <div id="leads-operator-status-strip" class="operator-status-strip" aria-label="Leads status summary"></div>
+              <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
               <div id="lead-funnel-summary" class="lead-funnel-summary"></div>
               <div class="leads-run-safety-grid">
                 <div id="leads-run-safety-card" class="leads-run-safety-card leads-run-safety-card-wait">
@@ -544,29 +546,28 @@
                   <p class="muted">Waiting for staged check, triage, and preview status.</p>
                 </div>
               </div>
-              <div id="leads-pipeline-steps" class="leads-pipeline-steps"></div>
+              <details class="leads-collapsible advanced-details debug-state-details">
+                <summary>Debug state</summary>
+                <div id="leads-pipeline-steps" class="leads-pipeline-steps"></div>
+              </details>
             </section>
 
-            <section class="panel panel-shell leads-panel leads-step-panel">
+            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Intake</p>
-                  <h2>Check New Leads</h2>
-                  <span class="muted">Manual file, paste, or upload intake. This stage only cleans and writes checked lead files.</span>
+                  <h2>Check Leads</h2>
+                  <span class="muted">Upload, paste, or check a prepared intake file. This stage only cleans and writes checked lead files.</span>
                 </div>
               </div>
               <div class="leads-quick-grid leads-primary-grid">
                 <div class="leads-quick-file">
-                  <span class="label">Input</span>
-                  <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Output</span>
-                  <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Rejected</span>
-                  <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
+                  <span class="label">Intake mode</span>
+                  <select id="leads-important-intake-mode">
+                    <option value="standard" selected>Standard</option>
+                    <option value="manual_author_research">Manual Author Research</option>
+                  </select>
+                  <span class="toolbar-field-note muted">Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.</span>
                 </div>
                 <div class="leads-action-slot">
                   <button id="leads-important-check-btn" class="btn btn-primary" type="button">Check Leads</button>
@@ -585,6 +586,24 @@
                 </div>
               </details>
 
+              <details class="leads-collapsible advanced-details advanced-file-details">
+                <summary>Advanced file details</summary>
+                <div class="leads-quick-grid leads-primary-grid">
+                  <div class="leads-quick-file">
+                    <span class="label">Input</span>
+                    <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
+                  </div>
+                  <div class="leads-quick-file">
+                    <span class="label">Output</span>
+                    <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
+                  </div>
+                  <div class="leads-quick-file">
+                    <span class="label">Rejected</span>
+                    <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
+                  </div>
+                </div>
+              </details>
+
               <details class="leads-collapsible">
                 <summary>Paste small/manual intake</summary>
                 <div class="leads-quick-file leads-quick-file-wide">
@@ -597,30 +616,12 @@
               <div id="leads-important-check-results" class="leads-results"></div>
             </section>
 
-            <section class="panel panel-shell leads-panel leads-step-panel">
+            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Triage &amp; Review</p>
-                  <h2>Verify and Review</h2>
+                  <h2>Lead Triage</h2>
                   <span class="muted">Fast Triage is the default gate. Strict Public Proof and quarantine actions stay separate for review-heavy cases.</span>
-                </div>
-              </div>
-              <div class="leads-quick-grid leads-primary-grid">
-                <div class="leads-quick-file">
-                  <span class="label">Input</span>
-                  <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Keep</span>
-                  <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Reject</span>
-                  <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Quarantine</span>
-                  <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
                 </div>
               </div>
               <div class="leads-action-row">
@@ -628,6 +629,27 @@
                 <button id="leads-verify-strict-btn" class="btn btn-secondary" type="button">Strict Public Proof</button>
                 <button id="leads-verify-stop-btn" class="btn btn-secondary" type="button" disabled>Stop Verify</button>
               </div>
+              <details class="leads-collapsible advanced-details advanced-file-details">
+                <summary>Advanced file details</summary>
+                <div class="leads-quick-grid leads-primary-grid">
+                  <div class="leads-quick-file">
+                    <span class="label">Input</span>
+                    <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
+                  </div>
+                  <div class="leads-quick-file">
+                    <span class="label">Keep</span>
+                    <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
+                  </div>
+                  <div class="leads-quick-file">
+                    <span class="label">Reject</span>
+                    <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
+                  </div>
+                  <div class="leads-quick-file">
+                    <span class="label">Quarantine</span>
+                    <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
+                  </div>
+                </div>
+              </details>
               <div id="leads-verify-meta" class="leads-meta muted">Verify is idle. Run Check Leads first, then run Fast Triage.</div>
               <div id="leads-verify-results" class="leads-results"></div>
 
@@ -685,7 +707,7 @@
               </section>
             </section>
 
-            <section class="panel panel-shell leads-panel leads-step-panel">
+            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Preview &amp; Dispatch</p>
@@ -719,6 +741,21 @@
               </div>
               <div id="leads-important-dispatch-meta" class="leads-meta muted">Dispatch is idle. Stop all senders, preview the exact write set, then confirm.</div>
               <div id="leads-important-dispatch-results" class="leads-results"></div>
+            </section>
+
+            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Safety</p>
+                  <h2>Active Alerts</h2>
+                  <span class="muted">Blocking safety warnings stay visible here. Technical state is kept in the expandable debug sections above.</span>
+                </div>
+              </div>
+              <div id="leads-active-alerts" class="leads-active-alerts"></div>
+              <details class="leads-collapsible advanced-details raw-paths-details">
+                <summary>Raw paths</summary>
+                <p class="muted">Open the Advanced file details or Dispatch archive details sections above for full paths and archived state references.</p>
+              </details>
             </section>
           </section>
         </main>

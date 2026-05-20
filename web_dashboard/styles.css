@@ -471,6 +471,170 @@ h3 {
   gap: 12px;
 }
 
+.operator-workflow-section {
+  gap: 14px;
+}
+
+.operator-status-strip {
+  min-width: 0;
+}
+
+.leads-workflow-status-banner {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(182, 203, 232, 0.14);
+  border-radius: 8px;
+  background: rgba(10, 18, 32, 0.58);
+}
+
+.workflow-banner-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workflow-banner-head strong {
+  color: #f7fbff;
+  font-size: 1.02rem;
+}
+
+.workflow-step-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-step {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(182, 203, 232, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.workflow-step-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.workflow-step strong {
+  color: #f7fbff;
+  text-transform: capitalize;
+}
+
+.workflow-step span:last-child {
+  color: #dce8fb;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.workflow-step-good {
+  border-color: rgba(72, 187, 120, 0.34);
+  background: rgba(18, 107, 77, 0.12);
+}
+
+.workflow-step-warn {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.workflow-step-bad {
+  border-color: rgba(248, 113, 113, 0.46);
+  background: rgba(127, 29, 29, 0.16);
+}
+
+.operator-status-metrics {
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+}
+
+.operator-secondary-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.advanced-details {
+  min-width: 0;
+  border: 1px solid rgba(182, 203, 232, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.advanced-details > summary {
+  cursor: pointer;
+  color: #dce8fb;
+  font-weight: 800;
+  list-style: none;
+}
+
+.advanced-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-details > summary::after {
+  content: "Open";
+  float: right;
+  margin-left: 12px;
+  padding: 3px 8px;
+  border: 1px solid rgba(182, 203, 232, 0.12);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.advanced-details[open] > summary::after {
+  content: "Close";
+}
+
+.leads-active-alerts {
+  display: grid;
+  gap: 8px;
+}
+
+.leads-alert-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(182, 203, 232, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.leads-alert-card strong {
+  color: #f7fbff;
+}
+
+.leads-alert-card p {
+  margin: 4px 0 0;
+  color: #dce8fb;
+}
+
+.leads-alert-card-bad,
+.leads-alert-card-critical {
+  border-color: rgba(248, 113, 113, 0.46);
+  background: rgba(127, 29, 29, 0.16);
+}
+
+.leads-alert-card-warn {
+  border-color: rgba(245, 158, 11, 0.42);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.leads-alert-card-good,
+.leads-alert-card-ok {
+  border-color: rgba(72, 187, 120, 0.34);
+  background: rgba(18, 107, 77, 0.12);
+}
+
 .leads-dispatch-grid {
   display: grid;
   grid-template-columns: minmax(190px, 0.75fr) minmax(120px, 0.35fr) minmax(240px, 1fr) auto;
@@ -651,6 +815,10 @@ h3 {
   .leads-run-safety-grid {
     grid-template-columns: 1fr;
   }
+
+  .workflow-step-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -664,6 +832,10 @@ h3 {
 
   .path-ellipsis {
     max-width: 62vw;
+  }
+
+  .workflow-step-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1065,8 +1237,26 @@ h3 {
   align-items: center;
   justify-content: center;
   min-width: 92px;
+  gap: 8px;
   text-align: center;
   white-space: nowrap;
+}
+
+.btn.is-loading::before {
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 999px;
+  content: "";
+  flex: 0 0 auto;
+  animation: button-spin 820ms linear infinite;
+}
+
+@keyframes button-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .operator-pill-strip,

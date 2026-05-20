@@ -40,6 +40,7 @@ const els = {
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
   leadsImportantInputPath: document.getElementById("leads-important-input-path"),
+  leadsImportantIntakeMode: document.getElementById("leads-important-intake-mode"),
   leadsImportantOutputPath: document.getElementById("leads-important-output-path"),
   leadsImportantRejectedPath: document.getElementById("leads-important-rejected-path"),
   leadsImportantInputText: document.getElementById("leads-important-input-text"),
@@ -80,6 +81,9 @@ const els = {
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsOperatorStatusStrip: document.getElementById("leads-operator-status-strip"),
+  leadsWorkflowStatusBanner: document.getElementById("leads-workflow-status-banner"),
+  leadsActiveAlerts: document.getElementById("leads-active-alerts"),
   leadFunnelSummary: document.getElementById("lead-funnel-summary"),
   leadsRunSafetyCard: document.getElementById("leads-run-safety-card"),
   nextBatchPrepCard: document.getElementById("next-batch-prep-card"),
@@ -139,6 +143,9 @@ let importantLeadDispatchJobTimer = null;
 let importantLeadDispatchJobPollId = "";
 let lastImportantDispatchSource = null;
 let lastImportantDispatchPreview = null;
+let importantLeadDispatchPreviewLoading = false;
+let importantLeadDispatchConfirmLoading = false;
+let lastImportantDispatchPreviewState = "not_generated";
 let lastQuarantineReview = null;
 let lastQuarantineReviewLead = null;
 let socketReconnectTimer = null;
@@ -166,6 +173,7 @@ const IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY = "emailautomation.activeImportantChe
 const IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY = "emailautomation.activeImportantVerifyJobId";
 const IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY = "emailautomation.activeImportantDispatchJobId";
 const VERIFY_MODE_FAST_TRIAGE = "FAST_TRIAGE";
+const VERIFY_MODE_MANUAL_AUTHOR_RESEARCH = "MANUAL_AUTHOR_RESEARCH";
 const VERIFY_MODE_STRICT_PUBLIC_PROOF = "STRICT_PUBLIC_PROOF";
 const QUARANTINE_PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 const VERIFY_FAST_DEFAULT_PATHS = {
@@ -799,6 +807,15 @@ function setNodeHtml(node, html) {
   }
 }
 
+function setButtonBusy(button, busy, label) {
+  if (!button) return;
+  button.classList.toggle("is-loading", Boolean(busy));
+  button.disabled = Boolean(busy);
+  if (label !== undefined) {
+    setNodeText(button, label);
+  }
+}
+
 function parseDomainList(value) {
   return String(value || "")
     .split(",")
@@ -973,6 +990,7 @@ function selectedLeadsMapping() {
 
 function importantLeadPathsPayload() {
   return {
+    intake_mode: els.leadsImportantIntakeMode?.value || "standard",
     input_path: els.leadsImportantInputPath?.value?.trim() || "",
     output_path: els.leadsImportantOutputPath?.value?.trim() || "",
     rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
@@ -1069,6 +1087,7 @@ function importantLeadUploadPayload() {
   formData.append("client_selected_filename", filename);
   formData.append("client_selected_size_bytes", String(size || 0));
   formData.append("client_selected_extension", extension);
+  formData.append("intake_mode", els.leadsImportantIntakeMode?.value || "standard");
   formData.append("output_path", els.leadsImportantOutputPath?.value?.trim() || "");
   formData.append("rejected_path", els.leadsImportantRejectedPath?.value?.trim() || "");
   return { formData, file, filename, size, extension };
@@ -1238,6 +1257,7 @@ function renderImportantLeadCheckJob(job) {
       detail ? `${label}: ${detail}` : `${label}.`,
     );
   }
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   if (status !== "completed" && status !== "failed" && els.leadsImportantCheckResults) {
     const stage = job.stage || status || "queued";
     const totalRows = Number(job.total_input_rows || 0);
@@ -1268,6 +1288,7 @@ function renderImportantLeadCheckJob(job) {
           <div class="pill-row">
             <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
             <span class="mini-pill">Mode ${escapeHtml(job.source_mode || "uploaded_file")}</span>
+            <span class="mini-pill">Intake mode ${escapeHtml(job.intake_mode_label || (job.intake_mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH ? "Manual Author Research" : "Standard"))}</span>
             <span class="mini-pill">Selected ${escapeHtml(selectedFilename)}</span>
             <span class="mini-pill">Server ${escapeHtml(serverFilename)}</span>
             ${sheetName ? `<span class="mini-pill">Sheet ${escapeHtml(sheetName)}</span>` : ""}
@@ -1371,7 +1392,7 @@ function renderImportantLeadVerifyJob(job) {
   const status = importantLeadCheckJobStatus(job);
   const active = isActiveImportantLeadCheckJob(job);
   const mode = String(job.mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase();
-  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : "Fast Triage";
+  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH ? "Manual Author Research" : "Fast Triage";
   if (active) {
     saveJobId(IMPORTANT_LEAD_VERIFY_JOB_STORAGE_KEY, job.job_id);
   } else if (isTerminalImportantLeadCheckJob(job)) {
@@ -1391,12 +1412,10 @@ function renderImportantLeadVerifyJob(job) {
     setNodeText(els.leadsImportantVerifyMeta, `Verify job ${status}: ${job.message || job.error || stage}.`);
   }
   if (els.leadsImportantVerifyBtn) {
-    els.leadsImportantVerifyBtn.disabled = active;
-    setNodeText(els.leadsImportantVerifyBtn, active ? "Verifying..." : "Fast Triage");
+    setButtonBusy(els.leadsImportantVerifyBtn, active, active ? "Verifying..." : "Fast Triage");
   }
   if (els.leadsImportantVerifyStrictBtn) {
-    els.leadsImportantVerifyStrictBtn.disabled = active;
-    setNodeText(els.leadsImportantVerifyStrictBtn, active ? "Verifying..." : "Strict Public Proof");
+    setButtonBusy(els.leadsImportantVerifyStrictBtn, active, active ? "Verifying..." : "Strict Public Proof");
   }
   if (els.leadsImportantVerifyStopBtn) {
     els.leadsImportantVerifyStopBtn.disabled = !active || Boolean(job.cancel_requested);
@@ -1427,6 +1446,7 @@ function renderImportantLeadVerifyJob(job) {
       `,
     );
   }
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
 }
 
 async function stopImportantLeadVerify() {
@@ -1559,12 +1579,12 @@ function renderImportantLeadDispatchJob(job) {
     setNodeText(els.leadsImportantDispatchMeta, `Dispatch job ${status}: ${job.message || job.error || stage}.`);
   }
   if (els.leadsImportantDispatchPreviewBtn) {
-    els.leadsImportantDispatchPreviewBtn.disabled = active;
+    setButtonBusy(els.leadsImportantDispatchPreviewBtn, active, "Preview Dispatch");
     setNodeText(els.leadsImportantDispatchPreviewBtn, "Preview Dispatch");
   }
   if (els.leadsImportantDispatchConfirmBtn) {
+    setButtonBusy(els.leadsImportantDispatchConfirmBtn, active, active ? "Dispatching..." : "Confirm Dispatch");
     els.leadsImportantDispatchConfirmBtn.disabled = true;
-    setNodeText(els.leadsImportantDispatchConfirmBtn, active ? "Dispatching..." : "Confirm Dispatch");
   }
   if (els.leadsImportantDispatchResults && active) {
     setNodeHtml(
@@ -1591,6 +1611,7 @@ function renderImportantLeadDispatchJob(job) {
       `,
     );
   }
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
 }
 
 function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
@@ -1691,9 +1712,12 @@ function syncImportantLeadPathInputs(status) {
 }
 
 function importantLeadVerifyPayload(mode = VERIFY_MODE_FAST_TRIAGE) {
-  const normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
+  let normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
     ? VERIFY_MODE_STRICT_PUBLIC_PROOF
     : VERIFY_MODE_FAST_TRIAGE;
+  if (normalizedMode === VERIFY_MODE_FAST_TRIAGE && (els.leadsImportantIntakeMode?.value || "") === "manual_author_research") {
+    normalizedMode = VERIFY_MODE_MANUAL_AUTHOR_RESEARCH;
+  }
   const modeDefaults = normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF
     ? VERIFY_STRICT_DEFAULT_PATHS
     : VERIFY_FAST_DEFAULT_PATHS;
@@ -2408,6 +2432,7 @@ function renderOperatorTableBlock(title, caption, headers, rows, emptyText = "No
     "Source Preview",
     "Assigned Preview",
     "Source Snapshot",
+    "Already Contacted Evidence",
   ]);
   const isCollapsible = collapsibleTitles.has(String(title || ""));
   if (isCollapsible) {
@@ -2460,7 +2485,7 @@ function renderImportantLeadCheck(result) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantCheckMeta,
-        `${result.input_label} checked into ${result.output_label}. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
+        `Last check completed. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
       );
     } else {
       setNodeText(
@@ -2478,30 +2503,41 @@ function renderImportantLeadCheck(result) {
   const fieldnames = Array.isArray(result.output_fieldnames) ? result.output_fieldnames : [];
   const rows = Array.isArray(result.output_preview_rows) ? result.output_preview_rows : [];
   const reasonRows = Object.entries(result.reason_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) }));
+  const intakeModeLabel = result.intake_mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH ? "Manual Author Research" : (result.intake_mode_label || "Standard");
   setNodeHtml(
     els.leadsImportantCheckResults,
     `
       <div class="operator-result-shell operator-check-shell">
         ${renderOperatorMetricStrip([
+          { label: "Intake mode", value: intakeModeLabel },
           { label: "Input", value: Number(result.input_rows || 0) },
           { label: "Cleaned", value: Number(result.cleaned_rows || 0), tone: "good" },
+          { label: "Rejected", value: Math.max(0, Number(result.input_rows || 0) - Number(result.cleaned_rows || 0)), tone: "warn" },
+          { label: "Review / Quarantine", value: Number(result.quarantine_count || result.review_count || 0), tone: Number(result.quarantine_count || result.review_count || 0) ? "warn" : "" },
+          { label: "Safe fixes", value: Number(result.safe_fixes_applied || 0) },
+        ])}
+        ${renderOperatorMetricStrip([
           { label: "Duplicates", value: Number(result.duplicates_removed || 0) },
           { label: "Invalid", value: Number(result.invalid_removed || 0), tone: "warn" },
           { label: "Suppressed", value: Number(result.suppressed_removed || 0), tone: "warn" },
           { label: "Suspicious", value: Number(result.suspicious_flagged || 0), tone: "warn" },
-        ])}
-        ${renderOperatorPillStrip([
-          `Input ${result.input_label || "-"}`,
-          `Output ${result.output_label || "-"}`,
-          `Rejected ${result.rejected_label || "-"}`,
-          `Safe fixes ${Number(result.safe_fixes_applied || 0)}`,
-        ])}
+        ], "operator-secondary-metrics")}
         <div class="operator-result-grid operator-result-grid-wide">
           ${reasonRows.length
             ? renderOperatorTableBlock("Removal Ledger", "What changed during hygiene.", ["Reason", "Count"], reasonRows, "No rows were removed.")
             : `<section class="operator-table-block"><div class="operator-table-head"><div><h3>Removal Ledger</h3><p class="muted">No removal reasons were recorded for this run.</p></div></div></section>`}
           ${renderOperatorTableBlock("Clean Output Preview", "The working rows that move into Verify.", fieldnames, rows, "No checked rows were written.")}
         </div>
+        <details class="dispatch-drawer advanced-details">
+          <summary>Advanced file details</summary>
+          <div class="dispatch-disclosure-body">
+            ${renderOperatorPillStrip([
+              `Input ${result.input_label || "-"}`,
+              `Output ${result.output_label || "-"}`,
+              `Rejected ${result.rejected_label || "-"}`,
+            ])}
+          </div>
+        </details>
       </div>
     `,
   );
@@ -2509,12 +2545,13 @@ function renderImportantLeadCheck(result) {
 
 function renderImportantLeadVerify(result) {
   const mode = String(result?.mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase();
-  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : "Fast Triage";
+  const modeLabel = mode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict Public Proof" : mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH ? "Manual Author Research" : "Fast Triage";
+  const isManualAuthorResearch = mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH;
   if (els.leadsImportantVerifyMeta) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantVerifyMeta,
-        `${modeLabel}: ${result.input_label} processed into ${result.verified_label}. KEEP ${Number(result.keep_count || 0)}, REJECT ${Number(result.reject_count || 0)}, QUARANTINE ${Number(result.quarantine_count || 0)}.`,
+        `${modeLabel}: KEEP ${Number(result.keep_count || 0)}, REJECT ${Number(result.reject_count || 0)}, QUARANTINE ${Number(result.quarantine_count || 0)}.`,
       );
     } else {
       setNodeText(
@@ -2545,22 +2582,58 @@ function renderImportantLeadVerify(result) {
           { label: "Input", value: Number(result.total_input_rows || 0) },
           { label: "Keep", value: Number(result.keep_count || 0), tone: "good" },
           { label: "Reject", value: Number(result.reject_count || 0), tone: "warn" },
-          { label: "Quarantine", value: Number(result.quarantine_count || 0), tone: "warn" },
+          { label: "Review / Quarantine", value: Number(result.quarantine_count || 0), tone: "warn" },
         ])}
-        ${renderOperatorPillStrip([
-          `Input ${result.input_label || "-"}`,
-          `Keep ${result.verified_label || "-"}`,
-          `Reject ${result.rejected_label || "-"}`,
-          `Quarantine ${result.quarantine_label || "-"}`,
-        ])}
+        ${isManualAuthorResearch
+          ? `
+            <section class="operator-empty-state operator-empty-state-inline">
+              <strong>Manual Author Research mode</strong>
+              <span>Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.</span>
+            </section>
+            <section class="operator-empty-state operator-empty-state-inline">
+              <strong>Review/Quarantine rows are not dispatched automatically.</strong>
+              <span>They must be manually promoted or selected before dispatch.</span>
+            </section>
+          `
+          : ""}
         <div class="operator-result-grid">
           ${reasonRows.length
             ? renderOperatorTableBlock("Reason Ledger", "Local triage evidence for the current pass.", ["Reason", "Count"], reasonRows, "No verification reasons were recorded.")
+            : ""}
+          ${isManualAuthorResearch
+            ? renderOperatorTableBlock(
+              "Soft Warnings",
+              "Manual Author Research warnings routed to Review/Quarantine.",
+              ["Reason", "Count"],
+              Object.entries(result.soft_warning_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
+              "No soft warnings were recorded.",
+            )
+            : ""}
+          ${isManualAuthorResearch
+            ? renderOperatorTableBlock(
+              "Hard Reject Reasons",
+              "Hard safety blockers still rejected.",
+              ["Reason", "Count"],
+              Object.entries(result.hard_reject_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
+              "No hard rejects were recorded.",
+            )
             : ""}
           ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward. Showing up to 5 rows.`, keepPreview.headers, keepPreview.rows, "No rows moved to keep.")}
           ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed. Showing up to 5 rows.", rejectPreview.headers, rejectPreview.rows, "No rows were rejected.")}
           ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review. Showing up to 5 rows.", quarantinePreview.headers, quarantinePreview.rows, "No rows were quarantined.")}
         </div>
+        <details class="dispatch-drawer advanced-details">
+          <summary>Advanced file details</summary>
+          <div class="dispatch-disclosure-body">
+            ${renderOperatorPillStrip([
+              `Intake mode: ${modeLabel}`,
+              `Input ${result.input_label || "-"}`,
+              `Keep ${result.verified_label || "-"}`,
+              `Reject ${result.rejected_label || "-"}`,
+              `Quarantine ${result.quarantine_label || "-"}`,
+            ])}
+          </div>
+        </details>
       </div>
     `,
   );
@@ -2589,6 +2662,13 @@ function renderImportantDispatch(result) {
     + Number(result?.assigned_sg3 || 0)
     + Number(result?.assigned_sg4 || 0)
     + Number(result?.assigned_sg5 || 0);
+  const confirmedSg1 = Number(result?.sg1_added || result?.assigned_sg1 || 0);
+  const confirmedSg2 = Number(result?.sg2_added || result?.assigned_sg2 || 0);
+  const confirmedSg3 = Number(result?.sg3_added || result?.assigned_sg3 || 0);
+  const confirmedSg4 = Number(result?.sg4_added || result?.assigned_sg4 || 0);
+  const confirmedSg5 = Number(result?.sg5_added || result?.assigned_sg5 || 0);
+  const confirmedSendgridTotal = Number(result?.sendgrid_added || result?.added_sendgrid || assignedSendgridTotal || 0);
+  const confirmedPrivateJcTotal = Number(result?.private_jc_added || result?.added_astra || 0);
   const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
   const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
   const sourceName = dispatchSource.dispatch_source_name || result?.dispatch_source_name || dispatchSource.dispatch_source_mode || result?.dispatch_source_mode || "triaged_keep";
@@ -2599,6 +2679,18 @@ function renderImportantDispatch(result) {
     ? liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")
     : "None";
   const selectedCap = els.leadsImportantDispatchCap?.value || (dispatchPreview?.dispatch_cap ?? "all");
+  const previewPrivateJc = Number(dispatchPreview?.rows_to_add_private_jc || 0);
+  const previewSg1 = Number(dispatchPreview?.rows_to_add_sendgrid_1 || 0);
+  const previewSg2 = Number(dispatchPreview?.rows_to_add_sendgrid_2 || 0);
+  const previewSg3 = Number(dispatchPreview?.rows_to_add_sendgrid_3 || 0);
+  const previewSg4 = Number(dispatchPreview?.rows_to_add_sendgrid_4 || 0);
+  const previewSg5 = Number(dispatchPreview?.rows_to_add_sendgrid_5 || 0);
+  const previewSendgrid = previewSg1 + previewSg2 + previewSg3 + previewSg4 + previewSg5;
+  const previewSkipped = Number(dispatchPreview?.skipped_both || 0)
+    || Number(dispatchPreview?.skipped_already_sent || 0)
+    + Number(dispatchPreview?.skipped_already_queued || 0)
+    + Number(dispatchPreview?.skipped_suppressed || 0)
+    + Number(dispatchPreview?.skipped_invalid_malformed || 0);
 
   renderDispatchConfirmGuard(dispatchSource, dispatchPreview);
   if (els.leadsImportantDispatchMeta) {
@@ -2612,7 +2704,7 @@ function renderImportantDispatch(result) {
     } else if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_name || result.dispatch_source_mode || "triaged_keep")} from ${escapeHtml(result.dispatch_source_path || "-")}. The queue sends Email + FirstName only. Astra ${Number(result.added_astra || 0)}, SendGrid ${assignedSendgridTotal}. Live queue counts are shown separately below.`,
+        `Last dispatch ${lastDispatchGeneratedAt}. Source ${escapeHtml(result.dispatch_source_name || result.dispatch_source_mode || "triaged_keep")}. Astra ${confirmedPrivateJcTotal}, SendGrid ${confirmedSendgridTotal}. Live queue counts are shown separately below.`,
       );
     } else {
       const sourceMode = selectedDispatchSource.mode;
@@ -2621,8 +2713,8 @@ function renderImportantDispatch(result) {
       setNodeText(
         els.leadsImportantDispatchMeta,
         dispatchBlockReason
-          ? `Dispatch is idle. Source ${idleName} from ${idlePath}. Preview and confirm are blocked: ${dispatchBlockReason}`
-          : `Dispatch is idle. Source ${idleName} from ${idlePath}. The queue uses Email + FirstName only. Check the source file first, then dispatch while all senders are stopped.`,
+          ? `Dispatch is idle. Source ${idleName}. Preview and confirm are blocked: ${dispatchBlockReason}`
+          : `Dispatch is idle. Source ${idleName}. Check the selected source first, then dispatch while all senders are stopped.`,
       );
     }
   }
@@ -2634,19 +2726,12 @@ function renderImportantDispatch(result) {
       els.leadsImportantDispatchResults,
       `
         <div class="dispatch-shell dispatch-shell-preview">
-          ${renderOperatorPillStrip([
-            preflightLabel,
-            sourceName,
-            `Cap ${selectedCap}`,
-            `Active ${Number(liveSenderProfiles.length || 0)}`,
-            dispatchSource.dispatch_block_reason || "",
-          ].filter(Boolean), "dispatch-preflight-strip")}
           ${renderOperatorMetricStrip([
-            { label: "Preflight", value: preflightLabel, tone: preflightAllowed ? "good" : "warn" },
+            { label: "Current preview", value: dispatchPreview ? "Ready" : "Not generated", tone: dispatchPreview ? "good" : "warn" },
             { label: "Eligible", value: Number(dispatchPreview?.dispatch_eligible_row_count || dispatchSource.dispatch_eligible_row_count || 0) },
-            { label: "Selected", value: Number(dispatchPreview?.dispatch_selected_row_count || 0) },
-            { label: "Would Write", value: Number(dispatchPreview?.total_rows_would_write || 0), tone: dispatchPreview ? "good" : "" },
-            { label: "Live SG", value: liveSendgridTotal },
+            { label: "Private JC planned", value: previewPrivateJc },
+            { label: "SendGrid planned", value: previewSendgrid },
+            { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
           ], "dispatch-metrics")}
           <section class="dispatch-runbook">
             <div class="operator-table-head">
@@ -2689,7 +2774,7 @@ function renderImportantDispatch(result) {
           <section class="dispatch-decision-surface">
             <div class="operator-table-head">
               <div>
-                <h3>Preview Surface</h3>
+                <h3>Current preview</h3>
                 <p class="muted">The exact write set lives here. Review this before confirm.</p>
               </div>
             </div>
@@ -2699,57 +2784,72 @@ function renderImportantDispatch(result) {
                   ${renderOperatorMetricStrip([
                     { label: "Cap", value: dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all" },
                     { label: "Eligible", value: Number(dispatchPreview.dispatch_eligible_row_count || 0) },
-                    { label: "Selected", value: Number(dispatchPreview.dispatch_selected_row_count || 0), tone: "good" },
-                    { label: "Would Write", value: Number(dispatchPreview.total_rows_would_write || 0), tone: "good" },
+                    { label: "Private JC", value: previewPrivateJc, tone: "good" },
+                    { label: "SendGrid", value: previewSendgrid, tone: "good" },
+                    { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
                   ], "dispatch-selection-strip")}
-                  ${renderOperatorMetricStrip([
-                    { label: "JC", value: Number(dispatchPreview.rows_to_add_private_jc || 0) },
-                    { label: "SG1", value: Number(dispatchPreview.rows_to_add_sendgrid_1 || 0) },
-                    { label: "SG2", value: Number(dispatchPreview.rows_to_add_sendgrid_2 || 0) },
-                    { label: "SG3", value: Number(dispatchPreview.rows_to_add_sendgrid_3 || 0) },
-                    { label: "SG4", value: Number(dispatchPreview.rows_to_add_sendgrid_4 || 0) },
-                    { label: "SG5", value: Number(dispatchPreview.rows_to_add_sendgrid_5 || 0) },
-                  ], "dispatch-allocation-strip")}
-                  ${renderOperatorPillStrip([
-                    `Already sent ${Number(dispatchPreview.skipped_already_sent || 0)}`,
-                    `Already queued ${Number(dispatchPreview.skipped_already_queued || 0)}`,
-                    `Suppressed ${Number(dispatchPreview.skipped_suppressed || 0)}`,
-                    `Invalid ${Number(dispatchPreview.skipped_invalid_malformed || 0)}`,
-                    `Path ${sourcePath}`,
-                    `Active senders ${activeSenderSummary}`,
-                  ], "dispatch-preview-pills")}
-                  <div class="operator-result-grid">
-                    ${renderOperatorTableBlock("Source Preview", "The eligible source rows behind this run.", sourceHeaders, sourcePreviewRows, "No source preview available yet.")}
-                    ${renderOperatorTableBlock("Assigned Preview", "The exact rows that would be written on confirm.", previewFields, previewRows, "No assigned preview rows were produced.")}
-                  </div>
+                  <details class="dispatch-drawer advanced-details">
+                    <summary>Advanced dispatch details</summary>
+                    <div class="dispatch-disclosure-body">
+                      ${renderOperatorPillStrip([
+                        `Selected source ${sourceName}`,
+                        `Source path ${sourcePath}`,
+                        `Cap ${dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all"}`,
+                        `Preflight ${preflightLabel}`,
+                        `Active senders ${activeSenderSummary}`,
+                        `Already sent ${Number(dispatchPreview.skipped_already_sent || 0)}`,
+                        `Already queued ${Number(dispatchPreview.skipped_already_queued || 0)}`,
+                        `Suppressed ${Number(dispatchPreview.skipped_suppressed || 0)}`,
+                        `Invalid ${Number(dispatchPreview.skipped_invalid_malformed || 0)}`,
+                        dispatchPreview.preview_path ? `Preview path ${dispatchPreview.preview_path}` : "",
+                        dispatchPreview.assigned_preview_archive_path ? `Assigned preview ${dispatchPreview.assigned_preview_archive_path}` : "",
+                      ])}
+                      ${renderOperatorMetricStrip([
+                        { label: "JC", value: previewPrivateJc },
+                        { label: "SG1", value: previewSg1 },
+                        { label: "SG2", value: previewSg2 },
+                        { label: "SG3", value: previewSg3 },
+                        { label: "SG4", value: previewSg4 },
+                        { label: "SG5", value: previewSg5 },
+                      ], "dispatch-allocation-strip")}
+                      <div class="operator-result-grid">
+                        ${renderOperatorTableBlock("Source Preview", "The eligible source rows behind this run.", sourceHeaders, sourcePreviewRows, "No source preview available yet.")}
+                        ${renderOperatorTableBlock("Assigned Preview", "The exact rows that would be written on confirm.", previewFields, previewRows, "No assigned preview rows were produced.")}
+                        ${Array.isArray(dispatchPreview.already_contacted_evidence) && dispatchPreview.already_contacted_evidence.length
+                          ? renderOperatorTableBlock(
+                            "Already Contacted Evidence",
+                            "already_contacted is a send-history protection, not a lead-quality rejection.",
+                            ["matched_email", "normalized_matched_email", "contact_ledger_source_file", "contacted_at", "channel", "campaign", "subject", "matching_rule"],
+                            dispatchPreview.already_contacted_evidence,
+                            "No already_contacted evidence was recorded.",
+                          )
+                          : ""}
+                      </div>
+                      ${renderOperatorTable(
+                        ["Queue", "Current Live"],
+                        [
+                          { Queue: "Astra / JC", "Current Live": liveJcCount },
+                          { Queue: "SG1", "Current Live": liveSg1 },
+                          { Queue: "SG2", "Current Live": liveSg2 },
+                          { Queue: "SG3", "Current Live": liveSg3 },
+                          { Queue: "SG4", "Current Live": liveSg4 },
+                          { Queue: "SG5", "Current Live": liveSg5 },
+                        ],
+                        "No live queue counts available.",
+                        "dispatch-live-table",
+                      )}
+                      <p class="dispatch-support-note">Live queue comparison is advanced-only and does not change the preview.</p>
+                    </div>
+                  </details>
                 `
                 : `
                   <section class="operator-empty-state operator-empty-state-inline">
-                    <strong>Preview is waiting.</strong>
-                    <span>Run Preview Dispatch first. Preview is read-only and computes the exact rows that would be written.</span>
+                    <strong>No current dispatch preview generated yet.</strong>
+                    <span>No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.</span>
                   </section>
                 `
             }
           </section>
-          <details class="dispatch-drawer" open>
-            <summary>Live queue comparison</summary>
-            <div class="dispatch-disclosure-body">
-              <p class="dispatch-support-note">Use live queue counts as a final sanity check before confirm.</p>
-              ${renderOperatorTable(
-                ["Queue", "Current Live"],
-                [
-                  { Queue: "Astra / JC", "Current Live": liveJcCount },
-                  { Queue: "SG1", "Current Live": liveSg1 },
-                  { Queue: "SG2", "Current Live": liveSg2 },
-                  { Queue: "SG3", "Current Live": liveSg3 },
-                  { Queue: "SG4", "Current Live": liveSg4 },
-                  { Queue: "SG5", "Current Live": liveSg5 },
-                ],
-                "No live queue counts available.",
-                "dispatch-live-table",
-              )}
-            </div>
-          </details>
         </div>
       `,
     );
@@ -2758,95 +2858,149 @@ function renderImportantDispatch(result) {
 
   const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows : [];
   const previewFields = Array.isArray(result.queue_headers) ? result.queue_headers : [];
+  const confirmedZeroAdd = Number(result.total_rows_would_write || 0) === 0;
+  const exclusionReasons = result.exclusion_reason_counts || {};
+  const skippedAlreadyContacted = Number(result.skipped_already_contacted || exclusionReasons.already_contacted || 0);
+  const skippedAlreadySent = Number(result.skipped_already_sent || exclusionReasons.already_sent || 0);
+  const skippedAlreadyQueued = Number(result.skipped_already_queued || exclusionReasons.already_queued || 0);
+  const skippedSuppressed = Number(result.skipped_suppressed || result.suppressed_skipped || exclusionReasons.suppressed || 0);
+  const skippedInvalid = Number(result.skipped_invalid_malformed || result.invalid_malformed_skipped || exclusionReasons.invalid_source_row || 0);
+  const sendgridZeroAddReasonParts = [
+    skippedAlreadyContacted ? `${skippedAlreadyContacted} already contacted` : "",
+    Number(result.skipped_sendgrid_already_sent || 0) ? `${Number(result.skipped_sendgrid_already_sent || 0)} already sent through SendGrid` : "",
+    Number(result.skipped_sendgrid_already_queued || 0) ? `${Number(result.skipped_sendgrid_already_queued || 0)} already queued for SendGrid` : "",
+    skippedSuppressed ? `${skippedSuppressed} suppressed` : "",
+    skippedInvalid ? `${skippedInvalid} invalid or malformed` : "",
+  ].filter(Boolean);
+  const sendgridZeroAddExplanation = confirmedSendgridTotal === 0 && Number(result.dispatch_selected_row_count || result.selected_rows || 0) > 0
+    ? `SendGrid added 0 rows because the selected rows were excluded before queue write${sendgridZeroAddReasonParts.length ? `: ${sendgridZeroAddReasonParts.join(", ")}.` : "."}`
+    : "";
+  const alreadyContactedEvidenceRows = Array.isArray(result.already_contacted_evidence) ? result.already_contacted_evidence : [];
   setNodeHtml(
     els.leadsImportantDispatchResults,
     `
       <div class="dispatch-shell dispatch-shell-confirmed">
-        ${renderOperatorPillStrip([
-          sourceName,
-          `Last dispatch ${lastDispatchGeneratedAt}`,
-          `Live SG ${liveSendgridTotal}`,
-          `Path ${sourcePath}`,
-          `Backup ${result.backup_dir || "-"}`,
-        ], "dispatch-preflight-strip")}
         ${renderOperatorMetricStrip([
-          { label: "Last dispatch", value: lastDispatchGeneratedAt },
-          { label: "Astra added", value: Number(result.added_astra || 0), tone: "good" },
-          { label: "SendGrid added", value: Number(result.added_sendgrid || 0), tone: "good" },
-          { label: "Skipped both", value: Number(result.skipped_both || 0), tone: "warn" },
-          { label: "Live SG", value: liveSendgridTotal },
+          { label: "Last confirmed dispatch", value: lastDispatchGeneratedAt },
+          { label: "Eligible", value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0) },
+          { label: "Private JC added", value: confirmedPrivateJcTotal, tone: "good" },
+          { label: "SendGrid added", value: confirmedSendgridTotal, tone: "good" },
+          { label: "Skipped", value: Number(result.skipped_both || 0), tone: Number(result.skipped_both || 0) ? "warn" : "" },
         ], "dispatch-metrics")}
-        <section class="dispatch-decision-surface">
+        <section class="dispatch-decision-surface dispatch-current-preview">
           <div class="operator-table-head">
             <div>
-              <h3>Last Confirmed Dispatch</h3>
-              <p class="muted">Compact summary of the last confirmed write for this source.</p>
+              <h3>Current preview</h3>
+              <p class="muted">This is the preview for the currently selected source and cap.</p>
             </div>
           </div>
-          ${renderOperatorMetricStrip([
-            { label: "Source rows", value: Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0) },
-            { label: "Eligible", value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0) },
-            { label: "Astra", value: Number(result.added_astra || 0), tone: "good" },
-            { label: "SendGrid", value: Number(result.added_sendgrid || 0), tone: "good" },
-            { label: "Suppressed", value: Number(result.suppressed_skipped || 0), tone: "warn" },
-          ], "dispatch-selection-strip")}
-          <div class="operator-result-grid">
-            ${sourceHeaders.length && sourcePreviewRows.length
-              ? renderOperatorTableBlock("Source Snapshot", "Source rows used for the last confirmed run.", sourceHeaders, sourcePreviewRows, "No source preview available.")
-              : ""}
-            ${renderOperatorTableBlock(
-              "Channel Decisions",
-              "How this dispatch wrote or skipped rows by channel.",
-              ["Channel", "Decision", "Count"],
-              [
-                { Channel: "Astra", Decision: "Added", Count: Number(result.added_astra || 0) },
-                { Channel: "Astra", Decision: "Already Sent", Count: Number(result.skipped_astra_already_sent || 0) },
-                { Channel: "Astra", Decision: "Already Queued", Count: Number(result.skipped_astra_already_queued || 0) },
-                { Channel: "SendGrid", Decision: "Added", Count: Number(result.added_sendgrid || 0) },
-                { Channel: "SendGrid", Decision: "Already Sent", Count: Number(result.skipped_sendgrid_already_sent || 0) },
-                { Channel: "SendGrid", Decision: "Already Queued", Count: Number(result.skipped_sendgrid_already_queued || 0) },
-                { Channel: "Both", Decision: "Skipped Both", Count: Number(result.skipped_both || 0) },
-              ],
-              "No channel decisions were recorded.",
-            )}
-          </div>
-        </section>
-        <details class="dispatch-drawer" open>
-          <summary>Live queue comparison</summary>
-          <div class="dispatch-disclosure-body">
-            <p class="dispatch-support-note">Live queues can already be lower than the last write once sending drains files.</p>
-            ${renderOperatorTable(
-              ["Queue", "Current Live", "At Last Dispatch"],
-              [
-                { Queue: "Astra / JC", "Current Live": liveJcCount, "At Last Dispatch": Number(result.final_queue_counts?.jc || 0) },
-                { Queue: "SG1", "Current Live": liveSg1, "At Last Dispatch": Number(result.final_queue_counts?.sg1 || 0) },
-                { Queue: "SG2", "Current Live": liveSg2, "At Last Dispatch": Number(result.final_queue_counts?.sg2 || 0) },
-                { Queue: "SG3", "Current Live": liveSg3, "At Last Dispatch": Number(result.final_queue_counts?.sg3 || 0) },
-                { Queue: "SG4", "Current Live": liveSg4, "At Last Dispatch": Number(result.final_queue_counts?.sg4 || 0) },
-                { Queue: "SG5", "Current Live": liveSg5, "At Last Dispatch": Number(result.final_queue_counts?.sg5 || 0) },
-              ],
-              "No live queue comparison is available.",
-              "dispatch-live-table",
-            )}
-          </div>
-        </details>
-        ${
-          previewFields.length && previewRows.length
+          ${dispatchPreview
             ? `
-              <details class="dispatch-drawer">
-                <summary>Last assigned preview</summary>
-                <div class="dispatch-disclosure-body">
-                  ${renderOperatorTable(previewFields, previewRows, "No assigned preview rows were stored for the last dispatch.")}
-                </div>
-              </details>
+              ${renderOperatorMetricStrip([
+                { label: "Eligible", value: Number(dispatchPreview.dispatch_eligible_row_count || 0) },
+                { label: "Selected", value: Number(dispatchPreview.dispatch_selected_row_count || 0), tone: "good" },
+                { label: "Would Write", value: Number(dispatchPreview.total_rows_would_write || 0), tone: "good" },
+                { label: "Cap", value: dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all" },
+              ], "dispatch-selection-strip")}
             `
             : `
               <section class="operator-empty-state operator-empty-state-inline">
-                <strong>No stored assigned preview.</strong>
-                <span>No assigned preview rows were stored for the last dispatch.</span>
+                <strong>No current dispatch preview generated yet.</strong>
+                <span>No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.</span>
+              </section>
+            `}
+        </section>
+        <section class="dispatch-decision-surface">
+          <div class="operator-table-head">
+            <div>
+              <h3>Last confirmed dispatch — not the current upload</h3>
+              <p class="muted">Last confirmed dispatch — not the current upload. Use Current preview above for the active source before confirming again.</p>
+            </div>
+          </div>
+          ${sendgridZeroAddExplanation
+            ? `
+              <section class="operator-empty-state operator-empty-state-inline">
+                <strong>SendGrid added 0 rows.</strong>
+                <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
               </section>
             `
-        }
+            : ""}
+          <details class="dispatch-drawer advanced-details">
+            <summary>Advanced dispatch details</summary>
+            <div class="dispatch-disclosure-body">
+              ${renderOperatorPillStrip([
+                `Source ${sourceName}`,
+                `Path ${sourcePath}`,
+                `Backup ${result.backup_dir || "-"}`,
+                result.assigned_preview_archive_path ? `Assigned preview ${result.assigned_preview_archive_path}` : "",
+                result.confirmed_summary_archive_path ? `Confirmed summary ${result.confirmed_summary_archive_path}` : "",
+              ])}
+              ${renderOperatorMetricStrip([
+                { label: "Source rows", value: Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0) },
+                { label: "Suppressed", value: Number(result.suppressed_skipped || 0), tone: "warn" },
+                { label: "JC", value: confirmedPrivateJcTotal },
+                { label: "SG1", value: confirmedSg1 },
+                { label: "SG2", value: confirmedSg2 },
+                { label: "SG3", value: confirmedSg3 },
+                { label: "SG4", value: confirmedSg4 },
+                { label: "SG5", value: confirmedSg5 },
+              ], "dispatch-allocation-strip")}
+              <div class="operator-result-grid">
+                ${sourceHeaders.length && sourcePreviewRows.length
+                  ? renderOperatorTableBlock("Source Snapshot", "Source rows used for the last confirmed run.", sourceHeaders, sourcePreviewRows, "No source preview available.")
+                  : ""}
+                ${renderOperatorTableBlock(
+                  "Channel Decisions",
+                  "How this dispatch wrote or skipped rows by channel.",
+                  ["Channel", "Decision", "Count"],
+                  [
+                    { Channel: "Astra", Decision: "Added", Count: confirmedPrivateJcTotal },
+                    { Channel: "Astra", Decision: "Already Sent", Count: Number(result.skipped_astra_already_sent || 0) },
+                    { Channel: "Astra", Decision: "Already Queued", Count: Number(result.skipped_astra_already_queued || 0) },
+                    { Channel: "SendGrid", Decision: "Added", Count: confirmedSendgridTotal },
+                    { Channel: "SendGrid", Decision: "Already Contacted", Count: skippedAlreadyContacted },
+                    { Channel: "SendGrid", Decision: "Already Sent", Count: Number(result.skipped_sendgrid_already_sent || 0) },
+                    { Channel: "SendGrid", Decision: "Already Queued", Count: Number(result.skipped_sendgrid_already_queued || 0) },
+                    { Channel: "Both", Decision: "Suppressed", Count: skippedSuppressed },
+                    { Channel: "Both", Decision: "Invalid / Malformed", Count: skippedInvalid },
+                    { Channel: "Both", Decision: "Skipped Both", Count: Number(result.skipped_both || 0) },
+                  ],
+                  "No channel decisions were recorded.",
+                )}
+                ${alreadyContactedEvidenceRows.length
+                  ? renderOperatorTableBlock(
+                    "Already Contacted Evidence",
+                    "already_contacted is a send-history protection, not a lead-quality rejection.",
+                    ["matched_email", "normalized_matched_email", "contact_ledger_source_file", "contacted_at", "channel", "campaign", "subject", "matching_rule"],
+                    alreadyContactedEvidenceRows,
+                    "No already_contacted evidence was recorded.",
+                  )
+                  : ""}
+              </div>
+              ${renderOperatorTable(
+                ["Queue", "Current Live", "At Last Dispatch"],
+                [
+                  { Queue: "Astra / JC", "Current Live": liveJcCount, "At Last Dispatch": Number(result.final_queue_counts?.jc || 0) },
+                  { Queue: "SG1", "Current Live": liveSg1, "At Last Dispatch": Number(result.final_queue_counts?.sg1 || 0) },
+                  { Queue: "SG2", "Current Live": liveSg2, "At Last Dispatch": Number(result.final_queue_counts?.sg2 || 0) },
+                  { Queue: "SG3", "Current Live": liveSg3, "At Last Dispatch": Number(result.final_queue_counts?.sg3 || 0) },
+                  { Queue: "SG4", "Current Live": liveSg4, "At Last Dispatch": Number(result.final_queue_counts?.sg4 || 0) },
+                  { Queue: "SG5", "Current Live": liveSg5, "At Last Dispatch": Number(result.final_queue_counts?.sg5 || 0) },
+                ],
+                "No live queue comparison is available.",
+                "dispatch-live-table",
+              )}
+              <p class="dispatch-support-note">Live queue comparison is advanced-only and may be lower after sending drains files.</p>
+              ${
+                previewFields.length && previewRows.length
+                  ? renderOperatorTable(previewFields, previewRows, "No assigned preview rows were stored for the last dispatch.")
+                  : confirmedZeroAdd
+                    ? `<section class="operator-empty-state operator-empty-state-inline"><strong>Zero-add dispatch stored.</strong><span>No assigned rows were expected for this confirmed dispatch. Skip reasons were saved with the confirmed summary.</span></section>`
+                    : `<section class="operator-empty-state operator-empty-state-inline"><strong>No stored assigned preview.</strong><span>Last dispatch has no stored assigned preview. Re-run Preview Dispatch before confirming again.</span></section>`
+              }
+            </div>
+          </details>
+        </section>
       </div>
     `,
   );
@@ -3032,6 +3186,209 @@ function renderLeadFunnelSummary(funnel) {
   );
 }
 
+function formatOperatorCount(value) {
+  if (value === null || value === undefined || value === "") return "Pending";
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value);
+}
+
+function intakeModeLabelFromStatus(status = lastLeadsStatus) {
+  const mode = String(
+    els.leadsImportantIntakeMode?.value
+    || status?.latest_master_check?.intake_mode
+    || status?.latest_lead_triage?.intake_mode
+    || status?.latest_lead_triage?.mode
+    || "standard",
+  ).toLowerCase();
+  return mode === "manual_author_research" || mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH.toLowerCase()
+    ? "Manual Author Research"
+    : "Standard";
+}
+
+function latestDispatchAddedSummary(dispatch = lastImportantDispatch) {
+  if (!dispatch?.generated_at_utc) return "Pending";
+  const privateAdded = Number(dispatch.private_jc_added || dispatch.added_astra || 0);
+  const sendgridAdded = Number(dispatch.sendgrid_added || dispatch.added_sendgrid || 0);
+  return `JC ${privateAdded.toLocaleString()} · SG ${sendgridAdded.toLocaleString()}`;
+}
+
+function workflowTerminalStatus(job) {
+  const status = String(job?.status || "").toLowerCase();
+  if (["failed", "error"].includes(status)) return "failed";
+  if (["canceled", "cancelled"].includes(status)) return "failed";
+  if (status === "completed") return "completed";
+  return "";
+}
+
+function workflowStepStatus(activeJob, latestResult, pendingLabel = "pending") {
+  if (isActiveImportantLeadCheckJob(activeJob)) return "running";
+  const terminal = workflowTerminalStatus(activeJob);
+  if (terminal) return terminal;
+  if (latestResult?.generated_at_utc) return "completed";
+  return pendingLabel;
+}
+
+function workflowStatusLabel(status) {
+  const normalized = String(status || "pending").toLowerCase();
+  if (normalized === "not_generated") return "not generated";
+  if (normalized === "not_confirmed") return "not confirmed";
+  return normalized;
+}
+
+function workflowStatusTone(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (["completed", "ready", "confirmed"].includes(normalized)) return "good";
+  if (["running"].includes(normalized)) return "warn";
+  if (["failed"].includes(normalized)) return "bad";
+  return "pending";
+}
+
+function workflowNextStepMessage(checkStatus, triageStatus, previewStatus, confirmStatus) {
+  if (checkStatus === "running") return "Check Leads running...";
+  if (checkStatus === "failed") return "Check failed. Review the error before continuing.";
+  if (checkStatus === "completed" && triageStatus === "pending") return "Check complete. Next step: Run Fast Triage.";
+  if (triageStatus === "running") return "Fast Triage running...";
+  if (triageStatus === "failed") return "Fast Triage failed. Review the error before previewing dispatch.";
+  if (triageStatus === "completed" && previewStatus === "not_generated") return "Fast Triage complete. Next step: Preview Dispatch.";
+  if (previewStatus === "running") return "Preview Dispatch running...";
+  if (previewStatus === "failed") return "Preview Dispatch failed. Re-run preview after fixing the issue.";
+  if (previewStatus === "ready" && confirmStatus !== "confirmed") return "Preview Dispatch ready. Next step: Confirm Dispatch.";
+  if (confirmStatus === "confirmed") return "Dispatch confirmed. Queue write summary is shown below.";
+  return "Start with Check Leads, then run Fast Triage and Preview Dispatch.";
+}
+
+function renderWorkflowStep(label, status, detail = "") {
+  const normalized = String(status || "pending").toLowerCase();
+  return `
+    <div class="workflow-step workflow-step-${escapeHtml(workflowStatusTone(normalized))}">
+      <span class="workflow-step-label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(workflowStatusLabel(normalized))}</strong>
+      ${detail ? `<span>${escapeHtml(detail)}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
+  if (!els.leadsWorkflowStatusBanner) return;
+  const activeCheck = currentImportantCheckJob(status);
+  const activeVerify = status?.active_important_verify_job || lastImportantVerifyJob || null;
+  const activeDispatch = status?.active_important_dispatch_job || lastImportantDispatchJob || null;
+  const latestCheck = status?.latest_master_check || lastImportantLeadCheck || {};
+  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || lastImportantVerify || {};
+  const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
+  const checkStatus = workflowStepStatus(activeCheck, latestCheck);
+  const triageStatus = workflowStepStatus(activeVerify, latestTriage);
+  const currentPreviewReady = dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
+  const previewStatus = importantLeadDispatchPreviewLoading
+    ? "running"
+    : currentPreviewReady
+      ? "ready"
+      : lastImportantDispatchPreviewState === "failed"
+        ? "failed"
+        : "not_generated";
+  const confirmStatus = importantLeadDispatchConfirmLoading || isActiveImportantLeadCheckJob(activeDispatch)
+    ? "running"
+    : latestDispatch?.generated_at_utc
+      ? "confirmed"
+      : "not_confirmed";
+  const triageCounts = latestTriage?.generated_at_utc
+    ? `input ${formatOperatorCount(latestTriage.total_input_rows)} · keep ${formatOperatorCount(latestTriage.keep_count)} · reject ${formatOperatorCount(latestTriage.reject_count)} · review ${formatOperatorCount(latestTriage.quarantine_count)}`
+    : "";
+  setNodeHtml(
+    els.leadsWorkflowStatusBanner,
+    `
+      <div class="workflow-banner-head">
+        <div>
+          <p class="eyebrow">Workflow Status</p>
+          <strong>${escapeHtml(workflowNextStepMessage(checkStatus, triageStatus, previewStatus, confirmStatus))}</strong>
+        </div>
+      </div>
+      <div class="workflow-step-grid">
+        ${renderWorkflowStep("Last check", checkStatus)}
+        ${renderWorkflowStep("Last triage", triageStatus, triageCounts)}
+        ${renderWorkflowStep("Preview dispatch", previewStatus)}
+        ${renderWorkflowStep("Confirm dispatch", confirmStatus)}
+      </div>
+    `,
+  );
+}
+
+function renderLeadsOperatorStatusStrip(status = lastLeadsStatus) {
+  if (!els.leadsOperatorStatusStrip) return;
+  const safety = leadsRunSafety(status);
+  const latestCheck = status?.latest_master_check || {};
+  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || {};
+  const blocker = safety.queueUnsafe
+    ? (safety.reasons[0] || "Recipient queue unsafe.")
+    : (safety.checkRunning ? "Next batch check is running." : "None");
+  const triageSummary = latestTriage?.generated_at_utc
+    ? `Keep ${formatOperatorCount(latestTriage.keep_count)} · Review ${formatOperatorCount(latestTriage.quarantine_count)} · Reject ${formatOperatorCount(latestTriage.reject_count)}`
+    : "Pending";
+  setNodeHtml(
+    els.leadsOperatorStatusStrip,
+    `
+      ${renderOperatorMetricStrip([
+        { label: "Intake mode", value: intakeModeLabelFromStatus(status) },
+        { label: "Last check", value: latestCheck?.generated_at_utc ? formatOperatorCount(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows) : "Pending" },
+        { label: "Last triage", value: triageSummary },
+        { label: "Last dispatch", value: latestDispatchAddedSummary(status?.latest_dispatch || lastImportantDispatch) },
+        { label: "Current blocker", value: blocker, tone: safety.queueUnsafe ? "warn" : "good" },
+      ], "operator-status-metrics")}
+    `,
+  );
+}
+
+function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  if (!els.leadsActiveAlerts) return;
+  const safety = leadsRunSafety(status, snapshot);
+  const cards = [];
+  if (safety.queueUnsafe) {
+    cards.push({
+      severity: "bad",
+      title: "Current live queue blocked",
+      message: safety.reasons[0] || "Recipient queue unsafe. Rebuild queues from the current campaign source before starting.",
+      blocks: true,
+    });
+  }
+  const currentSafety = status?.current_send_safety || {};
+  if (currentSafety.sendgrid_status && currentSafety.private_status && currentSafety.sendgrid_status !== currentSafety.private_status) {
+    cards.push({
+      severity: currentSafety.private_status === "READY" ? "warn" : "bad",
+      title: `${currentSafety.sendgrid_status === "READY" ? "SendGrid ready" : "SendGrid blocked"}; ${currentSafety.private_status === "READY" ? "Private JC ready" : "Private JC blocked"}`,
+      message: "Provider-specific queue safety controls individual Start buttons. Start All still requires every provider to be safe.",
+      blocks: currentSafety.private_status !== "READY" || currentSafety.sendgrid_status !== "READY",
+    });
+  }
+  (Array.isArray(snapshot?.alerts) ? snapshot.alerts : []).forEach((alert) => {
+    cards.push({
+      severity: alert?.severity || "warn",
+      title: alert?.title || "Alert",
+      message: alert?.message || "",
+      blocks: Boolean(alert?.blocks_sending),
+    });
+  });
+  if (!cards.length) {
+    cards.push({
+      severity: "good",
+      title: "No active lead safety alerts",
+      message: "Current lead safety checks do not show a blocking alert.",
+      blocks: false,
+    });
+  }
+  setNodeHtml(
+    els.leadsActiveAlerts,
+    cards.slice(0, 6).map((card) => `
+      <article class="leads-alert-card leads-alert-card-${escapeHtml(card.severity || "warn")}">
+        <div>
+          <strong>${escapeHtml(card.title)}</strong>
+          <p>${escapeHtml(card.message || "No details provided.")}</p>
+        </div>
+        <span class="mini-pill">${card.blocks ? "Blocking" : "Info"}</span>
+      </article>
+    `).join(""),
+  );
+}
+
 function renderLeadsRunSafety(status = lastLeadsStatus) {
   if (!els.leadsRunSafetyCard) return;
   const safety = leadsRunSafety(status);
@@ -3159,9 +3516,12 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   renderLeadFunnelSummary(lastLeadsStatus?.lead_funnel || {});
+  renderLeadsOperatorStatusStrip(lastLeadsStatus);
   renderLeadsRunSafety(lastLeadsStatus);
   renderLeadsPipeline(lastLeadsStatus?.pipeline || {});
+  renderLeadsActiveAlerts(lastLeadsStatus, lastSnapshot);
 
   if (els.leadsUploadMeta) {
     if (latestUpload?.saved_filename) {
@@ -3328,8 +3688,7 @@ async function runImportantLeadCheck() {
     return;
   }
   if (els.leadsImportantCheckBtn) {
-    els.leadsImportantCheckBtn.disabled = true;
-    setNodeText(els.leadsImportantCheckBtn, "Checking...");
+    setButtonBusy(els.leadsImportantCheckBtn, true, "Checking...");
   }
   try {
     const data = await fetchJson("/api/leads/check-important", {
@@ -3348,8 +3707,7 @@ async function runImportantLeadCheck() {
     showMessage(`Quick lead check failed: ${err}`, "error");
   } finally {
     if (els.leadsImportantCheckBtn) {
-      els.leadsImportantCheckBtn.disabled = false;
-      setNodeText(els.leadsImportantCheckBtn, "Check Leads");
+      setButtonBusy(els.leadsImportantCheckBtn, false, "Check Leads");
     }
   }
 }
@@ -3366,8 +3724,7 @@ async function runImportantLeadUploadCheck() {
     return;
   }
   if (els.leadsImportantUploadCheckBtn) {
-    els.leadsImportantUploadCheckBtn.disabled = true;
-    setNodeText(els.leadsImportantUploadCheckBtn, "Uploading...");
+    setButtonBusy(els.leadsImportantUploadCheckBtn, true, "Uploading...");
   }
   updateImportantLeadUploadNote(`Submitting ${filename} (${humanizeFileSize(size)}, ${extension || "no extension"}).`);
   try {
@@ -3405,24 +3762,25 @@ async function runImportantLeadUploadCheck() {
     showMessage(`Upload lead check failed: ${err}`, "error");
   } finally {
     if (els.leadsImportantUploadCheckBtn) {
-      els.leadsImportantUploadCheckBtn.disabled = false;
-      setNodeText(els.leadsImportantUploadCheckBtn, "Upload & Check");
+      setButtonBusy(els.leadsImportantUploadCheckBtn, false, "Upload & Check");
     }
   }
 }
 
 async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
-  const normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
+  let normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
     ? VERIFY_MODE_STRICT_PUBLIC_PROOF
     : VERIFY_MODE_FAST_TRIAGE;
+  if (normalizedMode === VERIFY_MODE_FAST_TRIAGE && (els.leadsImportantIntakeMode?.value || "") === "manual_author_research") {
+    normalizedMode = VERIFY_MODE_MANUAL_AUTHOR_RESEARCH;
+  }
   const activeLabel = normalizedMode === VERIFY_MODE_STRICT_PUBLIC_PROOF ? "Strict verifying..." : "Triaging...";
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   if (els.leadsImportantVerifyBtn) {
-    els.leadsImportantVerifyBtn.disabled = true;
-    setNodeText(els.leadsImportantVerifyBtn, activeLabel);
+    setButtonBusy(els.leadsImportantVerifyBtn, true, activeLabel);
   }
   if (els.leadsImportantVerifyStrictBtn) {
-    els.leadsImportantVerifyStrictBtn.disabled = true;
-    setNodeText(els.leadsImportantVerifyStrictBtn, activeLabel);
+    setButtonBusy(els.leadsImportantVerifyStrictBtn, true, activeLabel);
   }
   try {
     const data = await fetchJson("/api/leads/verify-important", {
@@ -3448,13 +3806,11 @@ async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
   } finally {
     if (els.leadsImportantVerifyBtn) {
       const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
-      els.leadsImportantVerifyBtn.disabled = activeVerify;
-      setNodeText(els.leadsImportantVerifyBtn, activeVerify ? "Verifying..." : "Fast Triage");
+      setButtonBusy(els.leadsImportantVerifyBtn, activeVerify, activeVerify ? "Verifying..." : "Fast Triage");
     }
     if (els.leadsImportantVerifyStrictBtn) {
       const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
-      els.leadsImportantVerifyStrictBtn.disabled = activeVerify;
-      setNodeText(els.leadsImportantVerifyStrictBtn, activeVerify ? "Verifying..." : "Strict Public Proof");
+      setButtonBusy(els.leadsImportantVerifyStrictBtn, activeVerify, activeVerify ? "Verifying..." : "Strict Public Proof");
     }
     if (els.leadsImportantVerifyStopBtn) {
       const activeVerify = isActiveImportantLeadCheckJob(lastImportantVerifyJob);
@@ -3477,8 +3833,10 @@ async function previewImportantLeadDispatch() {
     return;
   }
   if (els.leadsImportantDispatchPreviewBtn) {
-    els.leadsImportantDispatchPreviewBtn.disabled = true;
-    setNodeText(els.leadsImportantDispatchPreviewBtn, "Previewing...");
+    importantLeadDispatchPreviewLoading = true;
+    lastImportantDispatchPreviewState = "running";
+    setButtonBusy(els.leadsImportantDispatchPreviewBtn, true, "Previewing...");
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
   try {
     const data = await fetchJson("/api/leads/dispatch-important/preview", {
@@ -3491,6 +3849,7 @@ async function previewImportantLeadDispatch() {
         ...(data.preview || {}),
         _preview_key: currentDispatchPlanKey(),
       };
+      lastImportantDispatchPreviewState = "ready";
       if (data.status) {
         renderLeadsStatus(data.status || {});
       } else {
@@ -3501,14 +3860,17 @@ async function previewImportantLeadDispatch() {
       showMessage("Dispatch preview did not return a preview id.", "error");
     }
   } catch (err) {
+    lastImportantDispatchPreviewState = "failed";
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
     showMessage(`Dispatch preview failed: ${err}`, "error");
   } finally {
+    importantLeadDispatchPreviewLoading = false;
     if (els.leadsImportantDispatchPreviewBtn) {
       const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-      els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch;
-      setNodeText(els.leadsImportantDispatchPreviewBtn, "Preview Dispatch");
+      setButtonBusy(els.leadsImportantDispatchPreviewBtn, activeDispatch, "Preview Dispatch");
       renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
 }
 
@@ -3529,8 +3891,9 @@ async function confirmImportantLeadDispatch() {
     return;
   }
   if (els.leadsImportantDispatchConfirmBtn) {
-    els.leadsImportantDispatchConfirmBtn.disabled = true;
-    setNodeText(els.leadsImportantDispatchConfirmBtn, "Dispatching...");
+    importantLeadDispatchConfirmLoading = true;
+    setButtonBusy(els.leadsImportantDispatchConfirmBtn, true, "Dispatching...");
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
   try {
     const data = await fetchJson("/api/leads/dispatch-important/confirm", {
@@ -3548,12 +3911,13 @@ async function confirmImportantLeadDispatch() {
   } catch (err) {
     showMessage(`Lead dispatch failed: ${err}`, "error");
   } finally {
+    importantLeadDispatchConfirmLoading = false;
     if (els.leadsImportantDispatchConfirmBtn) {
       const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-      els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch;
-      setNodeText(els.leadsImportantDispatchConfirmBtn, activeDispatch ? "Dispatching..." : "Confirm Dispatch");
+      setButtonBusy(els.leadsImportantDispatchConfirmBtn, activeDispatch, activeDispatch ? "Dispatching..." : "Confirm Dispatch");
       renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
 }
 
@@ -6414,6 +6778,7 @@ if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
+if (els.leadsImportantIntakeMode) els.leadsImportantIntakeMode.addEventListener("change", () => renderLeadsOperatorStatusStrip(lastLeadsStatus || {}));
 if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE));
 if (els.leadsImportantVerifyStrictBtn) els.leadsImportantVerifyStrictBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_STRICT_PUBLIC_PROOF));
 if (els.leadsImportantVerifyStopBtn) els.leadsImportantVerifyStopBtn.addEventListener("click", () => stopImportantLeadVerify());

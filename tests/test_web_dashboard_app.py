@@ -327,8 +327,10 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_fast_triage_is_default_and_strict_public_proof_is_separate(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
         for expected in [
             "VERIFY_MODE_FAST_TRIAGE",
+            "VERIFY_MODE_MANUAL_AUTHOR_RESEARCH",
             "VERIFY_MODE_STRICT_PUBLIC_PROOF",
             "leadsImportantVerifyStrictBtn",
             "leads_triaged_keep.csv",
@@ -339,8 +341,80 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads_quarantine.csv",
             "runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE)",
             "runImportantLeadVerify(VERIFY_MODE_STRICT_PUBLIC_PROOF)",
+            "Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.",
+            "Review/Quarantine rows are not dispatched automatically.",
+            "soft_warning_counts",
+            "hard_reject_counts",
+            "already_contacted is a send-history protection, not a lead-quality rejection.",
+            "Already Contacted Evidence",
         ]:
             self.assertIn(expected, source)
+        for expected in [
+            "leads-important-intake-mode",
+            "<option value=\"standard\" selected>Standard</option>",
+            "<option value=\"manual_author_research\">Manual Author Research</option>",
+        ]:
+            self.assertIn(expected, html)
+
+    def test_leads_workspace_uses_operator_first_layout(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "Run Readiness",
+            "Check Leads",
+            "Lead Triage",
+            "Preview &amp; Dispatch",
+            "Active Alerts",
+            "leads-operator-status-strip",
+            "leads-workflow-status-banner",
+            "leads-active-alerts",
+            "Advanced file details",
+            "Debug state",
+            "Raw paths",
+            "leads-important-intake-mode",
+            "<option value=\"standard\" selected>Standard</option>",
+            "<option value=\"manual_author_research\">Manual Author Research</option>",
+        ]:
+            self.assertIn(expected, html)
+
+        for expected in [
+            "renderLeadsOperatorStatusStrip",
+            "renderLeadsWorkflowStatusBanner",
+            "renderLeadsActiveAlerts",
+            "Check complete. Next step: Run Fast Triage.",
+            "Fast Triage running...",
+            "Fast Triage complete. Next step: Preview Dispatch.",
+            "No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.",
+            "Last confirmed dispatch — not the current upload",
+            "Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.",
+            "Review/Quarantine rows are not dispatched automatically.",
+            "SendGrid added 0 rows because the selected rows were excluded before queue write",
+            "already_contacted is a send-history protection, not a lead-quality rejection.",
+            "Advanced file details",
+            "Advanced dispatch details",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            ".operator-status-strip",
+            ".leads-workflow-status-banner",
+            ".workflow-step-grid",
+            ".btn.is-loading::before",
+            ".operator-workflow-section",
+            ".advanced-details",
+            ".leads-active-alerts",
+            ".leads-alert-card",
+        ]:
+            self.assertIn(expected, styles)
+
+        self.assertIn('<details class="leads-collapsible advanced-details advanced-file-details">', html)
+        self.assertIsNotNone(re.search(
+            r"<details class=\"leads-collapsible advanced-details advanced-file-details\">.*?leads-important-output-path",
+            html,
+            re.DOTALL,
+        ))
 
     def test_dashboard_ops_hierarchy_uses_fleet_summary_and_compact_sender_warnings(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -430,6 +504,27 @@ class WebDashboardAppTests(unittest.TestCase):
             ".private-jc-repair-feedback-error",
         ]:
             self.assertIn(expected, styles)
+
+    def test_dispatch_confirmed_summary_uses_persisted_counts_and_clear_missing_preview_warning(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "confirmedPrivateJcTotal",
+            "confirmedSendgridTotal",
+            "confirmedSg1",
+            "confirmedSg2",
+            "confirmedSg3",
+            "confirmedSg4",
+            "confirmedSg5",
+            "Zero-add dispatch stored.",
+            "Last dispatch has no stored assigned preview. Re-run Preview Dispatch before confirming again.",
+            "SendGrid added 0 rows because the selected rows were excluded before queue write",
+            "already contacted",
+            "already sent through SendGrid",
+            "Already Contacted",
+            "SG1",
+            "SG5",
+        ]:
+            self.assertIn(expected, source)
 
     def test_dashboard_sender_workspace_uses_master_detail_layout_shell(self) -> None:
         source = INDEX_HTML.read_text(encoding="utf-8")
@@ -523,9 +618,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "alerts-progress-row",
             "Private Email",
             "SendGrid",
-            "dispatch-preflight-strip",
             "Dispatch Checklist",
-            "Preview Surface",
+            "Current preview",
             "Live queue comparison",
             "quarantine-list-row",
             "quarantine-list-shell",
