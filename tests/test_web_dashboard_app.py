@@ -88,10 +88,25 @@ class WebDashboardAppTests(unittest.TestCase):
             "Confirm Dispatch blocked",
             "activeSenderSummary",
             "Preflight",
-            "leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive || activeCheck",
+            "dispatchPreviewBlockReason",
+            "leadsImportantDispatchPreviewBtn.disabled = previewBusy",
+            "Preview did not save. Please retry.",
+            "Retry Preview Dispatch",
+            "lastImportantDispatchPreviewFeedback",
+            "lastImportantDispatchConfirmFeedback",
+            "Retry Confirm Dispatch",
+            "Confirm Dispatch failed. Retry Confirm Dispatch.",
+            "Confirm Dispatch is running.",
             "rows_to_add_sendgrid_5",
         ]:
             self.assertIn(expected, source)
+
+    def test_intake_mode_label_prefers_current_status_over_selector(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        match = re.search(r"function intakeModeLabelFromStatus[\s\S]+?\)\.toLowerCase\(\);", source)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertLess(body.index("status?.latest_master_check?.intake_mode"), body.index("els.leadsImportantIntakeMode?.value"))
 
     def test_leads_run_safety_card_reports_wait_blocked_freshness_and_stale_pipeline(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -341,7 +356,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads_quarantine.csv",
             "runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE)",
             "runImportantLeadVerify(VERIFY_MODE_STRICT_PUBLIC_PROOF)",
-            "Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.",
+            "Manual Author Research mode keeps rows with valid AuthorName and AuthorEmail when no hard safety blocker exists. Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body. Missing proof/enrichment fields are warnings, not dispatch blockers.",
+            "Keep with fallback",
+            "Soft warnings that did not block Keep.",
             "Review/Quarantine rows are not dispatched automatically.",
             "soft_warning_counts",
             "hard_reject_counts",
@@ -385,10 +402,18 @@ class WebDashboardAppTests(unittest.TestCase):
             "renderLeadsActiveAlerts",
             "Check complete. Next step: Run Fast Triage.",
             "Fast Triage running...",
-            "Fast Triage complete. Next step: Preview Dispatch.",
+            "Fast Triage complete. Preview Dispatch is ready.",
+            "No current preview yet. Next step: Click Preview Dispatch.",
+            "Preview failed. Retry Preview Dispatch.",
+            "Preview blocked.",
+            "Preview/source/cap mismatch. Retry Preview Dispatch.",
             "No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.",
+            "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes.",
+            "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically.",
             "Last confirmed dispatch — not the current upload",
-            "Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.",
+            "Manual Author Research mode keeps rows with valid AuthorName and AuthorEmail when no hard safety blocker exists. Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body. Missing proof/enrichment fields are warnings, not dispatch blockers.",
+            "Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body.",
+            "Soft warnings that did not block Keep.",
             "Review/Quarantine rows are not dispatched automatically.",
             "SendGrid added 0 rows because the selected rows were excluded before queue write",
             "already_contacted is a send-history protection, not a lead-quality rejection.",
@@ -402,6 +427,8 @@ class WebDashboardAppTests(unittest.TestCase):
             ".leads-workflow-status-banner",
             ".workflow-step-grid",
             ".btn.is-loading::before",
+            ".btn.is-next-action:not(:disabled)",
+            ".dispatch-next-step-banner",
             ".operator-workflow-section",
             ".advanced-details",
             ".leads-active-alerts",
@@ -516,6 +543,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "confirmedSg4",
             "confirmedSg5",
             "Zero-add dispatch stored.",
+            "No queue rows will be written.",
+            "Nothing to confirm for queue writes because all eligible rows were already queued/skipped",
             "Last dispatch has no stored assigned preview. Re-run Preview Dispatch before confirming again.",
             "SendGrid added 0 rows because the selected rows were excluded before queue write",
             "already contacted",

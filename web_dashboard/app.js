@@ -146,6 +146,8 @@ let lastImportantDispatchPreview = null;
 let importantLeadDispatchPreviewLoading = false;
 let importantLeadDispatchConfirmLoading = false;
 let lastImportantDispatchPreviewState = "not_generated";
+let lastImportantDispatchPreviewFeedback = null;
+let lastImportantDispatchConfirmFeedback = null;
 let lastQuarantineReview = null;
 let lastQuarantineReviewLead = null;
 let socketReconnectTimer = null;
@@ -957,6 +959,30 @@ function dispatchActionBlockReason() {
   return "";
 }
 
+function dispatchPreviewBlockReason(dispatchSource = {}) {
+  const actionBlock = dispatchActionBlockReason();
+  if (actionBlock) return actionBlock;
+  if (dispatchSource.dispatch_block_reason) return String(dispatchSource.dispatch_block_reason);
+  if (!dispatchSource.dispatch_source_path) return "No triage keep source is selected or the source is missing.";
+  const sourceMode = String(dispatchSource.dispatch_source_mode || "").toLowerCase();
+  const sourceName = String(dispatchSource.dispatch_source_name || "").toLowerCase();
+  const triageSourceSelected = sourceMode === "triaged_keep" || sourceName.includes("triage");
+  if (dispatchSource.dispatch_source_exists === false) {
+    return triageSourceSelected
+      ? "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes."
+      : "Selected dispatch source is missing. Retry after the source is generated.";
+  }
+  if (Number(dispatchSource.dispatch_source_row_count || 0) <= 0) {
+    return triageSourceSelected
+      ? "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically."
+      : "Dispatch source is empty. Retry after the source has accepted rows.";
+  }
+  if (Number(dispatchSource.dispatch_eligible_row_count || 0) <= 0) {
+    return "No eligible rows are available for preview. Rows may already be contacted, already sent, suppressed, invalid, or excluded.";
+  }
+  return "";
+}
+
 function currentShardPlanKey() {
   return [
     lastLeadsStatus?.latest_cleaned?.filename || "",
@@ -1617,19 +1643,32 @@ function renderImportantLeadDispatchJob(job) {
 function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
   const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-  const liveSenderProfiles = activeSenderProfiles();
-  const sendersActive = liveSenderProfiles.length > 0;
-  const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
-  const dispatchBlockReason = dispatchActionBlockReason();
+  const previewBlockReason = dispatchPreviewBlockReason(dispatchSource);
   const previewReady = dispatchPreviewMatchesCurrentSelection();
   const previewBlocked = !preview || !previewReady;
   if (els.leadsImportantDispatchPreviewBtn) {
-    els.leadsImportantDispatchPreviewBtn.disabled = activeDispatch || sourceBlocked || sendersActive || activeCheck;
-    els.leadsImportantDispatchPreviewBtn.title = dispatchBlockReason || "";
+    const previewBusy = Boolean(importantLeadDispatchPreviewLoading || activeDispatch);
+    els.leadsImportantDispatchPreviewBtn.disabled = previewBusy;
+    els.leadsImportantDispatchPreviewBtn.title = previewBlockReason || "";
+    if (!previewBusy) {
+      const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
+      setNodeText(els.leadsImportantDispatchPreviewBtn, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
+    }
+    els.leadsImportantDispatchPreviewBtn.classList.toggle(
+      "is-next-action",
+      previewBlocked && !els.leadsImportantDispatchPreviewBtn.disabled,
+    );
   }
   if (els.leadsImportantDispatchConfirmBtn) {
-    els.leadsImportantDispatchConfirmBtn.disabled = activeDispatch || sourceBlocked || previewBlocked || sendersActive || activeCheck;
-    els.leadsImportantDispatchConfirmBtn.title = dispatchBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
+    const sendersActive = activeSenderProfiles().length > 0;
+    const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
+    const confirmBusy = Boolean(importantLeadDispatchConfirmLoading || activeDispatch);
+    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || sourceBlocked || previewBlocked || sendersActive || activeCheck;
+    els.leadsImportantDispatchConfirmBtn.title = previewBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
+    if (!confirmBusy) {
+      const retryConfirm = lastImportantDispatchConfirmFeedback?.state === "failed" && !previewBlocked;
+      setNodeText(els.leadsImportantDispatchConfirmBtn, retryConfirm ? "Retry Confirm Dispatch" : "Confirm Dispatch");
+    }
   }
 }
 
@@ -1646,6 +1685,7 @@ async function pollImportantLeadDispatchJob(jobId) {
       clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id || jobId);
       lastImportantDispatchPreview = null;
       lastImportantDispatch = job.dispatch || null;
+      lastImportantDispatchConfirmFeedback = { state: "ready", message: job.message || "Lead dispatch complete." };
       if (data.status) renderLeadsStatus(data.status || {});
       else renderImportantDispatch(lastImportantDispatch);
       showMessage(job.message || "Lead dispatch complete.", "success");
@@ -1654,6 +1694,8 @@ async function pollImportantLeadDispatchJob(jobId) {
     if (job.status === "failed" || job.status === "canceled" || job.status === "cancelled") {
       stopImportantLeadDispatchJobPolling();
       clearSavedJobId(IMPORTANT_LEAD_DISPATCH_JOB_STORAGE_KEY, job.job_id || jobId);
+      lastImportantDispatchConfirmFeedback = { state: "failed", message: job.error || "Lead dispatch failed." };
+      renderImportantDispatch(lastImportantDispatch);
       showMessage(job.error || "Lead dispatch failed.", "error");
       return;
     }
@@ -2581,6 +2623,11 @@ function renderImportantLeadVerify(result) {
           { label: "Mode", value: modeLabel },
           { label: "Input", value: Number(result.total_input_rows || 0) },
           { label: "Keep", value: Number(result.keep_count || 0), tone: "good" },
+          ...(isManualAuthorResearch
+            ? [
+              { label: "Keep with fallback", value: Number(result.keep_with_fallback_rows || 0), tone: Number(result.keep_with_fallback_rows || 0) ? "warn" : "" },
+            ]
+            : []),
           { label: "Reject", value: Number(result.reject_count || 0), tone: "warn" },
           { label: "Review / Quarantine", value: Number(result.quarantine_count || 0), tone: "warn" },
         ])}
@@ -2588,7 +2635,7 @@ function renderImportantLeadVerify(result) {
           ? `
             <section class="operator-empty-state operator-empty-state-inline">
               <strong>Manual Author Research mode</strong>
-              <span>Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.</span>
+              <span>Manual Author Research mode keeps rows with valid AuthorName and AuthorEmail when no hard safety blocker exists. Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body. Missing proof/enrichment fields are warnings, not dispatch blockers.</span>
             </section>
             <section class="operator-empty-state operator-empty-state-inline">
               <strong>Review/Quarantine rows are not dispatched automatically.</strong>
@@ -2603,7 +2650,7 @@ function renderImportantLeadVerify(result) {
           ${isManualAuthorResearch
             ? renderOperatorTableBlock(
               "Soft Warnings",
-              "Manual Author Research warnings routed to Review/Quarantine.",
+              "Soft warnings that did not block Keep.",
               ["Reason", "Count"],
               Object.entries(result.soft_warning_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
               "No soft warnings were recorded.",
@@ -2637,6 +2684,27 @@ function renderImportantLeadVerify(result) {
       </div>
     `,
   );
+}
+
+function dispatchSkipReasonSummary(payload = {}) {
+  const reasons = payload.exclusion_reason_counts || {};
+  return [
+    Number(payload.skipped_already_queued || reasons.already_queued || 0)
+      ? `${Number(payload.skipped_already_queued || reasons.already_queued || 0)} already queued`
+      : "",
+    Number(payload.skipped_already_sent || reasons.already_sent || 0)
+      ? `${Number(payload.skipped_already_sent || reasons.already_sent || 0)} already sent`
+      : "",
+    Number(payload.skipped_already_contacted || reasons.already_contacted || 0)
+      ? `${Number(payload.skipped_already_contacted || reasons.already_contacted || 0)} already contacted`
+      : "",
+    Number(payload.skipped_suppressed || payload.suppressed_skipped || reasons.suppressed || 0)
+      ? `${Number(payload.skipped_suppressed || payload.suppressed_skipped || reasons.suppressed || 0)} suppressed`
+      : "",
+    Number(payload.skipped_invalid_malformed || payload.invalid_malformed_skipped || reasons.invalid_source_row || 0)
+      ? `${Number(payload.skipped_invalid_malformed || payload.invalid_malformed_skipped || reasons.invalid_source_row || 0)} invalid or malformed`
+      : "",
+  ].filter(Boolean).join(", ");
 }
 
 function renderImportantDispatch(result) {
@@ -2679,6 +2747,20 @@ function renderImportantDispatch(result) {
     ? liveSenderProfiles.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")
     : "None";
   const selectedCap = els.leadsImportantDispatchCap?.value || (dispatchPreview?.dispatch_cap ?? "all");
+  const stalePreviewMismatch = !dispatchPreview && Boolean(lastImportantDispatchPreview?.preview_id);
+  const previewFeedbackState = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.state || "") : "";
+  const previewFeedbackMessage = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.message || "") : "";
+  const noPreviewTitle = previewFeedbackState === "blocked"
+    ? "Preview blocked."
+    : previewFeedbackState === "failed"
+      ? "Preview failed. Retry Preview Dispatch."
+      : stalePreviewMismatch
+        ? "Preview/source/cap mismatch. Retry Preview Dispatch."
+        : "No current preview yet. Next step: Click Preview Dispatch.";
+  const noPreviewMessage = previewFeedbackMessage
+    || (stalePreviewMismatch
+      ? "The stored preview does not match the selected source or cap. Click Preview Dispatch to calculate queue assignments."
+      : "No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.");
   const previewPrivateJc = Number(dispatchPreview?.rows_to_add_private_jc || 0);
   const previewSg1 = Number(dispatchPreview?.rows_to_add_sendgrid_1 || 0);
   const previewSg2 = Number(dispatchPreview?.rows_to_add_sendgrid_2 || 0);
@@ -2691,6 +2773,17 @@ function renderImportantDispatch(result) {
     + Number(dispatchPreview?.skipped_already_queued || 0)
     + Number(dispatchPreview?.skipped_suppressed || 0)
     + Number(dispatchPreview?.skipped_invalid_malformed || 0);
+  const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) === 0;
+  const previewZeroAddReasons = dispatchSkipReasonSummary(dispatchPreview || {});
+  const confirmFeedbackState = String(lastImportantDispatchConfirmFeedback?.state || "");
+  const confirmFeedbackMessage = String(lastImportantDispatchConfirmFeedback?.message || "");
+  const confirmFeedbackTitle = confirmFeedbackState === "blocked"
+    ? "Confirm Dispatch blocked."
+    : confirmFeedbackState === "failed"
+      ? "Confirm Dispatch failed. Retry Confirm Dispatch."
+      : confirmFeedbackState === "queued" || confirmFeedbackState === "running"
+        ? "Confirm Dispatch running."
+        : "";
 
   renderDispatchConfirmGuard(dispatchSource, dispatchPreview);
   if (els.leadsImportantDispatchMeta) {
@@ -2733,6 +2826,9 @@ function renderImportantDispatch(result) {
             { label: "SendGrid planned", value: previewSendgrid },
             { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
           ], "dispatch-metrics")}
+          ${confirmFeedbackTitle
+            ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
+            : ""}
           <section class="dispatch-runbook">
             <div class="operator-table-head">
               <div>
@@ -2788,6 +2884,9 @@ function renderImportantDispatch(result) {
                     { label: "SendGrid", value: previewSendgrid, tone: "good" },
                     { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
                   ], "dispatch-selection-strip")}
+                  ${previewZeroAdd
+                    ? `<section class="operator-empty-state operator-empty-state-inline"><strong>No queue rows will be written.</strong><span>Nothing to confirm for queue writes because all eligible rows were already queued/skipped${previewZeroAddReasons ? `: ${escapeHtml(previewZeroAddReasons)}.` : "."}</span></section>`
+                    : ""}
                   <details class="dispatch-drawer advanced-details">
                     <summary>Advanced dispatch details</summary>
                     <div class="dispatch-disclosure-body">
@@ -2843,9 +2942,9 @@ function renderImportantDispatch(result) {
                   </details>
                 `
                 : `
-                  <section class="operator-empty-state operator-empty-state-inline">
-                    <strong>No current dispatch preview generated yet.</strong>
-                    <span>No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.</span>
+                  <section class="operator-empty-state operator-empty-state-inline dispatch-next-step-banner${previewFeedbackState ? ` dispatch-next-step-${escapeHtml(previewFeedbackState)}` : ""}">
+                    <strong>${escapeHtml(noPreviewTitle)}</strong>
+                    <span>${escapeHtml(noPreviewMessage)}</span>
                   </section>
                 `
             }
@@ -2887,6 +2986,9 @@ function renderImportantDispatch(result) {
           { label: "SendGrid added", value: confirmedSendgridTotal, tone: "good" },
           { label: "Skipped", value: Number(result.skipped_both || 0), tone: Number(result.skipped_both || 0) ? "warn" : "" },
         ], "dispatch-metrics")}
+        ${confirmFeedbackTitle
+          ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
+          : ""}
         <section class="dispatch-decision-surface dispatch-current-preview">
           <div class="operator-table-head">
             <div>
@@ -2904,9 +3006,9 @@ function renderImportantDispatch(result) {
               ], "dispatch-selection-strip")}
             `
             : `
-              <section class="operator-empty-state operator-empty-state-inline">
-                <strong>No current dispatch preview generated yet.</strong>
-                <span>No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.</span>
+              <section class="operator-empty-state operator-empty-state-inline dispatch-next-step-banner${previewFeedbackState ? ` dispatch-next-step-${escapeHtml(previewFeedbackState)}` : ""}">
+                <strong>${escapeHtml(noPreviewTitle)}</strong>
+                <span>${escapeHtml(noPreviewMessage)}</span>
               </section>
             `}
         </section>
@@ -3194,10 +3296,10 @@ function formatOperatorCount(value) {
 
 function intakeModeLabelFromStatus(status = lastLeadsStatus) {
   const mode = String(
-    els.leadsImportantIntakeMode?.value
-    || status?.latest_master_check?.intake_mode
+    status?.latest_master_check?.intake_mode
     || status?.latest_lead_triage?.intake_mode
     || status?.latest_lead_triage?.mode
+    || els.leadsImportantIntakeMode?.value
     || "standard",
   ).toLowerCase();
   return mode === "manual_author_research" || mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH.toLowerCase()
@@ -3249,7 +3351,7 @@ function workflowNextStepMessage(checkStatus, triageStatus, previewStatus, confi
   if (checkStatus === "completed" && triageStatus === "pending") return "Check complete. Next step: Run Fast Triage.";
   if (triageStatus === "running") return "Fast Triage running...";
   if (triageStatus === "failed") return "Fast Triage failed. Review the error before previewing dispatch.";
-  if (triageStatus === "completed" && previewStatus === "not_generated") return "Fast Triage complete. Next step: Preview Dispatch.";
+  if (triageStatus === "completed" && previewStatus === "not_generated") return "Fast Triage complete. Preview Dispatch is ready.";
   if (previewStatus === "running") return "Preview Dispatch running...";
   if (previewStatus === "failed") return "Preview Dispatch failed. Re-run preview after fixing the issue.";
   if (previewStatus === "ready" && confirmStatus !== "confirmed") return "Preview Dispatch ready. Next step: Confirm Dispatch.";
@@ -3821,13 +3923,19 @@ async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
 }
 
 async function previewImportantLeadDispatch() {
-  const blockReason = dispatchActionBlockReason();
+  const selectedDispatchSource = dispatchSourceForSelectedMode();
+  const blockReason = dispatchPreviewBlockReason(selectedDispatchSource.source || {});
   if (blockReason) {
+    lastImportantDispatchPreviewFeedback = { state: "blocked", message: blockReason };
+    lastImportantDispatchPreviewState = "blocked";
     renderImportantDispatch(lastImportantDispatch);
     showMessage(`Dispatch preview blocked: ${blockReason}`, "error");
     return;
   }
   if (activeSenderProfiles().length) {
+    const activeReason = `Active senders are running: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}.`;
+    lastImportantDispatchPreviewFeedback = { state: "blocked", message: activeReason };
+    lastImportantDispatchPreviewState = "blocked";
     renderImportantDispatch(lastImportantDispatch);
     showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
     return;
@@ -3835,7 +3943,9 @@ async function previewImportantLeadDispatch() {
   if (els.leadsImportantDispatchPreviewBtn) {
     importantLeadDispatchPreviewLoading = true;
     lastImportantDispatchPreviewState = "running";
+    lastImportantDispatchPreviewFeedback = { state: "running", message: "Preview Dispatch is running." };
     setButtonBusy(els.leadsImportantDispatchPreviewBtn, true, "Previewing...");
+    renderImportantDispatch(lastImportantDispatch);
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
   try {
@@ -3850,6 +3960,7 @@ async function previewImportantLeadDispatch() {
         _preview_key: currentDispatchPlanKey(),
       };
       lastImportantDispatchPreviewState = "ready";
+      lastImportantDispatchPreviewFeedback = { state: "ready", message: "Current preview ready." };
       if (data.status) {
         renderLeadsStatus(data.status || {});
       } else {
@@ -3857,10 +3968,15 @@ async function previewImportantLeadDispatch() {
       }
       showMessage(data.message || "Dispatch preview ready.", "success");
     } else {
-      showMessage("Dispatch preview did not return a preview id.", "error");
+      lastImportantDispatchPreviewState = "failed";
+      lastImportantDispatchPreviewFeedback = { state: "failed", message: "Preview did not save. Please retry." };
+      renderImportantDispatch(lastImportantDispatch);
+      showMessage("Preview did not save. Please retry.", "error");
     }
   } catch (err) {
     lastImportantDispatchPreviewState = "failed";
+    lastImportantDispatchPreviewFeedback = { state: "failed", message: String(err || "Preview Dispatch failed.") };
+    renderImportantDispatch(lastImportantDispatch);
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
     showMessage(`Dispatch preview failed: ${err}`, "error");
   } finally {
@@ -3877,22 +3993,29 @@ async function previewImportantLeadDispatch() {
 async function confirmImportantLeadDispatch() {
   const blockReason = dispatchActionBlockReason();
   if (blockReason) {
+    lastImportantDispatchConfirmFeedback = { state: "blocked", message: blockReason };
     renderImportantDispatch(lastImportantDispatch);
     showMessage(`Confirm Dispatch blocked: ${blockReason}`, "error");
     return;
   }
   if (activeSenderProfiles().length) {
+    const message = `Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`;
+    lastImportantDispatchConfirmFeedback = { state: "blocked", message };
     renderImportantDispatch(lastImportantDispatch);
-    showMessage(`Dispatch blocked: stop active senders first. Active: ${activeSenderProfiles().map((profile) => formatProfileName(profile.name)).join(", ")}`, "error");
+    showMessage(message, "error");
     return;
   }
   if (!dispatchPreviewMatchesCurrentSelection() || !lastImportantDispatchPreview?.preview_id) {
+    lastImportantDispatchConfirmFeedback = { state: "blocked", message: "Run Preview Dispatch first for the current source and cap." };
+    renderImportantDispatch(lastImportantDispatch);
     showMessage("Run Preview Dispatch first for the current source and cap.", "error");
     return;
   }
   if (els.leadsImportantDispatchConfirmBtn) {
     importantLeadDispatchConfirmLoading = true;
+    lastImportantDispatchConfirmFeedback = { state: "running", message: "Confirm Dispatch is running." };
     setButtonBusy(els.leadsImportantDispatchConfirmBtn, true, "Dispatching...");
+    renderImportantDispatch(lastImportantDispatch);
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
   try {
@@ -3902,13 +4025,18 @@ async function confirmImportantLeadDispatch() {
       body: JSON.stringify(importantLeadDispatchPayload(true)),
     });
     if (data.job?.job_id) {
+      lastImportantDispatchConfirmFeedback = { state: "queued", message: data.message || "Lead dispatch queued." };
       renderImportantLeadDispatchJob(data.job);
       void pollImportantLeadDispatchJob(data.job.job_id);
       showMessage(data.message || "Lead dispatch queued.", "success");
     } else {
+      lastImportantDispatchConfirmFeedback = { state: "failed", message: "Dispatch confirm did not return a job." };
+      renderImportantDispatch(lastImportantDispatch);
       showMessage("Dispatch confirm did not return a job.", "error");
     }
   } catch (err) {
+    lastImportantDispatchConfirmFeedback = { state: "failed", message: String(err || "Lead dispatch failed.") };
+    renderImportantDispatch(lastImportantDispatch);
     showMessage(`Lead dispatch failed: ${err}`, "error");
   } finally {
     importantLeadDispatchConfirmLoading = false;

@@ -41,6 +41,7 @@ TRIAGE_PATHS_STATE_KEY = "important_leads_triage_paths"
 VERIFY_CHECKPOINT_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_VERIFY_CHECKPOINT_ROWS", "100") or 100))
 FAST_TRIAGE_CHECKPOINT_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_FAST_TRIAGE_CHECKPOINT_ROWS", "5000") or 5000))
 FAST_TRIAGE_CANCEL_POLL_ROWS = max(1, int(os.environ.get("IMPORTANT_LEADS_FAST_TRIAGE_CANCEL_POLL_ROWS", "1000") or 1000))
+MANUAL_AUTHOR_TRIAGE_POLICY_VERSION = 3
 VERIFY_DEFAULT_MAX_WORKERS = max(1, int(os.environ.get("IMPORTANT_LEADS_VERIFY_MAX_WORKERS", "12") or 12))
 VERIFY_HTTP_RETRIES = max(0, int(os.environ.get("IMPORTANT_LEADS_VERIFY_HTTP_RETRIES", "1") or 1))
 VERIFY_CACHE_MAX_ITEMS = max(0, int(os.environ.get("IMPORTANT_LEADS_VERIFY_CACHE_MAX_ITEMS", "5000") or 5000))
@@ -212,6 +213,14 @@ BOOK_TITLE_HEADER_CANDIDATES = (
     "book_title",
     "title",
 )
+AUTHOR_NAME_HEADER_CANDIDATES = (
+    "authorname",
+    "author_name",
+    "author",
+    "fullname",
+    "full_name",
+    "name",
+)
 LOCAL_QUALITY_SIGNAL_HEADER_CANDIDATES = (
     "booktitle",
     "book_title",
@@ -243,6 +252,58 @@ MANUAL_AUTHOR_SOFT_REASONS = {
     "BASIC_AUTHOR_SITE",
     "NO_AUTHOR_OWNED_WEBSITE_FOUND",
     "BOOKTITLE_MISSING",
+    "BOOKTITLE_MISSING_USING_TEMPLATE_FALLBACK",
+    "WHYA_CALL_OUT_MISSING",
+    "WHYA_CALL_OUT_GENERIC",
+    "PERSONALIZED_OPENING_MISSING",
+}
+MANUAL_AUTHOR_REQUIRED_HEADERS = ("Email", "AuthorEmail", "FirstName")
+MANUAL_AUTHOR_UNSAFE_TITLE_VALUES = {
+    "approved",
+    "archway",
+    "authorhouse",
+    "authorhouseuk",
+    "balboa",
+    "book trailer",
+    "bookbaby",
+    "cancelled",
+    "canceled",
+    "complete",
+    "completed",
+    "ebook",
+    "hardcover",
+    "illustration package",
+    "in progress",
+    "iuniverse",
+    "launch package",
+    "lulu",
+    "marketing package",
+    "n/a",
+    "none",
+    "not started",
+    "paperback",
+    "pending",
+    "publishing package",
+    "rejected",
+    "resubmission",
+    "submission",
+    "trafford",
+    "tbd",
+    "unknown",
+    "website",
+    "website package",
+    "westbow",
+    "xlibris",
+}
+MANUAL_AUTHOR_UNSAFE_NAME_VALUES = {
+    "admin",
+    "customer service",
+    "publishing package",
+    "service",
+    "support",
+    "test",
+    "unknown",
+    "website package",
 }
 
 
@@ -511,6 +572,11 @@ def _book_title_value(row: dict[str, str], fieldnames: Sequence[str]) -> str:
     return _normalize_row_value(row, book_header) if book_header else ""
 
 
+def _author_name_value(row: dict[str, str], fieldnames: Sequence[str]) -> str:
+    author_header = _pick_header(fieldnames, AUTHOR_NAME_HEADER_CANDIDATES)
+    return _normalize_row_value(row, author_header) if author_header else ""
+
+
 def _field_value(row: dict[str, str], fieldnames: Sequence[str], candidates: Sequence[str]) -> str:
     field = _pick_header(fieldnames, candidates)
     return _normalize_row_value(row, field) if field else ""
@@ -656,7 +722,40 @@ def _manual_author_booktitle_unsafe(value: str) -> bool:
     text = _strip_cell(value)
     if not text:
         return False
-    return bool(re.search(r"(\{\{?[^{}]+\}?\}|<<[^<>]+>>)", text))
+    normalized = _normalize(text)
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    if normalized in MANUAL_AUTHOR_UNSAFE_TITLE_VALUES or compact in {
+        re.sub(r"[^a-z0-9]+", "", item) for item in MANUAL_AUTHOR_UNSAFE_TITLE_VALUES
+    }:
+        return True
+    if bool(re.search(r"(\{\{?[^{}]+\}?\}|<<[^<>]+>>)", text)):
+        return True
+    if EMAIL_RE.search(text) or re.search(r"https?://|www\.", text, re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", text):
+        return True
+    if re.search(r"[$€£]\s?\d+|\b\d+\s?(?:usd|dollars?)\b", normalized):
+        return True
+    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{4}", normalized):
+        return True
+    return False
+
+
+def _manual_author_name_issue(name: str) -> tuple[str, str, str] | None:
+    text = _strip_cell(name)
+    normalized = _normalize(text)
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    if not text:
+        return "QUARANTINE", "AUTHORNAME_MISSING", "AuthorName is missing."
+    if normalized in MANUAL_AUTHOR_UNSAFE_NAME_VALUES or compact in {
+        re.sub(r"[^a-z0-9]+", "", item) for item in MANUAL_AUTHOR_UNSAFE_NAME_VALUES
+    }:
+        return "REJECT", "UNSAFE_AUTHORNAME", "AuthorName is a placeholder, service, or junk value."
+    if _is_junk_name(text):
+        return "REJECT", "UNSAFE_AUTHORNAME", "AuthorName is a placeholder, service, or junk value."
+    if not re.search(r"[A-Za-z]", text):
+        return "QUARANTINE", "AUTHORNAME_MISSING", "AuthorName does not contain a usable author identity."
+    return None
 
 
 def _manual_author_soft_issues(row: dict[str, str], fieldnames: Sequence[str], domain: str) -> list[tuple[str, str]]:
@@ -700,7 +799,52 @@ def _manual_author_soft_issues(row: dict[str, str], fieldnames: Sequence[str], d
         issues.append(("NO_AUTHOR_OWNED_WEBSITE_FOUND", "No author-owned website was found."))
     if "weak online presence" in combined_text:
         issues.append(("WEAK_LOCAL_CONFIDENCE", "Online presence signal is weak."))
+    why_astra = _field_value(row, fieldnames, ("WhyAstraFit", "Why Astra Fit", "WhyAstra", "FitReason"))
+    if _is_missingish(why_astra):
+        issues.append(("WHYA_CALL_OUT_MISSING", "WhyAstraFit is missing."))
+    elif _normalize(why_astra) in {"generic", "n/a", "none", "unknown", "not found"}:
+        issues.append(("WHYA_CALL_OUT_GENERIC", "WhyAstraFit is generic."))
+    opening = _field_value(row, fieldnames, ("PersonalizedOpeningLine", "Personalized Opening Line", "OpeningLine"))
+    if _is_missingish(opening):
+        issues.append(("PERSONALIZED_OPENING_MISSING", "PersonalizedOpeningLine is missing."))
     return issues
+
+
+def _manual_author_output_headers(input_headers: Sequence[str]) -> list[str]:
+    headers = list(input_headers)
+    for header in MANUAL_AUTHOR_REQUIRED_HEADERS:
+        if header not in headers:
+            headers.append(header)
+    return headers
+
+
+def _normalize_manual_author_row(row: dict[str, str], fieldnames: Sequence[str]) -> dict[str, str]:
+    normalized = dict(row)
+    email_header = _pick_header(fieldnames, ("Email", "email"))
+    author_email_header = _pick_header(fieldnames, ("AuthorEmail", "author_email", "Author Email"))
+    email_value = _normalize_row_value(normalized, email_header) if email_header else ""
+    author_email_value = _normalize_row_value(normalized, author_email_header) if author_email_header else ""
+    if not email_value and author_email_value:
+        normalized["Email"] = author_email_value
+    if not author_email_value and email_value:
+        normalized["AuthorEmail"] = email_value
+
+    author_name = _author_name_value(normalized, [*fieldnames, *MANUAL_AUTHOR_REQUIRED_HEADERS])
+    first_header = _pick_header(fieldnames, FIRST_NAME_HEADER_CANDIDATES)
+    first_name = _normalize_row_value(normalized, first_header) if first_header else ""
+    if not first_name and author_name:
+        first_name = author_name.split()[0]
+    if first_name:
+        normalized["FirstName"] = first_name
+    return normalized
+
+
+def _manual_author_soft_warning_codes(evidence: str) -> list[str]:
+    codes: list[str] = []
+    for code in MANUAL_AUTHOR_SOFT_REASONS:
+        if re.search(rf"(^|; )({re.escape(code)}):", str(evidence or "")):
+            codes.append(code)
+    return sorted(codes)
 
 
 def _row_has_bad_local_indicator(row: dict[str, str], fieldnames: Sequence[str]) -> tuple[bool, str]:
@@ -730,6 +874,7 @@ def _classify_fast_triage_row(
     *,
     disposable_domains: set[str] | None = None,
     mode: str = TRIAGE_MODE_FAST,
+    book_title_fallback_supported: bool = False,
 ) -> tuple[str, str, str]:
     is_manual_author = str(mode or "").strip().upper() == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
     email_raw = _email_value(row, fieldnames)
@@ -761,23 +906,41 @@ def _classify_fast_triage_row(
     if is_role_recipient(email, TRIAGE_ROLE_BLOCKLIST):
         return "REJECT", "ROLE_ACCOUNT", "Role-based inbox rejected by fast triage."
 
+    if is_manual_author:
+        author_name = _author_name_value(row, fieldnames)
+        name_issue = _manual_author_name_issue(author_name)
+        if name_issue:
+            return name_issue
+        book_title = _book_title_value(row, fieldnames)
+        if _is_missingish(book_title):
+            if book_title_fallback_supported:
+                soft_issues = [
+                    issue
+                    for issue in _manual_author_soft_issues(row, fieldnames, domain)
+                    if issue[0] != "BOOKTITLE_MISSING"
+                ]
+                soft_issues.insert(
+                    0,
+                    (
+                        "BOOKTITLE_MISSING_USING_TEMPLATE_FALLBACK",
+                        "BookTitle is missing, but the selected template has safe subject/body fallback.",
+                    ),
+                )
+                evidence = "; ".join(f"{code}: {text}" for code, text in soft_issues)
+                return "KEEP", "MANUAL_AUTHOR_RESEARCH_READY_WITH_WARNINGS", evidence
+            return "QUARANTINE", "BOOKTITLE_MISSING", "BookTitle is missing."
+        if _manual_author_booktitle_unsafe(book_title):
+            return "REJECT", "UNSAFE_PLACEHOLDER_BOOKTITLE", "BookTitle is an unsafe placeholder, workflow, URL, contact, price, or date value."
+        soft_issues = _manual_author_soft_issues(row, fieldnames, domain)
+        evidence = "; ".join(f"{code}: {text}" for code, text in soft_issues)
+        if soft_issues:
+            return "KEEP", "MANUAL_AUTHOR_RESEARCH_READY_WITH_WARNINGS", evidence
+        return "KEEP", "MANUAL_AUTHOR_RESEARCH_READY", "Manual Author Research found no hard blocker or material soft warning."
+
     identity_rejection = _fast_triage_identity_rejection(row, fieldnames)
     if identity_rejection:
         reason, evidence = identity_rejection
-        if is_manual_author and reason in MANUAL_AUTHOR_SOFT_REASONS:
-            return "QUARANTINE", reason, evidence
         return "REJECT", reason, evidence
-
-    if is_manual_author:
-        book_title = _book_title_value(row, fieldnames)
-        if _manual_author_booktitle_unsafe(book_title):
-            return "REJECT", "UNSAFE_PLACEHOLDER_BOOKTITLE", "BookTitle contains unsafe placeholder-like token syntax."
-        soft_issues = _manual_author_soft_issues(row, fieldnames, domain)
-        if soft_issues:
-            reason, _evidence = soft_issues[0]
-            evidence = "; ".join(f"{code}: {text}" for code, text in soft_issues)
-            return "QUARANTINE", reason, evidence
-        return "KEEP", "MANUAL_AUTHOR_RESEARCH_READY", "Manual Author Research found no hard blocker or material soft warning."
 
     return _fast_triage_quality_gate(row, fieldnames, domain)
 
@@ -1326,6 +1489,7 @@ def fast_triage_master_leads(
     should_cancel: Callable[[], bool] | None = None,
     disposable_domains: set[str] | None = None,
     mode: str = TRIAGE_MODE_FAST,
+    book_title_fallback_supported: bool = False,
 ) -> dict[str, object]:
     input_path = Path(input_path)
     keep_path = Path(keep_path)
@@ -1348,6 +1512,8 @@ def fast_triage_master_leads(
         raise ValueError(f"Fast triage input is empty: {input_path}")
 
     base_headers = [header for header in input_headers if header not in VERIFY_AUDIT_HEADERS]
+    if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+        base_headers = _manual_author_output_headers(base_headers)
     if not base_headers:
         raise ValueError("Fast triage input must include at least one data column.")
 
@@ -1357,8 +1523,18 @@ def fast_triage_master_leads(
         Path(str(checkpoint.get(key) or "")).resolve(strict=False) in strict_output_paths
         for key in ("keep_path", "rejected_path", "quarantine_path")
     )
+    checkpoint_policy_matches = (
+        normalized_mode != TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+        or int(checkpoint.get("manual_author_policy_version") or 0) == MANUAL_AUTHOR_TRIAGE_POLICY_VERSION
+    )
+    checkpoint_fallback_matches = (
+        normalized_mode != TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+        or bool(checkpoint.get("book_title_fallback_supported")) == bool(book_title_fallback_supported)
+    )
     resume_ok = (
         not checkpoint_uses_strict_outputs
+        and checkpoint_policy_matches
+        and checkpoint_fallback_matches
         and str(checkpoint.get("mode") or TRIAGE_MODE_FAST).strip().upper() == normalized_mode
         and str(checkpoint.get("input_fingerprint") or "") == input_fingerprint
         and str(checkpoint.get("input_path") or "") == str(input_path)
@@ -1428,6 +1604,8 @@ def fast_triage_master_leads(
                         chunk_complete = False
                         break
                     row = input_rows[index]
+                    if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+                        row = _normalize_manual_author_row(row, base_headers)
                     signature = _row_signature(row, base_headers)
                     row_email = norm_email(_email_value(row, base_headers))
                     is_duplicate_email = bool(row_email and row_email in seen_triage_emails)
@@ -1472,6 +1650,7 @@ def fast_triage_master_leads(
                         base_headers,
                         disposable_domains=disposable_domain_set,
                         mode=normalized_mode,
+                        book_title_fallback_supported=bool(book_title_fallback_supported),
                     )
                     output_row = _build_output_row(
                         row,
@@ -1516,6 +1695,8 @@ def fast_triage_master_leads(
             checkpoint_next_index = chunk_end if chunk_complete else chunk_start
             checkpoint_payload = {
                 "mode": normalized_mode,
+                "manual_author_policy_version": MANUAL_AUTHOR_TRIAGE_POLICY_VERSION if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "",
+                "book_title_fallback_supported": bool(book_title_fallback_supported) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "",
                 "input_path": str(input_path),
                 "input_fingerprint": input_fingerprint,
                 "keep_path": str(keep_path),
@@ -1553,9 +1734,20 @@ def fast_triage_master_leads(
         reason = str(row.get("VerificationReason") or "").strip()
         if reason:
             reason_counts[reason] += 1
-    for row in quarantine_rows:
+    keep_with_warnings_rows = 0
+    keep_with_fallback_rows = 0
+    for row in keep_rows + quarantine_rows:
         reason = str(row.get("VerificationReason") or "").strip()
-        if reason:
+        evidence = str(row.get("VerificationEvidence") or "")
+        warning_codes = _manual_author_soft_warning_codes(evidence) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else []
+        if warning_codes:
+            if row in keep_rows:
+                keep_with_warnings_rows += 1
+                if "BOOKTITLE_MISSING_USING_TEMPLATE_FALLBACK" in warning_codes:
+                    keep_with_fallback_rows += 1
+            for code in warning_codes:
+                soft_warning_counts[code] += 1
+        elif row in quarantine_rows and reason:
             soft_warning_counts[reason] += 1
     for row in rejected_rows:
         reason = str(row.get("VerificationReason") or "").strip()
@@ -1579,6 +1771,10 @@ def fast_triage_master_leads(
         "reason_counts": dict(reason_counts),
         "soft_warning_counts": dict(soft_warning_counts),
         "hard_reject_counts": dict(hard_reject_counts),
+        "send_ready_keep_rows": len(keep_rows) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,
+        "keep_with_warnings_rows": keep_with_warnings_rows if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,
+        "keep_with_fallback_rows": keep_with_fallback_rows if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,
+        "book_title_fallback_supported": bool(book_title_fallback_supported) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else False,
         "keep_preview_rows": _derive_preview(keep_rows),
         "reject_preview_rows": _derive_preview(rejected_rows),
         "quarantine_preview_rows": _derive_preview(quarantine_rows),
@@ -1598,6 +1794,8 @@ def fast_triage_master_leads(
         _save_triage_checkpoint_state(
             {
                 "mode": normalized_mode,
+                "manual_author_policy_version": MANUAL_AUTHOR_TRIAGE_POLICY_VERSION if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "",
+                "book_title_fallback_supported": bool(book_title_fallback_supported) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "",
                 "input_path": str(input_path),
                 "input_fingerprint": input_fingerprint,
                 "keep_path": str(keep_path),

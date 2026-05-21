@@ -1253,6 +1253,13 @@ h3 {
   animation: button-spin 820ms linear infinite;
 }
 
+.btn.is-next-action:not(:disabled) {
+  border-color: rgba(255, 225, 159, 0.52);
+  background: linear-gradient(135deg, rgba(216, 179, 106, 0.92), rgba(246, 208, 124, 0.9));
+  color: #1b1200;
+  box-shadow: 0 0 0 3px rgba(216, 179, 106, 0.18);
+}
+
 @keyframes button-spin {
   to {
     transform: rotate(360deg);
@@ -1366,6 +1373,21 @@ h3 {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.dispatch-next-step-banner {
+  border-color: rgba(216, 179, 106, 0.46);
+  background: rgba(216, 179, 106, 0.12);
+}
+
+.dispatch-next-step-banner strong {
+  color: #ffe6ad;
+}
+
+.dispatch-next-step-failed,
+.dispatch-next-step-blocked {
+  border-color: rgba(248, 113, 113, 0.46);
+  background: rgba(127, 29, 29, 0.16);
 }
 
 .dispatch-runbook-items {

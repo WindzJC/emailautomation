@@ -1366,6 +1366,28 @@ def _archive_confirmed_dispatch_summary(report: Dict[str, object], archive_dir: 
     return path
 
 
+def _zero_add_dispatch_message(report: Dict[str, object]) -> str:
+    reasons = report.get("exclusion_reason_counts") if isinstance(report.get("exclusion_reason_counts"), dict) else {}
+    parts: List[str] = []
+    already_queued = int(report.get("skipped_already_queued") or reasons.get("already_queued") or 0)
+    already_sent = int(report.get("skipped_already_sent") or reasons.get("already_sent") or 0)
+    already_contacted = int(report.get("skipped_already_contacted") or reasons.get("already_contacted") or 0)
+    suppressed = int(report.get("suppressed_skipped") or report.get("skipped_suppressed") or reasons.get("suppressed") or 0)
+    invalid = int(report.get("invalid_malformed_skipped") or report.get("skipped_invalid_malformed") or reasons.get("invalid_source_row") or 0)
+    if already_queued:
+        parts.append(f"{already_queued} already queued")
+    if already_sent:
+        parts.append(f"{already_sent} already sent")
+    if already_contacted:
+        parts.append(f"{already_contacted} already contacted")
+    if suppressed:
+        parts.append(f"{suppressed} suppressed")
+    if invalid:
+        parts.append(f"{invalid} invalid or malformed")
+    suffix = f": {', '.join(parts)}." if parts else "."
+    return f"Zero-add dispatch confirmed. No new queue rows were written because all eligible rows were already queued/skipped{suffix}"
+
+
 def load_dispatch_preview(preview_id: str, preview_dir: Path = DISPATCH_PREVIEWS_DIR) -> Dict[str, object]:
     path = _dispatch_preview_path(preview_id, preview_dir)
     if not path.exists():
@@ -2159,11 +2181,14 @@ def confirm_dispatch_preview(
     )
     report["staged_batch_cleanup"] = staged_batch_cleanup
     report["staged_batch_archive_path"] = str(staged_batch_cleanup.get("archive_path") or "")
-    report["message"] = (
-        "Dispatch confirmed. Staged batch archived and cleared. Run Check Leads and Fast Triage before previewing another batch."
-        if bool(staged_batch_cleanup.get("cleared"))
-        else "Dispatch confirmed."
-    )
+    if int(report.get("total_rows_would_write") or 0) == 0:
+        report["message"] = _zero_add_dispatch_message(report)
+    else:
+        report["message"] = (
+            "Dispatch confirmed. Staged batch archived and cleared. Run Check Leads and Fast Triage before previewing another batch."
+            if bool(staged_batch_cleanup.get("cleared"))
+            else "Dispatch confirmed."
+        )
     if not str(report.get("assigned_preview_archive_path") or "").strip():
         assigned_preview_archive_path = _archive_assigned_dispatch_preview(preview, report_dir / "dispatch_previews")
         report["assigned_preview_archive_path"] = str(assigned_preview_archive_path)
@@ -2176,6 +2201,7 @@ def confirm_dispatch_preview(
     report["sg5_added"] = int(report.get("assigned_sg5") or 0)
     confirmed_summary_path = _archive_confirmed_dispatch_summary(report, report_dir / "dispatch_confirmed")
     report["confirmed_summary_path"] = str(confirmed_summary_path)
+    report["confirmed_summary_archive_path"] = str(confirmed_summary_path)
 
     report_path = report_dir / f"important_leads_dispatch_{timestamp_slug()}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)

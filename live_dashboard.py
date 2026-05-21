@@ -94,6 +94,7 @@ from important_leads_workflow import (
     confirm_dispatch_preview,
     important_leads_path_state,
     important_leads_status,
+    load_dispatch_preview,
     preview_dispatch_master_leads,
     validate_dispatch_preview,
 )
@@ -413,6 +414,13 @@ def _important_dispatch_source_labels_for_state(mode: str) -> dict[str, str]:
     if normalized not in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_STRICT_VERIFIED, DISPATCH_SOURCE_CLEANED}:
         normalized = DISPATCH_SOURCE_TRIAGED_KEEP
     return {"dispatch_source_mode": normalized}
+
+
+def _dashboard_path_label(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(settings.APP_ROOT.resolve()))
+    except Exception:
+        return str(path)
 
 
 def _important_check_batch_policy() -> dict[str, object]:
@@ -775,12 +783,31 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
     existing_status = str(job.get("auto_triage_status") or "").strip().lower()
     if existing_status in {"running", "completed", "failed", "skipped"}:
         return job
+    check_status = str(job.get("status") or "").strip().lower()
+    if check_status not in {"completed", "done"}:
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "check_still_running"
+        job["message"] = "Check still running. Auto triage will wait for a finalized leads.csv."
+        return job
 
     output_path = Path(str(job.get("output_path") or ""))
     rejected_path = Path(str(job.get("rejected_path") or ""))
     if not output_path.exists() or not rejected_path.exists():
         job["auto_triage_status"] = "skipped"
         job["auto_triage_skip_reason"] = "fresh_check_outputs_missing"
+        job["message"] = "Check output is not ready. Auto triage requires finalized leads.csv and leads_rejected.csv."
+        return job
+    try:
+        checked_output_rows = _count_csv_rows(output_path)
+    except Exception as exc:
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "fresh_check_output_unreadable"
+        job["message"] = f"Check output is not readable yet. Auto triage skipped: {exc}"
+        return job
+    if checked_output_rows <= 0:
+        job["auto_triage_status"] = "skipped"
+        job["auto_triage_skip_reason"] = "fresh_check_output_empty"
+        job["message"] = "Check output has no accepted rows. Auto triage was not started."
         return job
     if _has_newer_important_check_job(job):
         job["auto_triage_status"] = "skipped"
@@ -849,6 +876,11 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
 
     try:
         triage_mode = TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH if _normalize_intake_mode(job.get("intake_mode")) == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else TRIAGE_MODE_FAST
+        book_title_fallback_supported = (
+            bool(_book_title_fallback_readiness().get("fallback_capable"))
+            if triage_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH
+            else False
+        )
         report = fast_triage_master_leads(
             input_path=output_path,
             keep_path=staged_keep_path,
@@ -858,6 +890,7 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
             progress_callback=save_auto_triage_progress,
             should_cancel=should_cancel_auto_triage,
             mode=triage_mode,
+            book_title_fallback_supported=book_title_fallback_supported,
         )
         if bool(report.get("canceled")) or should_cancel_auto_triage():
             job["status"] = "completed"
@@ -884,6 +917,8 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         final_report["auto_triage_source_check_job_id"] = job_id
         final_report["intake_mode"] = triage_mode
         final_report["intake_mode_label"] = "Manual Author Research" if triage_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "Standard"
+        if triage_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+            final_report["book_title_fallback_supported"] = book_title_fallback_supported
         save_state(
             **{
                 TRIAGE_PATHS_STATE_KEY: _triage_path_state_labels(
@@ -918,7 +953,11 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
             f"Check complete. Auto triage complete: KEEP {int(final_report.get('keep_count') or 0)}, "
             f"REJECT {int(final_report.get('reject_count') or 0)}, "
             f"QUARANTINE {int(final_report.get('quarantine_count') or 0)}. "
-            f"Dispatch preview {str(job.get('auto_dispatch_preview_status') or 'not_started')}."
+            + (
+                f"Dispatch preview failed: {job.get('auto_dispatch_preview_error')}"
+                if str(job.get("auto_dispatch_preview_status") or "").lower() == "failed"
+                else f"Dispatch preview {str(job.get('auto_dispatch_preview_status') or 'not_started')}."
+            )
         )
     except Exception as exc:
         job["status"] = "triage_failed"
@@ -1026,6 +1065,63 @@ def _count_csv_rows(path: Path) -> int:
             if any(str(value or "").strip() for value in row.values()):
                 count += 1
     return count
+
+
+def _dispatch_source_readiness_block(
+    dispatch_source_mode: str,
+    source_path: Path,
+    *,
+    source_resolution: str = "",
+) -> dict[str, str] | None:
+    mode = str(dispatch_source_mode or "").strip().lower() or DISPATCH_SOURCE_TRIAGED_KEEP
+    label = _dashboard_path_label(source_path)
+    if mode == DISPATCH_SOURCE_TRIAGED_KEEP:
+        if source_resolution == "latest_completed_staged_run" and (not source_path.exists() or _count_csv_rows(source_path) <= 0):
+            return {
+                "error": "triage_not_ready",
+                "message": "Current staged Fast Triage Keep is empty. Run Check Leads / Fast Triage first.",
+                "retry_action": "Run Check Leads / Fast Triage, then retry Preview Dispatch.",
+            }
+        if not source_path.exists():
+            return {
+                "error": "triage_not_ready",
+                "message": f"Triage not ready: leads_triaged_keep.csv is missing at {label}. Run Fast Triage after Check Leads completes.",
+                "retry_action": "Run Fast Triage, then retry Preview Dispatch.",
+            }
+        if _count_csv_rows(source_path) <= 0:
+            return {
+                "error": "triage_not_ready",
+                "message": "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically.",
+                "retry_action": "Review the triage results or rerun Fast Triage after fixing the source, then retry Preview Dispatch.",
+            }
+        return None
+    if mode == DISPATCH_SOURCE_STRICT_VERIFIED:
+        if not source_path.exists():
+            return {
+                "error": "strict_verified_not_ready",
+                "message": f"Strict verified source is missing at {label}. Run Verify Leads before Preview Dispatch.",
+                "retry_action": "Run Verify Leads, then retry Preview Dispatch.",
+            }
+        if _count_csv_rows(source_path) <= 0:
+            return {
+                "error": "strict_verified_not_ready",
+                "message": "Strict verified source has no eligible rows. Preview Dispatch cannot run.",
+                "retry_action": "Review Verify Leads output, then retry Preview Dispatch.",
+            }
+        return None
+    if not source_path.exists():
+        return {
+            "error": "checked_output_not_ready",
+            "message": f"Check still running or output missing: leads.csv is not available at {label}.",
+            "retry_action": "Wait for Check Leads to complete, then retry Preview Dispatch.",
+        }
+    if _count_csv_rows(source_path) <= 0:
+        return {
+            "error": "checked_output_not_ready",
+            "message": "Check output has no accepted rows. Preview Dispatch cannot run.",
+            "retry_action": "Rerun Check Leads with a valid source, then retry Preview Dispatch.",
+        }
+    return None
 
 
 def _normalize_uploaded_check_file(filename: str, content: bytes) -> tuple[str, str, str]:
@@ -1662,6 +1758,245 @@ def _latest_important_check_job() -> dict[str, object] | None:
     return candidates[0][1]
 
 
+def _latest_completed_important_check_job() -> dict[str, object] | None:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return None
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("status") or "").strip().lower() not in {"completed", "done"}:
+            continue
+        candidates.append((_check_job_created_sort_key(job, path), job))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _staged_run_dir_for_job(job: dict[str, object]) -> Path:
+    staged_dir = Path(str(job.get("staged_run_dir") or "")) if job.get("staged_run_dir") else IMPORTANT_LEADS_RUNS / str(job.get("job_id") or "")
+    if not staged_dir.is_absolute():
+        staged_dir = settings.APP_ROOT / staged_dir
+    return staged_dir
+
+
+def _staged_triage_paths_for_job(job: dict[str, object]) -> dict[str, Path]:
+    staged_dir = _staged_run_dir_for_job(job)
+
+    def path_from_job(key: str, filename: str) -> Path:
+        path = Path(str(job.get(key) or staged_dir / filename))
+        if not path.is_absolute():
+            path = settings.APP_ROOT / path
+        return path
+
+    return {
+        "input": path_from_job("output_path", "leads.csv"),
+        "rejected": path_from_job("rejected_path", "leads_rejected.csv"),
+        "keep": path_from_job("auto_triage_keep_path", "leads_triaged_keep.csv"),
+        "triage_reject": path_from_job("auto_triage_rejected_path", "leads_triaged_reject.csv"),
+        "triage_quarantine": path_from_job("auto_triage_quarantine_path", "leads_triaged_quarantine.csv"),
+    }
+
+
+def _latest_fast_triage_keep_source() -> dict[str, object]:
+    job = _latest_completed_important_check_job()
+    if job:
+        paths = _staged_triage_paths_for_job(job)
+        keep_path = paths["keep"]
+        return {
+            "source_resolution": "latest_completed_staged_run",
+            "job": job,
+            "run_id": str(job.get("job_id") or ""),
+            "path": keep_path,
+            "paths": paths,
+            "exists": keep_path.exists(),
+            "row_count": _count_csv_rows(keep_path) if keep_path.exists() else 0,
+        }
+    legacy_path = TRIAGED_KEEP_PATH
+    return {
+        "source_resolution": "legacy_important_triaged_keep",
+        "job": None,
+        "run_id": "",
+        "path": legacy_path,
+        "paths": {},
+        "exists": legacy_path.exists(),
+        "row_count": _count_csv_rows(legacy_path) if legacy_path.exists() else 0,
+    }
+
+
+def _read_dispatch_source_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not path.exists():
+        return [], []
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        headers = [str(field or "").strip().lstrip("\ufeff") for field in (reader.fieldnames or [])]
+        rows = [
+            {header: str(row.get(header, "") or "") for header in headers}
+            for row in reader
+            if any(str(value or "").strip() for value in row.values())
+        ]
+    return headers, rows
+
+
+def _dispatch_source_status_for_path(
+    *,
+    path: Path,
+    mode: str,
+    source_resolution: str = "",
+    run_id: str = "",
+) -> dict[str, object]:
+    headers, rows = _read_dispatch_source_rows(path)
+    exists = path.exists()
+    status_keep_filter = mode in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_STRICT_VERIFIED}
+    eligible_rows = rows
+    if status_keep_filter and "Status" in headers:
+        eligible_rows = [row for row in rows if str(row.get("Status") or "").strip().upper() == "KEEP"]
+    source_name = "Fast Triage Keep" if mode == DISPATCH_SOURCE_TRIAGED_KEEP else "Strict Public Proof Verified" if mode == DISPATCH_SOURCE_STRICT_VERIFIED else "Cleaned Leads"
+    block_reason = ""
+    if mode == DISPATCH_SOURCE_TRIAGED_KEEP and source_resolution == "latest_completed_staged_run" and (not exists or not rows):
+        block_reason = "Current staged Fast Triage Keep is empty. Run Check Leads / Fast Triage first."
+    elif not exists:
+        block_reason = f"{source_name} dispatch source missing: {_dashboard_path_label(path)}"
+    elif not rows:
+        block_reason = f"{source_name} dispatch source is empty: {_dashboard_path_label(path)}"
+    elif status_keep_filter and "Status" in headers and not eligible_rows:
+        block_reason = f"{source_name} dispatch source has no KEEP rows: {_dashboard_path_label(path)}"
+    verification_file_mtime = ""
+    if exists:
+        try:
+            verification_file_mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        except Exception:
+            verification_file_mtime = ""
+    return {
+        "dispatch_source_mode": mode,
+        "dispatch_source_name": source_name,
+        "dispatch_source_path": str(path),
+        "dispatch_source_label": _dashboard_path_label(path),
+        "dispatch_source_exists": exists,
+        "dispatch_source_row_count": len(rows),
+        "dispatch_eligible_row_count": len(eligible_rows),
+        "dispatch_block_reason": block_reason,
+        "verification_required": mode == DISPATCH_SOURCE_STRICT_VERIFIED,
+        "status_keep_filter": status_keep_filter,
+        "verification_file_mtime": verification_file_mtime,
+        "dispatch_source_preview_rows": eligible_rows[:5],
+        "dispatch_source_headers": headers,
+        "source_resolution": source_resolution,
+        "run_id": run_id,
+    }
+
+
+def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, object]:
+    fast_triage_source = _latest_fast_triage_keep_source()
+    if fast_triage_source.get("source_resolution") != "latest_completed_staged_run":
+        return status
+    job = fast_triage_source.get("job") if isinstance(fast_triage_source.get("job"), dict) else None
+    paths = fast_triage_source.get("paths") if isinstance(fast_triage_source.get("paths"), dict) else {}
+    if not job or not paths:
+        return status
+
+    input_path = Path(paths["input"])
+    rejected_path = Path(paths["rejected"])
+    keep_path = Path(paths["keep"])
+    triage_reject_path = Path(paths["triage_reject"])
+    triage_quarantine_path = Path(paths["triage_quarantine"])
+    intake_mode = _normalize_intake_mode(job.get("intake_mode"))
+    intake_mode_label = "Manual Author Research" if intake_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else "Standard"
+
+    check_rows = _count_csv_rows(input_path) if input_path.exists() else 0
+    rejected_rows = _count_csv_rows(rejected_path) if rejected_path.exists() else 0
+    keep_rows = _count_csv_rows(keep_path) if keep_path.exists() else 0
+    triage_reject_rows = _count_csv_rows(triage_reject_path) if triage_reject_path.exists() else 0
+    quarantine_rows = _count_csv_rows(triage_quarantine_path) if triage_quarantine_path.exists() else 0
+
+    latest_master_check = dict(job.get("check") or status.get("latest_master_check") or {})
+    latest_master_check.update(
+        {
+            "intake_mode": intake_mode,
+            "intake_mode_label": intake_mode_label,
+            "input_rows": int(job.get("total_input_rows") or latest_master_check.get("input_rows") or check_rows),
+            "cleaned_rows": check_rows,
+            "output_rows": check_rows,
+            "rejected_rows": rejected_rows,
+            "output_label": _dashboard_path_label(input_path),
+            "rejected_label": _dashboard_path_label(rejected_path),
+            "generated_at_utc": str(
+                latest_master_check.get("generated_at_utc")
+                or job.get("completed_at_utc")
+                or job.get("updated_at_utc")
+                or ""
+            ),
+        }
+    )
+
+    latest_triage = dict(job.get("auto_triage_report") or status.get("latest_lead_triage") or {})
+    latest_triage.update(
+        {
+            "mode": TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH if intake_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else TRIAGE_MODE_FAST,
+            "intake_mode": intake_mode,
+            "intake_mode_label": intake_mode_label,
+            "input_count": check_rows,
+            "keep_count": keep_rows,
+            "reject_count": triage_reject_rows,
+            "rejected_count": triage_reject_rows,
+            "quarantine_count": quarantine_rows,
+            "review_count": quarantine_rows,
+            "keep_path": _dashboard_path_label(keep_path),
+            "rejected_path": _dashboard_path_label(triage_reject_path),
+            "quarantine_path": _dashboard_path_label(triage_quarantine_path),
+            "generated_at_utc": str(
+                latest_triage.get("generated_at_utc")
+                or job.get("auto_triage_completed_at_utc")
+                or job.get("updated_at_utc")
+                or ""
+            ),
+        }
+    )
+
+    source_status = _dispatch_source_status_for_path(
+        path=keep_path,
+        mode=DISPATCH_SOURCE_TRIAGED_KEEP,
+        source_resolution=str(fast_triage_source.get("source_resolution") or ""),
+        run_id=str(fast_triage_source.get("run_id") or ""),
+    )
+    source_options = dict(status.get("dispatch_source_options") or {})
+    source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = source_status
+
+    status.update(
+        {
+            "important_output_label": _dashboard_path_label(input_path),
+            "important_rejected_label": _dashboard_path_label(rejected_path),
+            "important_triage_input_label": _dashboard_path_label(input_path),
+            "important_triage_keep_label": _dashboard_path_label(keep_path),
+            "important_triage_rejected_label": _dashboard_path_label(triage_reject_path),
+            "important_triage_quarantine_label": _dashboard_path_label(triage_quarantine_path),
+            "latest_master_check": latest_master_check,
+            "latest_lead_triage": latest_triage,
+            "dispatch_source_options": source_options,
+        }
+    )
+    if str(status.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP).strip().lower() == DISPATCH_SOURCE_TRIAGED_KEEP:
+        status.update(
+            {
+                "dispatch_source_path": source_status["dispatch_source_label"],
+                "dispatch_source_exists": source_status["dispatch_source_exists"],
+                "dispatch_source_row_count": source_status["dispatch_source_row_count"],
+                "dispatch_eligible_row_count": source_status["dispatch_eligible_row_count"],
+                "dispatch_block_reason": source_status["dispatch_block_reason"],
+                "verification_required": source_status["verification_required"],
+                "verification_file_mtime": source_status["verification_file_mtime"],
+                "dispatch_source_preview_rows": source_status["dispatch_source_preview_rows"],
+                "dispatch_source": source_status,
+            }
+        )
+    return status
+
+
 def _funnel_stage_count(stage: dict[str, object]) -> int | None:
     if str(stage.get("status") or "") != "ready":
         return None
@@ -1981,6 +2316,7 @@ def _combined_leads_status() -> dict[str, object]:
     }
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
+    status = _apply_latest_staged_run_status(status)
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
     status["current_send_safety"] = _build_current_send_safety_status(status)
@@ -3705,14 +4041,42 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             raise ValueError("Dispatch source mode must be triaged_keep, strict_verified, or cleaned.")
         save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         save_state(important_leads_dispatch_source=_important_dispatch_source_labels_for_state(dispatch_source_mode))
-        triaged_keep_source_path = _resolve_dashboard_csv_path(
-            triage_paths["keep_path"],
-            TRIAGED_KEEP_PATH,
-        )
+        fast_triage_source = _latest_fast_triage_keep_source()
+        if fast_triage_source.get("source_resolution") == "latest_completed_staged_run":
+            triaged_keep_source_path = Path(str(fast_triage_source["path"]))
+            triaged_keep_source_resolution = str(fast_triage_source.get("source_resolution") or "")
+        else:
+            triaged_keep_source_path = _resolve_dashboard_csv_path(
+                triage_paths["keep_path"],
+                TRIAGED_KEEP_PATH,
+            )
+            triaged_keep_source_resolution = str(fast_triage_source.get("source_resolution") or "")
         verified_source_path = _resolve_dashboard_csv_path(
             verify_paths["verified_path"],
             STRICT_VERIFIED_PATH,
         )
+        source_path_for_mode = {
+            DISPATCH_SOURCE_TRIAGED_KEEP: triaged_keep_source_path,
+            DISPATCH_SOURCE_STRICT_VERIFIED: verified_source_path,
+            DISPATCH_SOURCE_CLEANED: output_path,
+        }[dispatch_source_mode]
+        source_block = _dispatch_source_readiness_block(
+            dispatch_source_mode,
+            source_path_for_mode,
+            source_resolution=triaged_keep_source_resolution if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP else "",
+        )
+        if source_block is not None:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    **source_block,
+                    "source_path": _dashboard_path_label(source_path_for_mode),
+                    "dispatch_source_mode": dispatch_source_mode,
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=409,
+            )
         preview = preview_dispatch_master_leads(
             master_path=output_path,
             rejected_path=rejected_path,
@@ -3736,7 +4100,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             "ok": True,
             "message": f"Preview ready for {preview['dispatch_source_name']}.",
             "preview": preview,
-            "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+            "status": _combined_leads_status(),
             "snapshot": _build_live_snapshot(),
         }
     )
@@ -3833,6 +4197,37 @@ def _write_private_jc_queue_repair_csv(path: Path, headers: list[str], rows: lis
     settings.secure_private_file(path)
 
 
+def _private_jc_repair_email_set(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    emails: set[str] = set()
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            email = ""
+            for key in ("Email", "email", "AuthorEmail", "author_email"):
+                value = str(row.get(key) or "").strip().lower()
+                if value:
+                    email = value
+                    break
+            if email:
+                emails.add(email)
+    return emails
+
+
+def _confirmed_dispatch_archived_path(latest_dispatch: dict[str, object], key: str) -> Path | None:
+    cleanup = latest_dispatch.get("staged_batch_cleanup") if isinstance(latest_dispatch, dict) else {}
+    files = cleanup.get("files") if isinstance(cleanup, dict) else []
+    if isinstance(files, list):
+        for entry in files:
+            if not isinstance(entry, dict) or str(entry.get("key") or "") != key:
+                continue
+            archive_path = Path(str(entry.get("archive_path") or ""))
+            if archive_path.exists():
+                return archive_path
+    return None
+
+
 def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, object]]:
     state = load_state()
     latest_dispatch = state.get(MASTER_DISPATCH_STATE_KEY) if isinstance(state, dict) else {}
@@ -3843,7 +4238,7 @@ def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, o
     preview_id = str(latest_dispatch.get("preview_id") or "").strip()
     if not preview_id:
         raise RuntimeError("Latest dispatch does not reference a preview. Re-run Preview Dispatch and Confirm Dispatch.")
-    preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+    preview = load_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
     if str(preview.get("status") or "").strip().lower() != "confirmed":
         raise RuntimeError("Latest dispatch preview is not confirmed. Run Confirm Dispatch before repairing the queue.")
     confirmed_run_id = str(preview.get("confirmed_run_id") or "").strip()
@@ -3893,6 +4288,25 @@ def repair_private_jc_queue() -> JSONResponse:
             for row in (plan_rows_by_queue.get("private_jc") or [])
             if isinstance(row, dict)
         ]
+        live_queue_emails = _private_jc_repair_email_set(private_queue_path)
+        confirmed_source_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_keep")
+        if confirmed_source_path is None:
+            source_text = str(latest_dispatch.get("dispatch_source_path") or preview.get("dispatch_source_path") or "").strip()
+            confirmed_source_path = Path(source_text) if source_text else None
+        confirmed_source_emails = _private_jc_repair_email_set(confirmed_source_path) if confirmed_source_path else set()
+        matching_current_source_reviewed = len(live_queue_emails & confirmed_source_emails) if confirmed_source_emails else 0
+        outside_current_source_removed = (
+            len(live_queue_emails - confirmed_source_emails)
+            if confirmed_source_emails
+            else max(
+                int(before.get("outside_intended_source_count") or 0),
+                int(before.get("outside_checked_output_count") or 0),
+            )
+        )
+        confirmed_reject_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_reject")
+        confirmed_quarantine_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_quarantine")
+        reject_overlap_removed = len(live_queue_emails & _private_jc_repair_email_set(confirmed_reject_path)) if confirmed_reject_path else int(before.get("overlap_with_triaged_reject") or 0)
+        quarantine_overlap_removed = len(live_queue_emails & _private_jc_repair_email_set(confirmed_quarantine_path)) if confirmed_quarantine_path else 0
         repair_dir = settings.BACKUPS_DIR / "private_jc_queue_repair" / timestamp_slug()
         repair_dir.mkdir(parents=True, exist_ok=True)
         settings.secure_private_dir(repair_dir)
@@ -3908,14 +4322,14 @@ def repair_private_jc_queue() -> JSONResponse:
             "source": "confirmed_dispatch_preview",
             "preview_id": str(preview.get("preview_id") or latest_dispatch.get("preview_id") or ""),
             "dispatch_run_id": str(latest_dispatch.get("run_id") or ""),
+            "confirmed_source_path": str(confirmed_source_path or ""),
             "live_queue_path": str(private_queue_path),
             "backup_path": str(backup_path),
             "unsafe_queue_rows_archived": int(before.get("shard_row_count_total") or 0),
-            "reject_overlap_rows_removed": int(before.get("overlap_with_triaged_reject") or 0),
-            "outside_source_rows_removed": max(
-                int(before.get("outside_intended_source_count") or 0),
-                int(before.get("outside_checked_output_count") or 0),
-            ),
+            "reject_overlap_rows_removed": reject_overlap_removed,
+            "quarantine_overlap_rows_removed": quarantine_overlap_removed,
+            "outside_source_rows_removed": outside_current_source_removed,
+            "matching_current_source_reviewed": matching_current_source_reviewed,
             "rebuilt_queue_rows": len(planned_rows),
         }
         manifest_path = repair_dir / "manifest.json"
@@ -3927,7 +4341,9 @@ def repair_private_jc_queue() -> JSONResponse:
         summary = {
             "unsafe_queue_rows_archived": manifest["unsafe_queue_rows_archived"],
             "reject_overlap_rows_removed": manifest["reject_overlap_rows_removed"],
+            "quarantine_overlap_rows_removed": manifest["quarantine_overlap_rows_removed"],
             "outside_source_rows_removed": manifest["outside_source_rows_removed"],
+            "matching_current_source_reviewed": manifest["matching_current_source_reviewed"],
             "rebuilt_queue_rows": manifest["rebuilt_queue_rows"],
             "backup_path": str(backup_path),
         }
