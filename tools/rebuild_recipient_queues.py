@@ -226,6 +226,40 @@ def _latest_queue_rebuild_source_paths() -> Dict[str, object] | None:
     return None
 
 
+def _latest_confirmed_dispatch_source_paths(state_dir: Path = settings.STATE_DIR) -> Dict[str, object] | None:
+    confirmed_dir = state_dir / "dispatch_confirmed"
+    if not confirmed_dir.exists():
+        return None
+    confirmed_files = sorted(
+        confirmed_dir.glob("dispatch_confirmed_*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for confirmed_path in confirmed_files:
+        payload = _read_json(confirmed_path)
+        if not payload:
+            continue
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        archive_text = str(payload.get("staged_batch_archive_path") or report.get("staged_batch_archive_path") or "").strip()
+        if archive_text:
+            resolved = _staged_archive_source_paths(_resolve_app_path(archive_text), "latest_confirmed_dispatch_archive")
+            if resolved:
+                resolved["confirmed_dispatch_summary_path"] = confirmed_path
+                return resolved
+
+        source_text = str(payload.get("source_path") or report.get("dispatch_source_path") or report.get("source_file_path") or "").strip()
+        if not source_text:
+            continue
+        source = _resolve_app_path(source_text)
+        if _nonempty_file(source):
+            source_dir = source.parent
+            resolved = _staged_archive_source_paths(source_dir, "latest_confirmed_dispatch_source")
+            if resolved:
+                resolved["confirmed_dispatch_summary_path"] = confirmed_path
+                return resolved
+    return None
+
+
 def default_queue_safety_sources(important_dir: Path = settings.APP_ROOT / "_important") -> Dict[str, object]:
     checked = important_dir / "leads.csv"
     keep = important_dir / "leads_triaged_keep.csv"
@@ -238,6 +272,10 @@ def default_queue_safety_sources(important_dir: Path = settings.APP_ROOT / "_imp
             "triaged_keep": keep,
             "triaged_reject": reject,
         }
+
+    resolved = _latest_confirmed_dispatch_source_paths(settings.STATE_DIR)
+    if resolved:
+        return resolved
 
     resolved = _latest_queue_rebuild_source_paths()
     if resolved:

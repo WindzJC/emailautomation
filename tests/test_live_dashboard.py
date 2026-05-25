@@ -18,6 +18,7 @@ import lead_ledger
 import important_leads_verify
 import important_leads_workflow
 import live_dashboard
+from tools import rebuild_recipient_queues
 from important_leads_workflow import ImportantLeadsCheckError
 
 
@@ -2129,6 +2130,78 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(live_dashboard._dashboard_path_label(keep_path), status["dispatch_source_path"])
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
+
+    def test_queue_safety_sources_prefer_latest_confirmed_dispatch_archive_over_stale_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            important_dir = tmp / "_important"
+            state_dir = tmp / "data" / "state"
+            backups_dir = state_dir / "backups"
+            confirmed_dir = state_dir / "dispatch_confirmed"
+            current_archive = backups_dir / "staged_batches" / "dispatch_current"
+            stale_archive = backups_dir / "staged_batches" / "dispatch_stale"
+            rebuild_manifest_dir = backups_dir / "queue_rebuild" / "queue_rebuild_stale"
+            for path in [important_dir, confirmed_dir, current_archive, stale_archive, rebuild_manifest_dir]:
+                path.mkdir(parents=True, exist_ok=True)
+            self._write_csv(current_archive / "leads.csv", ["Email"], [{"Email": "current@example.test"}])
+            self._write_csv(current_archive / "leads_triaged_keep.csv", ["Email"], [{"Email": "current@example.test"}])
+            self._write_csv(current_archive / "leads_triaged_reject.csv", ["Email"], [])
+            self._write_csv(stale_archive / "leads.csv", ["Email"], [{"Email": "stale@example.test"}])
+            self._write_csv(stale_archive / "leads_triaged_keep.csv", ["Email"], [{"Email": "stale@example.test"}])
+            self._write_csv(stale_archive / "leads_triaged_reject.csv", ["Email"], [])
+            (confirmed_dir / "dispatch_confirmed_20260521_195529.json").write_text(
+                json.dumps(
+                    {
+                        "confirmed_at_utc": "2026-05-21T19:55:29+00:00",
+                        "staged_batch_archive_path": str(current_archive),
+                        "report": {"staged_batch_archive_path": str(current_archive)},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (rebuild_manifest_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "queue_safety_source_paths": {
+                            "intended_source_path": str(stale_archive / "leads_triaged_keep.csv"),
+                            "checked_path": str(stale_archive / "leads.csv"),
+                            "triaged_reject_path": str(stale_archive / "leads_triaged_reject.csv"),
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(rebuild_recipient_queues.settings, "APP_ROOT", tmp), patch.object(
+                rebuild_recipient_queues.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(rebuild_recipient_queues.settings, "BACKUPS_DIR", backups_dir):
+                sources = rebuild_recipient_queues.default_queue_safety_sources(important_dir)
+
+            self.assertEqual("latest_confirmed_dispatch_archive", sources["origin"])
+            self.assertEqual(current_archive / "leads_triaged_keep.csv", sources["intended"])
+            self.assertEqual(current_archive / "leads.csv", sources["checked"])
+
+    def test_missing_booktitle_queue_check_ignores_empty_or_unknown_header_shards(self) -> None:
+        self.assertEqual(
+            [],
+            live_dashboard._queue_status_missing_booktitle(
+                {
+                    "jc_queue": {"count": 0, "fieldnames": ["Email"]},
+                    "sendgrid_queues": [
+                        {"name": "SG1", "count": 0, "fieldnames": ["Email"]},
+                        {"name": "SG2", "count": 10},
+                    ],
+                }
+            ),
+        )
+        self.assertEqual(
+            ["SG1"],
+            live_dashboard._queue_status_missing_booktitle(
+                {"sendgrid_queues": [{"name": "SG1", "count": 10, "fieldnames": ["Email", "FirstName"]}]}
+            ),
+        )
 
     def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
         class RequestStub:

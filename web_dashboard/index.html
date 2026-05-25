@@ -517,35 +517,39 @@
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Leads Workspace</p>
-                  <h2>Run Readiness</h2>
+                  <h2>Current Run</h2>
                   <span id="leads-pipeline-meta" class="muted">Next: Check New Leads. Waiting for latest counts.</span>
                 </div>
               </div>
-              <div id="leads-operator-status-strip" class="operator-status-strip" aria-label="Leads status summary"></div>
-              <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
-              <div id="lead-funnel-summary" class="lead-funnel-summary"></div>
-              <div class="leads-run-safety-grid">
-                <div id="leads-run-safety-card" class="leads-run-safety-card leads-run-safety-card-wait">
-                  <div class="leads-run-safety-head">
-                    <div>
-                      <p class="eyebrow">Current Run Safety</p>
-                      <strong>WAIT</strong>
+              <div id="leads-current-run-panel" class="leads-current-run-panel" aria-live="polite"></div>
+              <details class="leads-collapsible advanced-details run-readiness-advanced">
+                <summary>Advanced run details</summary>
+                <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
+                <div id="leads-operator-status-strip" class="operator-status-strip" aria-label="Leads status summary"></div>
+                <div id="lead-funnel-summary" class="lead-funnel-summary"></div>
+                <div class="leads-run-safety-grid">
+                  <div id="leads-run-safety-card" class="leads-run-safety-card leads-run-safety-card-wait">
+                    <div class="leads-run-safety-head">
+                      <div>
+                        <p class="eyebrow">Current Run Safety</p>
+                        <strong>WAIT</strong>
+                      </div>
+                      <span class="mini-pill">Refreshing</span>
                     </div>
-                    <span class="mini-pill">Refreshing</span>
+                    <p class="muted">Waiting for the latest dashboard status.</p>
                   </div>
-                  <p class="muted">Waiting for the latest dashboard status.</p>
-                </div>
-                <div id="next-batch-prep-card" class="leads-run-safety-card leads-run-safety-card-wait">
-                  <div class="leads-run-safety-head">
-                    <div>
-                      <p class="eyebrow">Next Batch Prep Status</p>
-                      <strong>WAIT</strong>
+                  <div id="next-batch-prep-card" class="leads-run-safety-card leads-run-safety-card-wait">
+                    <div class="leads-run-safety-head">
+                      <div>
+                        <p class="eyebrow">Next Batch Prep Status</p>
+                        <strong>WAIT</strong>
+                      </div>
+                      <span class="mini-pill">Refreshing</span>
                     </div>
-                    <span class="mini-pill">Refreshing</span>
+                    <p class="muted">Waiting for staged check, triage, and preview status.</p>
                   </div>
-                  <p class="muted">Waiting for staged check, triage, and preview status.</p>
                 </div>
-              </div>
+              </details>
               <details class="leads-collapsible advanced-details debug-state-details">
                 <summary>Debug state</summary>
                 <div id="leads-pipeline-steps" class="leads-pipeline-steps"></div>
@@ -570,7 +574,7 @@
                   <span class="toolbar-field-note muted">Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.</span>
                 </div>
                 <div class="leads-action-slot">
-                  <button id="leads-important-check-btn" class="btn btn-primary" type="button">Check Leads</button>
+                  <button id="leads-important-check-btn" class="btn btn-secondary" type="button">Check Leads</button>
                 </div>
               </div>
 
@@ -625,7 +629,7 @@
                 </div>
               </div>
               <div class="leads-action-row">
-                <button id="leads-verify-btn" class="btn btn-primary" type="button">Fast Triage</button>
+                <button id="leads-verify-btn" class="btn btn-secondary" type="button">Fast Triage</button>
                 <button id="leads-verify-strict-btn" class="btn btn-secondary" type="button">Strict Public Proof</button>
                 <button id="leads-verify-stop-btn" class="btn btn-secondary" type="button" disabled>Stop Verify</button>
               </div>

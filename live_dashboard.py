@@ -2185,7 +2185,7 @@ def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
     jc_queue = status.get("jc_queue") if isinstance(status.get("jc_queue"), dict) else {}
     if jc_queue:
         fields = [str(field).strip().lower() for field in jc_queue.get("fieldnames", []) if str(field).strip()]
-        if "booktitle" not in fields:
+        if fields and int(jc_queue.get("count") or 0) > 0 and "booktitle" not in fields:
             missing.append(str(jc_queue.get("profile") or jc_queue.get("name") or "private_jc"))
     sendgrid_queues = status.get("sendgrid_queues")
     if isinstance(sendgrid_queues, list):
@@ -2193,7 +2193,7 @@ def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
             if not isinstance(queue, dict):
                 continue
             fields = [str(field).strip().lower() for field in queue.get("fieldnames", []) if str(field).strip()]
-            if "booktitle" not in fields:
+            if fields and int(queue.get("count") or 0) > 0 and "booktitle" not in fields:
                 missing.append(str(queue.get("profile") or queue.get("name") or queue.get("path") or "sendgrid"))
     return missing
 
@@ -2210,7 +2210,8 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
         else:
             reasons.append(str(queue_safety.get("message") or "Live recipient queue is unsafe."))
     missing_booktitle = _queue_status_missing_booktitle(status)
-    if missing_booktitle:
+    fallback = _book_title_fallback_readiness()
+    if missing_booktitle and not bool(fallback.get("fallback_capable")):
         reasons.append(f"Live recipient queues are missing BookTitle: {', '.join(missing_booktitle)}.")
     return {
         "status": "BLOCKED" if reasons else "READY",
@@ -2223,6 +2224,12 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
         "sendgrid_queue_safety": sendgrid_queue_safety,
         "private_queue_safety": private_queue_safety,
         "missing_booktitle_queues": missing_booktitle,
+        "booktitle_fallback_capable": bool(fallback.get("fallback_capable")),
+        "booktitle_warning": (
+            f"Live recipient queues are missing BookTitle, but template fallback is available: {', '.join(missing_booktitle)}."
+            if missing_booktitle and bool(fallback.get("fallback_capable"))
+            else ""
+        ),
     }
 
 

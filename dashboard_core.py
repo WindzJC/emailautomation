@@ -25,7 +25,14 @@ from zoneinfo import ZoneInfo
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
 from provider_pacing import provider_pacing_status
-from send_shard import DOMAIN_SLOT_TTL_SECONDS, PROFILES, PROVIDER_LIMIT_DEFAULTS
+from send_shard import (
+    DOMAIN_SLOT_TTL_SECONDS,
+    PITCHES,
+    PROFILES,
+    PROVIDER_LIMIT_DEFAULTS,
+    book_title_fallback_supported,
+    template_requires_book_title,
+)
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -497,6 +504,19 @@ def profile_actual_pitch_mode(profile_name: str) -> str:
     return pitch_key or "unknown"
 
 
+def _profile_book_title_fallback_supported(profile_name: str) -> bool:
+    pitch_key = str(PROFILES.get(profile_name, {}).get("pitch") or "").strip()
+    pitch = PITCHES.get(pitch_key) or {}
+    subject = str(pitch.get("subject") or "")
+    body = str(pitch.get("body") or "")
+    subject_fallback = str(pitch.get("subject_fallback") or "")
+    if not template_requires_book_title(subject, body):
+        return True
+    if bool(pitch.get("require_book_title")):
+        return False
+    return book_title_fallback_supported(subject, body, subject_fallback)
+
+
 def message_preview_path_for_profile(profile_name: str) -> Path:
     safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile_name or "sender").strip() or "sender")
     return MESSAGE_PREVIEW_DIR / f"{safe_profile}_message_preview.csv"
@@ -581,15 +601,19 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
 
     expected_mode = profile_expected_pitch_mode(profile_name)
     actual_mode = profile_actual_pitch_mode(profile_name)
+    fallback_supported = _profile_book_title_fallback_supported(profile_name)
     reasons: List[str] = []
+    warnings: List[str] = []
     validation_status = "NOT RUN"
     if preview_exists and failed_count is not None:
         validation_status = "FAIL" if failed_count > 0 else "PASS"
 
     status = "PASS"
-    if not book_title_present:
+    if not book_title_present and row_count > 0 and not fallback_supported:
         status = "FAIL"
         reasons.append("BookTitle column is missing.")
+    elif not book_title_present and row_count > 0 and fallback_supported:
+        warnings.append("BookTitle column is missing; template fallback is available.")
     if invalid_count > 0:
         status = "FAIL"
         reasons.append("Recipient queue has invalid email rows.")
@@ -634,6 +658,8 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "actual_profile_mode": actual_mode,
         "preview_csv_name": preview_path.name,
         "reasons": reasons,
+        "warnings": warnings,
+        "book_title_fallback_supported": fallback_supported,
     }
 
 

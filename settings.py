@@ -74,7 +74,11 @@ DATA_DIR = _resolve_path(_env("DATA_DIR"), APP_ROOT / "data")
 
 UPLOADS_DIR = _managed_dir("UPLOADS_DIR", "uploads")
 CLEANED_DIR = _managed_dir("CLEANED_DIR", "cleaned")
-SHARDS_DIR = _managed_dir("SHARDS_DIR", "shards")
+# Canonical live recipient queues live at the repo root because send_shard.py
+# resolves profile CSV names like "recipients_sendgrid_1.csv" from this
+# directory. The legacy data/shards directory may still exist as archived or
+# non-canonical state, but live safety/readiness must validate this location.
+SHARDS_DIR = _resolve_path(_env("SHARDS_DIR"), APP_ROOT)
 LOGS_DIR = _managed_dir("LOGS_DIR", "logs")
 STATE_DIR = _managed_dir("STATE_DIR", "state")
 TMP_DIR = _managed_dir("TMP_DIR", "tmp")
@@ -137,7 +141,8 @@ def ensure_dirs(paths: Iterable[Path] | None = None) -> None:
     ))
     for path in managed_paths:
         path.mkdir(parents=True, exist_ok=True)
-        secure_private_dir(path)
+        if path.resolve() != APP_ROOT:
+            secure_private_dir(path)
 
 
 def ensure_csv_with_headers(path: Path, headers: Iterable[str]) -> Path:

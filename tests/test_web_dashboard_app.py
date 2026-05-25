@@ -117,6 +117,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-run-safety-card",
             "Current Run Safety",
             "WAIT",
+            "leads-current-run-panel",
+            "Advanced run details",
         ]:
             self.assertIn(expected, markup)
 
@@ -379,14 +381,16 @@ class WebDashboardAppTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
 
         for expected in [
-            "Run Readiness",
+            "Current Run",
             "Check Leads",
             "Lead Triage",
             "Preview &amp; Dispatch",
             "Active Alerts",
+            "leads-current-run-panel",
             "leads-operator-status-strip",
             "leads-workflow-status-banner",
             "leads-active-alerts",
+            "Advanced run details",
             "Advanced file details",
             "Debug state",
             "Raw paths",
@@ -397,6 +401,27 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, html)
 
         for expected in [
+            "renderLeadsCurrentRunPanel",
+            "currentRunWorkflowState",
+            "currentRunPreviewBlockMessage",
+            "Current run ready",
+            "leads ready for dispatch",
+            "will use BookTitle fallback",
+            "Next step:",
+            "Ready to preview",
+            "Preview blocked: current staged keep is empty",
+            "Preview blocked: Fast Triage has not completed",
+            "Preview blocked: source file missing",
+            "Queue safe to send",
+            "Queue blocked:",
+            "Dispatch complete",
+            "queued",
+            "Private JC",
+            "SendGrid",
+            "Skipped",
+            "Next step: Start SendGrid / Start sending",
+            "New staged run not ready — previous dispatch is queued.",
+            "Private JC auth issue — affects JC/private bounce sync only",
             "renderLeadsOperatorStatusStrip",
             "renderLeadsWorkflowStatusBanner",
             "renderLeadsActiveAlerts",
@@ -423,6 +448,14 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, source)
 
         for expected in [
+            ".leads-current-run-panel",
+            ".current-run-card",
+            ".current-run-step-strip",
+            ".current-run-hero",
+            ".current-run-next-action",
+            ".current-run-blocker",
+            ".current-run-auth-warning",
+            ".workflow-staged-warning",
             ".operator-status-strip",
             ".leads-workflow-status-banner",
             ".workflow-step-grid",
@@ -437,11 +470,29 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, styles)
 
         self.assertIn('<details class="leads-collapsible advanced-details advanced-file-details">', html)
+        self.assertIn('<details class="leads-collapsible advanced-details run-readiness-advanced">', html)
         self.assertIsNotNone(re.search(
             r"<details class=\"leads-collapsible advanced-details advanced-file-details\">.*?leads-important-output-path",
             html,
             re.DOTALL,
         ))
+
+    def test_current_run_operator_panel_hides_stale_dispatch_noise_from_main_view(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        self.assertIn("leads-current-run-panel", html)
+        self.assertIn("data-leads-next-action", source)
+        self.assertIn('action === "preview_dispatch"', source)
+        self.assertIn('action === "confirm_dispatch"', source)
+        self.assertIn("Last confirmed dispatch — not the current upload", source)
+        self.assertIn("confirmedDispatchQueueState", source)
+        self.assertIn("confirmedQueue.liveMatches", source)
+        self.assertIn("No leads ready for dispatch yet", source)
+        self.assertLess(source.index("confirmedQueue.liveMatches"), source.index("No leads ready for dispatch yet"))
+        zero_add_index = source.index("SendGrid added 0 rows.")
+        advanced_index = source.rfind("<summary>Advanced dispatch details</summary>", 0, zero_add_index)
+        self.assertGreater(advanced_index, -1)
+        self.assertIn("Number(queue.count || 0) > 0 && !hasCaseInsensitiveField(queue.fields, \"BookTitle\")", source)
 
     def test_dashboard_ops_hierarchy_uses_fleet_summary_and_compact_sender_warnings(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

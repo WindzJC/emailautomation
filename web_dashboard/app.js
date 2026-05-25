@@ -81,6 +81,7 @@ const els = {
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsCurrentRunPanel: document.getElementById("leads-current-run-panel"),
   leadsOperatorStatusStrip: document.getElementById("leads-operator-status-strip"),
   leadsWorkflowStatusBanner: document.getElementById("leads-workflow-status-banner"),
   leadsActiveAlerts: document.getElementById("leads-active-alerts"),
@@ -868,6 +869,7 @@ function recipientQueueBookTitleStatus(status = lastLeadsStatus) {
     queues.push({
       label: "private_jc",
       fields: Array.isArray(status.jc_queue.fieldnames) ? status.jc_queue.fieldnames : [],
+      count: Number(status.jc_queue.count || 0),
     });
   }
   if (Array.isArray(status?.sendgrid_queues)) {
@@ -875,11 +877,12 @@ function recipientQueueBookTitleStatus(status = lastLeadsStatus) {
       queues.push({
         label: queue.profile || queue.name || queue.path || "sendgrid",
         fields: Array.isArray(queue.fieldnames) ? queue.fieldnames : [],
+        count: Number(queue.count || 0),
       });
     });
   }
   const missing = queues
-    .filter((queue) => !hasCaseInsensitiveField(queue.fields, "BookTitle"))
+    .filter((queue) => Number(queue.count || 0) > 0 && !hasCaseInsensitiveField(queue.fields, "BookTitle"))
     .map((queue) => queue.label);
   return { checked: queues.length > 0, missing };
 }
@@ -3019,17 +3022,17 @@ function renderImportantDispatch(result) {
               <p class="muted">Last confirmed dispatch — not the current upload. Use Current preview above for the active source before confirming again.</p>
             </div>
           </div>
-          ${sendgridZeroAddExplanation
-            ? `
-              <section class="operator-empty-state operator-empty-state-inline">
-                <strong>SendGrid added 0 rows.</strong>
-                <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
-              </section>
-            `
-            : ""}
           <details class="dispatch-drawer advanced-details">
             <summary>Advanced dispatch details</summary>
             <div class="dispatch-disclosure-body">
+              ${sendgridZeroAddExplanation
+                ? `
+                  <section class="operator-empty-state operator-empty-state-inline">
+                    <strong>SendGrid added 0 rows.</strong>
+                    <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
+                  </section>
+                `
+                : ""}
               ${renderOperatorPillStrip([
                 `Source ${sourceName}`,
                 `Path ${sourcePath}`,
@@ -3370,8 +3373,7 @@ function renderWorkflowStep(label, status, detail = "") {
   `;
 }
 
-function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
-  if (!els.leadsWorkflowStatusBanner) return;
+function currentRunWorkflowState(status = lastLeadsStatus) {
   const activeCheck = currentImportantCheckJob(status);
   const activeVerify = status?.active_important_verify_job || lastImportantVerifyJob || null;
   const activeDispatch = status?.active_important_dispatch_job || lastImportantDispatchJob || null;
@@ -3393,6 +3395,219 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
     : latestDispatch?.generated_at_utc
       ? "confirmed"
       : "not_confirmed";
+  return {
+    activeCheck,
+    activeVerify,
+    activeDispatch,
+    latestCheck,
+    latestTriage,
+    latestDispatch,
+    checkStatus,
+    triageStatus,
+    previewStatus,
+    confirmStatus,
+    currentPreviewReady,
+  };
+}
+
+function currentRunPreviewBlockMessage(dispatchSource = {}, state = currentRunWorkflowState()) {
+  if (state.checkStatus === "running") return "Preview blocked: Check Leads is still running";
+  if (state.triageStatus === "running") return "Preview blocked: Fast Triage has not completed";
+  if (state.triageStatus !== "completed") return "Preview blocked: Fast Triage has not completed";
+  const rawReason = String(dispatchSource.dispatch_block_reason || dispatchPreviewBlockReason(dispatchSource) || "").trim();
+  if (!rawReason) return "";
+  const normalized = rawReason.toLowerCase();
+  if (normalized.includes("current staged fast triage keep is empty") || normalized.includes("has no keep rows")) {
+    return "Preview blocked: current staged keep is empty";
+  }
+  if (normalized.includes("missing") || normalized.includes("not available")) {
+    return "Preview blocked: source file missing";
+  }
+  if (normalized.includes("no eligible")) {
+    return "Preview blocked: no eligible rows are available";
+  }
+  return `Preview blocked: ${rawReason.replace(/^Preview blocked:\s*/i, "")}`;
+}
+
+function currentRunNextAction(state, dispatchSource = {}) {
+  const previewBlock = currentRunPreviewBlockMessage(dispatchSource, state);
+  if (state.checkStatus === "running") return { label: "Check Leads running", action: "", disabled: true };
+  if (state.checkStatus !== "completed") return { label: "Upload & Check", action: "upload_check", disabled: false };
+  if (state.triageStatus === "running") return { label: "Fast Triage running", action: "", disabled: true };
+  if (state.triageStatus !== "completed") return { label: "Fast Triage", action: "fast_triage", disabled: false };
+  if (state.previewStatus === "ready") {
+    const confirmBlocked = dispatchActionBlockReason();
+    return {
+      label: "Confirm Dispatch",
+      action: "confirm_dispatch",
+      disabled: Boolean(confirmBlocked || importantLeadDispatchConfirmLoading),
+      blocker: confirmBlocked,
+    };
+  }
+  return {
+    label: "Preview Dispatch",
+    action: "preview_dispatch",
+    disabled: Boolean(previewBlock || importantLeadDispatchPreviewLoading),
+    blocker: previewBlock,
+  };
+}
+
+function renderCurrentRunStatusStrip(state) {
+  return `
+    <div class="current-run-step-strip" aria-label="Current run workflow">
+      ${renderWorkflowStep("Check Leads", state.checkStatus)}
+      ${renderWorkflowStep("Fast Triage", state.triageStatus)}
+      ${renderWorkflowStep("Preview Dispatch", state.previewStatus)}
+      ${renderWorkflowStep("Confirm Dispatch", state.confirmStatus)}
+    </div>
+  `;
+}
+
+function liveSendGridQueueTotal(status = lastLeadsStatus) {
+  return Array.isArray(status?.sendgrid_queues)
+    ? status.sendgrid_queues.reduce((sum, queue) => sum + Number(queue.count || 0), 0)
+    : 0;
+}
+
+function confirmedDispatchQueueState(status = lastLeadsStatus) {
+  const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
+  const privateAdded = Number(latestDispatch.private_jc_added || latestDispatch.added_astra || 0);
+  const sendgridAdded = Number(latestDispatch.sendgrid_added || latestDispatch.added_sendgrid || 0);
+  const skipped = Number(latestDispatch.skipped_both || 0);
+  const livePrivate = Number(status?.jc_queue?.count || 0);
+  const liveSendgrid = liveSendGridQueueTotal(status);
+  const totalQueued = privateAdded + sendgridAdded;
+  const liveMatches = Boolean(latestDispatch?.generated_at_utc)
+    && totalQueued > 0
+    && livePrivate === privateAdded
+    && liveSendgrid === sendgridAdded;
+  return {
+    confirmed: Boolean(latestDispatch?.generated_at_utc),
+    liveMatches,
+    privateAdded,
+    sendgridAdded,
+    skipped,
+    livePrivate,
+    liveSendgrid,
+    totalQueued,
+    sourcePath: latestDispatch.dispatch_source_path || latestDispatch.source_path || "",
+  };
+}
+
+function privateJcAuthIssueMessage(snapshot = lastSnapshot) {
+  const alerts = Array.isArray(snapshot?.alerts) ? snapshot.alerts : [];
+  const match = alerts.find((alert) => {
+    const text = `${alert?.title || ""} ${alert?.message || ""}`.toLowerCase();
+    return text.includes("private") && text.includes("bounce") && (text.includes("auth") || text.includes("token") || text.includes("credential"));
+  });
+  return match ? "Private JC auth issue — affects JC/private bounce sync only" : "";
+}
+
+function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
+  if (!els.leadsCurrentRunPanel) return;
+  const state = currentRunWorkflowState(status);
+  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const confirmedQueue = confirmedDispatchQueueState(status);
+  const latestCheck = state.latestCheck || {};
+  const latestTriage = state.latestTriage || {};
+  const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0);
+  const fallbackRows = Number(latestTriage.keep_with_fallback_rows || 0);
+  const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
+  const reviewRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
+  const checkRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows || 0);
+  const previewBlock = currentRunPreviewBlockMessage(dispatchSource, state);
+  const sendSafety = status?.current_send_safety || {};
+  const safetyReport = sendSafety.queue_safety || {};
+  const safetyReasons = Array.isArray(sendSafety.reasons) ? sendSafety.reasons : [];
+  const queuePlainResult = sendSafety.blocked
+    ? `Queue blocked: ${safetyReasons[0] || "recipient queue unsafe"}${safetyReport.intended_source_path ? ` · Source ${safetyReport.intended_source_path}` : ""}`
+    : "Queue safe to send";
+  const previewReady = state.previewStatus === "ready";
+  const sourceRows = Number(dispatchSource.dispatch_eligible_row_count || dispatchSource.dispatch_source_row_count || 0);
+  const nextAction = currentRunNextAction(state, dispatchSource);
+  const readyForPreview = state.triageStatus === "completed" && sourceRows > 0 && !previewBlock;
+  const confirmedDispatchReady = confirmedQueue.liveMatches;
+  const currentRunTitle = confirmedDispatchReady ? "Dispatch complete" : readyForPreview || previewReady ? "Current run ready" : "Current run not ready";
+  const sourcePath = dispatchSource.dispatch_source_path || dispatchSource.dispatch_source_label || "-";
+  const previewStatusCopy = previewReady
+    ? "Current preview ready"
+    : readyForPreview
+      ? "Ready to preview"
+      : (previewBlock || "Preview not generated yet");
+  const displayStatusCopy = confirmedDispatchReady ? "Queues match confirmed dispatch" : previewStatusCopy;
+  const primaryLine = confirmedDispatchReady
+    ? `${confirmedQueue.totalQueued.toLocaleString()} queued`
+    : keepRows > 0
+    ? `${keepRows.toLocaleString()} leads ready for dispatch`
+    : "No leads ready for dispatch yet";
+  const fallbackLine = confirmedDispatchReady
+    ? `Private JC ${confirmedQueue.privateAdded.toLocaleString()} · SendGrid ${confirmedQueue.sendgridAdded.toLocaleString()} · Skipped ${confirmedQueue.skipped.toLocaleString()}`
+    : fallbackRows > 0
+    ? `${fallbackRows.toLocaleString()} will use BookTitle fallback`
+    : "No BookTitle fallback rows";
+  const actionTitle = confirmedDispatchReady ? "Use the Sender tab Start buttons when ready." : (nextAction.blocker || "");
+  const authIssue = privateJcAuthIssueMessage(lastSnapshot);
+  setNodeHtml(
+    els.leadsCurrentRunPanel,
+    `
+      <article class="current-run-card ${confirmedDispatchReady || readyForPreview || previewReady ? "current-run-card-ready" : "current-run-card-wait"}">
+        <div class="current-run-head">
+          <div>
+            <p class="eyebrow">Current Run</p>
+            <h3>${escapeHtml(currentRunTitle)}</h3>
+            <p class="current-run-subtitle">${confirmedDispatchReady
+              ? `Confirmed dispatch · Live queues match · ${escapeHtml(intakeModeLabelFromStatus(status))}`
+              : `${escapeHtml(intakeModeLabelFromStatus(status))} · Check ${escapeHtml(workflowStatusLabel(state.checkStatus))} · Fast Triage ${escapeHtml(workflowStatusLabel(state.triageStatus))}`}</p>
+          </div>
+          <span class="mini-pill">${escapeHtml(displayStatusCopy)}</span>
+        </div>
+        ${renderCurrentRunStatusStrip(state)}
+        <div class="current-run-hero">
+          <div>
+            <strong>${escapeHtml(primaryLine)}</strong>
+            <span>${escapeHtml(fallbackLine)}</span>
+          </div>
+          <button class="btn btn-primary current-run-next-action" type="button" data-leads-next-action="${escapeHtml(confirmedDispatchReady ? "" : nextAction.action)}" ${confirmedDispatchReady || nextAction.disabled ? "disabled" : ""} title="${escapeHtml(actionTitle)}">${escapeHtml(confirmedDispatchReady ? "Start SendGrid" : nextAction.label)}</button>
+        </div>
+        <div class="current-run-metrics">
+          ${confirmedDispatchReady
+            ? `
+              <div><span>Dispatch status</span><strong>Complete</strong></div>
+              <div><span>Private JC</span><strong>${confirmedQueue.privateAdded.toLocaleString()}</strong></div>
+              <div><span>SendGrid</span><strong>${confirmedQueue.sendgridAdded.toLocaleString()}</strong></div>
+              <div><span>Skipped</span><strong>${confirmedQueue.skipped.toLocaleString()}</strong></div>
+            `
+            : `
+              <div><span>Check status and count</span><strong>${escapeHtml(workflowStatusLabel(state.checkStatus))} · ${checkRows.toLocaleString()}</strong></div>
+              <div><span>Triage status and count</span><strong>${escapeHtml(workflowStatusLabel(state.triageStatus))} · ${keepRows.toLocaleString()} keep</strong></div>
+              <div><span>Reject rows</span><strong>${rejectRows.toLocaleString()}</strong></div>
+              <div><span>Review rows</span><strong>${reviewRows.toLocaleString()}</strong></div>
+            `}
+        </div>
+        <div class="current-run-source">
+          <span>Dispatch source path</span>
+          <strong class="path-ellipsis" title="${escapeHtml(confirmedDispatchReady ? confirmedQueue.sourcePath || sourcePath : sourcePath)}">${escapeHtml(confirmedDispatchReady ? confirmedQueue.sourcePath || sourcePath : sourcePath)}</strong>
+        </div>
+        ${authIssue ? `<div class="current-run-auth-warning">${escapeHtml(authIssue)}</div>` : ""}
+        ${confirmedDispatchReady
+          ? `<div class="current-run-next-copy">${escapeHtml(queuePlainResult)} · Next step: Start SendGrid / Start sending</div>`
+          : sendSafety.blocked || previewBlock
+          ? `<div class="current-run-blocker">${escapeHtml(sendSafety.blocked ? queuePlainResult : previewBlock)}</div>`
+          : `<div class="current-run-next-copy">${escapeHtml(queuePlainResult)} · Next step: ${escapeHtml(nextAction.label)}</div>`}
+      </article>
+    `,
+  );
+}
+
+function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
+  if (!els.leadsWorkflowStatusBanner) return;
+  const state = currentRunWorkflowState(status);
+  const latestTriage = state.latestTriage || {};
+  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const confirmedQueue = confirmedDispatchQueueState(status);
+  const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
+    ? "New staged run not ready — previous dispatch is queued."
+    : "";
   const triageCounts = latestTriage?.generated_at_utc
     ? `input ${formatOperatorCount(latestTriage.total_input_rows)} · keep ${formatOperatorCount(latestTriage.keep_count)} · reject ${formatOperatorCount(latestTriage.reject_count)} · review ${formatOperatorCount(latestTriage.quarantine_count)}`
     : "";
@@ -3402,15 +3617,16 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
       <div class="workflow-banner-head">
         <div>
           <p class="eyebrow">Workflow Status</p>
-          <strong>${escapeHtml(workflowNextStepMessage(checkStatus, triageStatus, previewStatus, confirmStatus))}</strong>
+          <strong>${escapeHtml(workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus))}</strong>
         </div>
       </div>
       <div class="workflow-step-grid">
-        ${renderWorkflowStep("Last check", checkStatus)}
-        ${renderWorkflowStep("Last triage", triageStatus, triageCounts)}
-        ${renderWorkflowStep("Preview dispatch", previewStatus)}
-        ${renderWorkflowStep("Confirm dispatch", confirmStatus)}
+        ${renderWorkflowStep("Last check", state.checkStatus)}
+        ${renderWorkflowStep("Last triage", state.triageStatus, triageCounts)}
+        ${renderWorkflowStep("Preview dispatch", state.previewStatus)}
+        ${renderWorkflowStep("Confirm dispatch", state.confirmStatus)}
       </div>
+      ${stagedRunWarning ? `<div class="workflow-staged-warning">${escapeHtml(stagedRunWarning)}</div>` : ""}
     `,
   );
 }
@@ -3462,6 +3678,13 @@ function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapsh
     });
   }
   (Array.isArray(snapshot?.alerts) ? snapshot.alerts : []).forEach((alert) => {
+    const alertText = `${alert?.title || ""} ${alert?.message || ""}`.toLowerCase();
+    const sendgridPending = Array.isArray(status?.sendgrid_queues)
+      ? status.sendgrid_queues.reduce((sum, queue) => sum + Number(queue.count || 0), 0)
+      : 0;
+    if (alertText.includes("booktitle") && sendgridPending <= 0 && !Boolean(alert?.blocks_sending)) {
+      return;
+    }
     cards.push({
       severity: alert?.severity || "warn",
       title: alert?.title || "Alert",
@@ -3618,6 +3841,7 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadsCurrentRunPanel(lastLeadsStatus);
   renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   renderLeadFunnelSummary(lastLeadsStatus?.lead_funnel || {});
   renderLeadsOperatorStatusStrip(lastLeadsStatus);
@@ -6904,6 +7128,17 @@ if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/st
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
 if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
+if (els.leadsCurrentRunPanel) {
+  els.leadsCurrentRunPanel.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-leads-next-action]");
+    if (!button || button.disabled) return;
+    const action = String(button.dataset.leadsNextAction || "");
+    if (action === "upload_check") void runImportantLeadUploadCheck();
+    if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
+    if (action === "preview_dispatch") void previewImportantLeadDispatch();
+    if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
+  });
+}
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
 if (els.leadsImportantIntakeMode) els.leadsImportantIntakeMode.addEventListener("change", () => renderLeadsOperatorStatusStrip(lastLeadsStatus || {}));
