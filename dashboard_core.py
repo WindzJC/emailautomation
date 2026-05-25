@@ -2859,6 +2859,7 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
     reject_overlap = int(report.get("overlap_with_triaged_reject") or 0)
     outside_checked = int(report.get("outside_checked_output_count") or 0)
     outside_intended = int(report.get("outside_intended_source_count") or 0)
+    sendgrid_sent_overlap = int(report.get("sendgrid_already_sent_overlap_count") or 0)
     missing_header_shards = report.get("missing_required_header_shards")
     missing_header_text = ""
     if isinstance(missing_header_shards, list) and missing_header_shards:
@@ -2873,7 +2874,9 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
                 parts.append(f"{name} missing {missing_text}")
         if parts:
             missing_header_text = " Required header issue(s): " + "; ".join(parts) + "."
-    if str(report.get("message") or "").strip():
+    if sendgrid_sent_overlap > 0:
+        message = f"SendGrid queue blocked: {sendgrid_sent_overlap} already sent through SendGrid."
+    elif str(report.get("message") or "").strip():
         message = str(report.get("message"))
     else:
         message = (

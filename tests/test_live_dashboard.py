@@ -17,6 +17,7 @@ from openpyxl import Workbook
 import lead_ledger
 import important_leads_verify
 import important_leads_workflow
+import dashboard_core
 import live_dashboard
 from tools import rebuild_recipient_queues
 from important_leads_workflow import ImportantLeadsCheckError
@@ -33,6 +34,44 @@ class LiveDashboardTests(unittest.TestCase):
     def _read_csv_rows(self, path: Path) -> list[dict[str, str]]:
         with path.open(newline="", encoding="utf-8-sig") as handle:
             return list(csv.DictReader(handle))
+
+    def test_sendgrid_queue_safety_blocks_prior_sendgrid_log_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            source = tmp / "leads_triaged_keep.csv"
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            queue = tmp / "recipients_sendgrid_1.csv"
+            log = tmp / "sendgrid_annette_log.csv"
+            row = {
+                "Email": "reader@example.com",
+                "FirstName": "Reader",
+                "AuthorEmail": "reader@example.com",
+                "AuthorName": "Reader Author",
+                "BookTitle": "Reader Book",
+            }
+            self._write_csv(source, headers, [row])
+            self._write_csv(checked, headers, [row])
+            self._write_csv(reject, headers, [])
+            self._write_csv(queue, headers, [row])
+            self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [{"Email": "reader@example.com", "Status": "SENT"}])
+
+            report = rebuild_recipient_queues.build_queue_safety_report(
+                shard_paths=[queue],
+                intended_source_path=source,
+                checked_path=checked,
+                triaged_keep_path=source,
+                triaged_reject_path=reject,
+                sendgrid_log_paths=[log],
+            )
+            alert = dashboard_core.queue_safety_alert({**report, "affected_provider": "sendgrid"})
+
+            self.assertFalse(report["safe"])
+            self.assertIn("SENDGRID_ALREADY_SENT_OVERLAP", report["unsafe_reasons"])
+            self.assertEqual(1, report["sendgrid_already_sent_overlap_count"])
+            self.assertIsNotNone(alert)
+            self.assertEqual("SendGrid queue blocked: 1 already sent through SendGrid.", alert["message"])
 
     def test_preview_validate_profile_runs_preview_then_validation_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

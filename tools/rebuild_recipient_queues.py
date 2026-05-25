@@ -29,6 +29,13 @@ QUEUE_FILENAMES = (
     "recipients_sendgrid_5.csv",
 )
 SENDGRID_QUEUE_FILENAMES = tuple(name for name in QUEUE_FILENAMES if name.startswith("recipients_sendgrid_"))
+SENDGRID_LOG_FILENAMES = (
+    "sendgrid_annette_log.csv",
+    "sendgrid_jordan_log.csv",
+    "sendgrid_jodi_log.csv",
+    "sendgrid_alison_log.csv",
+    "sendgrid_fiorela_log.csv",
+)
 SENDGRID_REQUIRED_HEADERS = ("Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle")
 EMAIL_HEADER_CANDIDATES = ("email", "authoremail", "author_email", "e_mail", "e-mail", "mail", "address")
 FIRST_NAME_CANDIDATES = ("firstname", "first_name", "first name", "authorname", "author_name", "author")
@@ -119,6 +126,22 @@ def email_set(path: Path) -> set[str]:
     return {email for email in (norm_email(row.get(email_header)) for row in rows) if email}
 
 
+def sent_email_set(path: Path) -> set[str]:
+    headers, rows = read_csv(path)
+    email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+    status_header = find_header(headers, ("status", "event", "result"))
+    if not email_header:
+        return set()
+    sent: set[str] = set()
+    for row in rows:
+        if status_header and str(row.get(status_header) or "").strip().upper() != "SENT":
+            continue
+        email = norm_email(row.get(email_header))
+        if email:
+            sent.add(email)
+    return sent
+
+
 def row_count(path: Path) -> int:
     _headers, rows = read_csv(path)
     return len(rows)
@@ -138,6 +161,13 @@ def default_queue_paths(shards_dir: Path = settings.SHARDS_DIR) -> List[Path]:
 
 def default_sendgrid_queue_paths(shards_dir: Path = settings.SHARDS_DIR) -> List[Path]:
     return [shards_dir / name for name in SENDGRID_QUEUE_FILENAMES]
+
+
+def default_sendgrid_log_paths(log_dir: Path = settings.APP_ROOT) -> List[Path]:
+    paths: List[Path] = []
+    for name in SENDGRID_LOG_FILENAMES:
+        paths.append(log_dir / name)
+    return paths
 
 
 def _is_sendgrid_queue_path(path: Path) -> bool:
@@ -309,6 +339,7 @@ def build_queue_safety_report(
     checked_path: Path | None = None,
     triaged_keep_path: Path | None = None,
     triaged_reject_path: Path | None = None,
+    sendgrid_log_paths: Sequence[Path] | None = None,
 ) -> Dict[str, object]:
     important_dir = settings.APP_ROOT / "_important"
     default_sources = default_queue_safety_sources(important_dir)
@@ -320,6 +351,7 @@ def build_queue_safety_report(
 
     per_shard = []
     shard_emails: set[str] = set()
+    sendgrid_shard_emails: set[str] = set()
     duplicate_rows_across_shards = 0
     seen: set[str] = set()
     for path in queues:
@@ -342,15 +374,23 @@ def build_queue_safety_report(
         duplicate_rows_across_shards += len(seen & emails)
         seen.update(emails)
         shard_emails.update(emails)
+        if _is_sendgrid_queue_path(path):
+            sendgrid_shard_emails.update(emails)
 
     intended_emails = email_set(intended)
     checked_emails = email_set(checked)
     keep_emails = email_set(triaged_keep)
     reject_emails = email_set(triaged_reject)
+    sendgrid_sent_emails: set[str] = set()
+    if sendgrid_shard_emails:
+        log_paths = list(sendgrid_log_paths or default_sendgrid_log_paths())
+        for log_path in log_paths:
+            sendgrid_sent_emails.update(email_set(log_path))
 
     outside_intended = shard_emails - intended_emails if intended_emails else set(shard_emails)
     outside_checked = shard_emails - checked_emails if checked_emails else set(shard_emails)
     reject_overlap = shard_emails & reject_emails
+    sendgrid_sent_overlap = sendgrid_shard_emails & sendgrid_sent_emails
     source_reject_overlap = intended_emails & reject_emails
     missing_required_header_shards = [
         {"name": str(item["name"]), "missing_required_headers": list(item["missing_required_headers"])}
@@ -369,6 +409,8 @@ def build_queue_safety_report(
         unsafe_reasons.append("OUTSIDE_INTENDED_SOURCE")
     if source_reject_overlap:
         unsafe_reasons.append("INTENDED_SOURCE_OVERLAPS_REJECT")
+    if sendgrid_sent_overlap:
+        unsafe_reasons.append("SENDGRID_ALREADY_SENT_OVERLAP")
 
     return {
         "safe": not unsafe_reasons,
@@ -389,6 +431,7 @@ def build_queue_safety_report(
         "overlap_with_checked_output": len(shard_emails & checked_emails),
         "overlap_with_triaged_keep": len(shard_emails & keep_emails),
         "overlap_with_triaged_reject": len(reject_overlap),
+        "sendgrid_already_sent_overlap_count": len(sendgrid_sent_overlap),
         "outside_intended_source_count": len(outside_intended),
         "outside_checked_output_count": len(outside_checked),
         "intended_source_reject_overlap_count": len(source_reject_overlap),
@@ -397,6 +440,7 @@ def build_queue_safety_report(
         "outside_intended_source_fingerprint": set_fingerprint(outside_intended) if outside_intended else "",
         "outside_checked_output_fingerprint": set_fingerprint(outside_checked) if outside_checked else "",
         "triaged_reject_overlap_fingerprint": set_fingerprint(reject_overlap) if reject_overlap else "",
+        "sendgrid_already_sent_overlap_fingerprint": set_fingerprint(sendgrid_sent_overlap) if sendgrid_sent_overlap else "",
     }
 
 
