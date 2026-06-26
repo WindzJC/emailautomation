@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 
 try:
     from cryptography.exceptions import InvalidSignature
@@ -60,6 +60,7 @@ from dashboard_core import (
     build_dashboard_snapshot,
     build_profile_message_readiness,
     campaign_history_record,
+    active_or_locked_sender_profiles,
     detect_running_preview_profiles,
     detect_running_sender_profiles,
     load_dashboard_run_settings,
@@ -92,6 +93,7 @@ from important_leads_workflow import (
     ImportantLeadsCheckError,
     check_master_leads,
     confirm_dispatch_preview,
+    create_safer_recontact_pool_from_preview,
     important_leads_path_state,
     important_leads_status,
     load_dispatch_preview,
@@ -119,14 +121,14 @@ from leads_workflow import (
     timestamp_slug,
 )
 from tools.package_campaign_handoff import pack_archive
-from tools.rebuild_recipient_queues import build_queue_safety_report
+from tools.rebuild_recipient_queues import active_campaign_manifest_path, build_queue_safety_report
 from private_bounce_hygiene import (
     PRIVATE_BOUNCE_MONITOR_ENABLED,
     PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS,
     run_private_bounce_monitor_cycle,
 )
 from provider_pacing import mark_recovery_started, provider_pacing_status
-from send_shard import PROFILES
+from send_shard import CAMPAIGN_TYPE_COLD, PROFILES, is_recontact_cold_campaign, normalize_campaign_type
 from sendgrid_hygiene import (
     WEBHOOK_EVENTS_JSONL,
     append_events_jsonl,
@@ -194,10 +196,7 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if path in _AUTH_PROTECTED_DOC_PATHS or path.startswith("/api/") or path == "/ws":
             if not settings.DASHBOARD_AUTH_PASSWORD:
-                return JSONResponse(
-                    {"ok": False, "message": "Dashboard auth is not configured."},
-                    status_code=503,
-                )
+                return await call_next(request)
             if not bool(request.session.get(_AUTH_SESSION_KEY)):
                 return JSONResponse(
                     {"ok": False, "message": "Authentication required."},
@@ -291,7 +290,9 @@ class ImportantLeadDispatchPayload(BaseModel):
     rejected_path: str = ""
     dispatch_source_mode: str = DISPATCH_SOURCE_TRIAGED_KEEP
     dispatch_cap: str = DISPATCH_CAP_ALL
+    campaign_type: str = CAMPAIGN_TYPE_COLD
     preview_id: str = ""
+    recontact_recency_override: bool = False
 
 
 class QuarantineReviewActionPayload(BaseModel):
@@ -630,8 +631,14 @@ def _book_title_fallback_readiness() -> dict[str, object]:
         subject = str(pitch.get("subject") or "")
         body = str(pitch.get("body") or "")
         subject_fallback = str(pitch.get("subject_fallback") or "")
+        body_fallback = str(pitch.get("body_fallback") or "")
         requires_booktitle = template_requires_book_title(subject, body)
-        fallback_supported = book_title_fallback_supported(subject, body, subject_fallback) if requires_booktitle else True
+        fallback_error = ""
+        try:
+            fallback_supported = book_title_fallback_supported(subject, body, subject_fallback, body_fallback=body_fallback) if requires_booktitle else True
+        except ValueError as exc:
+            fallback_supported = False
+            fallback_error = str(exc)
         strict_required = bool(pitch.get("require_book_title"))
         ok = (not requires_booktitle) or (fallback_supported and not strict_required)
         profiles[profile_name] = {
@@ -641,6 +648,8 @@ def _book_title_fallback_readiness() -> dict[str, object]:
             "strict_booktitle_required": strict_required,
             "ready_for_missing_booktitle": ok,
         }
+        if fallback_error:
+            profiles[profile_name]["fallback_error"] = fallback_error
         all_ok = all_ok and ok
     return {"fallback_capable": all_ok, "profiles": profiles}
 
@@ -660,6 +669,7 @@ def _auto_dispatch_preview_summary(
     *,
     preview: dict[str, object],
     triage_report: dict[str, object],
+    checked_path: Path,
     keep_path: Path,
     rejected_path: Path,
 ) -> dict[str, object]:
@@ -669,7 +679,7 @@ def _auto_dispatch_preview_summary(
     try:
         queue_safety = build_queue_safety_report(
             intended_source_path=keep_path,
-            checked_path=IMPORTANT_LEADS_OUTPUT,
+            checked_path=checked_path,
             triaged_keep_path=keep_path,
             triaged_reject_path=rejected_path,
         )
@@ -684,6 +694,12 @@ def _auto_dispatch_preview_summary(
         "preview_id": str(preview.get("preview_id") or ""),
         "preview_path": str(preview.get("preview_path") or ""),
         "status": "previewed",
+        "generated_at_utc": iso_utc(),
+        "campaign_type": str(preview.get("campaign_type") or CAMPAIGN_TYPE_COLD),
+        "dispatch_source_path": str(preview.get("dispatch_source_path") or keep_path),
+        "dispatch_source_mode": str(preview.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP),
+        "dispatch_source_row_count": int(preview.get("dispatch_source_row_count") or triage_report.get("keep_count") or 0),
+        "dispatch_eligible_row_count": int(preview.get("dispatch_eligible_row_count") or triage_report.get("keep_count") or 0),
         "total_keep_rows": int(triage_report.get("keep_count") or preview.get("dispatch_source_row_count") or 0),
         "rejected_rows": int(triage_report.get("reject_count") or 0),
         "quarantine_rows": int(triage_report.get("quarantine_count") or 0),
@@ -746,12 +762,14 @@ def _run_auto_dispatch_preview_after_triage(
                 settings.LOGS_DIR / "sendgrid_jodi_log.csv",
                 settings.LOGS_DIR / "sendgrid_alison_log.csv",
                 settings.LOGS_DIR / "sendgrid_fiorela_log.csv",
+                settings.LOGS_DIR / "sendgrid_domain_log.csv",
             ],
             preview_dir=preview_dir or IMPORTANT_LEADS_DISPATCH_PREVIEWS,
         )
         summary = _auto_dispatch_preview_summary(
             preview=preview,
             triage_report=triage_report,
+            checked_path=master_path,
             keep_path=keep_path,
             rejected_path=rejected_path,
         )
@@ -1596,6 +1614,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
         report = confirm_dispatch_preview(
             str(job.get("preview_id") or ""),
             require_stopped=True,
+            allow_high_risk_recontact=bool(job.get("recontact_recency_override")),
             backup_root=settings.BACKUPS_DIR,
             report_dir=settings.STATE_DIR,
             persist_state=True,
@@ -1650,6 +1669,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
 def _start_important_dispatch_job(
     *,
     preview_id: str,
+    campaign_type: str,
     dispatch_source_mode: str,
     dispatch_source_name: str,
     dispatch_source_path: str,
@@ -1658,6 +1678,7 @@ def _start_important_dispatch_job(
     eligible_rows: int,
     selected_rows: int,
     total_rows_would_write: int,
+    recontact_recency_override: bool = False,
 ) -> dict[str, object]:
     job_id = f"dispatch_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     job = {
@@ -1668,10 +1689,12 @@ def _start_important_dispatch_job(
         "phase": "queued",
         "created_at_utc": iso_utc(),
         "updated_at_utc": iso_utc(),
+        "campaign_type": campaign_type,
         "dispatch_source_mode": dispatch_source_mode,
         "dispatch_source_name": dispatch_source_name,
         "dispatch_source_path": dispatch_source_path,
         "dispatch_cap": dispatch_cap,
+        "recontact_recency_override": bool(recontact_recency_override),
         "total_source_rows": max(0, int(total_source_rows or 0)),
         "eligible_rows": max(0, int(eligible_rows or 0)),
         "selected_rows": max(0, int(selected_rows or 0)),
@@ -1710,6 +1733,7 @@ def _csv_count_from_status_label(status: dict[str, object], key: str, default_pa
             path = settings.APP_ROOT / path
         if path.suffix.lower() == ".csv" and path.exists():
             return _count_csv_rows(path)
+        return 0
     path = default_path
     return _count_csv_rows(path)
 
@@ -1827,6 +1851,66 @@ def _latest_fast_triage_keep_source() -> dict[str, object]:
         "exists": legacy_path.exists(),
         "row_count": _count_csv_rows(legacy_path) if legacy_path.exists() else 0,
     }
+
+
+def _normalize_dashboard_path_text(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text.rstrip("/")
+
+
+def _dashboard_paths_match(left: object, right: object) -> bool:
+    left_text = _normalize_dashboard_path_text(left)
+    right_text = _normalize_dashboard_path_text(right)
+    if not left_text or not right_text:
+        return False
+    try:
+        return Path(left_text).resolve(strict=False) == Path(right_text).resolve(strict=False)
+    except Exception:
+        return left_text == right_text
+
+
+def _dispatch_summary_timestamp(summary: dict[str, object]) -> datetime | None:
+    for key in ("generated_at_utc", "confirmed_at", "confirmed_at_utc", "completed_at_utc", "completed_at"):
+        parsed = _parse_iso_timestamp(summary.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _preview_summary_timestamp(summary: dict[str, object]) -> datetime | None:
+    for key in ("generated_at_utc", "completed_at_utc", "completed_at", "created_at_utc", "created_at"):
+        parsed = _parse_iso_timestamp(summary.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _summary_current_for_staged_source(
+    summary: dict[str, object],
+    *,
+    source_path: Path,
+    source_generated_at: object,
+    timestamp_reader: Callable[[dict[str, object]], datetime | None],
+) -> bool:
+    if not summary:
+        return False
+    summary_source = (
+        summary.get("dispatch_source_path")
+        or summary.get("source_path")
+        or summary.get("triaged_keep_path")
+        or ""
+    )
+    if summary_source and not _dashboard_paths_match(summary_source, source_path):
+        return False
+    source_time = _parse_iso_timestamp(source_generated_at)
+    summary_time = timestamp_reader(summary)
+    if source_time is not None and summary_time is not None and summary_time < source_time:
+        return False
+    if source_time is not None and summary_time is None:
+        return False
+    return True
 
 
 def _read_dispatch_source_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -1957,6 +2041,7 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
             ),
         }
     )
+    triage_generated_at = latest_triage.get("generated_at_utc")
 
     source_status = _dispatch_source_status_for_path(
         path=keep_path,
@@ -1966,6 +2051,20 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     )
     source_options = dict(status.get("dispatch_source_options") or {})
     source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = source_status
+    latest_preview = dict(job.get("auto_dispatch_preview") or status.get("latest_auto_dispatch_preview") or {})
+    latest_preview_current = _summary_current_for_staged_source(
+        latest_preview,
+        source_path=keep_path,
+        source_generated_at=triage_generated_at,
+        timestamp_reader=_preview_summary_timestamp,
+    )
+    latest_dispatch = status.get("latest_dispatch") if isinstance(status.get("latest_dispatch"), dict) else {}
+    latest_dispatch_current = _summary_current_for_staged_source(
+        latest_dispatch,
+        source_path=keep_path,
+        source_generated_at=triage_generated_at,
+        timestamp_reader=_dispatch_summary_timestamp,
+    )
 
     status.update(
         {
@@ -1977,6 +2076,11 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
             "important_triage_quarantine_label": _dashboard_path_label(triage_quarantine_path),
             "latest_master_check": latest_master_check,
             "latest_lead_triage": latest_triage,
+            "latest_auto_dispatch_preview": latest_preview if latest_preview_current else {},
+            "latest_dispatch": latest_dispatch if latest_dispatch_current else {},
+            "stale_latest_dispatch": latest_dispatch if latest_dispatch and not latest_dispatch_current else {},
+            "latest_confirmed_dispatch_current": latest_dispatch_current,
+            "latest_auto_dispatch_preview_current": latest_preview_current,
             "dispatch_source_options": source_options,
         }
     )
@@ -2185,7 +2289,7 @@ def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
     jc_queue = status.get("jc_queue") if isinstance(status.get("jc_queue"), dict) else {}
     if jc_queue:
         fields = [str(field).strip().lower() for field in jc_queue.get("fieldnames", []) if str(field).strip()]
-        if fields and int(jc_queue.get("count") or 0) > 0 and "booktitle" not in fields:
+        if "booktitle" not in fields:
             missing.append(str(jc_queue.get("profile") or jc_queue.get("name") or "private_jc"))
     sendgrid_queues = status.get("sendgrid_queues")
     if isinstance(sendgrid_queues, list):
@@ -2193,15 +2297,51 @@ def _queue_status_missing_booktitle(status: dict[str, object]) -> list[str]:
             if not isinstance(queue, dict):
                 continue
             fields = [str(field).strip().lower() for field in queue.get("fieldnames", []) if str(field).strip()]
-            if fields and int(queue.get("count") or 0) > 0 and "booktitle" not in fields:
+            if "booktitle" not in fields:
                 missing.append(str(queue.get("profile") or queue.get("name") or queue.get("path") or "sendgrid"))
     return missing
 
 
 def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, object]:
-    queue_safety = build_dashboard_queue_safety_report("all")
-    sendgrid_queue_safety = build_dashboard_queue_safety_report("sendgrid")
-    private_queue_safety = build_dashboard_queue_safety_report("private_jc")
+    dispatch_source = status.get("dispatch_source") if isinstance(status.get("dispatch_source"), dict) else {}
+    source_resolution = str(dispatch_source.get("source_resolution") or "").strip()
+    if source_resolution == "latest_completed_staged_run":
+        checked_path = _state_label_path(status.get("important_output_label")) or IMPORTANT_LEADS_OUTPUT
+        keep_path = _state_label_path(status.get("important_triage_keep_label")) or TRIAGED_KEEP_PATH
+        reject_path = _state_label_path(status.get("important_triage_rejected_label")) or IMPORTANT_LEADS_OUTPUT.with_name("leads_triaged_reject.csv")
+
+        def scoped_queue_safety(provider: str, shard_paths: list[Path] | None) -> dict[str, object]:
+            try:
+                report = build_queue_safety_report(
+                    shard_paths=shard_paths,
+                    intended_source_path=keep_path,
+                    checked_path=checked_path,
+                    triaged_keep_path=keep_path,
+                    triaged_reject_path=reject_path,
+                )
+            except Exception as exc:
+                return {
+                    "safe": False,
+                    "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
+                    "message": f"Queue safety check failed: {exc}",
+                    "provider": provider,
+                    "affected_provider": provider,
+                    "validated_shard_paths": [str(path) for path in shard_paths] if shard_paths is not None else [],
+                }
+            report["provider"] = provider
+            report["affected_provider"] = provider
+            report["validated_shard_paths"] = [str(item.get("path") or "") for item in report.get("shards", []) if isinstance(item, dict)]
+            return report
+
+        sendgrid_paths = [settings.SHARDS_DIR / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+        private_paths = [settings.SHARDS_DIR / "recipients_private_jc.csv"]
+        queue_safety = scoped_queue_safety("all", None)
+        sendgrid_queue_safety = scoped_queue_safety("sendgrid", sendgrid_paths)
+        private_queue_safety = scoped_queue_safety("private_jc", private_paths)
+    else:
+        queue_safety = build_dashboard_queue_safety_report("all")
+        sendgrid_queue_safety = build_dashboard_queue_safety_report("sendgrid")
+        private_queue_safety = build_dashboard_queue_safety_report("private_jc")
     reasons: list[str] = []
     if not bool(queue_safety.get("safe")):
         raw_reasons = queue_safety.get("unsafe_reasons")
@@ -2210,8 +2350,7 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
         else:
             reasons.append(str(queue_safety.get("message") or "Live recipient queue is unsafe."))
     missing_booktitle = _queue_status_missing_booktitle(status)
-    fallback = _book_title_fallback_readiness()
-    if missing_booktitle and not bool(fallback.get("fallback_capable")):
+    if missing_booktitle:
         reasons.append(f"Live recipient queues are missing BookTitle: {', '.join(missing_booktitle)}.")
     return {
         "status": "BLOCKED" if reasons else "READY",
@@ -2224,12 +2363,6 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
         "sendgrid_queue_safety": sendgrid_queue_safety,
         "private_queue_safety": private_queue_safety,
         "missing_booktitle_queues": missing_booktitle,
-        "booktitle_fallback_capable": bool(fallback.get("fallback_capable")),
-        "booktitle_warning": (
-            f"Live recipient queues are missing BookTitle, but template fallback is available: {', '.join(missing_booktitle)}."
-            if missing_booktitle and bool(fallback.get("fallback_capable"))
-            else ""
-        ),
     }
 
 
@@ -2308,9 +2441,35 @@ def _load_latest_confirmed_dispatch_summary() -> dict[str, object]:
     return {}
 
 
+def _load_active_campaign_snapshot_summary() -> dict[str, object]:
+    path = active_campaign_manifest_path(settings.STATE_DIR)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
+    intended = files.get("intended_source") if isinstance(files.get("intended_source"), dict) else {}
+    checked = files.get("checked") if isinstance(files.get("checked"), dict) else {}
+    return {
+        "manifest_path": str(path),
+        "created_at_utc": str(payload.get("created_at_utc") or payload.get("created_at") or ""),
+        "campaign_type": str(payload.get("campaign_type") or ""),
+        "source": str(payload.get("source") or ""),
+        "intended_source_path": str(payload.get("intended_source_path") or intended.get("path") or ""),
+        "intended_source_row_count": int(intended.get("row_count") or 0),
+        "checked_path": str(payload.get("checked_path") or checked.get("path") or ""),
+        "checked_row_count": int(checked.get("row_count") or 0),
+    }
+
+
 def _combined_leads_status() -> dict[str, object]:
     state = load_state()
     latest_confirmed_dispatch = _load_latest_confirmed_dispatch_summary()
+    active_campaign_snapshot = _load_active_campaign_snapshot_summary()
     status = {
         **shard_status(),
         **important_leads_status(),
@@ -2320,6 +2479,8 @@ def _combined_leads_status() -> dict[str, object]:
         "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
         "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
         "latest_confirmed_dispatch": latest_confirmed_dispatch,
+        "active_campaign_snapshot": active_campaign_snapshot,
+        "safer_recontact_source_summary": _load_safer_recontact_source_summary(),
     }
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
@@ -2329,6 +2490,36 @@ def _combined_leads_status() -> dict[str, object]:
     status["current_send_safety"] = _build_current_send_safety_status(status)
     status["next_batch_prep"] = _build_next_batch_prep_status(status)
     return status
+
+
+def _load_safer_recontact_source_summary() -> dict[str, object]:
+    path = settings.STATE_DIR / "safer_recontact_source_summary.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    safe_keys = {
+        "preview_id",
+        "campaign_type",
+        "dispatch_source_mode",
+        "source_path",
+        "original_source_rows",
+        "planned_unique",
+        "found_in_active_history",
+        "found_in_active_history_pct",
+        "seen_this_month",
+        "seen_this_month_pct",
+        "not_found_in_active_history",
+        "not_found_in_active_history_pct",
+        "risk_level",
+        "safer_found_in_active_history",
+        "safer_rows_written",
+        "output_path",
+        "created_at",
+    }
+    return {key: value for key, value in raw.items() if key in safe_keys}
 
 
 def _normalize_pasted_leads_csv(input_text: str) -> str:
@@ -2856,7 +3047,7 @@ def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
 def _dashboard_auth_response() -> dict[str, object]:
     return {
         "auth_enabled": _dashboard_auth_enabled(),
-        "authenticated": False,
+        "authenticated": True if not _dashboard_auth_enabled() else False,
         "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
     }
 
@@ -2892,7 +3083,7 @@ def auth_status(request: Request) -> JSONResponse:
         {
             "ok": True,
             **_dashboard_auth_response(),
-            "authenticated": authenticated,
+            "authenticated": True if not _dashboard_auth_enabled() else authenticated,
             "username": str(request.session.get("dashboard_username") or settings.DASHBOARD_AUTH_USERNAME or "admin"),
         }
     )
@@ -2989,6 +3180,26 @@ def _profile_readiness_from_snapshot(snapshot: dict[str, object], profile_name: 
                 if isinstance(readiness, dict):
                     return dict(readiness)
     return build_profile_message_readiness(profile_name)
+
+
+def _profile_provider_block_reason_from_snapshot(snapshot: dict[str, object], profile_name: str) -> str:
+    profiles = snapshot.get("profiles")
+    profile: dict[str, object] = {}
+    if isinstance(profiles, list):
+        for candidate in profiles:
+            if isinstance(candidate, dict) and str(candidate.get("name") or "") == profile_name:
+                profile = candidate
+                break
+    if not profile:
+        return ""
+    readiness_label = str(profile.get("readiness_label") or "").strip()
+    readiness_tone = str(profile.get("readiness_tone") or "").strip().lower()
+    reason_code = str(profile.get("reason_code") or "").strip()
+    reason_note = str(profile.get("reason_note") or profile.get("readiness_note") or profile.get("health_note") or "").strip()
+    if readiness_tone == "bad" or readiness_label.lower() in {"blocked", "not ready"}:
+        note = reason_note or readiness_label or "Provider is not ready."
+        return f"Provider readiness for {profile_name} is {readiness_label or 'Blocked'} ({reason_code or 'PROVIDER_BLOCKED'}). {note}"
+    return ""
 
 
 def _state_label_path(value: object) -> Path | None:
@@ -3153,6 +3364,9 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
     for profile in profiles:
         readiness = _profile_readiness_from_snapshot(snapshot, profile)
         readiness_by_profile[profile] = readiness
+        provider_block = _profile_provider_block_reason_from_snapshot(snapshot, profile)
+        if provider_block:
+            blocked_reasons.append(provider_block)
         status = str(readiness.get("status") or "NOT RUN").strip().upper() or "NOT RUN"
         readiness_status_by_profile[profile] = status
         if status == "PASS":
@@ -3244,6 +3458,10 @@ def _active_sender_names() -> set[str]:
         pass
     try:
         names.update(detect_running_sender_profiles())
+    except Exception:
+        pass
+    try:
+        names.update(active_or_locked_sender_profiles())
     except Exception:
         pass
     return names
@@ -3915,9 +4133,18 @@ def verify_important_leads(payload: ImportantLeadVerifyPayload | None = None) ->
             IMPORTANT_LEADS_OUTPUT,
         )
         if mode != TRIAGE_MODE_STRICT:
-            verified_path = default_keep_path.resolve(strict=False)
-            rejected_path = default_rejected_path.resolve(strict=False)
-            quarantine_path = default_quarantine_path.resolve(strict=False)
+            verified_path = _resolve_dashboard_csv_path(
+                payload.verified_path if payload else current_keep,
+                default_keep_path,
+            )
+            rejected_path = _resolve_dashboard_csv_path(
+                payload.rejected_path if payload else current_paths["rejected_path"],
+                default_rejected_path,
+            )
+            quarantine_path = _resolve_dashboard_csv_path(
+                payload.quarantine_path if payload else current_paths["quarantine_path"],
+                default_quarantine_path,
+            )
         else:
             verified_path = _resolve_dashboard_csv_path(
                 payload.verified_path if payload else current_keep,
@@ -4036,6 +4263,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
         )
         dispatch_source_mode = str(getattr(payload, "dispatch_source_mode", DISPATCH_SOURCE_TRIAGED_KEEP) if payload else DISPATCH_SOURCE_TRIAGED_KEEP).strip().lower() or DISPATCH_SOURCE_TRIAGED_KEEP
         dispatch_cap = str(getattr(payload, "dispatch_cap", DISPATCH_CAP_ALL) if payload else DISPATCH_CAP_ALL).strip().lower() or DISPATCH_CAP_ALL
+        campaign_type = normalize_campaign_type(getattr(payload, "campaign_type", CAMPAIGN_TYPE_COLD) if payload else CAMPAIGN_TYPE_COLD)
         aliases = {
             "verified": DISPATCH_SOURCE_TRIAGED_KEEP,
             "fast_triage": DISPATCH_SOURCE_TRIAGED_KEEP,
@@ -4046,12 +4274,18 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
         dispatch_source_mode = aliases.get(dispatch_source_mode, dispatch_source_mode)
         if dispatch_source_mode not in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_STRICT_VERIFIED, DISPATCH_SOURCE_CLEANED}:
             raise ValueError("Dispatch source mode must be triaged_keep, strict_verified, or cleaned.")
+        if is_recontact_cold_campaign(campaign_type):
+            dispatch_source_mode = DISPATCH_SOURCE_CLEANED
         save_state(important_leads_paths=_important_path_labels_for_state(input_path, output_path, rejected_path))
         save_state(important_leads_dispatch_source=_important_dispatch_source_labels_for_state(dispatch_source_mode))
         fast_triage_source = _latest_fast_triage_keep_source()
         if fast_triage_source.get("source_resolution") == "latest_completed_staged_run":
             triaged_keep_source_path = Path(str(fast_triage_source["path"]))
             triaged_keep_source_resolution = str(fast_triage_source.get("source_resolution") or "")
+            staged_paths = fast_triage_source.get("paths") if isinstance(fast_triage_source.get("paths"), dict) else {}
+            if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP and staged_paths:
+                output_path = Path(staged_paths.get("input") or output_path)
+                rejected_path = Path(staged_paths.get("rejected") or rejected_path)
         else:
             triaged_keep_source_path = _resolve_dashboard_csv_path(
                 triage_paths["keep_path"],
@@ -4080,6 +4314,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     **source_block,
                     "source_path": _dashboard_path_label(source_path_for_mode),
                     "dispatch_source_mode": dispatch_source_mode,
+                    "campaign_type": campaign_type,
                     "snapshot": _build_live_snapshot(),
                 },
                 status_code=409,
@@ -4091,6 +4326,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             triaged_keep_path=triaged_keep_source_path,
             dispatch_source_mode=dispatch_source_mode,
             dispatch_cap=dispatch_cap,
+            campaign_type=campaign_type,
             preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
         )
     except FileNotFoundError as exc:
@@ -4107,6 +4343,31 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             "ok": True,
             "message": f"Preview ready for {preview['dispatch_source_name']}.",
             "preview": preview,
+            "status": _combined_leads_status(),
+            "snapshot": _build_live_snapshot(),
+        }
+    )
+
+
+@app.post("/api/leads/dispatch-important/safer-recontact-pool")
+def create_safer_recontact_pool(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    try:
+        preview_id = str(getattr(payload, "preview_id", "") if payload else "").strip()
+        summary = create_safer_recontact_pool_from_preview(
+            preview_id,
+            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+        )
+    except FileNotFoundError as exc:
+        return JSONResponse({"ok": False, "error": "missing_recontact_preview", "message": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": "invalid_recontact_preview", "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": "safer_recontact_failed", "message": f"Safer recontact pool failed: {exc}"}, status_code=500)
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"Safer recontact pool created with {int(summary.get('safer_rows_written') or 0)} row(s).",
+            "summary": summary,
             "status": _combined_leads_status(),
             "snapshot": _build_live_snapshot(),
         }
@@ -4144,6 +4405,18 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         if not preview_id:
             raise ValueError("Run Preview Dispatch first.")
         preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+        if not str(preview.get("campaign_type") or "").strip():
+            raise RuntimeError("Dispatch preview is missing campaign type. Re-run Preview Dispatch.")
+        if not str(preview.get("dispatch_source_mode") or "").strip():
+            raise RuntimeError("Dispatch preview is missing dispatch source mode. Re-run Preview Dispatch.")
+        requested_campaign_type = normalize_campaign_type(
+            getattr(payload, "campaign_type", preview.get("campaign_type"))
+            if payload
+            else preview.get("campaign_type")
+        )
+        preview_campaign_type = normalize_campaign_type(preview.get("campaign_type"))
+        if requested_campaign_type != preview_campaign_type:
+            raise RuntimeError("Dispatch preview does not match the selected campaign type. Re-run Preview Dispatch.")
         requested_mode = str(getattr(payload, "dispatch_source_mode", preview.get("dispatch_source_mode") or "") if payload else preview.get("dispatch_source_mode") or "").strip().lower()
         if requested_mode:
             aliases = {
@@ -4154,13 +4427,24 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
                 "strict_public_proof": DISPATCH_SOURCE_STRICT_VERIFIED,
             }
             requested_mode = aliases.get(requested_mode, requested_mode)
+            if is_recontact_cold_campaign(requested_campaign_type):
+                requested_mode = DISPATCH_SOURCE_CLEANED
             if requested_mode != str(preview.get("dispatch_source_mode") or ""):
                 raise RuntimeError("Dispatch preview does not match the selected source. Re-run Preview Dispatch.")
+        current_status = _combined_leads_status()
+        current_source_path = str(current_status.get("dispatch_source_path") or "").strip()
+        if current_source_path and not _dashboard_paths_match(preview.get("dispatch_source_path"), current_source_path):
+            raise RuntimeError("Dispatch preview source path does not match the current selected source. Re-run Preview Dispatch.")
         requested_cap = str(getattr(payload, "dispatch_cap", preview.get("dispatch_cap") or DISPATCH_CAP_ALL) if payload else preview.get("dispatch_cap") or DISPATCH_CAP_ALL).strip().lower()
         if requested_cap and requested_cap != str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL):
             raise RuntimeError("Dispatch preview does not match the selected cap. Re-run Preview Dispatch.")
+        recontact_recency = preview.get("recontact_recency") if isinstance(preview.get("recontact_recency"), dict) else {}
+        recontact_override = bool(getattr(payload, "recontact_recency_override", False) if payload else False)
+        if is_recontact_cold_campaign(preview_campaign_type) and bool(recontact_recency.get("high_risk")) and not recontact_override:
+            raise RuntimeError("Recontact preview has high recent-contact overlap. Confirm requires explicit override.")
         job = _start_important_dispatch_job(
             preview_id=preview_id,
+            campaign_type=preview_campaign_type,
             dispatch_source_mode=str(preview.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP),
             dispatch_source_name=str(preview.get("dispatch_source_name") or ""),
             dispatch_source_path=str(preview.get("dispatch_source_path") or ""),
@@ -4169,6 +4453,7 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
             eligible_rows=int(preview.get("dispatch_eligible_row_count") or 0),
             selected_rows=int(preview.get("dispatch_selected_row_count") or 0),
             total_rows_would_write=int(preview.get("total_rows_would_write") or 0),
+            recontact_recency_override=recontact_override,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
@@ -4658,3 +4943,25 @@ async def websocket_snapshot_stream(
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
+
+# --- LOCAL DASHBOARD NO-AUTH OVERRIDE ---
+# When DASHBOARD_AUTH_PASSWORD is empty, this local dashboard should behave as
+# already authenticated instead of showing the Sign in / Auth unavailable panel.
+def _dashboard_auth_response():
+    auth_enabled = _dashboard_auth_enabled()
+    return {
+        "ok": True,
+        "auth_enabled": auth_enabled,
+        "authenticated": True if not auth_enabled else False,
+        "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
+        "local_mode": True if not auth_enabled else False,
+    }
+
+
+def _dashboard_is_authenticated(scope):
+    if not _dashboard_auth_enabled():
+        return True
+    session = getattr(scope, "session", None)
+    if not isinstance(session, dict):
+        session = {}
+    return bool(session.get(_AUTH_SESSION_KEY))

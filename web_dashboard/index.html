@@ -11,7 +11,7 @@
     <style>
       .app-shell {
         grid-template-columns: 1fr;
-        gap: 10px;
+        gap: 6px;
         max-width: 1460px;
         margin: 0 auto;
       }
@@ -19,12 +19,12 @@
       .app-rail {
         position: static;
         min-height: 0;
-        padding: 10px 12px;
+        padding: 6px 8px;
         display: grid;
         grid-template-columns: minmax(220px, 1fr) auto minmax(360px, auto);
         grid-template-areas:
           "brand tabs status";
-        gap: 8px 12px;
+        gap: 6px 10px;
         align-items: center;
         overflow: visible;
       }
@@ -33,7 +33,7 @@
         grid-area: brand;
         display: flex;
         align-items: baseline;
-        gap: 10px;
+        gap: 7px;
       }
 
       .app-rail-top .eyebrow {
@@ -41,7 +41,7 @@
       }
 
       .app-rail-title {
-        font-size: clamp(1.35rem, 1.8vw, 1.7rem);
+        font-size: clamp(1.1rem, 1.45vw, 1.35rem);
         line-height: 1;
       }
 
@@ -49,12 +49,12 @@
         grid-area: tabs;
         display: inline-flex;
         justify-content: flex-end;
-        gap: 8px;
+        gap: 6px;
         flex-wrap: wrap;
       }
 
       .app-rail-tabs .tab-btn {
-        min-width: 120px;
+        min-width: 100px;
         flex: 0 0 auto;
       }
 
@@ -64,14 +64,14 @@
         flex-wrap: wrap;
         align-items: center;
         justify-content: flex-end;
-        gap: 8px;
-        padding: 8px 10px;
+        gap: 6px;
+        padding: 5px 7px;
       }
 
       .toolbar-status {
         margin-left: auto;
         text-align: right;
-        font-size: 12px;
+        font-size: 10px;
       }
 
       .workspace-header {
@@ -84,16 +84,16 @@
 
       .workspace-controls {
         display: grid;
-        grid-template-columns: 120px 150px minmax(220px, 1fr) auto;
+        grid-template-columns: 108px 132px minmax(170px, 1fr) auto;
         grid-template-areas: "window cap note actions";
-        gap: 10px;
+        gap: 7px;
         align-items: end;
-        padding: 10px 12px;
+        padding: 6px 8px;
       }
 
       .workspace-controls label {
-        gap: 4px;
-        font-size: 11px;
+        gap: 3px;
+        font-size: 10px;
         font-weight: 700;
       }
 
@@ -117,7 +117,7 @@
       }
 
       .workspace-controls .toolbar-field-note {
-        font-size: 11px;
+        font-size: 10px;
         line-height: 1.25;
         max-width: none;
         grid-area: note;
@@ -127,7 +127,7 @@
       .workspace-controls .toolbar-actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 8px;
+        gap: 6px;
         justify-content: flex-end;
         align-items: center;
         grid-area: actions;
@@ -138,13 +138,13 @@
       .workspace-controls input,
       .detail-switcher .btn,
       .detail-switcher select {
-        height: 36px;
+        height: 30px;
       }
 
       .workspace-controls-card {
         display: grid;
-        gap: 8px;
-        border-radius: 16px;
+        gap: 5px;
+        border-radius: 10px;
       }
 
       .workspace-controls-card .workspace-controls {
@@ -152,14 +152,14 @@
       }
 
       .workspace-view {
-        gap: 8px;
+        gap: 6px;
       }
 
       .workspace-status-row {
         display: grid;
         grid-template-columns: 1fr;
         grid-template-areas: "controls";
-        gap: 10px;
+        gap: 6px;
         align-items: start;
       }
 
@@ -170,7 +170,7 @@
       .workspace-metrics-row {
         display: grid;
         grid-template-columns: minmax(360px, 0.9fr) minmax(300px, 0.65fr);
-        gap: 10px;
+        gap: 7px;
         align-items: start;
       }
 
@@ -179,8 +179,8 @@
       }
 
       .workspace-summary-strip {
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 10px;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 7px;
         align-items: stretch;
       }
 
@@ -264,7 +264,7 @@
       }
 
       .workspace-card-detail-main {
-        padding: 14px;
+        padding: 8px 10px;
       }
 
       .detail-stage {
@@ -272,7 +272,7 @@
       }
 
       .panel-header-compact {
-        margin-bottom: 10px;
+        margin-bottom: 6px;
       }
 
       .detail-switcher {
@@ -372,8 +372,8 @@
       <div class="app-shell">
         <aside class="app-rail panel-shell" aria-label="Primary navigation">
           <div class="app-rail-top">
-            <p class="eyebrow">Email Automation</p>
-            <h1 class="app-rail-title">Dashboard</h1>
+            <p class="eyebrow">Operations Console</p>
+            <h1 class="app-rail-title">Email Automation</h1>
           </div>
 
           <div class="app-rail-tabs topbar-tabs" role="tablist" aria-label="Dashboard sections" aria-orientation="vertical">
@@ -410,7 +410,7 @@
               <span id="auth-status-label" class="auth-status-label">Signed out</span>
               <button id="logout-btn" class="btn btn-secondary btn-sm" type="button">Log out</button>
             </div>
-            <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting first snapshot</p>
+            <p id="toolbar-generated-at" class="toolbar-status muted">Awaiting snapshot</p>
           </div>
         </aside>
 
@@ -438,7 +438,7 @@
                       <option value="10000">10,000</option>
                     </select>
                   </label>
-                  <div id="send-cap-note" class="toolbar-field-note muted">6 PM today to 12 PM tomorrow</div>
+                  <div id="send-cap-note" class="toolbar-field-note muted">6 PM-12 PM window</div>
                   <div class="toolbar-actions">
                     <button id="start-btn" class="btn btn-primary" type="button">Start All</button>
                     <button id="stop-btn" class="btn btn-danger" type="button">Stop All</button>
@@ -460,30 +460,54 @@
             <section id="summary-grid" class="summary-grid summary-strip workspace-summary-strip"></section>
           </section>
 
-          <section class="workspace-metrics-row">
-            <section class="panel-shell ops-progress-shell workspace-metric-block">
-              <div class="ops-strip-head">
-                <div>
-                  <p class="eyebrow">Run Progress</p>
-                  <p class="muted">Live send totals by channel</p>
-                </div>
-              </div>
-              <div id="alerts-progress" class="alerts-progress"></div>
-            </section>
-
-            <section class="ops-alerts-strip panel-shell workspace-metric-block">
-              <div class="ops-strip-head ops-strip-head-inline">
-                <div>
-                  <p class="eyebrow">Active Alerts</p>
-                  <p id="alerts-caption" class="muted">No active threshold alerts right now.</p>
-                </div>
-              </div>
-              <div id="alerts-grid" class="alerts-grid alerts-grid-compact"></div>
-            </section>
+          <section class="panel panel-shell ops-progress-strip" aria-label="Run Progress and Alerts summary">
+            <div class="ops-progress-summary-head">
+              <span class="ops-progress-summary-title">Run Progress / Alerts</span>
+              <span id="ops-progress-summary" class="ops-progress-summary" aria-live="polite"></span>
+              <button
+                id="ops-progress-details-toggle"
+                class="ops-progress-summary-action"
+                type="button"
+                aria-controls="ops-progress-details"
+                aria-expanded="false"
+              >View details</button>
+            </div>
           </section>
 
+          <details id="ops-progress-details" class="panel panel-shell workspace-metric-details advanced-details">
+            <summary class="panel-summary">
+              <span>Run Progress / Alerts details</span>
+              <span class="muted">Expanded sender totals and alert details</span>
+            </summary>
+            <section class="workspace-metrics-row workspace-metric-drawer">
+              <section class="panel-shell ops-progress-shell workspace-metric-block">
+                <div class="ops-strip-head">
+                  <div>
+                    <p class="eyebrow">Run Progress</p>
+                    <p class="muted">Live send totals by channel</p>
+                  </div>
+                </div>
+                <div id="alerts-progress" class="alerts-progress"></div>
+              </section>
+
+              <section class="ops-alerts-strip panel-shell workspace-metric-block">
+                <div class="ops-strip-head ops-strip-head-inline">
+                  <div>
+                    <p class="eyebrow">Active Alerts</p>
+                    <p id="alerts-caption" class="muted">No active threshold alerts right now.</p>
+                  </div>
+                </div>
+                <div id="alerts-grid" class="alerts-grid alerts-grid-compact"></div>
+              </section>
+            </section>
+          </details>
+
             <section class="workspace-primary">
-              <section id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main">
+              <details id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">
+                <summary class="panel-summary">
+                  <span>Profile Detail</span>
+                  <span class="muted">Diagnostics and focused sender controls</span>
+                </summary>
                 <div class="panel-header panel-header-compact">
                   <div>
                     <h2>Profile Detail</h2>
@@ -499,9 +523,13 @@
                   </div>
                 </div>
                 <div id="profile-detail" class="detail-stage"></div>
-              </section>
+              </details>
             </section>
-            <section class="panel panel-shell workspace-card campaign-history-panel">
+            <details class="panel panel-shell workspace-card campaign-history-panel advanced-details">
+              <summary class="panel-summary">
+                <span>Campaign Run History</span>
+                <span class="muted">Recent preview, validation, and start activity</span>
+              </summary>
               <div class="panel-header panel-header-compact">
                 <div>
                   <h2>Campaign Run History</h2>
@@ -509,22 +537,139 @@
                 </div>
               </div>
               <div id="campaign-run-history" class="campaign-run-history"></div>
-            </section>
+            </details>
           </section>
 
           <section id="leads-view" class="dashboard-view workspace-view leads-workspace hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
-            <section class="panel panel-shell leads-panel leads-pipeline-panel operator-workflow-section">
-              <div class="panel-header">
+            <section class="leads-page-title" aria-labelledby="leads-page-title-heading">
+              <p class="eyebrow">Leads</p>
+              <h2 id="leads-page-title-heading">Leads Operations</h2>
+              <p class="muted">Clean, triage, and prepare lead sources.</p>
+              <p id="leads-current-queue-note" class="leads-current-queue-note muted" hidden></p>
+            </section>
+
+            <section class="panel panel-shell leads-panel leads-command-center operator-workflow-section">
+              <div class="panel-header panel-header-compact">
                 <div>
-                  <p class="eyebrow">Leads Workspace</p>
-                  <h2>Current Run</h2>
-                  <span id="leads-pipeline-meta" class="muted">Next: Check New Leads. Waiting for latest counts.</span>
+                  <p class="eyebrow">Command Center</p>
+                  <h2>Prepare Dispatch</h2>
+                  <span id="leads-pipeline-meta" class="muted">Current source, preview, and queue confirmation in one place.</span>
                 </div>
               </div>
-              <div id="leads-current-run-panel" class="leads-current-run-panel" aria-live="polite"></div>
-              <details class="leads-collapsible advanced-details run-readiness-advanced">
-                <summary>Advanced run details</summary>
-                <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
+              <section class="leads-control-bar leads-ops-bar" aria-label="Lead source and check controls">
+                <div class="leads-control-source">
+                  <p class="eyebrow">Upload / Source / Check</p>
+                  <strong>Lead source</strong>
+                  <span id="leads-important-check-meta" class="muted">Choose a CSV/XLSX file or check the stored intake source.</span>
+                  <input id="leads-important-input-path" type="hidden" value="_important/leadschecker.csv" />
+                  <input id="leads-important-output-path" type="hidden" value="_important/leads.csv" />
+                  <input id="leads-important-rejected-path" type="hidden" value="_important/leads_rejected.csv" />
+                  <div class="leads-control-file-row">
+                    <input id="leads-important-upload-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                  </div>
+                  <span id="leads-important-upload-note" class="toolbar-field-note muted">Upload is file-only. Preview and confirm remain separate.</span>
+                </div>
+                <div class="leads-control-results">
+                  <span>Last check result</span>
+                  <div id="leads-control-check-result" class="leads-control-check-chips">Waiting for source status</div>
+                </div>
+                <div class="leads-control-actions">
+                  <span class="leads-source-actions-label">Source actions</span>
+                  <button id="leads-important-check-btn" class="btn btn-secondary" type="button">Check Leads</button>
+                  <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
+                  <button id="leads-important-dispatch-preview-top-btn" class="btn btn-secondary" type="button">Preview Dispatch</button>
+                </div>
+              </section>
+              <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
+              <div id="leads-workflow-task-list" class="leads-workflow-task-list leads-workflow-tracker" aria-live="polite"></div>
+
+              <div class="leads-command-main">
+                <div class="leads-command-column leads-command-column-left">
+                  <div id="leads-current-run-panel" class="leads-current-run-panel leads-source-summary-row" aria-live="polite"></div>
+
+                  <div class="leads-command-section leads-campaign-command">
+                    <div class="command-section-head">
+                      <div>
+                        <p class="eyebrow">Campaign</p>
+                        <h3>Select source and mode</h3>
+                        <span class="muted">Changing source changes the eligible count.</span>
+                      </div>
+                    </div>
+                    <div id="leads-dispatch-current-queue-note" class="leads-dispatch-current-queue-note" hidden>Finish current JC queue before preparing the next dispatch.</div>
+                    <div id="leads-dispatch-mode-cards" class="dispatch-mode-cards" role="group" aria-label="Dispatch mode"></div>
+                    <div class="leads-dispatch-grid leads-command-controls">
+                      <div class="leads-quick-file dispatch-technical-select">
+                        <span class="label">Dispatch Source</span>
+                        <select id="leads-dispatch-source-mode">
+                          <option value="triaged_keep">Fresh Cold Keep</option>
+                          <option value="strict_verified">Strict Public Proof</option>
+                          <option value="cleaned">Recontact Pool / Checked Output</option>
+                        </select>
+                        <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Changing source changes the eligible count. Fresh Cold Keep reads <strong>_important/leads_triaged_keep.csv</strong>. Strict reads <strong>_important/leads_verified.csv</strong>. Recontact uses checked output.</span>
+                      </div>
+                      <div class="leads-quick-file">
+                        <span class="label">Cap</span>
+                        <input id="leads-dispatch-cap" type="text" value="all" spellcheck="false" />
+                        <span class="toolbar-field-note muted">Use <strong>all</strong> or a number for this dispatch preview.</span>
+                      </div>
+                      <div class="leads-quick-file dispatch-technical-select">
+                        <span class="label">Campaign Type</span>
+                        <select id="leads-dispatch-campaign-type">
+                          <option value="cold">Fresh Cold — excludes prior contacts</option>
+                          <option value="recontact_cold">Recontact — allows prior contacts</option>
+                        </select>
+                        <span class="toolbar-field-note muted">Recontact allows prior sends/contact while keeping suppressions and bad outcomes blocked.</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="leads-command-column leads-command-column-right">
+                  <div class="leads-command-section leads-preview-command">
+                    <div class="command-section-head">
+                      <div>
+                        <p class="eyebrow">Preview</p>
+                        <h3>Dispatch Preview</h3>
+                        <span class="muted">Read-only. Calculates planned queues and safety counts without writing recipient queues.</span>
+                      </div>
+                      <button id="leads-important-dispatch-preview-btn" class="btn btn-secondary" type="button">Preview Dispatch</button>
+                    </div>
+                    <div id="leads-important-dispatch-meta" class="leads-meta muted">Dispatch is idle. Stop all senders, preview the exact write set, then confirm.</div>
+                    <div id="leads-important-dispatch-results" class="leads-results"></div>
+                  </div>
+
+                  <div class="leads-command-section leads-confirm-command">
+                    <div class="command-section-head">
+                      <div>
+                        <p class="eyebrow">Confirm</p>
+                        <h3>Confirm queue</h3>
+                        <span class="muted">Confirm writes queues only after the selected preview is current and safety checks pass.</span>
+                      </div>
+                      <div class="leads-action-slot leads-confirm-action-slot">
+                        <label id="leads-recontact-override-wrap" class="recontact-override" hidden>
+                          <input id="leads-recontact-recency-override" type="checkbox" />
+                          I understand this full recontact campaign includes recently contacted leads.
+                        </label>
+                        <button id="leads-important-dispatch-confirm-btn" class="btn btn-primary" type="button" disabled>Confirm Dispatch</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="leads-command-section leads-start-command">
+                    <div class="command-section-head">
+                      <div>
+                        <p class="eyebrow">Start Senders</p>
+                        <h3>Locked until queues exist</h3>
+                        <span class="muted">Start controls stay on the Dashboard after Confirm writes live queues.</span>
+                      </div>
+                      <span class="mini-pill">No queue</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <details class="leads-collapsible advanced-details leads-advanced-diagnostics">
+                <summary>Advanced diagnostics</summary>
                 <div id="leads-operator-status-strip" class="operator-status-strip" aria-label="Leads status summary"></div>
                 <div id="lead-funnel-summary" class="lead-funnel-summary"></div>
                 <div class="leads-run-safety-grid">
@@ -549,216 +694,8 @@
                     <p class="muted">Waiting for staged check, triage, and preview status.</p>
                   </div>
                 </div>
-              </details>
-              <details class="leads-collapsible advanced-details debug-state-details">
-                <summary>Debug state</summary>
+                <div id="leads-active-alerts" class="leads-active-alerts"></div>
                 <div id="leads-pipeline-steps" class="leads-pipeline-steps"></div>
-              </details>
-            </section>
-
-            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Intake</p>
-                  <h2>Check Leads</h2>
-                  <span class="muted">Upload, paste, or check a prepared intake file. This stage only cleans and writes checked lead files.</span>
-                </div>
-              </div>
-              <div class="leads-quick-grid leads-primary-grid">
-                <div class="leads-quick-file">
-                  <span class="label">Intake mode</span>
-                  <select id="leads-important-intake-mode">
-                    <option value="standard" selected>Standard</option>
-                    <option value="manual_author_research">Manual Author Research</option>
-                  </select>
-                  <span class="toolbar-field-note muted">Manual Author Research keeps hard safety blockers strict and sends soft-quality issues to Review/Quarantine.</span>
-                </div>
-                <div class="leads-action-slot">
-                  <button id="leads-important-check-btn" class="btn btn-secondary" type="button">Check Leads</button>
-                </div>
-              </div>
-
-              <details class="leads-collapsible">
-                <summary>Upload CSV/XLSX intake</summary>
-                <div class="leads-quick-file">
-                  <span class="label">Upload CSV/XLSX</span>
-                  <input id="leads-important-upload-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
-                  <span id="leads-important-upload-note" class="toolbar-field-note muted">File-driven check. Does not reuse the stored input path.</span>
-                </div>
-                <div class="leads-action-slot">
-                  <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
-                </div>
-              </details>
-
-              <details class="leads-collapsible advanced-details advanced-file-details">
-                <summary>Advanced file details</summary>
-                <div class="leads-quick-grid leads-primary-grid">
-                  <div class="leads-quick-file">
-                    <span class="label">Input</span>
-                    <input id="leads-important-input-path" type="text" value="_important/leadschecker.csv" spellcheck="false" />
-                  </div>
-                  <div class="leads-quick-file">
-                    <span class="label">Output</span>
-                    <input id="leads-important-output-path" type="text" value="_important/leads.csv" spellcheck="false" />
-                  </div>
-                  <div class="leads-quick-file">
-                    <span class="label">Rejected</span>
-                    <input id="leads-important-rejected-path" type="text" value="_important/leads_rejected.csv" spellcheck="false" />
-                  </div>
-                </div>
-              </details>
-
-              <details class="leads-collapsible">
-                <summary>Paste small/manual intake</summary>
-                <div class="leads-quick-file leads-quick-file-wide">
-                  <span class="label">Paste Intake CSV</span>
-                  <textarea id="leads-important-input-text" rows="8" placeholder="Small/manual only. Use Upload CSV for 1,000+ rows.&#10;Email,FirstName&#10;info@example.com,Jane&#10;john@example.com,John" spellcheck="false"></textarea>
-                  <span id="leads-important-paste-note" class="toolbar-field-note muted">Small/manual only. Paste first, then Check Leads writes the run file and cleans it into Output and Rejected.</span>
-                </div>
-              </details>
-              <div id="leads-important-check-meta" class="leads-meta muted">Ready to clean `_important/leadschecker.csv`.</div>
-              <div id="leads-important-check-results" class="leads-results"></div>
-            </section>
-
-            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Triage &amp; Review</p>
-                  <h2>Lead Triage</h2>
-                  <span class="muted">Fast Triage is the default gate. Strict Public Proof and quarantine actions stay separate for review-heavy cases.</span>
-                </div>
-              </div>
-              <div class="leads-action-row">
-                <button id="leads-verify-btn" class="btn btn-secondary" type="button">Fast Triage</button>
-                <button id="leads-verify-strict-btn" class="btn btn-secondary" type="button">Strict Public Proof</button>
-                <button id="leads-verify-stop-btn" class="btn btn-secondary" type="button" disabled>Stop Verify</button>
-              </div>
-              <details class="leads-collapsible advanced-details advanced-file-details">
-                <summary>Advanced file details</summary>
-                <div class="leads-quick-grid leads-primary-grid">
-                  <div class="leads-quick-file">
-                    <span class="label">Input</span>
-                    <input id="leads-verify-input-path" type="text" value="_important/leads.csv" spellcheck="false" />
-                  </div>
-                  <div class="leads-quick-file">
-                    <span class="label">Keep</span>
-                    <input id="leads-verify-output-path" type="text" value="_important/leads_verified.csv" spellcheck="false" />
-                  </div>
-                  <div class="leads-quick-file">
-                    <span class="label">Reject</span>
-                    <input id="leads-verify-rejected-path" type="text" value="_important/leads_verify_rejected.csv" spellcheck="false" />
-                  </div>
-                  <div class="leads-quick-file">
-                    <span class="label">Quarantine</span>
-                    <input id="leads-verify-quarantine-path" type="text" value="_important/leads_quarantine.csv" spellcheck="false" />
-                  </div>
-                </div>
-              </details>
-              <div id="leads-verify-meta" class="leads-meta muted">Verify is idle. Run Check Leads first, then run Fast Triage.</div>
-              <div id="leads-verify-results" class="leads-results"></div>
-
-              <section class="leads-review-shell">
-                <div class="leads-review-head">
-                  <div>
-                    <p class="eyebrow">Review Inbox</p>
-                    <h3>Quarantine</h3>
-                  </div>
-                  <button id="leads-quarantine-refresh-btn" class="btn btn-secondary" type="button">Refresh Review</button>
-                </div>
-                <div class="leads-review-grid">
-                  <label>
-                    Reason
-                    <select id="leads-quarantine-reason-code">
-                      <option value="">All reason codes</option>
-                    </select>
-                  </label>
-                  <label>
-                    Stage
-                    <select id="leads-quarantine-stage">
-                      <option value="">All stages</option>
-                    </select>
-                  </label>
-                  <label>
-                    Status
-                    <select id="leads-quarantine-status">
-                      <option value="QUARANTINE">QUARANTINE</option>
-                    </select>
-                  </label>
-                  <label>
-                    Sort
-                    <select id="leads-quarantine-sort">
-                      <option value="score_desc">Score high first</option>
-                      <option value="score_asc">Score low first</option>
-                      <option value="created_desc">Newest first</option>
-                      <option value="created_asc">Oldest first</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="leads-review-actions">
-                  <div class="leads-quick-file">
-                    <span class="label">Operator Note</span>
-                    <input id="leads-quarantine-operator-note" type="text" placeholder="Optional note for selected rows" spellcheck="false" />
-                  </div>
-                  <div class="leads-action-row">
-                    <button id="leads-quarantine-promote-btn" class="btn btn-secondary" type="button">Promote</button>
-                    <button id="leads-quarantine-strict-btn" class="btn btn-secondary" type="button">Strict Verify</button>
-                    <button id="leads-quarantine-reject-btn" class="btn btn-secondary" type="button">Reject</button>
-                    <button id="leads-quarantine-note-btn" class="btn btn-secondary" type="button">Save Note</button>
-                  </div>
-                </div>
-                <div id="leads-quarantine-meta" class="leads-meta muted">Quarantine review is waiting for a refresh.</div>
-                <div id="leads-quarantine-results" class="leads-results"></div>
-              </section>
-            </section>
-
-            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Preview &amp; Dispatch</p>
-                  <h2>Queue Write</h2>
-                  <span class="muted">Preview is read-only. Confirm writes queues only when all senders are stopped and the preview still matches the selected source and cap.</span>
-                </div>
-              </div>
-              <div class="leads-dispatch-grid">
-                <div class="leads-quick-file">
-                  <span class="label">Dispatch Source</span>
-                  <select id="leads-dispatch-source-mode">
-                    <option value="triaged_keep">Fast Triage Keep</option>
-                    <option value="strict_verified">Strict Public Proof</option>
-                  </select>
-                  <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Fast Triage reads <strong>_important/leads_triaged_keep.csv</strong>. Strict reads <strong>_important/leads_verified.csv</strong>.</span>
-                </div>
-                <div class="leads-quick-file">
-                  <span class="label">Cap</span>
-                  <input id="leads-dispatch-cap" type="text" value="all" spellcheck="false" />
-                  <span class="toolbar-field-note muted">Use <strong>all</strong> or a number for this dispatch preview.</span>
-                </div>
-                <div class="leads-quick-file leads-dispatch-rule">
-                  <span class="label">Safety Rule</span>
-                  <strong>Astra + one SendGrid shard per lead.</strong>
-                  <span class="toolbar-field-note muted">Confirm is blocked while any sender is active. A pre-dispatch archive is created before queue writes.</span>
-                </div>
-                <div class="leads-action-slot">
-                  <button id="leads-important-dispatch-preview-btn" class="btn btn-secondary" type="button">Preview Dispatch</button>
-                  <button id="leads-important-dispatch-confirm-btn" class="btn btn-primary" type="button" disabled>Confirm Dispatch</button>
-                </div>
-              </div>
-              <div id="leads-important-dispatch-meta" class="leads-meta muted">Dispatch is idle. Stop all senders, preview the exact write set, then confirm.</div>
-              <div id="leads-important-dispatch-results" class="leads-results"></div>
-            </section>
-
-            <section class="panel panel-shell leads-panel leads-step-panel operator-workflow-section">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Safety</p>
-                  <h2>Active Alerts</h2>
-                  <span class="muted">Blocking safety warnings stay visible here. Technical state is kept in the expandable debug sections above.</span>
-                </div>
-              </div>
-              <div id="leads-active-alerts" class="leads-active-alerts"></div>
-              <details class="leads-collapsible advanced-details raw-paths-details">
-                <summary>Raw paths</summary>
-                <p class="muted">Open the Advanced file details or Dispatch archive details sections above for full paths and archived state references.</p>
               </details>
             </section>
           </section>

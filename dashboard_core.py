@@ -8,6 +8,7 @@ import re
 import signal
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -25,14 +26,7 @@ from zoneinfo import ZoneInfo
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
 from provider_pacing import provider_pacing_status
-from send_shard import (
-    DOMAIN_SLOT_TTL_SECONDS,
-    PITCHES,
-    PROFILES,
-    PROVIDER_LIMIT_DEFAULTS,
-    book_title_fallback_supported,
-    template_requires_book_title,
-)
+from send_shard import DOMAIN_SLOT_TTL_SECONDS, PROFILES, PROVIDER_LIMIT_DEFAULTS, profile_runtime_lock_status
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -44,7 +38,7 @@ from sendgrid_hygiene import (
     parse_iso_utc,
 )
 from sendgrid_launch_auth import resolve_sendgrid_api_key
-from tools.rebuild_recipient_queues import build_queue_safety_report, default_sendgrid_queue_paths
+from tools.rebuild_recipient_queues import build_queue_safety_report, default_queue_paths, default_sendgrid_queue_paths, email_set, set_fingerprint
 
 ROOT = settings.APP_ROOT
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
@@ -504,19 +498,6 @@ def profile_actual_pitch_mode(profile_name: str) -> str:
     return pitch_key or "unknown"
 
 
-def _profile_book_title_fallback_supported(profile_name: str) -> bool:
-    pitch_key = str(PROFILES.get(profile_name, {}).get("pitch") or "").strip()
-    pitch = PITCHES.get(pitch_key) or {}
-    subject = str(pitch.get("subject") or "")
-    body = str(pitch.get("body") or "")
-    subject_fallback = str(pitch.get("subject_fallback") or "")
-    if not template_requires_book_title(subject, body):
-        return True
-    if bool(pitch.get("require_book_title")):
-        return False
-    return book_title_fallback_supported(subject, body, subject_fallback)
-
-
 def message_preview_path_for_profile(profile_name: str) -> Path:
     safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile_name or "sender").strip() or "sender")
     return MESSAGE_PREVIEW_DIR / f"{safe_profile}_message_preview.csv"
@@ -601,19 +582,15 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
 
     expected_mode = profile_expected_pitch_mode(profile_name)
     actual_mode = profile_actual_pitch_mode(profile_name)
-    fallback_supported = _profile_book_title_fallback_supported(profile_name)
     reasons: List[str] = []
-    warnings: List[str] = []
     validation_status = "NOT RUN"
     if preview_exists and failed_count is not None:
         validation_status = "FAIL" if failed_count > 0 else "PASS"
 
     status = "PASS"
-    if not book_title_present and row_count > 0 and not fallback_supported:
+    if not book_title_present:
         status = "FAIL"
         reasons.append("BookTitle column is missing.")
-    elif not book_title_present and row_count > 0 and fallback_supported:
-        warnings.append("BookTitle column is missing; template fallback is available.")
     if invalid_count > 0:
         status = "FAIL"
         reasons.append("Recipient queue has invalid email rows.")
@@ -658,8 +635,6 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "actual_profile_mode": actual_mode,
         "preview_csv_name": preview_path.name,
         "reasons": reasons,
-        "warnings": warnings,
-        "book_title_fallback_supported": fallback_supported,
     }
 
 
@@ -1160,6 +1135,26 @@ def detect_running_sender_profiles(profile_names: Optional[Iterable[str]] = None
     return {profile for profile in profiles if profile}
 
 
+def locked_sender_profiles(profile_names: Optional[Iterable[str]] = None) -> set[str]:
+    allowed_profiles = set(profile_names or DASHBOARD_PROFILES)
+    profiles: set[str] = set()
+    for profile in allowed_profiles:
+        if profile not in DASHBOARD_PROFILES:
+            continue
+        try:
+            status = profile_runtime_lock_status(profile)
+        except Exception:
+            continue
+        if bool(status.get("locked")):
+            profiles.add(profile)
+    return profiles
+
+
+def active_or_locked_sender_profiles(profile_names: Optional[Iterable[str]] = None) -> set[str]:
+    allowed_profiles = set(profile_names or DASHBOARD_PROFILES)
+    return (detect_running_sender_profiles(allowed_profiles) | locked_sender_profiles(allowed_profiles)) & allowed_profiles
+
+
 def _redact_launcher_output(text: str) -> str:
     redacted = re.sub(r"SG\.[A-Za-z0-9_.-]+", "[redacted-sendgrid-key]", str(text or ""))
     return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted-email]", redacted)
@@ -1177,7 +1172,7 @@ def _wait_for_started_profiles(profiles: Sequence[str], wait_seconds: float = 5.
     deadline = time.monotonic() + max(0.0, wait_seconds)
     active: set[str] = set()
     while True:
-        active = detect_running_sender_profiles(expected)
+        active = active_or_locked_sender_profiles(expected)
         if expected.issubset(active) or time.monotonic() >= deadline:
             return active
         time.sleep(0.25)
@@ -1265,6 +1260,9 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
     profiles = [profile for profile in START_ALL_PROFILES if profile in SENDGRID_PROFILES]
     if not profiles:
         return False, "No SendGrid profiles are configured for Start All."
+    active_profiles = active_or_locked_sender_profiles(profiles)
+    if active_profiles:
+        return False, f"Start All blocked; profiles already running or locked: {', '.join(sorted(active_profiles))}."
     key_resolution = resolve_sendgrid_api_key(env=env, env_files=SENDGRID_ENV_FILES)
     if not key_resolution.ok:
         return False, key_resolution.error
@@ -1274,6 +1272,9 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
         return False, "Missing Python runtime for SendGrid preflight."
     preflight_outputs: Dict[str, str] = {}
     for profile in profiles:
+        active_profiles = active_or_locked_sender_profiles([profile])
+        if active_profiles:
+            return False, f"Start All blocked; profile already running or locked: {profile}."
         preflight = subprocess.run(
             [str(python_bin), "send_shard.py", "--profile", profile, "--preflight"],
             cwd=ROOT,
@@ -1290,6 +1291,9 @@ def run_sendgrid_launcher() -> tuple[bool, str]:
     env["TMUX_SENDGRID_ATTACH"] = "0"
     env["SENDGRID_DASHBOARD_MAX_TOTAL"] = str(dashboard_send_cap_per_profile())
     env["SENDGRID_DASHBOARD_MAX_MESSAGES_1H"] = str(dashboard_sendgrid_hourly_target_cap())
+    active_profiles = active_or_locked_sender_profiles(profiles)
+    if active_profiles:
+        return False, f"Start All blocked; profiles already running or locked: {', '.join(sorted(active_profiles))}."
     try:
         proc = subprocess.run(
             ["bash", "./run_sendgrid_tmux.sh"],
@@ -1370,6 +1374,8 @@ def stop_sendgrid_profile(profile_name: str, pane_index: int, session: str = "se
 def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
     if profile_name not in DASHBOARD_PROFILES:
         return False, f"Unknown profile: {profile_name}"
+    if profile_name in active_or_locked_sender_profiles([profile_name]):
+        return False, f"{profile_name} is already running or locked."
     cfg = PROFILES.get(profile_name, {})
     provider = str(cfg.get("provider") or "").strip().lower()
     cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
@@ -1426,6 +1432,8 @@ def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
     if preflight.returncode != 0:
         output = "\n".join(part for part in [preflight.stdout.strip(), preflight.stderr.strip()] if part).strip()
         return False, output or f"Preflight failed for {profile_name}."
+    if profile_name in active_or_locked_sender_profiles([profile_name]):
+        return False, f"{profile_name} is already running or locked."
 
     target = f"{session}:run.{pane_index}"
     command = f"cd {shlex.quote(str(ROOT))} && {shlex.quote(str(python_bin))} send_shard.py --profile {shlex.quote(profile_name)}"
@@ -1457,6 +1465,8 @@ def stop_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
 def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TMUX_SESSION_NAME) -> tuple[bool, str]:
     if profile_name not in SENDGRID_PROFILES:
         return False, f"Unknown profile: {profile_name}"
+    if profile_name in active_or_locked_sender_profiles([profile_name]):
+        return False, f"{profile_name} is already running or locked."
     if not PYTHON_BIN.exists():
         return False, f"Missing Python venv at {PYTHON_BIN}"
 
@@ -1501,6 +1511,8 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     if preflight.returncode != 0:
         output = "\n".join(part for part in [preflight.stdout.strip(), preflight.stderr.strip()] if part).strip()
         return False, output or f"Preflight failed for {profile_name}."
+    if profile_name in active_or_locked_sender_profiles([profile_name]):
+        return False, f"{profile_name} is already running or locked."
 
     proc = subprocess.run(
         ["tmux", "set-environment", "-t", session, "SENDGRID_API_KEY", api_key],
@@ -2483,13 +2495,13 @@ def build_profile_health_status(
     if name == "private_jc" and bool(private_bounce_guard.get("sync_error_active")):
         return {
             "label": "Watch",
-            "tone": "warn",
+            "tone": "bad",
             "note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
             "reason_code": "BOUNCE_SYNC_ERROR",
             "reason_note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
-            "readiness_label": "Telemetry Degraded",
-            "readiness_tone": "warn",
-            "readiness_note": "Sender can run, but private bounce telemetry needs attention.",
+            "readiness_label": "Blocked",
+            "readiness_tone": "bad",
+            "readiness_note": "Private JC is blocked until private bounce sync succeeds.",
             "telemetry_label": "Low",
             "telemetry_tone": "warn",
             "telemetry_note": "Private bounce sync is currently failing.",
@@ -2831,13 +2843,266 @@ def _queue_safety_provider_paths(provider: str) -> tuple[str, Optional[List[Path
         return "sendgrid", default_sendgrid_queue_paths(SHARDS_DIR)
     if normalized in {"private", "private_jc", "jc"}:
         return "private_jc", _private_queue_paths()
-    return "all", None
+    return "all", default_queue_paths(SHARDS_DIR)
+
+
+def _dashboard_sendgrid_log_paths() -> List[Path]:
+    paths: List[Path] = []
+    seen: set[str] = set()
+    for cfg in PROFILES.values():
+        if str(cfg.get("provider") or "") != "sendgrid":
+            continue
+        for key in ("log", "domain_log"):
+            value = str(cfg.get(key) or "").strip()
+            if not value:
+                continue
+            path = settings.log_path(value)
+            marker = str(path)
+            if marker not in seen:
+                seen.add(marker)
+                paths.append(path)
+    return paths
+
+
+def _read_dashboard_json(path: Path) -> Dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _active_campaign_preview_payload() -> Dict[str, object]:
+    manifest = _read_dashboard_json(STATE_DIR / "active_campaign_snapshot.json")
+    preview_id = str(manifest.get("preview_id") or "").strip()
+    if not preview_id:
+        return {}
+
+    candidates = [
+        ROOT / "_important" / "dispatch_jobs" / "previews" / f"{preview_id}.json",
+        STATE_DIR / "dispatch_previews" / f"{preview_id}.json",
+    ]
+    short_id = "_".join(preview_id.split("_")[:3])
+    if short_id and short_id != preview_id:
+        candidates.append(STATE_DIR / "dispatch_previews" / f"{short_id}.json")
+
+    for path in candidates:
+        payload = _read_dashboard_json(path)
+        if payload:
+            return payload
+
+    for directory in (ROOT / "_important" / "dispatch_jobs" / "previews", STATE_DIR / "dispatch_previews"):
+        try:
+            matches = sorted(directory.glob(f"{preview_id}*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+        except Exception:
+            matches = []
+        for path in matches:
+            payload = _read_dashboard_json(path)
+            if payload:
+                return payload
+    return {}
+
+
+def _planned_preview_email_set(preview: Dict[str, object], provider: str) -> set[str] | None:
+    rows_by_queue = preview.get("plan_rows_by_queue")
+    rows: List[Dict[str, object]] = []
+    normalized = str(provider or "all").strip().lower()
+    if isinstance(rows_by_queue, dict):
+        for key, value in rows_by_queue.items():
+            queue_name = str(key or "")
+            if normalized == "sendgrid" and not queue_name.startswith("sendgrid_"):
+                continue
+            if normalized == "private_jc" and queue_name != "private_jc":
+                continue
+            if isinstance(value, list):
+                rows.extend(row for row in value if isinstance(row, dict))
+    if not rows:
+        fallback_key = "sendgrid_planned_rows" if normalized == "sendgrid" else "private_jc_planned_rows" if normalized == "private_jc" else ""
+        fallback = preview.get(fallback_key) if fallback_key else None
+        if isinstance(fallback, list):
+            rows.extend(row for row in fallback if isinstance(row, dict))
+    if not rows and preview:
+        return set()
+    if not preview:
+        return None
+    return {
+        str(row.get("Email") or row.get("AuthorEmail") or "").strip().lower()
+        for row in rows
+        if str(row.get("Email") or row.get("AuthorEmail") or "").strip()
+    }
+
+
+def _preview_campaign_id(preview: Dict[str, object]) -> str:
+    return (
+        str(preview.get("campaign_id") or "").strip()
+        or str(preview.get("preview_id") or "").strip()
+        or str(preview.get("campaign_type") or "").strip()
+    )
+
+
+def _log_info_marks_sent(info: object) -> bool:
+    text = str(info or "").strip().lower()
+    return "outcome=sent" in text or '"outcome":"sent"' in text or "'outcome': 'sent'" in text
+
+
+def _authoritative_sent_log_row(row: Dict[str, str]) -> bool:
+    status = str(row.get("Status") or "").strip().upper()
+    return status == "SENT" or (status == "ATTEMPT" and _log_info_marks_sent(row.get("Info") or ""))
+
+
+def _provider_profile_names(provider: str) -> list[str]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "private_jc":
+        return ["private_jc"] if "private_jc" in PROFILES else []
+    if normalized == "sendgrid":
+        return list(SENDGRID_PROFILES)
+    return list(DASHBOARD_PROFILES)
+
+
+def _provider_log_paths(provider: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for profile_name in _provider_profile_names(provider):
+        cfg = PROFILES.get(profile_name, {})
+        for key in ("log", "domain_log"):
+            value = str(cfg.get(key) or "").strip()
+            if not value:
+                continue
+            path = settings.log_path(value)
+            marker = str(path)
+            if marker not in seen:
+                seen.add(marker)
+                paths.append(path)
+    if provider == "sendgrid":
+        for path in _dashboard_sendgrid_log_paths():
+            marker = str(path)
+            if marker not in seen:
+                seen.add(marker)
+                paths.append(path)
+    return paths
+
+
+def _provider_log_accounted_missing_emails(provider: str) -> set[str]:
+    accounted: set[str] = set()
+    for path in _provider_log_paths(provider):
+        for row in read_csv_rows(path):
+            status = str(row.get("Status") or "").strip().upper()
+            if status not in {"SENT", "SKIP"} and not (status == "ATTEMPT" and _log_info_marks_sent(row.get("Info") or "")):
+                continue
+            email = str(row.get("Email") or "").strip().lower()
+            if email:
+                accounted.add(email)
+    return accounted
+
+
+def _provider_authoritative_sent_emails(provider: str) -> set[str]:
+    sent: set[str] = set()
+    for path in _provider_log_paths(provider):
+        for row in read_csv_rows(path):
+            if not _authoritative_sent_log_row(row):
+                continue
+            email = str(row.get("Email") or "").strip().lower()
+            if email:
+                sent.add(email)
+    return sent
+
+
+def _provider_idempotency_accounted_emails(provider: str, campaign_id: str = "") -> set[str]:
+    path = STATE_DIR / "send_idempotency.sqlite3"
+    if not path.exists():
+        return set()
+    normalized_provider = str(provider or "").strip().lower()
+    provider_values = ["private"] if normalized_provider == "private_jc" else ["sendgrid"] if normalized_provider == "sendgrid" else ["private", "sendgrid"]
+    accounted: set[str] = set()
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in provider_values)
+            rows = conn.execute(
+                f"""
+                SELECT campaign_id, provider, email, status, outcome
+                FROM send_reservations
+                WHERE provider IN ({placeholders})
+                """,
+                provider_values,
+            ).fetchall()
+    except Exception:
+        return set()
+    expected_campaign = str(campaign_id or "").strip()
+    for row in rows:
+        row_campaign = str(row["campaign_id"] or "").strip()
+        if expected_campaign and row_campaign and row_campaign != expected_campaign:
+            continue
+        status = str(row["status"] or "").strip().lower()
+        outcome = str(row["outcome"] or "").strip().lower()
+        if not (status or outcome):
+            continue
+        # A reservation means the row left the live queue under the runtime
+        # idempotency lock; later outcome updates refine the state.
+        email = str(row["email"] or "").strip().lower()
+        if email:
+            accounted.add(email)
+    return accounted
+
+
+def _apply_preview_queue_match(report: Dict[str, object], provider: str, shard_paths: Optional[List[Path]]) -> None:
+    preview = _active_campaign_preview_payload()
+    expected = _planned_preview_email_set(preview, provider)
+    if expected is None:
+        return
+    paths = list(shard_paths or default_sendgrid_queue_paths(SHARDS_DIR) + _private_queue_paths())
+    live: set[str] = set()
+    for path in paths:
+        live.update(email_set(path))
+
+    missing = expected - live
+    extra = live - expected
+    campaign_id = _preview_campaign_id(preview)
+    accounted_missing = set()
+    live_sent_overlap: set[str] = set()
+    if provider in {"private_jc", "sendgrid", "all"}:
+        accounted_missing = missing & (
+            _provider_log_accounted_missing_emails(provider)
+            | _provider_idempotency_accounted_emails(provider, campaign_id=campaign_id)
+        )
+        live_sent_overlap = live & _provider_authoritative_sent_emails(provider)
+    unaccounted_missing = missing - accounted_missing
+    report["preview_id"] = str(preview.get("preview_id") or "")
+    report["preview_campaign_id"] = campaign_id
+    report["expected_preview_unique_emails"] = len(expected)
+    report["live_preview_unique_emails"] = len(live)
+    report["missing_from_preview_expected_count"] = len(missing)
+    report["accounted_missing_from_preview_expected_count"] = len(accounted_missing)
+    report["unaccounted_missing_from_preview_expected_count"] = len(unaccounted_missing)
+    report["extra_vs_preview_expected_count"] = len(extra)
+    report["missing_from_preview_expected_fingerprint"] = set_fingerprint(missing) if missing else ""
+    report["accounted_missing_from_preview_expected_fingerprint"] = set_fingerprint(accounted_missing) if accounted_missing else ""
+    report["unaccounted_missing_from_preview_expected_fingerprint"] = set_fingerprint(unaccounted_missing) if unaccounted_missing else ""
+    report["extra_vs_preview_expected_fingerprint"] = set_fingerprint(extra) if extra else ""
+    report["live_already_sent_overlap_count"] = len(live_sent_overlap)
+    report["live_already_sent_overlap_fingerprint"] = set_fingerprint(live_sent_overlap) if live_sent_overlap else ""
+    if missing and not unaccounted_missing and not extra and not live_sent_overlap:
+        report["partial_consumption_verified"] = True
+        report["message"] = "Queue partially consumed — remaining recipients verified safe."
+    if unaccounted_missing or extra or live_sent_overlap:
+        reasons = list(report.get("unsafe_reasons") or [])
+        if unaccounted_missing:
+            reasons.append("MISSING_PREVIEW_PLANNED_ROWS")
+        if extra:
+            reasons.append("EXTRA_ROWS_NOT_IN_PREVIEW")
+        if live_sent_overlap:
+            reasons.append("LIVE_ALREADY_SENT_OVERLAP")
+        report["unsafe_reasons"] = reasons
+        report["safe"] = False
 
 
 def build_dashboard_queue_safety_report(provider: str = "all") -> Dict[str, object]:
     provider_name, shard_paths = _queue_safety_provider_paths(provider)
     try:
-        report = build_queue_safety_report(shard_paths=shard_paths)
+        report = build_queue_safety_report(
+            shard_paths=shard_paths,
+            sendgrid_log_paths=_dashboard_sendgrid_log_paths(),
+        )
     except Exception as exc:
         return {
             "safe": False,
@@ -2850,17 +3115,27 @@ def build_dashboard_queue_safety_report(provider: str = "all") -> Dict[str, obje
     report["provider"] = provider_name
     report["affected_provider"] = provider_name
     report["validated_shard_paths"] = [str(item.get("path") or "") for item in report.get("shards", []) if isinstance(item, dict)]
+    _apply_preview_queue_match(report, provider_name, shard_paths)
     return report
 
 
 def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
     if bool(report.get("safe")):
         return None
-    reject_overlap = int(report.get("overlap_with_triaged_reject") or 0)
+    reject_overlap = int(report.get("blocked_triaged_reject_overlap_count") if "blocked_triaged_reject_overlap_count" in report else report.get("overlap_with_triaged_reject") or 0)
     outside_checked = int(report.get("outside_checked_output_count") or 0)
     outside_intended = int(report.get("outside_intended_source_count") or 0)
+    source_reject_overlap = int(report.get("blocked_intended_source_reject_overlap_count") if "blocked_intended_source_reject_overlap_count" in report else report.get("intended_source_reject_overlap_count") or 0)
     sendgrid_sent_overlap = int(report.get("sendgrid_already_sent_overlap_count") or 0)
+    if "unaccounted_missing_from_preview_expected_count" in report:
+        preview_missing = int(report.get("unaccounted_missing_from_preview_expected_count") or 0)
+    else:
+        preview_missing = int(report.get("missing_from_preview_expected_count") or 0)
+    preview_extra = int(report.get("extra_vs_preview_expected_count") or 0)
+    live_sent_overlap = int(report.get("live_already_sent_overlap_count") or 0)
+    sendgrid_sent_allowed = bool(report.get("sendgrid_already_sent_overlap_allowed"))
     missing_header_shards = report.get("missing_required_header_shards")
+    missing_header_count = len(missing_header_shards) if isinstance(missing_header_shards, list) else 0
     missing_header_text = ""
     if isinstance(missing_header_shards, list) and missing_header_shards:
         parts = []
@@ -2874,16 +3149,33 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
                 parts.append(f"{name} missing {missing_text}")
         if parts:
             missing_header_text = " Required header issue(s): " + "; ".join(parts) + "."
-    if sendgrid_sent_overlap > 0:
-        message = f"SendGrid queue blocked: {sendgrid_sent_overlap} already sent through SendGrid."
-    elif str(report.get("message") or "").strip():
-        message = str(report.get("message"))
+    explicit_message = str(report.get("message") or "").strip()
+    unsafe_reasons = {str(reason) for reason in (report.get("unsafe_reasons") or []) if str(reason or "").strip()}
+    count_violations = reject_overlap + outside_checked + outside_intended + source_reject_overlap + missing_header_count + preview_missing + preview_extra + live_sent_overlap
+    if "SENDGRID_ALREADY_SENT_OVERLAP" in unsafe_reasons and not sendgrid_sent_allowed:
+        count_violations += sendgrid_sent_overlap
+    real_error_reasons = unsafe_reasons - {
+        "TRIAGED_REJECT_OVERLAP",
+        "OUTSIDE_CHECKED_OUTPUT",
+        "OUTSIDE_INTENDED_SOURCE",
+        "INTENDED_SOURCE_OVERLAPS_REJECT",
+        "SENDGRID_ALREADY_SENT_OVERLAP",
+        "MISSING_REQUIRED_HEADERS",
+        "LIVE_ALREADY_SENT_OVERLAP",
+    }
+    if count_violations <= 0 and not explicit_message and not real_error_reasons:
+        return None
+    if explicit_message:
+        message = explicit_message
     else:
         message = (
             "Live recipient queue is not safe to send. "
             f"{reject_overlap} email(s) overlap triaged_reject, "
             f"{outside_checked} are outside the latest checked output, and "
-            f"{outside_intended} are outside the intended source."
+            f"{outside_intended} are outside the intended source. "
+            f"{preview_missing} expected preview row(s) are missing without accounting, "
+            f"{preview_extra} live row(s) are not in the selected preview, and "
+            f"{live_sent_overlap} live row(s) already appear in authoritative sent logs."
             f"{missing_header_text} "
             "Freeze sending and rebuild queues from the current campaign source."
         )
@@ -3528,10 +3820,10 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     # tmux session, detect them via the process table and mark the matching
     # snapshots as running so the UI reflects actual live senders.
     try:
-        running_profiles = _detect_running_send_shard_profiles()
+        running_profiles = _detect_running_send_shard_profiles() | locked_sender_profiles()
         if running_profiles:
             for s in snapshots:
-                if s.name in SENDGRID_PROFILES and s.name in running_profiles:
+                if s.name in running_profiles:
                     if not profile_is_active(s):
                         _apply_process_runtime_fallback(s)
     except Exception:
@@ -3683,6 +3975,28 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         auto_stop_events=auto_stop_events,
         private_bounce_guard=private_bounce_guard,
     )
+    for provider_report in (private_queue_safety, sendgrid_queue_safety):
+        if bool(provider_report.get("safe")) and bool(provider_report.get("partial_consumption_verified")):
+            provider_label = str(provider_report.get("affected_provider") or provider_report.get("provider") or "queue").replace("_", " ").title()
+            alerts.append(
+                {
+                    "severity": "info",
+                    "title": f"{provider_label} queue verified",
+                    "message": (
+                        str(provider_report.get("message") or "Queue partially consumed — remaining recipients verified safe.")
+                        + " "
+                        + f"Original planned: {int(provider_report.get('expected_preview_unique_emails') or 0):,}. "
+                        + f"Accounted sent/skipped: {int(provider_report.get('accounted_missing_from_preview_expected_count') or 0):,}. "
+                        + f"Remaining: {int(provider_report.get('live_preview_unique_emails') or 0):,}. "
+                        + f"Unsafe extras: {int(provider_report.get('extra_vs_preview_expected_count') or 0):,}. "
+                        + f"Already-sent overlap in live queue: {int(provider_report.get('live_already_sent_overlap_count') or 0):,}."
+                    ),
+                    "source_function": "dashboard_core.build_dashboard_snapshot",
+                    "blocks_sending": False,
+                    "blocking_label": "Info",
+                    "affected_provider": str(provider_report.get("affected_provider") or provider_report.get("provider") or ""),
+                }
+            )
     for provider_report in (private_queue_safety, sendgrid_queue_safety):
         queue_alert = queue_safety_alert(provider_report)
         if queue_alert:

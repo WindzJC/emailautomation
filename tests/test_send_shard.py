@@ -101,6 +101,97 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(120, profile["cooldown_seconds"])
         self.assertEqual("12:00", profile["stop_at_local"])
 
+    def test_attempt_outcome_sent_counts_as_authoritative_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_domain_log.csv"
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-06-25T09:20:00+00:00,author@example.test,ATTEMPT,outcome=sent sg_message_id=abc\n",
+                encoding="utf-8",
+            )
+
+            self.assertIn("author@example.test", send_shard.load_already_done(log_path))
+            self.assertTrue(send_shard.email_logged_sent(log_path, "author@example.test"))
+            self.assertTrue(send_shard.email_logged_authoritative_sent_any([log_path], "author@example.test"))
+
+    def test_send_idempotency_reservation_blocks_duplicate_campaign_provider_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="campaign-a",
+                    provider="sendgrid",
+                    email="author@example.test",
+                    profile="sendgrid_annette",
+                    queue_file="recipients_sendgrid_1.csv",
+                    db_path=db_path,
+                )[0]
+            )
+            self.assertFalse(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="campaign-a",
+                    provider="sendgrid",
+                    email="AUTHOR@example.test",
+                    profile="sendgrid_annette",
+                    queue_file="recipients_sendgrid_1.csv",
+                    db_path=db_path,
+                )[0]
+            )
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="campaign-a",
+                    provider="private",
+                    email="author@example.test",
+                    profile="private_jc",
+                    queue_file="recipients_private_jc.csv",
+                    db_path=db_path,
+                )[0]
+            )
+
+    def test_claim_queue_row_atomically_removes_single_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            queue_path.write_text(
+                "Email,FirstName\n"
+                "author@example.test,Ada\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(send_shard.claim_queue_row(queue_path, "author@example.test"))
+            self.assertFalse(send_shard.claim_queue_row(queue_path, "author@example.test"))
+            self.assertNotIn("author@example.test", queue_path.read_text(encoding="utf-8"))
+
+    def test_profile_runtime_lock_prevents_duplicate_profile_acquire(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(send_shard, "STATE_DIR", Path(tmpdir)):
+                lock = send_shard.acquire_profile_runtime_lock("sendgrid_annette")
+                with lock:
+                    status = send_shard.profile_runtime_lock_status("sendgrid_annette")
+                    self.assertTrue(status["locked"])
+                    with self.assertRaises(RuntimeError):
+                        with send_shard.acquire_profile_runtime_lock("sendgrid_annette"):
+                            pass
+
+                self.assertFalse(send_shard.profile_runtime_lock_status("sendgrid_annette")["locked"])
+
+    def test_managed_dashboard_profile_refuses_stale_root_queue_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            shards.mkdir(parents=True)
+            root_queue = base / "recipients_sendgrid_1.csv"
+            shard_queue = shards / "recipients_sendgrid_1.csv"
+            profile = {**send_shard.PROFILES["sendgrid_annette"], "csv": "recipients_sendgrid_1.csv"}
+
+            with patch.object(send_shard, "SHARDS_DIR", shards), patch.dict(
+                send_shard.PROFILES,
+                {"sendgrid_annette": profile},
+                clear=False,
+            ):
+                self.assertFalse(send_shard.managed_dashboard_queue_path_allowed("sendgrid_annette", root_queue))
+                self.assertTrue(send_shard.managed_dashboard_queue_path_allowed("sendgrid_annette", shard_queue))
+
     def _build_sendgrid_runtime_fixture(self, tmpdir: str) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path, dict[str, object]]:
         base = Path(tmpdir)
         shards = base / "data" / "shards"

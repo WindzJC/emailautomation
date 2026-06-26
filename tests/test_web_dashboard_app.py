@@ -8,6 +8,7 @@ import unittest
 APP_JS = Path(__file__).resolve().parents[1] / "web_dashboard" / "app.js"
 INDEX_HTML = Path(__file__).resolve().parents[1] / "web_dashboard" / "index.html"
 STYLES_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "styles.css"
+LIVE_DASHBOARD_PY = Path(__file__).resolve().parents[1] / "live_dashboard.py"
 
 
 class WebDashboardAppTests(unittest.TestCase):
@@ -82,14 +83,23 @@ class WebDashboardAppTests(unittest.TestCase):
             "dispatchPreviewMatchesCurrentSelection",
             "currentDispatchPlanKey",
             "leadsImportantDispatchCap",
+            "leadsImportantDispatchCampaignType",
+            "selectedImportantDispatchCampaignType",
+            "selectedImportantDispatchSourceMode",
+            "syncImportantDispatchCampaignSource",
+            "recontact_cold",
+            "cleaned",
             "/api/leads/dispatch-important/preview",
             "/api/leads/dispatch-important/confirm",
             "Dispatch blocked: stop active senders first",
             "Confirm Dispatch blocked",
             "activeSenderSummary",
-            "Preflight",
+            "dispatchPreviewActionBlockReason",
             "dispatchPreviewBlockReason",
-            "leadsImportantDispatchPreviewBtn.disabled = previewBusy",
+            "dispatchSummaryMatchesCurrentSource",
+            "currentDispatchConfirmed",
+            "leadsImportantDispatchPreviewTopBtn",
+            "button.disabled = previewBusy",
             "Preview did not save. Please retry.",
             "Retry Preview Dispatch",
             "lastImportantDispatchPreviewFeedback",
@@ -98,8 +108,172 @@ class WebDashboardAppTests(unittest.TestCase):
             "Confirm Dispatch failed. Retry Confirm Dispatch.",
             "Confirm Dispatch is running.",
             "rows_to_add_sendgrid_5",
+            "sendgrid_zero_reason",
+            "SendGrid",
+            "SendGrid shards",
+            "shardsSlash",
+            "total_planned_unique_count",
+            "Unique",
+            "Duplicates",
+            "Skipped",
+            "Already contacted",
+            "Already sent",
+            "Sent-log overlap",
+            "Skipped math",
+            "Why only",
+            "History filter excluded",
+            "cold-safe leads remain",
+            "planned_authoritative_sent_overlap_count",
+            "skippedMathMismatch",
+            "dispatchPreviewRouteSummary",
+            "dispatchConfirmSafetyState",
+            "Ready to confirm Fresh Cold queue",
+            "Confirm locked — review preview",
+            "Confirm locked — rerun preview",
+            "recontact_recency_override",
+            "recontactRecencyOverrideRequired",
+            "importantDispatchConfirmButtonLabel",
+            "SAFER_RECONTACT_SOURCE_FILENAME",
+            "sourcePathMatchesSaferRecontact",
+            "isSaferRecontactSource",
+            "isCurrentSaferRecontactSource",
+            "dispatchSourceDisplayName",
+            "dispatchSourceDetailLabel",
+            "Safer recontact CSV — not found in active history",
+            "Safer Pool Selected",
+            "RED risk.",
+            "dispatch_source_kind",
+            "Not recommended: most leads were contacted recently.",
+            "Fresh Cold Campaign",
+            "Recontact Campaign",
+            "Safer Recontact Campaign",
+            "Create safer recontact leads failed:",
+            "safer recontact leads created.",
+            "safer candidates",
+            "safer leads created",
+            "Not recommended — ${percentLabel(recency.foundRatio)} already in active history.",
+            "Use Safer Pool",
+            "useSaferRecontactPoolAsSelectedSource",
+            "if (lastSaferRecontactSummary?.output_path)",
+            "void createSaferRecontactPool();",
+            "/api/leads/dispatch-important/safer-recontact-pool",
+            "source row",
+            "Preview required for actual sendable count.",
+            "cold-safe lead",
+            "percentLabel(recency.foundRatio)",
+            "percentLabel(recency.seenThisMonthRatio)",
+            "Do not confirm full recontact —",
+            "Confirm Full Recontact Queue",
+            "Confirm Fresh Cold Queue",
+            "Confirm Safer Recontact Queue",
+            "Confirm locked — review preview",
         ]:
             self.assertIn(expected, source)
+        self.assertIn("previewStatus = currentPreviewReady", source)
+        self.assertLess(source.index("previewStatus = currentPreviewReady"), source.index("importantLeadDispatchPreviewLoading", source.index("previewStatus = currentPreviewReady")))
+        self.assertNotIn("sendable</b>", source)
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        for expected in [
+            "leads-command-center",
+            "leads-dispatch-mode-cards",
+            "leads-dispatch-campaign-type",
+            "<option value=\"cold\">Fresh Cold — excludes prior contacts</option>",
+            "<option value=\"recontact_cold\">Recontact — allows prior contacts</option>",
+            "<option value=\"triaged_keep\">Fresh Cold Keep</option>",
+            "<option value=\"cleaned\">Recontact Pool / Checked Output</option>",
+            "leads-recontact-recency-override",
+            "I understand this full recontact campaign includes recently contacted leads.",
+        ]:
+            self.assertIn(expected, html)
+
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        for expected in [
+            ".leads-command-center",
+            ".leads-command-section",
+            ".dispatch-mode-card",
+            ".dispatch-status-banner",
+            ".dispatch-technical-select",
+            ".recontact-override",
+        ]:
+            self.assertIn(expected, styles)
+
+    def test_dispatch_preview_renders_backend_blocked_response(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "function previewDispatchBlockedFeedback",
+            "errorCode === \"triage_not_ready\"",
+            "Current staged Fast Triage Keep is empty.",
+            "Run Check Leads / Fast Triage first.",
+            "Retry action:",
+            "Source path:",
+            "err?.payload",
+            "Boolean(payload?.blocked) || Boolean(payload?.error)",
+            "Preview Dispatch request started.",
+            "Preview Dispatch API failure:",
+            "Dispatch preview blocked:",
+        ]:
+            self.assertIn(expected, source)
+
+        fetch_start = source.index("async function fetchJson")
+        fetch_end = source.index("function renderLeadsMappingOptions", fetch_start)
+        fetch_body = source[fetch_start:fetch_end]
+        self.assertIn("error.payload = data;", fetch_body)
+        self.assertIn("error.status = response.status;", fetch_body)
+
+        preview_start = source.index("async function previewImportantLeadDispatch")
+        preview_end = source.index("async function confirmImportantLeadDispatch", preview_start)
+        preview_body = source[preview_start:preview_end]
+        self.assertIn("previewDispatchBlockedFeedback(payload", preview_body)
+        self.assertIn("lastImportantDispatchPreviewState = blocked ? \"blocked\" : \"failed\";", preview_body)
+        self.assertIn("renderImportantDispatch(lastImportantDispatch);", preview_body)
+        self.assertNotIn("confirmImportantLeadDispatch(", preview_body)
+
+    def test_dispatch_preview_source_state_is_authoritative_for_selected_eligibility(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+
+        plan_start = source.index("function currentDispatchPlanKey")
+        plan_end = source.index("function dispatchPreviewMatchesCurrentSelection", plan_start)
+        plan_body = source[plan_start:plan_end]
+        for expected in [
+            "dispatchSourceForSelectedMode()",
+            "source.dispatch_source_path",
+            "source.dispatch_source_exists",
+            "source.dispatch_source_row_count",
+            "source.dispatch_eligible_row_count",
+            "source.verification_file_mtime",
+        ]:
+            self.assertIn(expected, plan_body)
+        self.assertLess(plan_body.index("source.dispatch_source_path"), plan_body.index("els.leadsImportantDispatchCap"))
+
+        render_start = source.index("function renderImportantDispatch")
+        render_end = source.index("function renderLeadsShardResults", render_start)
+        render_body = source[render_start:render_end]
+        self.assertIn("Selected source rows", render_body)
+        self.assertIn("Writable", render_body)
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        self.assertIn("Dispatch Preview", html)
+
+        funnel_start = source.index("function renderLeadFunnelSummary")
+        funnel_end = source.index("function formatOperatorCount", funnel_start)
+        funnel_body = source[funnel_start:funnel_end]
+        self.assertIn("Historical/canonical files", funnel_body)
+        self.assertIn("Current staged run", funnel_body)
+
+        count_start = backend.index("def _csv_count_from_status_label")
+        count_end = backend.index("def _csv_funnel_stage", count_start)
+        count_body = backend[count_start:count_end]
+        self.assertIn("return 0", count_body)
+        self.assertLess(count_body.index("return 0"), count_body.index("path = default_path"))
+
+        verify_start = backend.index("def verify_important_leads")
+        verify_end = backend.index("@app.get(\"/api/leads/verify-important/job", verify_start)
+        verify_body = backend[verify_start:verify_end]
+        self.assertIn("if mode != TRIAGE_MODE_STRICT:", verify_body)
+        self.assertIn("payload.verified_path if payload else current_keep", verify_body)
+        self.assertIn("payload.rejected_path if payload else current_paths[\"rejected_path\"]", verify_body)
+        self.assertIn("payload.quarantine_path if payload else current_paths[\"quarantine_path\"]", verify_body)
+        self.assertIn("important_leads_triage_paths=_important_triage_path_labels_for_state", verify_body)
 
     def test_intake_mode_label_prefers_current_status_over_selector(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -107,6 +281,21 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group(0)
         self.assertLess(body.index("status?.latest_master_check?.intake_mode"), body.index("els.leadsImportantIntakeMode?.value"))
+
+    def test_snapshot_fallback_status_is_not_scary_disconnected(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "let socketLive = false;",
+            "let snapshotFallbackHealthy = false;",
+            "Snapshot connected",
+            "snapshotFallbackHealthy = response.ok;",
+            "if (!socketLive) setConnectionState(false);",
+        ]:
+            self.assertIn(expected, source)
+        start = source.index("function setConnectionState(live)")
+        end = source.index("function showMessage", start)
+        body = source[start:end]
+        self.assertLess(body.index("Snapshot connected"), body.index("Ops socket disconnected"))
 
     def test_leads_run_safety_card_reports_wait_blocked_freshness_and_stale_pipeline(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -118,7 +307,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Current Run Safety",
             "WAIT",
             "leads-current-run-panel",
-            "Advanced run details",
+            "Advanced diagnostics",
         ]:
             self.assertIn(expected, markup)
 
@@ -129,8 +318,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "<col class=\"lead-funnel-stage-col\"",
             "<col class=\"lead-funnel-value-col\"",
             "<th>Stage</th>",
-            "<th>Current live</th>",
-            "<th>Next batch</th>",
+            "<th>Historical/canonical files</th>",
+            "<th>Current staged run</th>",
             "<tr>",
             "<td class=\"lead-funnel-stage\">",
             "<td class=\"lead-funnel-value\">",
@@ -364,104 +553,214 @@ class WebDashboardAppTests(unittest.TestCase):
             "Review/Quarantine rows are not dispatched automatically.",
             "soft_warning_counts",
             "hard_reject_counts",
-            "already_contacted is a send-history protection, not a lead-quality rejection.",
             "Already Contacted Evidence",
         ]:
             self.assertIn(expected, source)
-        for expected in [
-            "leads-important-intake-mode",
-            "<option value=\"standard\" selected>Standard</option>",
-            "<option value=\"manual_author_research\">Manual Author Research</option>",
-        ]:
-            self.assertIn(expected, html)
+        self.assertIn('intake_mode: els.leadsImportantIntakeMode?.value || "standard"', source)
+        self.assertNotIn("leads-important-intake-mode", html)
+        self.assertNotIn("<option value=\"manual_author_research\">Manual Author Research</option>", html)
 
     def test_leads_workspace_uses_operator_first_layout(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
+        leads_start = html.index('<section id="leads-view"')
+        leads_end = html.index("</main>", leads_start)
+        leads_html = html[leads_start:leads_end]
         styles = STYLES_CSS.read_text(encoding="utf-8")
 
         for expected in [
-            "Current Run",
+            "Leads Operations",
+            "Clean, triage, and prepare lead sources.",
+            "Command Center",
+            "Prepare Dispatch",
+            "leads-control-bar",
+            "leads-ops-bar",
+            "Upload / Source / Check",
+            "Source actions",
+            "leads-important-upload-file",
+            "leads-important-upload-check-btn",
+            "leads-important-check-btn",
+            "leads-important-dispatch-preview-top-btn",
             "Check Leads",
-            "Lead Triage",
-            "Preview &amp; Dispatch",
-            "Active Alerts",
+            "leads-control-check-chips",
+            "Select source and mode",
+            "Dispatch Preview",
+            "Confirm queue",
+            "Start Senders",
+            "Preview Dispatch",
+            "Confirm queue",
+            "Advanced diagnostics",
             "leads-current-run-panel",
+            "leads-workflow-task-list",
+            "leads-command-center",
+            "leads-campaign-command",
+            "leads-preview-command",
+            "leads-confirm-command",
+            "leads-start-command",
+            "leads-page-title",
+            "leads-current-queue-note",
+            "leads-dispatch-current-queue-note",
+            "Finish current JC queue before preparing the next dispatch.",
+            "Changing source changes the eligible count.",
             "leads-operator-status-strip",
             "leads-workflow-status-banner",
             "leads-active-alerts",
-            "Advanced run details",
-            "Advanced file details",
-            "Debug state",
-            "Raw paths",
-            "leads-important-intake-mode",
-            "<option value=\"standard\" selected>Standard</option>",
-            "<option value=\"manual_author_research\">Manual Author Research</option>",
         ]:
-            self.assertIn(expected, html)
+            self.assertIn(expected, leads_html)
+        for old_heading in [
+            "Recommended Next Action",
+            "Workflow and Source",
+            "Workflow Progress",
+            "Current Source Summary",
+            "Advanced run details",
+            "STEP 1",
+            "Lead Triage",
+            "Active Alerts",
+            "Alert details",
+            "Raw paths",
+            "Run/debug details",
+            "Debug state",
+            "Safety Rule",
+            "One sender route per lead",
+            "leads-check-section",
+            "leads-triage-section",
+            "leads-alerts-section",
+        ]:
+            self.assertNotIn(old_heading, leads_html)
+        self.assertEqual(leads_html.count('class="leads-control-bar leads-ops-bar"'), 1)
+        self.assertEqual(leads_html.count('id="leads-workflow-status-banner"'), 1)
+        self.assertEqual(leads_html.count('id="leads-workflow-task-list"'), 1)
+        self.assertEqual(leads_html.count('id="leads-current-run-panel"'), 1)
+        self.assertEqual(leads_html.count('class="leads-command-main"'), 1)
+        self.assertEqual(leads_html.count('class="leads-command-section leads-preview-command"'), 1)
+        self.assertEqual(leads_html.count('class="leads-command-section leads-confirm-command"'), 1)
+        self.assertEqual(leads_html.count('class="leads-collapsible advanced-details leads-advanced-diagnostics"'), 1)
+        self.assertEqual(leads_html.count("Dispatch Preview"), 1)
+        self.assertNotIn("Writable after history filtering", leads_html)
+        self.assertNotIn("Private JC planned", leads_html)
+        self.assertNotIn("Advanced dispatch details", source)
+        action_start = leads_html.index('class="leads-control-actions"')
+        action_end = leads_html.index("</div>", action_start)
+        action_html = leads_html[action_start:action_end]
+        self.assertLess(action_html.index("Check Leads"), action_html.index("Upload &amp; Check"))
+        self.assertLess(action_html.index("Upload &amp; Check"), action_html.index("Preview Dispatch"))
 
         for expected in [
             "renderLeadsCurrentRunPanel",
+            "renderLeadsWorkflowTaskList",
+            "renderLeadsCurrentQueueNote",
             "currentRunWorkflowState",
             "currentRunPreviewBlockMessage",
-            "Current run ready",
-            "leads ready for dispatch",
-            "will use BookTitle fallback",
-            "Next step:",
-            "Ready to preview",
+            "Source ready for preview",
+            "Source Summary",
+            "Input",
+            "Cleaned",
+            "Rejected",
+            "Triage Keep",
+            "Triage Reject",
+            "Eligible checked output",
+            "Check Leads",
+            "Triage",
+            "Choose Campaign",
+            "Preview Dispatch",
+            "Confirm Queue",
+            "Start Senders",
+            "Locked until preview is current and safe",
+            "Locked until queues exist",
+            "safer_recontact_source_summary",
+            "lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary",
+            "active history ·",
+            "safer candidates",
+            "use_safer_recontact",
+            "Source:",
+            "selectedDispatchSourceLabel",
+            "leads-dispatch-section-deferred",
+            "Counts below describe the current checked and triaged source only.",
+            "leadsControlCheckResult",
+            "Current queue exists: Private JC",
+            "Sender controls are on Dashboard.",
+            "Reason ledger and queues",
+            "Selected source has",
+            "broader than the confirmed safe source",
             "Preview blocked: current staged keep is empty",
             "Preview blocked: Fast Triage has not completed",
             "Preview blocked: source file missing",
-            "Queue safe to send",
-            "Queue blocked:",
-            "Dispatch complete",
-            "queued",
-            "Private JC",
-            "SendGrid",
-            "Skipped",
-            "Next step: Start SendGrid / Start sending",
-            "New staged run not ready — previous dispatch is queued.",
-            "Private JC auth issue — affects JC/private bounce sync only",
             "renderLeadsOperatorStatusStrip",
             "renderLeadsWorkflowStatusBanner",
+            "Safety Banner",
             "renderLeadsActiveAlerts",
+            "leads-alert-summary-row",
+            "Safety messages",
+            "New dispatch source warning",
             "Check complete. Next step: Run Fast Triage.",
             "Fast Triage running...",
             "Fast Triage complete. Preview Dispatch is ready.",
-            "No current preview yet. Next step: Click Preview Dispatch.",
+            "No preview yet.",
+            "Run Preview Dispatch to calculate writable recipients.",
             "Preview failed. Retry Preview Dispatch.",
             "Preview blocked.",
             "Preview/source/cap mismatch. Retry Preview Dispatch.",
-            "No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.",
             "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes.",
             "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically.",
-            "Last confirmed dispatch — not the current upload",
             "Manual Author Research mode keeps rows with valid AuthorName and AuthorEmail when no hard safety blocker exists. Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body. Missing proof/enrichment fields are warnings, not dispatch blockers.",
             "Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body.",
             "Soft warnings that did not block Keep.",
             "Review/Quarantine rows are not dispatched automatically.",
             "SendGrid added 0 rows because the selected rows were excluded before queue write",
-            "already_contacted is a send-history protection, not a lead-quality rejection.",
             "Advanced file details",
-            "Advanced dispatch details",
+            "const previewMetricsMarkup = dispatchPreview",
+            "dispatch-preview-empty",
+            "Sent-log overlap",
+            "Skipped math",
+            "Review required",
+            "sentLogOverlap",
+            "Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons",
+            "History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()}",
+            "Use Safer Pool",
+            "workflow-banner-inline",
+            "workflow-banner-chip",
+            "leads-control-check-result",
+            "dispatch-preview-empty",
+            "Selected source rows:",
         ]:
             self.assertIn(expected, source)
 
         for expected in [
+            ".leads-page-title",
+            ".leads-current-queue-note",
+            ".leads-control-bar",
+            ".leads-ops-bar",
+            ".leads-command-main",
+            ".leads-command-column",
             ".leads-current-run-panel",
+            ".leads-workflow-task-list",
+            ".leads-command-center",
+            ".leads-command-section",
+            ".workflow-tracker-row",
+            ".workflow-track-step-good",
+            ".workflow-track-step-warn",
+            ".leads-dispatch-section-deferred",
+            ".leads-dispatch-current-queue-note",
+            ".leads-alert-summary-row",
+            ".leads-alert-details",
+            ".leads-advanced-diagnostics",
             ".current-run-card",
-            ".current-run-step-strip",
-            ".current-run-hero",
+            ".current-run-summary-line",
             ".current-run-next-action",
             ".current-run-blocker",
-            ".current-run-auth-warning",
-            ".workflow-staged-warning",
+            ".lead-triage-details-drawer",
             ".operator-status-strip",
             ".leads-workflow-status-banner",
-            ".workflow-step-grid",
+            ".workflow-banner-inline",
+            ".workflow-banner-chip",
+            ".workflow-banner-meta",
+            ".leads-control-check-chips",
+            ".leads-source-actions-label",
+            ".dispatch-preview-empty",
             ".btn.is-loading::before",
             ".btn.is-next-action:not(:disabled)",
             ".dispatch-next-step-banner",
+            ".dispatch-step-subhead",
             ".operator-workflow-section",
             ".advanced-details",
             ".leads-active-alerts",
@@ -469,13 +768,64 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
-        self.assertIn('<details class="leads-collapsible advanced-details advanced-file-details">', html)
-        self.assertIn('<details class="leads-collapsible advanced-details run-readiness-advanced">', html)
-        self.assertIsNotNone(re.search(
-            r"<details class=\"leads-collapsible advanced-details advanced-file-details\">.*?leads-important-output-path",
-            html,
-            re.DOTALL,
-        ))
+        self.assertIn("#leads-view .leads-page-title {\n  order: 1;", styles)
+        self.assertIn("#leads-view .leads-command-center {\n  order: 2;", styles)
+        self.assertIn("grid-template-columns: minmax(0, 42%) minmax(0, 58%) !important;", styles)
+        self.assertIn("position: static !important;", styles)
+        self.assertIn("transform: none !important;", styles)
+        self.assertIn("overflow-wrap: anywhere;", styles)
+        self.assertIn("width: min(100%, 150px);", styles)
+        self.assertIn("max-height: none;", styles)
+        self.assertIn("max-height: 54px;", styles)
+        self.assertIn("#leads-view #leads-important-check-meta", styles)
+        self.assertIn("white-space: normal;", styles)
+        self.assertIn("text-overflow: clip;", styles)
+        self.assertNotIn("leads-current-live-dispatch-card", leads_html)
+        self.assertNotIn("current-live-dispatch-card", styles)
+
+        tab_start = source.index("function applyDashboardTab()")
+        tab_end = source.index("function isOpsTabVisible()", tab_start)
+        tab_body = source[tab_start:tab_end]
+        self.assertIn("const leadsActive = activeDashboardTab === \"leads\" && !wallboardMode;", tab_body)
+        self.assertIn("mountExclusiveDashboardPanel(leadsActive);", tab_body)
+        self.assertIn("els.opsTabBtn.classList.toggle(\"is-active\", !leadsActive);", tab_body)
+        self.assertIn("els.leadsTabBtn.classList.toggle(\"is-active\", leadsActive);", tab_body)
+        self.assertIn("els.opsView.hidden = leadsActive;", tab_body)
+        self.assertIn("els.leadsView.hidden = !leadsActive;", tab_body)
+        self.assertIn("els.opsView.setAttribute(\"aria-hidden\", String(leadsActive));", tab_body)
+        self.assertIn("els.leadsView.setAttribute(\"aria-hidden\", String(!leadsActive));", tab_body)
+        self.assertIn("els.opsView.setAttribute(\"inert\", \"\");", tab_body)
+        self.assertIn("els.leadsView.setAttribute(\"inert\", \"\");", tab_body)
+
+        self.assertNotIn("// --- TAB VISIBILITY GUARD ---", source)
+        self.assertNotIn("// HARD TAB BODY CLASS FIX", source)
+        self.assertNotIn("/* HARD TAB VISIBILITY FIX */", styles)
+
+        self.assertIn('<details class="leads-collapsible advanced-details leads-advanced-diagnostics">', html)
+        self.assertNotIn("advanced-file-details", html)
+        self.assertNotIn("run-readiness-advanced", html)
+
+    def test_dashboard_tabs_mount_only_active_panel_in_live_dom(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "function mountExclusiveDashboardPanel(leadsActive)",
+            "ensureTabPanelMountAnchors();",
+            "if (els.opsView?.isConnected) els.opsView.remove();",
+            "if (els.leadsView?.isConnected) els.leadsView.remove();",
+            "insertAfterAnchor(tabPanelMounts.opsAnchor, els.opsView);",
+            "insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);",
+        ]:
+            self.assertIn(expected, source)
+
+        apply_start = source.index("function applyDashboardTab()")
+        apply_end = source.index("function isOpsTabVisible()", apply_start)
+        body = source[apply_start:apply_end]
+        self.assertLess(body.index("mountExclusiveDashboardPanel(leadsActive);"), body.index("els.opsView.classList.toggle"))
+
+        self.assertIn("#leads-view.leads-workspace:not([hidden])", styles)
+        self.assertNotIn("#leads-view.leads-workspace {\n  display: grid;", styles)
 
     def test_current_run_operator_panel_hides_stale_dispatch_noise_from_main_view(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -484,21 +834,81 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("data-leads-next-action", source)
         self.assertIn('action === "preview_dispatch"', source)
         self.assertIn('action === "confirm_dispatch"', source)
-        self.assertIn("Last confirmed dispatch — not the current upload", source)
-        self.assertIn("confirmedDispatchQueueState", source)
-        self.assertIn("confirmedQueue.liveMatches", source)
-        self.assertIn("No leads ready for dispatch yet", source)
-        self.assertLess(source.index("confirmedQueue.liveMatches"), source.index("No leads ready for dispatch yet"))
         zero_add_index = source.index("SendGrid added 0 rows.")
-        advanced_index = source.rfind("<summary>Advanced dispatch details</summary>", 0, zero_add_index)
-        self.assertGreater(advanced_index, -1)
+        dispatch_function_start = source.index("function renderImportantDispatch")
+        self.assertGreater(zero_add_index, dispatch_function_start)
+        self.assertNotIn("<summary>Advanced dispatch details</summary>", source[dispatch_function_start:zero_add_index])
         self.assertIn("Number(queue.count || 0) > 0 && !hasCaseInsensitiveField(queue.fields, \"BookTitle\")", source)
+
+    def test_leads_live_dispatch_source_truth_is_separate_from_new_preview(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "currentLiveDispatchState",
+            "hasActualLiveQueueActivity",
+            "active_campaign_snapshot",
+            "intended_source_row_count",
+            "latest_confirmed_dispatch",
+            "Private JC pending",
+            "SendGrid pending",
+            "New dispatch source warning",
+            "newDispatchOnlySafetyWarning",
+            "inactiveSendgridBookTitleOnly",
+            "alertLooksLikeNewDispatchSourceWarning",
+            "This warning applies to preparing a new dispatch. It does not block the already confirmed current live dispatch.",
+            "Current live dispatch: Ready",
+            "queueSafetySourceContext",
+            "OUTSIDE_CHECKED_OUTPUT",
+            "Live queues differ from the selected checked output.",
+        ]:
+            self.assertIn(expected, source)
+        start = source.index("function renderLeadsCurrentRunPanel")
+        end = source.index("function renderLeadsWorkflowStatusBanner", start)
+        body = source[start:end]
+        self.assertNotIn("OUTSIDE_CHECKED_OUTPUT", body)
+        self.assertNotIn("current_send_safety", body)
+
+    def test_empty_live_queue_does_not_render_stale_current_live_queue_blocker(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        for expected in [
+            "function activeSenderStateNames",
+            "function activeSenderProcessCount",
+            "function liveRecipientQueueCounts",
+            "function hasActualLiveQueueActivity",
+            "const queueUnsafe = backendQueueUnsafe && hasLiveActivity && !sourceWarningOnly;",
+            "const queueWarnings = backendQueueUnsafe && !queueUnsafe ? backendReasons : [];",
+            "else if (Array.isArray(safety.queueWarnings) && safety.queueWarnings.length)",
+            "sourceWarning ? \"New dispatch source warning\" : \"Inactive live queue warning\"",
+            "blocks: false",
+            "currentLiveDispatchState(status).hasLiveQueue",
+        ]:
+            self.assertIn(expected, source)
+
+        safety_start = source.index("function leadsRunSafety")
+        safety_end = source.index("function dispatchActionBlockReason", safety_start)
+        safety_body = source[safety_start:safety_end]
+        self.assertIn("backendQueueUnsafe", safety_body)
+        self.assertIn("hasActualLiveQueueActivity(status, snapshot)", safety_body)
+        self.assertIn("queueWarnings", safety_body)
+        self.assertNotIn("const queueUnsafe = Object.prototype.hasOwnProperty.call", safety_body)
+
+        alerts_start = source.index("function renderLeadsActiveAlerts")
+        alerts_end = source.index("function renderLeadsRunSafety", alerts_start)
+        alerts_body = source[alerts_start:alerts_end]
+        self.assertIn("New dispatch source warning", alerts_body)
+        self.assertIn("Current live queue blocked", alerts_body)
+        self.assertLess(alerts_body.index("safety.queueWarnings"), alerts_body.index("currentLiveDispatchState(status).hasLiveQueue"))
 
     def test_dashboard_ops_hierarchy_uses_fleet_summary_and_compact_sender_warnings(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
             "total_awaiting_outcome",
-            "Critical Alerts",
+            "Alerts",
+            "Next Action",
+            "summary-alert-counts",
+            "summary-inline-details",
+            "Start JC",
+            "Use the Private JC sender row below.",
             "fleetProfileStatus",
             "renderFleetProfileStrip",
             "renderSummaryInsightList",
@@ -527,8 +937,43 @@ class WebDashboardAppTests(unittest.TestCase):
             ".alert-row",
             ".alerts-progress-row",
             ".alerts-progress-value-row",
+            "--status-green",
+            "--status-amber",
+            "--status-red",
+            ".summary-card-private_jc",
+            ".summary-card-next_action",
+            ".sender-status-pill-good",
         ]:
             self.assertIn(expected, styles)
+
+    def test_sender_status_badge_prefers_active_runtime_before_blocked_queue(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function senderStatusBadge(profile)")
+        end = source.index("function renderSenderStatusConsole", start)
+        body = source[start:end]
+        self.assertLess(body.index('["running", "starting", "sleeping"]'), body.index("queueSafetyBlockedForProfile(profile)"))
+        self.assertLess(body.index('["cooldown", "paused"]'), body.index("queueSafetyBlockedForProfile(profile)"))
+        self.assertIn('return { label: "Running", tone: "good" };', body)
+        self.assertIn('return { label: "Complete", tone: "good" };', body)
+        self.assertIn('return { label: "Resume", tone: "good" };', body)
+        self.assertIn('return { label: "Ready", tone: "good" };', body)
+        self.assertIn('return { label: "Blocked", tone: "bad" };', body)
+        self.assertLess(body.index('return { label: "Complete", tone: "good" };'), body.index("queueSafetyBlockedForProfile(profile)"))
+
+    def test_zero_queue_sender_buttons_show_no_queue(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("Start unavailable — no pending leads.", source)
+        self.assertIn('noPendingQueue ? "No queue" : "Start"', source)
+        self.assertIn("noPendingQueue || (!stopAvailable && !startAvailable)", source)
+        self.assertIn("profilePendingCount(profile) > 0", source)
+        self.assertIn("pendingCount <= 0", source)
+
+    def test_dashboard_next_action_prefers_active_private_jc_monitoring(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('value: "Monitor Private JC"', source)
+        self.assertIn("Private JC is running. Remaining recipients are verified against the confirmed preview.", source)
+        self.assertIn('value: "Resume Private JC"', source)
+        self.assertIn("Queue partially consumed — remaining recipients verified safe.", source)
 
     def test_sendgrid_metric_disclaimer_and_bounce_warnings_render_from_existing_metrics(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -593,16 +1038,11 @@ class WebDashboardAppTests(unittest.TestCase):
             "confirmedSg3",
             "confirmedSg4",
             "confirmedSg5",
-            "Zero-add dispatch stored.",
             "No queue rows will be written.",
             "Nothing to confirm for queue writes because all eligible rows were already queued/skipped",
-            "Last dispatch has no stored assigned preview. Re-run Preview Dispatch before confirming again.",
             "SendGrid added 0 rows because the selected rows were excluded before queue write",
             "already contacted",
             "already sent through SendGrid",
-            "Already Contacted",
-            "SG1",
-            "SG5",
         ]:
             self.assertIn(expected, source)
 
@@ -620,8 +1060,14 @@ class WebDashboardAppTests(unittest.TestCase):
           "toolbar-field-window",
           "toolbar-field-cap",
           "send-cap-note",
+          "ops-progress-strip",
           "ops-progress-shell",
           "ops-alerts-strip",
+          "workspace-metric-details",
+          "ops-progress-summary",
+          "ops-progress-details-toggle",
+          "ops-progress-details",
+          "workspace-metric-drawer",
           "alerts-caption",
           "alerts-grid",
           "alerts-progress",
@@ -632,6 +1078,9 @@ class WebDashboardAppTests(unittest.TestCase):
           "workspace-card-detail-main",
           "detail-stage",
           "Active Alerts",
+          "Run Progress / Alerts",
+          "Run Progress / Alerts details",
+          "View details",
           "Profile Detail",
         ]:
             self.assertIn(expected, source)
@@ -691,6 +1140,14 @@ class WebDashboardAppTests(unittest.TestCase):
             "alert-row-main",
             "renderAlertsProgress",
             "summarizeAlertProgress",
+            "renderProgressSummaryStrip",
+            "syncProgressDetailsToggle",
+            "opsProgressDetailsToggle",
+            "els.opsProgressDetails.open = !els.opsProgressDetails.open",
+            'document.querySelector(".ops-progress-strip")',
+            "data.auth_enabled === false",
+            "is-auth-disabled",
+            "ops-progress-summary-item",
             "messageWithProfile",
             "blocks_sending",
             "Blocks Start",
@@ -698,9 +1155,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "alerts-progress-row",
             "Private Email",
             "SendGrid",
-            "Dispatch Checklist",
-            "Current preview",
-            "Live queue comparison",
+            "Dispatch Preview",
+            "Preview is read-only and writes no queues.",
+            "Duplicate planned emails",
             "quarantine-list-row",
             "quarantine-list-shell",
             "Lead Inspector",

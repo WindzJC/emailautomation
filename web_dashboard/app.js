@@ -9,6 +9,9 @@ const els = {
   healthBanner: document.getElementById("health-banner"),
   alertsGrid: document.getElementById("alerts-grid"),
   alertsProgress: document.getElementById("alerts-progress"),
+  opsProgressSummary: document.getElementById("ops-progress-summary"),
+  opsProgressDetails: document.getElementById("ops-progress-details"),
+  opsProgressDetailsToggle: document.getElementById("ops-progress-details-toggle"),
   alertsCaption: document.getElementById("alerts-caption"),
   summaryGrid: document.getElementById("summary-grid"),
   trendsGrid: document.getElementById("trends-grid"),
@@ -50,6 +53,7 @@ const els = {
   leadsImportantUploadCheckBtn: document.getElementById("leads-important-upload-check-btn"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
   leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
+  leadsControlCheckResult: document.getElementById("leads-control-check-result"),
   leadsImportantCheckResults: document.getElementById("leads-important-check-results"),
   leadsImportantVerifyInputPath: document.getElementById("leads-verify-input-path"),
   leadsImportantVerifyOutputPath: document.getElementById("leads-verify-output-path"),
@@ -75,12 +79,22 @@ const els = {
   leadsQuarantineShell: document.querySelector(".leads-review-shell"),
   leadsImportantDispatchSourceMode: document.getElementById("leads-dispatch-source-mode"),
   leadsImportantDispatchCap: document.getElementById("leads-dispatch-cap"),
+  leadsImportantDispatchCampaignType: document.getElementById("leads-dispatch-campaign-type"),
   leadsImportantDispatchSourceNote: document.getElementById("leads-dispatch-source-note"),
+  leadsDispatchModeCards: document.getElementById("leads-dispatch-mode-cards"),
+  leadsRecommendedNextAction: document.getElementById("leads-recommended-next-action"),
+  leadsRecontactOverrideWrap: document.getElementById("leads-recontact-override-wrap"),
+  leadsRecontactRecencyOverride: document.getElementById("leads-recontact-recency-override"),
+  leadsDispatchSection: document.querySelector(".leads-dispatch-section"),
+  leadsDispatchCurrentQueueNote: document.getElementById("leads-dispatch-current-queue-note"),
   leadsImportantDispatchPreviewBtn: document.getElementById("leads-important-dispatch-preview-btn"),
+  leadsImportantDispatchPreviewTopBtn: document.getElementById("leads-important-dispatch-preview-top-btn"),
   leadsImportantDispatchConfirmBtn: document.getElementById("leads-important-dispatch-confirm-btn"),
   leadsImportantDispatchMeta: document.getElementById("leads-important-dispatch-meta"),
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
+  leadsCurrentQueueNote: document.getElementById("leads-current-queue-note"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsWorkflowTaskList: document.getElementById("leads-workflow-task-list"),
   leadsCurrentRunPanel: document.getElementById("leads-current-run-panel"),
   leadsOperatorStatusStrip: document.getElementById("leads-operator-status-strip"),
   leadsWorkflowStatusBanner: document.getElementById("leads-workflow-status-banner"),
@@ -145,10 +159,13 @@ let importantLeadDispatchJobPollId = "";
 let lastImportantDispatchSource = null;
 let lastImportantDispatchPreview = null;
 let importantLeadDispatchPreviewLoading = false;
+let saferRecontactPoolLoading = false;
 let importantLeadDispatchConfirmLoading = false;
 let lastImportantDispatchPreviewState = "not_generated";
 let lastImportantDispatchPreviewFeedback = null;
 let lastImportantDispatchConfirmFeedback = null;
+let lastSaferRecontactSummary = null;
+let lastSaferRecontactFeedback = null;
 let lastQuarantineReview = null;
 let lastQuarantineReviewLead = null;
 let socketReconnectTimer = null;
@@ -161,11 +178,18 @@ let allFilteredQuarantineSelected = false;
 let quarantinePageSize = 10;
 let quarantinePageIndex = 0;
 let didHydrate = false;
+let socketLive = false;
+let snapshotFallbackHealthy = false;
 let selectedProfileName = "";
 let senderStatusPanel = null;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
 let activeDashboardTab = "ops";
+const tabPanelMounts = {
+  initialized: false,
+  opsAnchor: null,
+  leadsAnchor: null,
+};
 let authState = {
   authEnabled: true,
   authenticated: false,
@@ -212,11 +236,14 @@ function currentTailLines() {
 }
 
 function setConnectionState(live) {
+  socketLive = Boolean(live);
   els.wsIndicator.className = `dot ${live ? "dot-live" : "dot-off"}`;
   if (live) {
     els.wsLabel.textContent = "Ops socket live";
   } else if (isLeadsTabVisible() && lastLeadsStatus) {
     els.wsLabel.textContent = "Leads local snapshot loaded";
+  } else if (snapshotFallbackHealthy && lastSnapshot) {
+    els.wsLabel.textContent = "Snapshot connected";
   } else {
     els.wsLabel.textContent = "Ops socket disconnected";
   }
@@ -239,12 +266,13 @@ function showMessage(message, kind = "success") {
 
 function renderAuthUi() {
   const authenticated = Boolean(authState.authenticated);
+  const authEnabled = Boolean(authState.authEnabled);
   if (els.authStatusLabel) {
     setNodeText(
       els.authStatusLabel,
       authenticated
         ? `Signed in as ${authState.username || "admin"}`
-        : authState.authEnabled
+        : authEnabled
           ? "Signed out"
           : "Auth not configured",
     );
@@ -254,10 +282,19 @@ function renderAuthUi() {
   }
   if (els.page) {
     els.page.classList.toggle("is-authenticated", authenticated);
+    els.page.classList.toggle("is-auth-disabled", !authEnabled);
   }
 }
 
 function showAuthOverlay(message = "") {
+  if (!authState.authEnabled || authState.authenticated) {
+    if (els.page) els.page.classList.add("is-authenticated");
+    if (els.authOverlay) els.authOverlay.hidden = true;
+    if (els.authPanel) els.authPanel.hidden = true;
+    if (els.authForm) els.authForm.hidden = true;
+    if (els.authMessage) setNodeText(els.authMessage, "");
+    return;
+  }
   if (els.authOverlay) {
     els.authOverlay.classList.remove("hidden");
     els.authOverlay.setAttribute("aria-hidden", "false");
@@ -288,9 +325,10 @@ function hideAuthOverlay() {
 }
 
 function setAuthState(nextState = {}) {
+  const authEnabled = nextState.authEnabled ?? authState.authEnabled;
   authState = {
-    authEnabled: nextState.authEnabled ?? authState.authEnabled,
-    authenticated: Boolean(nextState.authenticated),
+    authEnabled,
+    authenticated: !authEnabled || Boolean(nextState.authenticated),
     username: String(nextState.username || ""),
   };
   renderAuthUi();
@@ -309,7 +347,7 @@ async function fetchAuthStatus() {
   }
   setAuthState({
     authEnabled: Boolean(data.auth_enabled),
-    authenticated: Boolean(data.authenticated),
+    authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
     username: data.username || "",
   });
   return data;
@@ -335,7 +373,7 @@ async function submitAuthLogin() {
     });
     setAuthState({
       authEnabled: Boolean(data.auth_enabled),
-      authenticated: Boolean(data.authenticated),
+      authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
       username: data.username || username,
     });
     showMessage("Signed in.", "success");
@@ -393,17 +431,54 @@ function syncLocationState() {
   window.history.replaceState({}, "", url);
 }
 
+function insertAfterAnchor(anchor, node) {
+  if (!anchor || !node || !anchor.parentNode) return;
+  if (node.parentNode === anchor.parentNode && node.previousSibling === anchor) return;
+  anchor.parentNode.insertBefore(node, anchor.nextSibling);
+}
+
+function ensureTabPanelMountAnchors() {
+  if (tabPanelMounts.initialized) return;
+  if (els.opsView?.parentNode) {
+    tabPanelMounts.opsAnchor = document.createComment("ops-view-mount");
+    els.opsView.parentNode.insertBefore(tabPanelMounts.opsAnchor, els.opsView);
+  }
+  if (els.leadsView?.parentNode) {
+    tabPanelMounts.leadsAnchor = document.createComment("leads-view-mount");
+    els.leadsView.parentNode.insertBefore(tabPanelMounts.leadsAnchor, els.leadsView);
+  }
+  tabPanelMounts.initialized = true;
+}
+
+function mountExclusiveDashboardPanel(leadsActive) {
+  ensureTabPanelMountAnchors();
+  if (leadsActive) {
+    if (els.opsView?.isConnected) els.opsView.remove();
+    insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);
+  } else {
+    if (els.leadsView?.isConnected) els.leadsView.remove();
+    insertAfterAnchor(tabPanelMounts.opsAnchor, els.opsView);
+  }
+}
+
 function applyDashboardTab() {
   const leadsActive = activeDashboardTab === "leads" && !wallboardMode;
+  mountExclusiveDashboardPanel(leadsActive);
 
   if (els.opsView) {
     els.opsView.classList.toggle("hidden", leadsActive);
     els.opsView.hidden = leadsActive;
+    els.opsView.setAttribute("aria-hidden", String(leadsActive));
+    if (leadsActive) els.opsView.setAttribute("inert", "");
+    else els.opsView.removeAttribute("inert");
   }
 
   if (els.leadsView) {
     els.leadsView.classList.toggle("hidden", !leadsActive);
     els.leadsView.hidden = !leadsActive;
+    els.leadsView.setAttribute("aria-hidden", String(!leadsActive));
+    if (!leadsActive) els.leadsView.setAttribute("inert", "");
+    else els.leadsView.removeAttribute("inert");
   }
 
   if (els.opsTabBtn) {
@@ -416,6 +491,10 @@ function applyDashboardTab() {
     els.leadsTabBtn.classList.toggle("is-active", leadsActive);
     els.leadsTabBtn.setAttribute("aria-selected", String(leadsActive));
     els.leadsTabBtn.tabIndex = leadsActive ? 0 : -1;
+  }
+
+  if (leadsActive) {
+    initQuarantineInboxDisclosure();
   }
 }
 
@@ -673,6 +752,41 @@ function profileRunSentDisplay(profile) {
   return 0;
 }
 
+function profilePendingCount(profile) {
+  const value = Number(profile?.pending_count ?? profile?.pending ?? 0);
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function queueSafetyCount(queueSafety, key) {
+  const value = Number(queueSafety?.[key] ?? 0);
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function queueSafetyVerifiedSubset(queueSafety) {
+  if (!queueSafety || typeof queueSafety !== "object") return false;
+  return Boolean(queueSafety.partial_consumption_verified)
+    || (
+      queueSafety.safe === true
+      && queueSafetyCount(queueSafety, "expected_preview_unique_emails") > 0
+      && queueSafetyCount(queueSafety, "missing_from_preview_expected_count") > 0
+      && queueSafetyCount(queueSafety, "unaccounted_missing_from_preview_expected_count") === 0
+      && queueSafetyCount(queueSafety, "extra_vs_preview_expected_count") === 0
+      && queueSafetyCount(queueSafety, "live_already_sent_overlap_count") === 0
+    );
+}
+
+function queueSafetyComplete(queueSafety) {
+  if (!queueSafety || typeof queueSafety !== "object") return false;
+  const expected = queueSafetyCount(queueSafety, "expected_preview_unique_emails");
+  if (expected <= 0) return false;
+  return queueSafety.safe === true
+    && queueSafetyCount(queueSafety, "live_preview_unique_emails") === 0
+    && queueSafetyCount(queueSafety, "accounted_missing_from_preview_expected_count") >= expected
+    && queueSafetyCount(queueSafety, "unaccounted_missing_from_preview_expected_count") === 0
+    && queueSafetyCount(queueSafety, "extra_vs_preview_expected_count") === 0
+    && queueSafetyCount(queueSafety, "live_already_sent_overlap_count") === 0;
+}
+
 // Backwards-compatible alias: prefer the UI-only display value when present.
 // Use this helper in rendering code when the displayed "Accepted" count
 // should reflect server-provided `run_sent_display` (fallback to canonical
@@ -832,6 +946,46 @@ function activeSenderProfiles(snapshot = lastSnapshot) {
     : [];
 }
 
+function activeSenderStateNames(snapshot = lastSnapshot) {
+  const activeStates = ["starting", "running", "cooldown", "sleeping"];
+  const stateMaps = [
+    snapshot?.active_sender_states,
+    snapshot?.active_states,
+    snapshot?.sender_active_states,
+  ].filter((value) => value && typeof value === "object" && !Array.isArray(value));
+  return stateMaps.flatMap((states) => Object.entries(states)
+    .filter(([, state]) => activeStates.includes(String(state || "").toLowerCase()))
+    .map(([name]) => String(name || "").trim())
+    .filter(Boolean));
+}
+
+function activeSenderProcessCount(snapshot = lastSnapshot) {
+  const processLists = [
+    snapshot?.active_sender_processes,
+    snapshot?.sender_processes,
+    snapshot?.running_sender_processes,
+  ].filter(Array.isArray);
+  return processLists.reduce((sum, processes) => sum + processes.length, 0);
+}
+
+function liveRecipientQueueCounts(status = lastLeadsStatus) {
+  const privatePending = Number(status?.jc_queue?.count || 0);
+  const sendgridPending = liveSendGridQueueTotal(status);
+  return {
+    privatePending,
+    sendgridPending,
+    total: privatePending + sendgridPending,
+  };
+}
+
+function hasActualLiveQueueActivity(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  const counts = liveRecipientQueueCounts(status);
+  return counts.total > 0
+    || activeSenderProfiles(snapshot).length > 0
+    || activeSenderStateNames(snapshot).length > 0
+    || activeSenderProcessCount(snapshot) > 0;
+}
+
 function safeTimestampMs(value) {
   if (!value) return 0;
   const parsed = Date.parse(value);
@@ -898,9 +1052,19 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   const latestCheckTime = safeTimestampMs(latestCheck.generated_at_utc);
   const latestTriageTime = safeTimestampMs(latestTriage.generated_at_utc);
   const previewTime = safeTimestampMs(latestPreview.generated_at_utc || latestPreview.completed_at_utc || latestPreview.created_at_utc);
-  const queueUnsafe = Object.prototype.hasOwnProperty.call(backendCurrentSafety, "blocked")
+  const backendQueueUnsafe = Object.prototype.hasOwnProperty.call(backendCurrentSafety, "blocked")
     ? Boolean(backendCurrentSafety.blocked)
     : queueSafetyBlocked(snapshot);
+  const hasLiveActivity = hasActualLiveQueueActivity(status, snapshot);
+  const backendReasons = Array.isArray(backendCurrentSafety.reasons)
+    ? backendCurrentSafety.reasons.map((reason) => String(reason || "")).filter(Boolean)
+    : [];
+  const sourceWarningOnly = backendQueueUnsafe && (
+    sourceComparisonOnlySafety(backendCurrentSafety)
+    || backendReasons.every((reason) => isSourceComparisonSafetyReason(reason))
+  );
+  const queueUnsafe = backendQueueUnsafe && hasLiveActivity && !sourceWarningOnly;
+  const queueWarnings = backendQueueUnsafe && !queueUnsafe ? backendReasons : [];
   const bookTitleStatus = recipientQueueBookTitleStatus(status);
   const progress = importantCheckJobProgress(activeCheckJob);
 
@@ -913,8 +1077,8 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
       : null);
 
   const reasons = [];
-  if (Array.isArray(backendCurrentSafety.reasons) && backendCurrentSafety.reasons.length) {
-    reasons.push(...backendCurrentSafety.reasons.map((reason) => String(reason || "")).filter(Boolean));
+  if (queueUnsafe && backendReasons.length) {
+    reasons.push(...backendReasons);
   }
   if (bookTitleStatus.missing.length) {
     reasons.push(`Recipient queues are missing BookTitle: ${bookTitleStatus.missing.join(", ")}.`);
@@ -940,6 +1104,8 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
     checkRunning,
     activeSenders,
     queueUnsafe,
+    queueWarnings,
+    hasLiveActivity,
     progress,
     uploadFilename,
     checkJobId,
@@ -962,8 +1128,12 @@ function dispatchActionBlockReason() {
   return "";
 }
 
+function dispatchPreviewActionBlockReason() {
+  return dispatchActionBlockReason();
+}
+
 function dispatchPreviewBlockReason(dispatchSource = {}) {
-  const actionBlock = dispatchActionBlockReason();
+  const actionBlock = dispatchPreviewActionBlockReason();
   if (actionBlock) return actionBlock;
   if (dispatchSource.dispatch_block_reason) return String(dispatchSource.dispatch_block_reason);
   if (!dispatchSource.dispatch_source_path) return "No triage keep source is selected or the source is missing.";
@@ -998,15 +1168,61 @@ function previewMatchesCurrentSelection() {
   return Boolean(lastShardPreview && lastShardPreview._preview_key === currentShardPlanKey());
 }
 
+function selectedImportantDispatchCampaignType() {
+  return els.leadsImportantDispatchCampaignType?.value || "cold";
+}
+
+function selectedImportantDispatchSourceMode(campaignType = selectedImportantDispatchCampaignType()) {
+  if (campaignType === "recontact_cold") return "cleaned";
+  const selectedMode = els.leadsImportantDispatchSourceMode?.value || "triaged_keep";
+  if (selectedMode === "strict_verified") return "strict_verified";
+  if (selectedMode === "cleaned") return "cleaned";
+  return "triaged_keep";
+}
+
+function syncImportantDispatchCampaignSource() {
+  const sourceSelect = els.leadsImportantDispatchSourceMode;
+  if (!sourceSelect) return;
+  if (selectedImportantDispatchCampaignType() === "recontact_cold") {
+    sourceSelect.value = "cleaned";
+    sourceSelect.disabled = true;
+    sourceSelect.title = "Recontact previews from the checked upload output.";
+    return;
+  }
+  sourceSelect.disabled = false;
+  sourceSelect.title = "";
+  if (sourceSelect.value === "cleaned") sourceSelect.value = "triaged_keep";
+}
+
 function currentDispatchPlanKey() {
+  const selected = dispatchSourceForSelectedMode();
+  const source = selected.source || {};
   return [
-    els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
+    selectedImportantDispatchSourceMode(),
+    String(source.dispatch_source_path || ""),
+    String(source.dispatch_source_exists ?? ""),
+    String(source.dispatch_source_row_count ?? ""),
+    String(source.dispatch_eligible_row_count ?? ""),
+    String(source.verification_file_mtime || ""),
     els.leadsImportantDispatchCap?.value || "all",
+    selectedImportantDispatchCampaignType(),
   ].join("|");
 }
 
 function dispatchPreviewMatchesCurrentSelection() {
   return Boolean(lastImportantDispatchPreview && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey());
+}
+
+function dispatchSummaryMatchesCurrentSource(dispatch = lastImportantDispatch) {
+  if (!dispatch?.generated_at_utc) return false;
+  const selected = dispatchSourceForSelectedMode();
+  const selectedPath = String(selected?.source?.dispatch_source_path || "").trim();
+  const dispatchPath = String(dispatch.dispatch_source_path || "").trim();
+  return Boolean(selectedPath && dispatchPath && selectedPath === dispatchPath);
+}
+
+function currentDispatchConfirmed(dispatch = lastImportantDispatch) {
+  return Boolean(dispatch?.generated_at_utc && dispatchSummaryMatchesCurrentSource(dispatch));
 }
 
 function selectedLeadsMapping() {
@@ -1023,18 +1239,21 @@ function importantLeadPathsPayload() {
     input_path: els.leadsImportantInputPath?.value?.trim() || "",
     output_path: els.leadsImportantOutputPath?.value?.trim() || "",
     rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
-    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
+    dispatch_source_mode: selectedImportantDispatchSourceMode(),
     input_text: els.leadsImportantInputText?.value || "",
   };
 }
 
 function importantLeadDispatchPayload(includePreviewId = false) {
+  const campaignType = selectedImportantDispatchCampaignType();
   const payload = {
     input_path: els.leadsImportantInputPath?.value?.trim() || "",
     output_path: els.leadsImportantOutputPath?.value?.trim() || "",
     rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
-    dispatch_source_mode: els.leadsImportantDispatchSourceMode?.value || "triaged_keep",
+    dispatch_source_mode: selectedImportantDispatchSourceMode(campaignType),
     dispatch_cap: els.leadsImportantDispatchCap?.value || "all",
+    campaign_type: campaignType,
+    recontact_recency_override: Boolean(els.leadsRecontactRecencyOverride?.checked),
   };
   if (includePreviewId) {
     payload.preview_id = lastImportantDispatchPreview?.preview_id || "";
@@ -1612,7 +1831,7 @@ function renderImportantLeadDispatchJob(job) {
     setNodeText(els.leadsImportantDispatchPreviewBtn, "Preview Dispatch");
   }
   if (els.leadsImportantDispatchConfirmBtn) {
-    setButtonBusy(els.leadsImportantDispatchConfirmBtn, active, active ? "Dispatching..." : "Confirm Dispatch");
+    setButtonBusy(els.leadsImportantDispatchConfirmBtn, active, active ? "Dispatching..." : importantDispatchConfirmButtonLabel());
     els.leadsImportantDispatchConfirmBtn.disabled = true;
   }
   if (els.leadsImportantDispatchResults && active) {
@@ -1649,28 +1868,36 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   const previewBlockReason = dispatchPreviewBlockReason(dispatchSource);
   const previewReady = dispatchPreviewMatchesCurrentSelection();
   const previewBlocked = !preview || !previewReady;
-  if (els.leadsImportantDispatchPreviewBtn) {
-    const previewBusy = Boolean(importantLeadDispatchPreviewLoading || activeDispatch);
-    els.leadsImportantDispatchPreviewBtn.disabled = previewBusy;
-    els.leadsImportantDispatchPreviewBtn.title = previewBlockReason || "";
-    if (!previewBusy) {
-      const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
-      setNodeText(els.leadsImportantDispatchPreviewBtn, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
-    }
-    els.leadsImportantDispatchPreviewBtn.classList.toggle(
-      "is-next-action",
-      previewBlocked && !els.leadsImportantDispatchPreviewBtn.disabled,
-    );
+  const safety = dispatchConfirmSafetyState(dispatchSource, preview);
+  const previewButtons = [els.leadsImportantDispatchPreviewBtn, els.leadsImportantDispatchPreviewTopBtn].filter(Boolean);
+  if (previewButtons.length) {
+    const previewBusy = Boolean((importantLeadDispatchPreviewLoading && !previewReady) || activeDispatch);
+    previewButtons.forEach((button) => {
+      button.disabled = previewBusy;
+      button.title = previewBlockReason || "";
+      if (!previewBusy) {
+        const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
+        setNodeText(button, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
+      }
+      button.classList.toggle(
+        "is-next-action",
+        previewBlocked && !button.disabled,
+      );
+    });
   }
   if (els.leadsImportantDispatchConfirmBtn) {
-    const sendersActive = activeSenderProfiles().length > 0;
-    const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
     const confirmBusy = Boolean(importantLeadDispatchConfirmLoading || activeDispatch);
-    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || sourceBlocked || previewBlocked || sendersActive || activeCheck;
-    els.leadsImportantDispatchConfirmBtn.title = previewBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
+    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || !safety.ready;
+    els.leadsImportantDispatchConfirmBtn.title = safety.buttonTitle || previewBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
     if (!confirmBusy) {
+      els.leadsImportantDispatchConfirmBtn.classList.remove("is-loading");
       const retryConfirm = lastImportantDispatchConfirmFeedback?.state === "failed" && !previewBlocked;
-      setNodeText(els.leadsImportantDispatchConfirmBtn, retryConfirm ? "Retry Confirm Dispatch" : "Confirm Dispatch");
+      setNodeText(
+        els.leadsImportantDispatchConfirmBtn,
+        retryConfirm
+          ? "Retry Confirm Dispatch"
+          : safety.buttonLabel,
+      );
     }
   }
 }
@@ -1795,22 +2022,526 @@ function syncImportantVerifyPathInputs(status) {
 function syncImportantDispatchSourceMode(status) {
   const mode = status?.dispatch_source_mode || lastImportantDispatchSource?.dispatch_source_mode || "triaged_keep";
   if (els.leadsImportantDispatchSourceMode) {
-    els.leadsImportantDispatchSourceMode.value = mode === "strict_verified" ? "strict_verified" : "triaged_keep";
+    els.leadsImportantDispatchSourceMode.value = mode === "strict_verified" ? "strict_verified" : mode === "cleaned" ? "cleaned" : "triaged_keep";
   }
   if (els.leadsImportantDispatchCap && !els.leadsImportantDispatchCap.value) {
     els.leadsImportantDispatchCap.value = "all";
   }
+  syncImportantDispatchCampaignSource();
 }
 
 function dispatchSourceForSelectedMode() {
   const status = lastLeadsStatus || {};
-  const selectedMode = els.leadsImportantDispatchSourceMode?.value || status.dispatch_source_mode || "triaged_keep";
+  const selectedMode = selectedImportantDispatchSourceMode();
   const options = status.dispatch_source_options || {};
-  const mode = selectedMode === "strict_verified" ? "strict_verified" : "triaged_keep";
+  const mode = selectedMode === "strict_verified" ? "strict_verified" : selectedMode === "cleaned" ? "cleaned" : "triaged_keep";
   return {
     mode,
     source: options[mode] || status.dispatch_source || {},
   };
+}
+
+function selectedDispatchSourceLabel() {
+  const source = arguments.length > 0 ? arguments[0] : null;
+  const preview = arguments.length > 1 ? arguments[1] : null;
+  if (isCurrentSaferRecontactSource(source, preview)) return "Safer Recontact Pool";
+  const select = els.leadsImportantDispatchSourceMode;
+  if (select?.selectedOptions?.length) {
+    return String(select.selectedOptions[0].textContent || "").trim() || "Selected source";
+  }
+  const selected = dispatchSourceForSelectedMode();
+  return selected.source?.dispatch_source_name || selected.mode || "Selected source";
+}
+
+function dispatchCampaignTypeLabel(value = selectedImportantDispatchCampaignType()) {
+  if (isCurrentSaferRecontactSource(null, lastImportantDispatchPreview)) return "Safer Recontact Pool";
+  return value === "recontact_cold"
+    ? "Recontact — allows prior contacts"
+    : "Fresh Cold — excludes prior contacts";
+}
+
+function dispatchSourceFriendlyLabel(mode = selectedImportantDispatchSourceMode(), source = null, preview = null) {
+  if (isCurrentSaferRecontactSource(source, preview)) return "Safer Recontact Pool";
+  if (mode === "cleaned") return "Recontact Pool / Checked Output";
+  if (mode === "strict_verified") return "Strict Public Proof";
+  return "Fresh Cold Keep";
+}
+
+const SAFER_RECONTACT_SOURCE_FILENAME = "leads_safer_recontact_not_seen_active_history.csv";
+
+function normalizeComparableSourcePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
+function sourcePathMatchesSaferRecontact(value) {
+  const normalized = normalizeComparableSourcePath(value);
+  if (!normalized) return false;
+  if (normalized.includes(SAFER_RECONTACT_SOURCE_FILENAME)) return true;
+  const summaryPath = normalizeComparableSourcePath(lastSaferRecontactSummary?.output_path || "");
+  return Boolean(summaryPath && normalized === summaryPath);
+}
+
+function isSaferRecontactSource(payload = null) {
+  if (!payload || typeof payload !== "object") return false;
+  const sourceMode = String(payload.dispatch_source_mode || payload.source_mode || payload.dispatch_source_kind || "").trim().toLowerCase();
+  if (["safer_recontact", "safer_recontact_pool"].includes(sourceMode)) return true;
+  return [
+    payload.dispatch_source_path,
+    payload.source_path,
+    payload.output_path,
+    payload.dispatch_source_label,
+    payload.source_label,
+  ].some(sourcePathMatchesSaferRecontact);
+}
+
+function isCurrentSaferRecontactSource(source = null, preview = null) {
+  if (isSaferRecontactSource(preview) || isSaferRecontactSource(source)) return true;
+  if (dispatchPreviewMatchesCurrentSelection() && isSaferRecontactSource(lastImportantDispatchPreview)) return true;
+  return selectedSaferRecontactPoolIsActive();
+}
+
+function dispatchSourceDisplayName(source = null, preview = null) {
+  if (isCurrentSaferRecontactSource(source, preview)) return "Safer Recontact Pool";
+  return source?.dispatch_source_name || preview?.dispatch_source_name || dispatchSourceFriendlyLabel(selectedImportantDispatchSourceMode(), source, preview);
+}
+
+function dispatchSourceDetailLabel(source = null, preview = null) {
+  if (isCurrentSaferRecontactSource(source, preview)) return "Safer recontact CSV — not found in active history";
+  return dispatchSourceDisplayName(source, preview);
+}
+
+function recontactRecencySummary(preview = lastImportantDispatchPreview) {
+  const raw = preview?.recontact_recency && typeof preview.recontact_recency === "object"
+    ? preview.recontact_recency
+    : {};
+  const plannedUnique = Number(raw.planned_unique ?? preview?.recontact_planned_unique ?? preview?.total_planned_unique_count ?? 0);
+  const found = Number(raw.found_in_active_history ?? preview?.recontact_found_in_active_history ?? 0);
+  const seenThisMonth = Number(raw.seen_this_month ?? preview?.recontact_seen_this_month ?? 0);
+  const notFound = Number(raw.not_found_in_active_history ?? preview?.recontact_not_found_in_active_history ?? Math.max(0, plannedUnique - found));
+  const foundRatio = plannedUnique > 0 ? found / plannedUnique : 0;
+  const seenThisMonthRatio = plannedUnique > 0 ? seenThisMonth / plannedUnique : 0;
+  const notFoundRatio = plannedUnique > 0 ? notFound / plannedUnique : 0;
+  let riskLevel = String(raw.risk_level || preview?.recontact_recency_risk_level || "").trim().toLowerCase();
+  if (!riskLevel) {
+    riskLevel = foundRatio >= 0.3 || seenThisMonthRatio >= 0.15
+      ? "red"
+      : foundRatio >= 0.1 || seenThisMonthRatio >= 0.05
+        ? "yellow"
+        : "green";
+  }
+  const highRisk = Boolean(raw.high_risk ?? preview?.recontact_recency_high_risk) || riskLevel === "red";
+  return {
+    plannedUnique,
+    found,
+    seenThisMonth,
+    notFound,
+    foundRatio,
+    seenThisMonthRatio,
+    notFoundRatio,
+    riskLevel,
+    highRisk,
+    warning: String(raw.warning || preview?.recontact_recency_warning || (highRisk ? "Not recommended: most leads were contacted recently." : "")),
+  };
+}
+
+function percentLabel(ratio) {
+  const value = Number(ratio || 0) * 100;
+  return `${value.toFixed(1)}%`;
+}
+
+function isRecontactPreview(preview) {
+  return String(preview?.campaign_type || "").trim() === "recontact_cold";
+}
+
+function latestRecontactPreviewContext(preview = lastImportantDispatchPreview) {
+  return isRecontactPreview(preview) ? preview : null;
+}
+
+function recontactRecencyOverrideRequired(preview = lastImportantDispatchPreview) {
+  if (!preview || selectedImportantDispatchCampaignType() !== "recontact_cold") return false;
+  if (!dispatchPreviewMatchesCurrentSelection()) return false;
+  if (selectedSaferRecontactPoolIsActive() && Number(lastSaferRecontactSummary?.safer_found_in_active_history || 0) === 0) return false;
+  return recontactRecencySummary(preview).highRisk && !Boolean(els.leadsRecontactRecencyOverride?.checked);
+}
+
+function saferRecontactSummaryContext() {
+  const summary = lastSaferRecontactSummary && typeof lastSaferRecontactSummary === "object"
+    ? lastSaferRecontactSummary
+    : {};
+  const plannedUnique = Number(summary.planned_unique || 0);
+  const found = Number(summary.found_in_active_history || 0);
+  const seenThisMonth = Number(summary.seen_this_month || 0);
+  const notFound = Number(summary.not_found_in_active_history ?? summary.safer_rows_written ?? 0);
+  const foundRatio = plannedUnique > 0 ? found / plannedUnique : Number(summary.found_in_active_history_pct || 0) / 100;
+  const seenThisMonthRatio = plannedUnique > 0 ? seenThisMonth / plannedUnique : Number(summary.seen_this_month_pct || 0) / 100;
+  const notFoundRatio = plannedUnique > 0 ? notFound / plannedUnique : Number(summary.not_found_in_active_history_pct || 0) / 100;
+  const riskLevel = String(summary.risk_level || "").trim().toLowerCase();
+  return {
+    plannedUnique,
+    found,
+    seenThisMonth,
+    notFound,
+    foundRatio,
+    seenThisMonthRatio,
+    notFoundRatio,
+    highRisk: riskLevel === "red" || foundRatio >= 0.5 || seenThisMonthRatio >= 0.5,
+    riskLevel: riskLevel ? riskLevel.toUpperCase() : "",
+    hasSummary: plannedUnique > 0 || Boolean(summary.output_path),
+    outputPath: String(summary.output_path || "").trim(),
+  };
+}
+
+function recontactDecisionContext(preview = lastImportantDispatchPreview) {
+  const recontactPreview = latestRecontactPreviewContext(preview);
+  if (recontactPreview) return recontactRecencySummary(recontactPreview);
+  return saferRecontactSummaryContext();
+}
+
+function importantDispatchConfirmButtonLabel() {
+  return selectedQueueConfirmLabel(lastImportantDispatchPreview, dispatchSourceForSelectedMode().source || {});
+}
+
+function selectedSaferRecontactPoolIsActive() {
+  const saferPath = String(lastSaferRecontactSummary?.output_path || "").trim();
+  const selectedOutput = String(els.leadsImportantOutputPath?.value || "").trim();
+  return Boolean(
+    selectedImportantDispatchCampaignType() === "recontact_cold"
+    && (
+      (saferPath && selectedOutput && normalizeComparableSourcePath(saferPath) === normalizeComparableSourcePath(selectedOutput))
+      || sourcePathMatchesSaferRecontact(selectedOutput)
+    ),
+  );
+}
+
+function liveRecipientQueueTotal(status = lastLeadsStatus) {
+  return Number(status?.jc_queue?.count || 0) + liveSendGridQueueTotal(status);
+}
+
+function dispatchPreviewRouteSummary(preview = null, dispatchSource = {}) {
+  const shardCounts = preview?.sendgrid_shard_planned_counts && typeof preview.sendgrid_shard_planned_counts === "object"
+    ? preview.sendgrid_shard_planned_counts
+    : {};
+  const sg1 = Number(preview?.rows_to_add_sendgrid_1 ?? shardCounts.sendgrid_1 ?? 0);
+  const sg2 = Number(preview?.rows_to_add_sendgrid_2 ?? shardCounts.sendgrid_2 ?? 0);
+  const sg3 = Number(preview?.rows_to_add_sendgrid_3 ?? shardCounts.sendgrid_3 ?? 0);
+  const sg4 = Number(preview?.rows_to_add_sendgrid_4 ?? shardCounts.sendgrid_4 ?? 0);
+  const sg5 = Number(preview?.rows_to_add_sendgrid_5 ?? shardCounts.sendgrid_5 ?? 0);
+  const sendgridTotal = Number(preview?.rows_to_add_sendgrid ?? preview?.sendgrid_planned_count ?? (sg1 + sg2 + sg3 + sg4 + sg5) ?? 0);
+  const privateJc = Number(preview?.rows_to_add_private_jc ?? preview?.private_jc_planned_count ?? 0);
+  const selectedRows = Number(preview?.dispatch_selected_row_count ?? preview?.selected_rows ?? dispatchSource.dispatch_source_row_count ?? 0);
+  const uniquePlanned = Number(preview?.total_planned_unique_count ?? preview?.total_rows_would_write ?? privateJc + sendgridTotal ?? 0);
+  const skippedReasons = preview?.exclusion_reason_counts && typeof preview.exclusion_reason_counts === "object"
+    ? preview.exclusion_reason_counts
+    : {};
+  const skippedAlreadyContacted = Number(preview?.skipped_already_contacted ?? skippedReasons.already_contacted ?? 0);
+  const skippedAlreadySent = Number(preview?.skipped_already_sent ?? skippedReasons.already_sent ?? 0);
+  const skippedAlreadyQueued = Number(preview?.skipped_already_queued ?? skippedReasons.already_queued ?? 0);
+  const skippedSuppressed = Number(preview?.skipped_suppressed ?? preview?.suppressed_skipped ?? skippedReasons.suppressed ?? 0);
+  const skippedInvalid = Number(preview?.skipped_invalid_malformed ?? preview?.invalid_malformed_skipped ?? skippedReasons.invalid_source_row ?? 0);
+  const skippedBoth = Number(preview?.skipped_both ?? 0);
+  const skippedRows = Number(preview?.skipped_rows ?? 0);
+  const skippedFiltered = skippedRows || skippedBoth || (skippedAlreadyContacted + skippedAlreadySent + skippedAlreadyQueued + skippedSuppressed + skippedInvalid);
+  const skippedReasonTotal = Object.values(skippedReasons).reduce((sum, value) => sum + Number(value || 0), 0);
+  const skippedMathMismatch = Boolean(preview && skippedRows !== skippedReasonTotal);
+  const duplicatePlanned = Number(preview?.duplicate_planned_email_count ?? 0);
+  const sentLogOverlap = Number(preview?.planned_authoritative_sent_overlap_count ?? preview?.planned_sent_log_overlap_count ?? 0);
+  const sendgridZeroReason = String(preview?.sendgrid_zero_reason || "").trim();
+  const shardsSlash = `${sg1} / ${sg2} / ${sg3} / ${sg4} / ${sg5}`;
+  const shardsLabel = `SG1 ${sg1} · SG2 ${sg2} · SG3 ${sg3} · SG4 ${sg4} · SG5 ${sg5}`;
+  const sourceRows = Number(preview?.dispatch_source_row_count ?? dispatchSource.dispatch_source_row_count ?? selectedRows ?? 0);
+  const historyRemoved = skippedAlreadyContacted + skippedAlreadySent;
+  return {
+    privateJc,
+    sg1,
+    sg2,
+    sg3,
+    sg4,
+    sg5,
+    sendgridTotal,
+    uniquePlanned,
+    selectedRows,
+    sourceRows,
+    eligibleRows: Number(preview?.dispatch_eligible_row_count ?? dispatchSource.dispatch_eligible_row_count ?? 0),
+    skippedAlreadyContacted,
+    skippedAlreadySent,
+    skippedAlreadyQueued,
+    skippedSuppressed,
+    skippedInvalid,
+    historyRemoved,
+    skippedBoth,
+    skippedRows,
+    skippedFiltered,
+    skippedReasonTotal,
+    skippedMathMismatch,
+    duplicatePlanned,
+    sentLogOverlap,
+    sendgridZeroReason,
+    shardsSlash,
+    shardsLabel,
+    hasMissingSendgridZeroReason: Boolean(preview && uniquePlanned > 0 && sendgridTotal === 0 && !sendgridZeroReason),
+  };
+}
+
+function selectedQueueLabel(preview = lastImportantDispatchPreview, dispatchSource = {}) {
+  if (isCurrentSaferRecontactSource(dispatchSource, preview)) return "Safer Recontact";
+  if (String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold") return "Full Recontact";
+  return "Fresh Cold";
+}
+
+function selectedQueueConfirmLabel(preview = lastImportantDispatchPreview, dispatchSource = {}) {
+  const label = selectedQueueLabel(preview, dispatchSource);
+  if (label === "Safer Recontact") return "Confirm Safer Recontact Queue";
+  if (label === "Full Recontact") return "Confirm Full Recontact Queue";
+  return "Confirm Fresh Cold Queue";
+}
+
+function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
+  const summary = dispatchPreviewRouteSummary(preview, dispatchSource);
+  const previewCurrent = Boolean(preview && dispatchPreviewMatchesCurrentSelection());
+  const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
+  const sendersActive = activeSenderProfiles().length > 0;
+  const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
+  const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
+  const sourceBlockReason = dispatchPreviewBlockReason(dispatchSource);
+  const liveQueuesNotEmpty = liveRecipientQueueTotal() > 0;
+  const recencyOverrideRequired = recontactRecencyOverrideRequired(preview);
+  const malformedPreview = Boolean(preview) && (
+    !String(preview.campaign_type || "").trim()
+    || !String(preview.dispatch_source_mode || "").trim()
+  );
+  if (!preview) {
+    return {
+      state: "idle",
+      tone: "neutral",
+      ready: false,
+      title: "Needs preview",
+      message: sourceBlockReason || "Run Preview Dispatch for the selected source before confirming anything.",
+      buttonLabel: "Confirm locked — review preview",
+      buttonTitle: sourceBlockReason || "Run Preview Dispatch first.",
+    };
+  }
+  if (!previewCurrent) {
+    return {
+      state: "stale",
+      tone: "warn",
+      ready: false,
+      title: "Review required",
+      message: "Preview stale or inconsistent. Re-run Preview Dispatch for the selected source and cap.",
+      buttonLabel: "Confirm locked — rerun preview",
+      buttonTitle: "The stored preview does not match the current source, cap, or campaign.",
+    };
+  }
+  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || recencyOverrideRequired) {
+    const reason = activeDispatch
+      ? "Dispatch job is already running."
+      : sendersActive
+        ? "A sender is active. Stop senders before confirming a queue write."
+        : activeCheck
+          ? "Check Leads is running."
+          : liveQueuesNotEmpty
+            ? "Recipient queues are not empty."
+            : summary.duplicatePlanned > 0
+              ? `Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`
+              : summary.sentLogOverlap > 0
+                ? `Planned recipients overlap authoritative sent/contact logs: ${summary.sentLogOverlap.toLocaleString()}.`
+                : summary.skippedMathMismatch
+                  ? `Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons ${summary.skippedReasonTotal.toLocaleString()}.`
+                  : summary.hasMissingSendgridZeroReason
+                    ? "SendGrid planned is 0 and no SendGrid zero reason was provided."
+                    : malformedPreview
+                      ? "Preview is missing campaign or source metadata."
+                      : recencyOverrideRequired
+                        ? "Full recontact has high recent-contact overlap and requires explicit override."
+                        : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
+    return {
+      state: "blocked",
+      tone: "bad",
+      ready: false,
+      title: "Review required",
+      message: reason,
+      buttonLabel: "Confirm locked — review preview",
+      buttonTitle: reason,
+    };
+  }
+  const queueLabel = selectedQueueLabel(preview, dispatchSource);
+  const title = queueLabel === "Fresh Cold"
+    ? "Ready to confirm Fresh Cold queue"
+    : queueLabel === "Safer Recontact"
+      ? "Ready to confirm Safer Recontact queue"
+      : "Ready to confirm Full Recontact queue";
+  const message = `${summary.uniquePlanned.toLocaleString()} unique leads will be queued: ${summary.privateJc.toLocaleString()} Private JC and ${summary.sendgridTotal.toLocaleString()} SendGrid. SendGrid shards: ${summary.shardsSlash}. Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`;
+  return {
+    state: "ready",
+    tone: "good",
+    ready: true,
+    title,
+    message,
+    buttonLabel: selectedQueueConfirmLabel(preview, dispatchSource),
+    buttonTitle: "",
+  };
+}
+
+function dispatchSourceOptionForMode(mode) {
+  const options = lastLeadsStatus?.dispatch_source_options || {};
+  const normalized = mode === "cleaned" ? "cleaned" : mode === "strict_verified" ? "strict_verified" : "triaged_keep";
+  return options[normalized] || {};
+}
+
+function renderDispatchModeCards(preview = null) {
+  if (!els.leadsDispatchModeCards) return;
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  const recontactPreview = latestRecontactPreviewContext(preview || lastImportantDispatchPreview);
+  const activeSaferPreview = isCurrentSaferRecontactSource(null, preview || lastImportantDispatchPreview);
+  const freshSource = dispatchSourceOptionForMode("triaged_keep");
+  const recontactSource = dispatchSourceOptionForMode("cleaned");
+  const freshCount = Number(freshSource.dispatch_eligible_row_count || freshSource.dispatch_source_row_count || 0);
+  const validPreview = Boolean(preview && dispatchPreviewMatchesCurrentSelection());
+  const validColdPreview = validPreview && selectedCampaign === "cold";
+  const routeSummary = dispatchPreviewRouteSummary(validPreview ? preview : null, freshSource);
+  const coldPlanned = validColdPreview ? routeSummary.uniquePlanned : 0;
+  const coldSafety = dispatchConfirmSafetyState(freshSource, validColdPreview ? preview : null);
+  const fullRecency = recontactPreview && !activeSaferPreview ? recontactRecencySummary(recontactPreview) : saferRecontactSummaryContext();
+  const recontactCount = Number(fullRecency.plannedUnique || lastSaferRecontactSummary?.planned_unique || recontactSource.dispatch_eligible_row_count || recontactSource.dispatch_source_row_count || 0);
+  const recency = fullRecency;
+  const recentHistoryLabel = recency.plannedUnique
+    ? `${recency.found.toLocaleString()} / ${recency.plannedUnique.toLocaleString()} (${percentLabel(recency.foundRatio)}) active history · ${recency.seenThisMonth.toLocaleString()} / ${recency.plannedUnique.toLocaleString()} (${percentLabel(recency.seenThisMonthRatio)}) seen this month`
+    : "Run preview to calculate recent-history overlap";
+  const freshMetric = validColdPreview
+    ? `${coldPlanned.toLocaleString()} cold-safe lead${coldPlanned === 1 ? "" : "s"} after history filtering`
+    : `${freshCount.toLocaleString()} source row${freshCount === 1 ? "" : "s"}`;
+  const freshAdvice = validColdPreview && coldPlanned <= 2
+    ? "Only 2 cold-safe leads found — import new fresh leads."
+    : validColdPreview
+      ? `${routeSummary.privateJc.toLocaleString()} Private JC / ${routeSummary.sendgridTotal.toLocaleString()} SendGrid. ${coldSafety.ready ? "Ready" : "Review"}`
+      : "Preview required for actual sendable count.";
+  const recontactAdvice = recency.highRisk
+    ? `Not recommended — ${percentLabel(recency.foundRatio)} already in active history.`
+    : "Use only when recontacting prior SendGrid/local history is intentional.";
+  const recontactRiskLabel = recency.highRisk ? "RED risk. " : "";
+  const saferCount = Number(lastSaferRecontactSummary?.safer_rows_written ?? recency.notFound ?? 0);
+  const saferPlanned = Number(lastSaferRecontactSummary?.planned_unique ?? recency.plannedUnique ?? 0);
+  const saferPercent = saferPlanned > 0 ? percentLabel(saferCount / saferPlanned) : percentLabel(recency.notFoundRatio);
+  const saferActive = activeSaferPreview || selectedSaferRecontactPoolIsActive();
+  const saferCreated = Boolean(lastSaferRecontactSummary?.output_path);
+  const saferCreationCount = Number(saferCount || recency.notFound || 0);
+  const saferCreationLabel = saferCreationCount
+    ? `Create ${saferCreationCount.toLocaleString()} Safer Recontact Leads`
+    : "Create Safer Recontact Leads";
+  const saferButtonLabel = saferRecontactPoolLoading
+    ? "Creating..."
+    : saferActive
+      ? "Safer Pool Selected"
+      : saferCreated
+        ? "Use Safer Pool"
+        : saferCreationLabel;
+  const saferMetric = saferCreated
+    ? `${saferCount.toLocaleString()} / ${saferPlanned.toLocaleString()} (${escapeHtml(saferPercent)}) safer leads created`
+    : `${saferCount.toLocaleString()} / ${Math.max(saferPlanned, recency.plannedUnique).toLocaleString()} (${escapeHtml(saferPercent)}) safer candidates`;
+  const saferFeedback = lastSaferRecontactFeedback?.message
+    ? `<small class="dispatch-mode-feedback dispatch-mode-feedback-${escapeHtml(lastSaferRecontactFeedback.state || "warn")}">${escapeHtml(lastSaferRecontactFeedback.message)}</small>`
+    : "";
+  setNodeHtml(
+    els.leadsDispatchModeCards,
+    `
+      <button class="dispatch-mode-card ${selectedCampaign === "cold" ? "is-selected" : ""}" type="button" data-dispatch-mode-card="fresh">
+        <span class="label">Fresh Cold Campaign</span>
+        <strong>Fresh Cold Keep</strong>
+        <span>Excludes prior contacts/sends.</span>
+        <b>${escapeHtml(freshMetric)}</b>
+        <small>${escapeHtml(freshAdvice)}</small>
+        ${validColdPreview ? `<em>${escapeHtml(coldSafety.ready ? "Ready" : "Review")}</em>` : ""}
+      </button>
+      <button class="dispatch-mode-card ${selectedCampaign === "recontact_cold" && !activeSaferPreview ? "is-selected" : ""} ${recency.highRisk ? "is-warn" : ""}" type="button" data-dispatch-mode-card="recontact">
+        <span class="label">Recontact Campaign</span>
+        <strong>Full Recontact Pool / Checked Output</strong>
+        <span>May include prior contacts/sends.</span>
+        <b>${recontactCount.toLocaleString()} total planned</b>
+        <small>${escapeHtml(recentHistoryLabel)}. ${escapeHtml(recontactRiskLabel)}${escapeHtml(recontactAdvice)}</small>
+      </button>
+      <button class="dispatch-mode-card dispatch-mode-card-action ${saferActive ? "is-selected" : lastSaferRecontactSummary?.output_path ? "is-ready" : ""}" type="button" data-dispatch-mode-card="safer-recontact" ${saferActive ? "disabled" : ""}>
+        <span class="label">Safer Recontact Campaign</span>
+        ${saferActive ? `<span class="mini-pill">Selected</span>` : ""}
+        <strong>Safer Recontact Pool</strong>
+        <span>Only planned recontact leads not found in active history.</span>
+        <b>${saferMetric}</b>
+        <small>${saferActive ? "Selected source: Safer recontact CSV — not found in active history." : lastSaferRecontactSummary?.output_path ? `Created separately: ${lastSaferRecontactSummary.output_path}` : "Recommended over full recontact when recent-contact risk is high."}</small>
+        ${saferFeedback}
+        <em>${escapeHtml(saferButtonLabel)}</em>
+      </button>
+    `,
+  );
+}
+
+function dispatchStatusBannerModel(dispatchSource = {}, preview = null) {
+  const routeSummary = dispatchPreviewRouteSummary(preview, dispatchSource);
+  const duplicateCount = Number(preview?.duplicate_planned_email_count || 0);
+  const sourceMismatch = Boolean(lastImportantDispatchPreview?.preview_id && !preview);
+  const saferPreview = isCurrentSaferRecontactSource(dispatchSource, preview);
+  const malformedPreview = Boolean(preview) && (
+    !String(preview.campaign_type || "").trim()
+    || !String(preview.dispatch_source_mode || "").trim()
+    || duplicateCount > 0
+    || routeSummary.sentLogOverlap > 0
+    || routeSummary.skippedMathMismatch
+  );
+  const activeSenders = activeSenderProfiles().length > 0;
+  const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
+  if (activeSenders || malformedPreview || sourceBlocked || sourceMismatch) {
+    return {
+      tone: "bad",
+      title: "Blocked",
+      message: activeSenders
+        ? "Active sender is running. Stop senders before preparing a dispatch."
+        : malformedPreview
+          ? "Preview is malformed, overlaps sent history, has duplicate planned emails, or has inconsistent skipped math. Re-run Preview Dispatch."
+          : sourceMismatch
+            ? "Preview source or cap is stale. Re-run Preview Dispatch for the selected source."
+            : String(dispatchSource.dispatch_block_reason || "Selected source is blocked."),
+    };
+  }
+  const recency = recontactRecencySummary(preview);
+  if (preview && selectedImportantDispatchCampaignType() === "recontact_cold" && recency.highRisk && !saferPreview) {
+    return {
+      tone: "bad",
+      title: "Do not confirm",
+      message: `Do not confirm full recontact — ${percentLabel(recency.foundRatio)} were already in active history and ${percentLabel(recency.seenThisMonthRatio)} were seen this month. Use the ${recency.notFound.toLocaleString()} safer leads or import a new fresh pool.`,
+    };
+  }
+  if (preview && liveRecipientQueueTotal() === 0) {
+    return {
+      tone: "good",
+      title: "Preview calculated",
+      message: saferPreview
+        ? "Safer recontact CSV — not found in active history. Confirm is available when the selected preview is current."
+        : routeSummary.historyRemoved
+          ? `History filter excluded ${routeSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${routeSummary.uniquePlanned.toLocaleString()} cold-safe leads remain.`
+          : "Queues are empty. Confirm is available when the selected preview is current.",
+    };
+  }
+  return {
+    tone: "warn",
+    title: "Preview needed",
+    message: "Run Preview Dispatch for the selected mode before confirming anything.",
+  };
+}
+
+function renderDispatchStatusBanner(dispatchSource = {}, preview = null) {
+  const banner = dispatchStatusBannerModel(dispatchSource, preview);
+  return `
+    <section class="dispatch-status-banner dispatch-status-banner-${escapeHtml(banner.tone)}">
+      <strong>${escapeHtml(banner.title)}</strong>
+      <span>${escapeHtml(banner.message)}</span>
+    </section>
+  `;
+}
+
+function renderRecommendedNextAction(dispatchSource = {}, preview = null) {
+  void dispatchSource;
+  void preview;
+  if (els.leadsRecommendedNextAction) {
+    setNodeText(els.leadsRecommendedNextAction, "");
+    els.leadsRecommendedNextAction.hidden = true;
+  }
 }
 
 function quarantineReviewFiltersPayload() {
@@ -2319,6 +3050,9 @@ async function fetchJson(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.ok === false) {
     const message = data.message || data.detail || `Request failed (${response.status}).`;
+    const error = new Error(message);
+    error.payload = data;
+    error.status = response.status;
     if (response.status === 401 || response.status === 403) {
       setAuthState({
         authEnabled: authState.authEnabled,
@@ -2327,7 +3061,7 @@ async function fetchJson(path, options = {}) {
         message,
       });
     }
-    throw new Error(message);
+    throw error;
   }
   return data;
 }
@@ -2430,6 +3164,7 @@ function renderOperatorMetricStrip(items = [], className = "") {
         <div class="operator-metric${item.tone ? ` operator-metric-${item.tone}` : ""}">
           <span class="operator-metric-label">${escapeHtml(item.label)}</span>
           <span class="operator-metric-value">${escapeHtml(item.value ?? "-")}</span>
+          ${item.note ? `<span class="operator-metric-note">${escapeHtml(item.note)}</span>` : ""}
         </div>
       `).join("")}
     </div>
@@ -2646,32 +3381,35 @@ function renderImportantLeadVerify(result) {
             </section>
           `
           : ""}
-        <div class="operator-result-grid">
-          ${reasonRows.length
-            ? renderOperatorTableBlock("Reason Ledger", "Local triage evidence for the current pass.", ["Reason", "Count"], reasonRows, "No verification reasons were recorded.")
-            : ""}
-          ${isManualAuthorResearch
-            ? renderOperatorTableBlock(
-              "Soft Warnings",
-              "Soft warnings that did not block Keep.",
-              ["Reason", "Count"],
-              Object.entries(result.soft_warning_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
-              "No soft warnings were recorded.",
-            )
-            : ""}
-          ${isManualAuthorResearch
-            ? renderOperatorTableBlock(
-              "Hard Reject Reasons",
-              "Hard safety blockers still rejected.",
-              ["Reason", "Count"],
-              Object.entries(result.hard_reject_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
-              "No hard rejects were recorded.",
-            )
-            : ""}
-          ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward. Showing up to 5 rows.`, keepPreview.headers, keepPreview.rows, "No rows moved to keep.")}
-          ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed. Showing up to 5 rows.", rejectPreview.headers, rejectPreview.rows, "No rows were rejected.")}
-          ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review. Showing up to 5 rows.", quarantinePreview.headers, quarantinePreview.rows, "No rows were quarantined.")}
-        </div>
+        <details class="dispatch-drawer advanced-details lead-triage-details-drawer">
+          <summary>Reason ledger and queues</summary>
+          <div class="operator-result-grid">
+            ${reasonRows.length
+              ? renderOperatorTableBlock("Reason Ledger", "Local triage evidence for the current pass.", ["Reason", "Count"], reasonRows, "No verification reasons were recorded.")
+              : ""}
+            ${isManualAuthorResearch
+              ? renderOperatorTableBlock(
+                "Soft Warnings",
+                "Soft warnings that did not block Keep.",
+                ["Reason", "Count"],
+                Object.entries(result.soft_warning_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
+                "No soft warnings were recorded.",
+              )
+              : ""}
+            ${isManualAuthorResearch
+              ? renderOperatorTableBlock(
+                "Hard Reject Reasons",
+                "Hard safety blockers still rejected.",
+                ["Reason", "Count"],
+                Object.entries(result.hard_reject_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) })),
+                "No hard rejects were recorded.",
+              )
+              : ""}
+            ${renderOperatorTableBlock("Keep Queue", `${modeLabel} rows ready to move forward. Showing up to 5 rows.`, keepPreview.headers, keepPreview.rows, "No rows moved to keep.")}
+            ${renderOperatorTableBlock("Reject Queue", "Rows that should not proceed. Showing up to 5 rows.", rejectPreview.headers, rejectPreview.rows, "No rows were rejected.")}
+            ${renderOperatorTableBlock("Quarantine Queue", "Rows that require operator review. Showing up to 5 rows.", quarantinePreview.headers, quarantinePreview.rows, "No rows were quarantined.")}
+          </div>
+        </details>
         <details class="dispatch-drawer advanced-details">
           <summary>Advanced file details</summary>
           <div class="dispatch-disclosure-body">
@@ -2716,6 +3454,11 @@ function renderImportantDispatch(result) {
   const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
   const liveSenderProfiles = activeSenderProfiles();
   const sendersActive = liveSenderProfiles.length > 0;
+  const liveDispatch = currentLiveDispatchState(lastLeadsStatus);
+  const currentJcQueuePending = Number(liveDispatch.privatePending || 0) > 0;
+  const sourceLabel = selectedDispatchSourceLabel(dispatchSource, dispatchPreview);
+  const displaySourceName = dispatchSourceDisplayName(dispatchSource, dispatchPreview || result);
+  const displaySourceDetail = dispatchSourceDetailLabel(dispatchSource, dispatchPreview || result);
   const activeCheckRunning = isActiveImportantLeadCheckJob(currentImportantCheckJob());
   const dispatchBlockReason = dispatchActionBlockReason();
   const liveQueues = Array.isArray(lastLeadsStatus?.sendgrid_queues) ? lastLeadsStatus.sendgrid_queues : [];
@@ -2742,7 +3485,7 @@ function renderImportantDispatch(result) {
   const confirmedPrivateJcTotal = Number(result?.private_jc_added || result?.added_astra || 0);
   const sourcePreviewRows = Array.isArray(dispatchSource.dispatch_source_preview_rows) ? dispatchSource.dispatch_source_preview_rows : [];
   const sourceHeaders = Array.isArray(dispatchSource.dispatch_source_headers) ? dispatchSource.dispatch_source_headers : [];
-  const sourceName = dispatchSource.dispatch_source_name || result?.dispatch_source_name || dispatchSource.dispatch_source_mode || result?.dispatch_source_mode || "triaged_keep";
+  const sourceName = displaySourceName || dispatchSource.dispatch_source_name || result?.dispatch_source_name || dispatchSource.dispatch_source_mode || result?.dispatch_source_mode || "triaged_keep";
   const sourcePath = dispatchSource.dispatch_source_path || result?.dispatch_source_path || "-";
   const preflightAllowed = !sendersActive && !activeCheckRunning;
   const preflightLabel = preflightAllowed ? "Allowed" : "Blocked";
@@ -2759,11 +3502,11 @@ function renderImportantDispatch(result) {
       ? "Preview failed. Retry Preview Dispatch."
       : stalePreviewMismatch
         ? "Preview/source/cap mismatch. Retry Preview Dispatch."
-        : "No current preview yet. Next step: Click Preview Dispatch.";
+        : "No preview yet.";
   const noPreviewMessage = previewFeedbackMessage
     || (stalePreviewMismatch
       ? "The stored preview does not match the selected source or cap. Click Preview Dispatch to calculate queue assignments."
-      : "No current dispatch preview generated yet. Click Preview Dispatch to calculate queue assignments.");
+      : "Run Preview Dispatch to calculate writable recipients.");
   const previewPrivateJc = Number(dispatchPreview?.rows_to_add_private_jc || 0);
   const previewSg1 = Number(dispatchPreview?.rows_to_add_sendgrid_1 || 0);
   const previewSg2 = Number(dispatchPreview?.rows_to_add_sendgrid_2 || 0);
@@ -2771,11 +3514,16 @@ function renderImportantDispatch(result) {
   const previewSg4 = Number(dispatchPreview?.rows_to_add_sendgrid_4 || 0);
   const previewSg5 = Number(dispatchPreview?.rows_to_add_sendgrid_5 || 0);
   const previewSendgrid = previewSg1 + previewSg2 + previewSg3 + previewSg4 + previewSg5;
+  const sendgridShardBreakdown = `SG1 ${previewSg1} · SG2 ${previewSg2} · SG3 ${previewSg3} · SG4 ${previewSg4} · SG5 ${previewSg5}`;
+  const sendgridZeroReason = String(dispatchPreview?.sendgrid_zero_reason || "").trim();
+  const previewUniquePlanned = Number(dispatchPreview?.total_planned_unique_count || dispatchPreview?.total_rows_would_write || 0);
   const previewSkipped = Number(dispatchPreview?.skipped_both || 0)
     || Number(dispatchPreview?.skipped_already_sent || 0)
     + Number(dispatchPreview?.skipped_already_queued || 0)
     + Number(dispatchPreview?.skipped_suppressed || 0)
     + Number(dispatchPreview?.skipped_invalid_malformed || 0);
+  const previewRouteSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
+  const confirmSafety = dispatchConfirmSafetyState(dispatchSource, dispatchPreview);
   const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) === 0;
   const previewZeroAddReasons = dispatchSkipReasonSummary(dispatchPreview || {});
   const confirmFeedbackState = String(lastImportantDispatchConfirmFeedback?.state || "");
@@ -2789,13 +3537,31 @@ function renderImportantDispatch(result) {
         : "";
 
   renderDispatchConfirmGuard(dispatchSource, dispatchPreview);
+  renderDispatchModeCards(dispatchPreview);
+  renderRecommendedNextAction(dispatchSource, dispatchPreview);
+  if (els.leadsDispatchSection) {
+    els.leadsDispatchSection.classList.toggle("leads-dispatch-section-deferred", currentJcQueuePending);
+  }
+  if (els.leadsRecontactOverrideWrap) {
+    const showOverride = Boolean(dispatchPreview && selectedImportantDispatchCampaignType() === "recontact_cold" && recontactRecencySummary(dispatchPreview).highRisk);
+    els.leadsRecontactOverrideWrap.hidden = !showOverride;
+  }
+  if (els.leadsDispatchCurrentQueueNote) {
+    els.leadsDispatchCurrentQueueNote.hidden = !currentJcQueuePending;
+    setNodeText(
+      els.leadsDispatchCurrentQueueNote,
+      currentJcQueuePending
+        ? "Finish current JC queue before preparing the next dispatch."
+        : "",
+    );
+  }
   if (els.leadsImportantDispatchMeta) {
     if (dispatchPreview && !result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
         dispatchBlockReason
-          ? `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Dispatch actions are blocked: ${dispatchBlockReason}`
-          : `Preview ready. ${escapeHtml(dispatchPreview.dispatch_source_name || dispatchPreview.dispatch_source_mode || "triaged_keep")} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
+          ? `Preview ready. ${escapeHtml(displaySourceName)} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Dispatch actions are blocked: ${dispatchBlockReason}`
+          : `Preview ready. ${escapeHtml(displaySourceName)} with cap ${escapeHtml(dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all")}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
       );
     } else if (result?.generated_at_utc) {
       setNodeText(
@@ -2805,7 +3571,7 @@ function renderImportantDispatch(result) {
     } else {
       const sourceMode = selectedDispatchSource.mode;
       const idlePath = dispatchSource?.dispatch_source_path || (sourceMode === "strict_verified" ? "_important/leads_verified.csv" : "_important/leads_triaged_keep.csv");
-      const idleName = dispatchSource?.dispatch_source_name || (sourceMode === "strict_verified" ? "Strict Public Proof Verified" : "Fast Triage Keep");
+      const idleName = dispatchSourceDisplayName(dispatchSource, null) || dispatchSource?.dispatch_source_name || dispatchSourceFriendlyLabel(sourceMode, dispatchSource, null);
       setNodeText(
         els.leadsImportantDispatchMeta,
         dispatchBlockReason
@@ -2818,140 +3584,76 @@ function renderImportantDispatch(result) {
   if (!result?.generated_at_utc) {
     const previewRows = Array.isArray(dispatchPreview?.assigned_preview_rows) ? dispatchPreview.assigned_preview_rows : [];
     const previewFields = Array.isArray(dispatchPreview?.queue_headers) ? dispatchPreview.queue_headers : [];
+    const selectedSourceRows = Number(dispatchPreview?.dispatch_source_row_count || dispatchSource.dispatch_source_row_count || 0);
+    const previewMetricsMarkup = dispatchPreview
+      ? renderOperatorMetricStrip([
+        { label: "Writable", value: previewRouteSummary.uniquePlanned },
+        { label: "Private JC", value: previewRouteSummary.privateJc },
+        {
+          label: "SendGrid",
+          value: previewRouteSummary.sendgridTotal,
+          note: previewRouteSummary.sendgridTotal ? previewRouteSummary.shardsSlash : (previewRouteSummary.sendgridZeroReason || "Review required: no zero reason"),
+          tone: previewRouteSummary.sendgridTotal ? "good" : (previewRouteSummary.sendgridZeroReason ? "warn" : "bad"),
+        },
+        { label: "SendGrid shards", value: previewRouteSummary.shardsSlash },
+        { label: "Unique", value: previewRouteSummary.uniquePlanned },
+        { label: "Duplicates", value: previewRouteSummary.duplicatePlanned, tone: previewRouteSummary.duplicatePlanned ? "bad" : "good" },
+        { label: "Already contacted", value: previewRouteSummary.skippedAlreadyContacted, tone: previewRouteSummary.skippedAlreadyContacted ? "warn" : "" },
+        { label: "Already sent", value: previewRouteSummary.skippedAlreadySent, tone: previewRouteSummary.skippedAlreadySent ? "warn" : "" },
+        { label: "Suppressed", value: previewRouteSummary.skippedSuppressed, tone: previewRouteSummary.skippedSuppressed ? "bad" : "" },
+        { label: "Invalid", value: previewRouteSummary.skippedInvalid, tone: previewRouteSummary.skippedInvalid ? "bad" : "" },
+        { label: "Skipped", value: previewRouteSummary.skippedFiltered, tone: previewRouteSummary.skippedFiltered ? "warn" : "" },
+        { label: "Sent-log overlap", value: previewRouteSummary.sentLogOverlap, tone: previewRouteSummary.sentLogOverlap ? "bad" : "good" },
+        { label: "Skipped math", value: previewRouteSummary.skippedMathMismatch ? "Mismatch" : "Valid", tone: previewRouteSummary.skippedMathMismatch ? "bad" : "good" },
+      ], "dispatch-metrics dispatch-preview-metrics")
+      : `
+        <section class="dispatch-preview-empty" aria-live="polite">
+          <strong>${escapeHtml(noPreviewTitle)}</strong>
+          <span>${escapeHtml(noPreviewMessage)}</span>
+          <span class="dispatch-preview-source-count">Selected source rows: <strong>${selectedSourceRows.toLocaleString()}</strong> · ${escapeHtml(sourceLabel)}</span>
+        </section>
+      `;
     setNodeHtml(
       els.leadsImportantDispatchResults,
       `
         <div class="dispatch-shell dispatch-shell-preview">
-          ${renderOperatorMetricStrip([
-            { label: "Current preview", value: dispatchPreview ? "Ready" : "Not generated", tone: dispatchPreview ? "good" : "warn" },
-            { label: "Eligible", value: Number(dispatchPreview?.dispatch_eligible_row_count || dispatchSource.dispatch_eligible_row_count || 0) },
-            { label: "Private JC planned", value: previewPrivateJc },
-            { label: "SendGrid planned", value: previewSendgrid },
-            { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
-          ], "dispatch-metrics")}
+          <section class="dispatch-preview-card">
+            <div class="operator-table-head">
+              <div>
+                <p class="muted">Preview is read-only and writes no queues.</p>
+              </div>
+              <span class="mini-pill mini-pill-${escapeHtml(confirmSafety.tone === "good" ? "good" : confirmSafety.tone === "bad" ? "bad" : "warn")}">${escapeHtml(dispatchPreview ? (confirmSafety.ready ? "Ready to confirm" : "Review required") : "Preview needed")}</span>
+            </div>
+            <section class="dispatch-status-banner dispatch-status-banner-${escapeHtml(confirmSafety.tone === "neutral" ? "warn" : confirmSafety.tone)}">
+              <strong>${escapeHtml(confirmSafety.title)}</strong>
+              <span>${escapeHtml(dispatchPreview ? confirmSafety.message : noPreviewMessage)}</span>
+            </section>
+            ${previewMetricsMarkup}
+            ${dispatchPreview
+              ? `<div class="dispatch-skip-breakdown">
+                  <span>Already contacted: <strong>${previewRouteSummary.skippedAlreadyContacted.toLocaleString()}</strong></span>
+                  <span>Already sent: <strong>${previewRouteSummary.skippedAlreadySent.toLocaleString()}</strong></span>
+                  <span>Already queued: <strong>${previewRouteSummary.skippedAlreadyQueued.toLocaleString()}</strong></span>
+                  <span>Suppressed: <strong>${previewRouteSummary.skippedSuppressed.toLocaleString()}</strong></span>
+                  <span>Invalid: <strong>${previewRouteSummary.skippedInvalid.toLocaleString()}</strong></span>
+                  <span>Skipped rows: <strong>${previewRouteSummary.skippedRows.toLocaleString()}</strong></span>
+                  <span>Skipped reasons: <strong>${previewRouteSummary.skippedReasonTotal.toLocaleString()}</strong></span>
+                  <span>Sent-log overlap: <strong>${previewRouteSummary.sentLogOverlap.toLocaleString()}</strong></span>
+                </div>`
+              : ""}
+            ${dispatchPreview && (previewRouteSummary.skippedAlreadyContacted || previewRouteSummary.skippedAlreadySent)
+              ? `<section class="dispatch-skip-explainer">
+                  <h4>Why only ${previewRouteSummary.uniquePlanned.toLocaleString()}?</h4>
+                  <p>History filter excluded ${previewRouteSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${previewRouteSummary.uniquePlanned.toLocaleString()} cold-safe leads remain. Skipped reason: already_sent ${previewRouteSummary.skippedAlreadySent.toLocaleString()}.</p>
+                </section>`
+              : ""}
+          </section>
           ${confirmFeedbackTitle
             ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
             : ""}
-          <section class="dispatch-runbook">
-            <div class="operator-table-head">
-              <div>
-                <h3>Dispatch Checklist</h3>
-                <p class="muted">Intake/check volume is not dispatch approval. Confirm only after this surface is clean.</p>
-              </div>
-            </div>
-            <div class="op-checklist-items dispatch-runbook-items">
-              <div class="op-checklist-item ${preflightAllowed ? "is-ready" : "is-blocked"}">
-                <div class="op-checklist-step">1</div>
-                <div class="op-checklist-copy">
-                  <strong>Preflight</strong>
-                  <span>${preflightAllowed ? "All senders are stopped and no Check Leads job is running. Dispatch is allowed." : escapeHtml(dispatchBlockReason || `Blocked until active senders stop: ${activeSenderSummary}`)}</span>
-                </div>
-              </div>
-              <div class="op-checklist-item ${dispatchSource.dispatch_source_path ? "is-ready" : "is-warn"}">
-                <div class="op-checklist-step">2</div>
-                <div class="op-checklist-copy">
-                  <strong>Source</strong>
-                  <span>${escapeHtml(sourceName)} · ${Number(dispatchSource.dispatch_source_row_count || 0)} rows · ${Number(dispatchSource.dispatch_eligible_row_count || 0)} eligible before cap</span>
-                </div>
-              </div>
-              <div class="op-checklist-item ${dispatchPreview ? "is-ready" : "is-warn"}">
-                <div class="op-checklist-step">3</div>
-                <div class="op-checklist-copy">
-                  <strong>Preview</strong>
-                  <span>${dispatchPreview ? `${Number(dispatchPreview.dispatch_selected_row_count || 0)} selected by this cap · ${Number(dispatchPreview.total_rows_would_write || 0)} would write` : "Run Preview Dispatch to compute the exact capped write set."}</span>
-                </div>
-              </div>
-              <div class="op-checklist-item ${dispatchPreview && preflightAllowed ? "is-ready" : "is-warn"}">
-                <div class="op-checklist-step">4</div>
-                <div class="op-checklist-copy">
-                  <strong>Confirm</strong>
-                  <span>${dispatchPreview && preflightAllowed ? "Ready to confirm the exact previewed set." : "Confirm stays disabled until preview is current and preflight passes."}</span>
-                </div>
-              </div>
-            </div>
-          </section>
-          <section class="dispatch-decision-surface">
-            <div class="operator-table-head">
-              <div>
-                <h3>Current preview</h3>
-                <p class="muted">The exact write set lives here. Review this before confirm.</p>
-              </div>
-            </div>
-            ${
-              dispatchPreview
-                ? `
-                  ${renderOperatorMetricStrip([
-                    { label: "Cap", value: dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all" },
-                    { label: "Eligible", value: Number(dispatchPreview.dispatch_eligible_row_count || 0) },
-                    { label: "Private JC", value: previewPrivateJc, tone: "good" },
-                    { label: "SendGrid", value: previewSendgrid, tone: "good" },
-                    { label: "Skipped", value: previewSkipped, tone: previewSkipped ? "warn" : "" },
-                  ], "dispatch-selection-strip")}
-                  ${previewZeroAdd
-                    ? `<section class="operator-empty-state operator-empty-state-inline"><strong>No queue rows will be written.</strong><span>Nothing to confirm for queue writes because all eligible rows were already queued/skipped${previewZeroAddReasons ? `: ${escapeHtml(previewZeroAddReasons)}.` : "."}</span></section>`
-                    : ""}
-                  <details class="dispatch-drawer advanced-details">
-                    <summary>Advanced dispatch details</summary>
-                    <div class="dispatch-disclosure-body">
-                      ${renderOperatorPillStrip([
-                        `Selected source ${sourceName}`,
-                        `Source path ${sourcePath}`,
-                        `Cap ${dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all"}`,
-                        `Preflight ${preflightLabel}`,
-                        `Active senders ${activeSenderSummary}`,
-                        `Already sent ${Number(dispatchPreview.skipped_already_sent || 0)}`,
-                        `Already queued ${Number(dispatchPreview.skipped_already_queued || 0)}`,
-                        `Suppressed ${Number(dispatchPreview.skipped_suppressed || 0)}`,
-                        `Invalid ${Number(dispatchPreview.skipped_invalid_malformed || 0)}`,
-                        dispatchPreview.preview_path ? `Preview path ${dispatchPreview.preview_path}` : "",
-                        dispatchPreview.assigned_preview_archive_path ? `Assigned preview ${dispatchPreview.assigned_preview_archive_path}` : "",
-                      ])}
-                      ${renderOperatorMetricStrip([
-                        { label: "JC", value: previewPrivateJc },
-                        { label: "SG1", value: previewSg1 },
-                        { label: "SG2", value: previewSg2 },
-                        { label: "SG3", value: previewSg3 },
-                        { label: "SG4", value: previewSg4 },
-                        { label: "SG5", value: previewSg5 },
-                      ], "dispatch-allocation-strip")}
-                      <div class="operator-result-grid">
-                        ${renderOperatorTableBlock("Source Preview", "The eligible source rows behind this run.", sourceHeaders, sourcePreviewRows, "No source preview available yet.")}
-                        ${renderOperatorTableBlock("Assigned Preview", "The exact rows that would be written on confirm.", previewFields, previewRows, "No assigned preview rows were produced.")}
-                        ${Array.isArray(dispatchPreview.already_contacted_evidence) && dispatchPreview.already_contacted_evidence.length
-                          ? renderOperatorTableBlock(
-                            "Already Contacted Evidence",
-                            "already_contacted is a send-history protection, not a lead-quality rejection.",
-                            ["matched_email", "normalized_matched_email", "contact_ledger_source_file", "contacted_at", "channel", "campaign", "subject", "matching_rule"],
-                            dispatchPreview.already_contacted_evidence,
-                            "No already_contacted evidence was recorded.",
-                          )
-                          : ""}
-                      </div>
-                      ${renderOperatorTable(
-                        ["Queue", "Current Live"],
-                        [
-                          { Queue: "Astra / JC", "Current Live": liveJcCount },
-                          { Queue: "SG1", "Current Live": liveSg1 },
-                          { Queue: "SG2", "Current Live": liveSg2 },
-                          { Queue: "SG3", "Current Live": liveSg3 },
-                          { Queue: "SG4", "Current Live": liveSg4 },
-                          { Queue: "SG5", "Current Live": liveSg5 },
-                        ],
-                        "No live queue counts available.",
-                        "dispatch-live-table",
-                      )}
-                      <p class="dispatch-support-note">Live queue comparison is advanced-only and does not change the preview.</p>
-                    </div>
-                  </details>
-                `
-                : `
-                  <section class="operator-empty-state operator-empty-state-inline dispatch-next-step-banner${previewFeedbackState ? ` dispatch-next-step-${escapeHtml(previewFeedbackState)}` : ""}">
-                    <strong>${escapeHtml(noPreviewTitle)}</strong>
-                    <span>${escapeHtml(noPreviewMessage)}</span>
-                  </section>
-                `
-            }
-          </section>
+          ${previewZeroAdd
+            ? `<section class="operator-empty-state operator-empty-state-inline"><strong>No queue rows will be written.</strong><span>Nothing to confirm for queue writes because all eligible rows were already queued/skipped${previewZeroAddReasons ? `: ${escapeHtml(previewZeroAddReasons)}.` : "."}</span></section>`
+            : ""}
         </div>
       `,
     );
@@ -2984,7 +3686,11 @@ function renderImportantDispatch(result) {
       <div class="dispatch-shell dispatch-shell-confirmed">
         ${renderOperatorMetricStrip([
           { label: "Last confirmed dispatch", value: lastDispatchGeneratedAt },
-          { label: "Eligible", value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0) },
+          {
+            label: "Eligible for selected source",
+            value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0),
+            note: `Source: ${sourceLabel}`,
+          },
           { label: "Private JC added", value: confirmedPrivateJcTotal, tone: "good" },
           { label: "SendGrid added", value: confirmedSendgridTotal, tone: "good" },
           { label: "Skipped", value: Number(result.skipped_both || 0), tone: Number(result.skipped_both || 0) ? "warn" : "" },
@@ -2995,14 +3701,14 @@ function renderImportantDispatch(result) {
         <section class="dispatch-decision-surface dispatch-current-preview">
           <div class="operator-table-head">
             <div>
-              <h3>Current preview</h3>
+              <h3>Selected preview</h3>
               <p class="muted">This is the preview for the currently selected source and cap.</p>
             </div>
           </div>
           ${dispatchPreview
             ? `
               ${renderOperatorMetricStrip([
-                { label: "Eligible", value: Number(dispatchPreview.dispatch_eligible_row_count || 0) },
+                { label: "Eligible for selected source", value: Number(dispatchPreview.dispatch_eligible_row_count || 0), note: `Source: ${sourceLabel}` },
                 { label: "Selected", value: Number(dispatchPreview.dispatch_selected_row_count || 0), tone: "good" },
                 { label: "Would Write", value: Number(dispatchPreview.total_rows_would_write || 0), tone: "good" },
                 { label: "Cap", value: dispatchPreview.dispatch_cap_label || dispatchPreview.dispatch_cap || "all" },
@@ -3015,97 +3721,12 @@ function renderImportantDispatch(result) {
               </section>
             `}
         </section>
-        <section class="dispatch-decision-surface">
-          <div class="operator-table-head">
-            <div>
-              <h3>Last confirmed dispatch — not the current upload</h3>
-              <p class="muted">Last confirmed dispatch — not the current upload. Use Current preview above for the active source before confirming again.</p>
-            </div>
-          </div>
-          <details class="dispatch-drawer advanced-details">
-            <summary>Advanced dispatch details</summary>
-            <div class="dispatch-disclosure-body">
-              ${sendgridZeroAddExplanation
-                ? `
-                  <section class="operator-empty-state operator-empty-state-inline">
-                    <strong>SendGrid added 0 rows.</strong>
-                    <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
-                  </section>
-                `
-                : ""}
-              ${renderOperatorPillStrip([
-                `Source ${sourceName}`,
-                `Path ${sourcePath}`,
-                `Backup ${result.backup_dir || "-"}`,
-                result.assigned_preview_archive_path ? `Assigned preview ${result.assigned_preview_archive_path}` : "",
-                result.confirmed_summary_archive_path ? `Confirmed summary ${result.confirmed_summary_archive_path}` : "",
-              ])}
-              ${renderOperatorMetricStrip([
-                { label: "Source rows", value: Number(dispatchSource.dispatch_source_row_count || result.dispatch_source_row_count || 0) },
-                { label: "Suppressed", value: Number(result.suppressed_skipped || 0), tone: "warn" },
-                { label: "JC", value: confirmedPrivateJcTotal },
-                { label: "SG1", value: confirmedSg1 },
-                { label: "SG2", value: confirmedSg2 },
-                { label: "SG3", value: confirmedSg3 },
-                { label: "SG4", value: confirmedSg4 },
-                { label: "SG5", value: confirmedSg5 },
-              ], "dispatch-allocation-strip")}
-              <div class="operator-result-grid">
-                ${sourceHeaders.length && sourcePreviewRows.length
-                  ? renderOperatorTableBlock("Source Snapshot", "Source rows used for the last confirmed run.", sourceHeaders, sourcePreviewRows, "No source preview available.")
-                  : ""}
-                ${renderOperatorTableBlock(
-                  "Channel Decisions",
-                  "How this dispatch wrote or skipped rows by channel.",
-                  ["Channel", "Decision", "Count"],
-                  [
-                    { Channel: "Astra", Decision: "Added", Count: confirmedPrivateJcTotal },
-                    { Channel: "Astra", Decision: "Already Sent", Count: Number(result.skipped_astra_already_sent || 0) },
-                    { Channel: "Astra", Decision: "Already Queued", Count: Number(result.skipped_astra_already_queued || 0) },
-                    { Channel: "SendGrid", Decision: "Added", Count: confirmedSendgridTotal },
-                    { Channel: "SendGrid", Decision: "Already Contacted", Count: skippedAlreadyContacted },
-                    { Channel: "SendGrid", Decision: "Already Sent", Count: Number(result.skipped_sendgrid_already_sent || 0) },
-                    { Channel: "SendGrid", Decision: "Already Queued", Count: Number(result.skipped_sendgrid_already_queued || 0) },
-                    { Channel: "Both", Decision: "Suppressed", Count: skippedSuppressed },
-                    { Channel: "Both", Decision: "Invalid / Malformed", Count: skippedInvalid },
-                    { Channel: "Both", Decision: "Skipped Both", Count: Number(result.skipped_both || 0) },
-                  ],
-                  "No channel decisions were recorded.",
-                )}
-                ${alreadyContactedEvidenceRows.length
-                  ? renderOperatorTableBlock(
-                    "Already Contacted Evidence",
-                    "already_contacted is a send-history protection, not a lead-quality rejection.",
-                    ["matched_email", "normalized_matched_email", "contact_ledger_source_file", "contacted_at", "channel", "campaign", "subject", "matching_rule"],
-                    alreadyContactedEvidenceRows,
-                    "No already_contacted evidence was recorded.",
-                  )
-                  : ""}
-              </div>
-              ${renderOperatorTable(
-                ["Queue", "Current Live", "At Last Dispatch"],
-                [
-                  { Queue: "Astra / JC", "Current Live": liveJcCount, "At Last Dispatch": Number(result.final_queue_counts?.jc || 0) },
-                  { Queue: "SG1", "Current Live": liveSg1, "At Last Dispatch": Number(result.final_queue_counts?.sg1 || 0) },
-                  { Queue: "SG2", "Current Live": liveSg2, "At Last Dispatch": Number(result.final_queue_counts?.sg2 || 0) },
-                  { Queue: "SG3", "Current Live": liveSg3, "At Last Dispatch": Number(result.final_queue_counts?.sg3 || 0) },
-                  { Queue: "SG4", "Current Live": liveSg4, "At Last Dispatch": Number(result.final_queue_counts?.sg4 || 0) },
-                  { Queue: "SG5", "Current Live": liveSg5, "At Last Dispatch": Number(result.final_queue_counts?.sg5 || 0) },
-                ],
-                "No live queue comparison is available.",
-                "dispatch-live-table",
-              )}
-              <p class="dispatch-support-note">Live queue comparison is advanced-only and may be lower after sending drains files.</p>
-              ${
-                previewFields.length && previewRows.length
-                  ? renderOperatorTable(previewFields, previewRows, "No assigned preview rows were stored for the last dispatch.")
-                  : confirmedZeroAdd
-                    ? `<section class="operator-empty-state operator-empty-state-inline"><strong>Zero-add dispatch stored.</strong><span>No assigned rows were expected for this confirmed dispatch. Skip reasons were saved with the confirmed summary.</span></section>`
-                    : `<section class="operator-empty-state operator-empty-state-inline"><strong>No stored assigned preview.</strong><span>Last dispatch has no stored assigned preview. Re-run Preview Dispatch before confirming again.</span></section>`
-              }
-            </div>
-          </details>
-        </section>
+        ${sendgridZeroAddExplanation
+          ? `<section class="operator-empty-state operator-empty-state-inline">
+              <strong>SendGrid added 0 rows.</strong>
+              <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
+            </section>`
+          : ""}
       </div>
     `,
   );
@@ -3266,8 +3887,8 @@ function renderLeadFunnelSummary(funnel) {
           <thead>
             <tr>
               <th>Stage</th>
-              <th>Current live</th>
-              <th>Next batch</th>
+              <th>Historical/canonical files</th>
+              <th>Current staged run</th>
             </tr>
           </thead>
           <tbody>
@@ -3383,13 +4004,13 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
   const checkStatus = workflowStepStatus(activeCheck, latestCheck);
   const triageStatus = workflowStepStatus(activeVerify, latestTriage);
   const currentPreviewReady = dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
-  const previewStatus = importantLeadDispatchPreviewLoading
-    ? "running"
-    : currentPreviewReady
+  const previewStatus = currentPreviewReady
       ? "ready"
-      : lastImportantDispatchPreviewState === "failed"
-        ? "failed"
-        : "not_generated";
+      : importantLeadDispatchPreviewLoading
+        ? "running"
+        : lastImportantDispatchPreviewState === "failed"
+          ? "failed"
+          : "not_generated";
   const confirmStatus = importantLeadDispatchConfirmLoading || isActiveImportantLeadCheckJob(activeDispatch)
     ? "running"
     : latestDispatch?.generated_at_utc
@@ -3494,6 +4115,154 @@ function confirmedDispatchQueueState(status = lastLeadsStatus) {
   };
 }
 
+function pathDisplayName(path) {
+  const text = String(path || "").trim();
+  if (!text) return "-";
+  return text.split(/[\\/]/).pop() || text;
+}
+
+function currentLiveDispatchState(status = lastLeadsStatus) {
+  const activeSnapshot = status?.active_campaign_snapshot || {};
+  const confirmedDispatch = status?.latest_confirmed_dispatch || status?.latest_dispatch || lastImportantDispatch || {};
+  const privatePending = Number(status?.jc_queue?.count || 0);
+  const sendgridPending = liveSendGridQueueTotal(status);
+  const privateAdded = Number(confirmedDispatch.private_jc_added || confirmedDispatch.added_astra || 0);
+  const sendgridAdded = Number(confirmedDispatch.sendgrid_added || confirmedDispatch.added_sendgrid || 0);
+  const sourcePath = String(activeSnapshot.intended_source_path || confirmedDispatch.dispatch_source_path || confirmedDispatch.source_path || "").trim();
+  const sourceRows = Number(activeSnapshot.intended_source_row_count || confirmedDispatch.dispatch_source_row_count || confirmedDispatch.source_rows || 0);
+  const campaignType = String(activeSnapshot.campaign_type || confirmedDispatch.campaign_type || "cold").trim() || "cold";
+  const hasLiveQueue = privatePending + sendgridPending > 0;
+  const hasConfirmedDispatch = Boolean(confirmedDispatch?.generated_at_utc || confirmedDispatch?.confirmed_at_utc || confirmedDispatch?.confirmed_at);
+  return {
+    active: hasLiveQueue || hasConfirmedDispatch,
+    hasLiveQueue,
+    campaignType,
+    sourcePath,
+    sourceRows,
+    privatePending,
+    sendgridPending,
+    privateAdded,
+    sendgridAdded,
+    sendgridStatus: sendgridPending > 0 ? `SendGrid pending ${sendgridPending.toLocaleString()}` : "SendGrid complete",
+    privateStatus: privatePending > 0 ? `Private JC pending ${privatePending.toLocaleString()}` : "Private JC complete",
+    nextAction: privatePending > 0 && sendgridPending <= 0
+      ? "Start JC from Dashboard"
+      : privatePending + sendgridPending > 0
+        ? "Start remaining sender(s) from Dashboard"
+        : "No live queue action",
+  };
+}
+
+function dispatchSourceComparisonWarning(status = lastLeadsStatus) {
+  const live = currentLiveDispatchState(status);
+  if (!live.active || !live.sourceRows) return "";
+  const selectedSource = dispatchSourceForSelectedMode().source || {};
+  const selectedRows = Number(selectedSource.dispatch_eligible_row_count || selectedSource.dispatch_source_row_count || 0);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  if (selectedCampaign === "recontact_cold" && selectedRows > live.sourceRows) {
+    return `Selected source has ${selectedRows.toLocaleString()} rows, which is broader than the confirmed safe source (${live.sourceRows.toLocaleString()} rows).`;
+  }
+  return "";
+}
+
+function queueSafetyReasonLabel(reason) {
+  const normalized = String(reason || "").trim();
+  if (normalized === "OUTSIDE_CHECKED_OUTPUT") return "Live queues differ from the selected checked output.";
+  if (normalized === "OUTSIDE_INTENDED_SOURCE") return "Live queues differ from the selected intended source.";
+  if (normalized === "TRIAGED_REJECT_OVERLAP") return "Live queues overlap triaged reject rows.";
+  if (normalized === "INTENDED_SOURCE_OVERLAPS_REJECT") return "Selected intended source overlaps triaged reject rows.";
+  return normalized || "Recipient queue unsafe.";
+}
+
+function queueSafetySourceContext(currentSafety = {}) {
+  const report = currentSafety.queue_safety || currentSafety.combined_queue_safety || {};
+  const checked = report.checked_path || "";
+  const intended = report.intended_source_path || report.triaged_keep_path || "";
+  const pieces = [];
+  if (checked) pieces.push(`Checked: ${pathDisplayName(checked)}`);
+  if (intended) pieces.push(`Intended: ${pathDisplayName(intended)}`);
+  return pieces.join(" · ");
+}
+
+function sourceComparisonOnlySafety(currentSafety = {}) {
+  const reasons = Array.isArray(currentSafety.reasons) ? currentSafety.reasons : [];
+  if (!reasons.length) return false;
+  return reasons.every((reason) => ["OUTSIDE_CHECKED_OUTPUT", "OUTSIDE_INTENDED_SOURCE"].includes(String(reason || "").trim()));
+}
+
+function isSourceComparisonSafetyReason(reason) {
+  const normalized = String(reason || "").trim();
+  return ["OUTSIDE_CHECKED_OUTPUT", "OUTSIDE_INTENDED_SOURCE"].includes(normalized);
+}
+
+function inactiveSendgridBookTitleOnly(currentSafety = {}, status = lastLeadsStatus) {
+  const missing = Array.isArray(currentSafety.missing_booktitle_queues)
+    ? currentSafety.missing_booktitle_queues.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!missing.length) return false;
+  if (liveSendGridQueueTotal(status) > 0) return false;
+  if (String(currentSafety.private_status || "").toUpperCase() !== "READY") return false;
+  return missing.every((queue) => {
+    const normalized = queue.toLowerCase();
+    return normalized.startsWith("sg") || normalized.includes("sendgrid");
+  });
+}
+
+function isInactiveSendgridBookTitleReason(reason, currentSafety = {}, status = lastLeadsStatus) {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("missing booktitle") && inactiveSendgridBookTitleOnly(currentSafety, status);
+}
+
+function newDispatchOnlySafetyWarning(currentSafety = {}, status = lastLeadsStatus) {
+  if (!Boolean(currentSafety?.blocked)) return false;
+  const live = currentLiveDispatchState(status);
+  if (!live.active && !sourceComparisonOnlySafety(currentSafety)) return false;
+  if (live.privatePending > 0 && String(currentSafety.private_status || "").toUpperCase() !== "READY") return false;
+  const reasons = Array.isArray(currentSafety.reasons) ? currentSafety.reasons : [];
+  if (!reasons.length) return false;
+  return reasons.every((reason) => (
+    isSourceComparisonSafetyReason(reason)
+    || isInactiveSendgridBookTitleReason(reason, currentSafety, status)
+  ));
+}
+
+function newDispatchWarningMessage(reasonText, context = "") {
+  const scope = "This warning applies to preparing a new dispatch. It does not block the already confirmed current live dispatch.";
+  const detail = `${reasonText || ""}${context ? ` ${context}.` : ""}`.trim();
+  return detail ? `${scope} ${detail}` : scope;
+}
+
+function alertLooksLikeNewDispatchSourceWarning(alert = {}, currentSafety = {}, status = lastLeadsStatus) {
+  const text = `${alert?.title || ""} ${alert?.message || ""}`.toLowerCase();
+  const looksLikeSourceWarning = (
+    text.includes("selected checked output")
+    || text.includes("selected intended source")
+    || text.includes("outside checked")
+    || text.includes("outside intended")
+    || text.includes("differ from the selected")
+  );
+  if (!looksLikeSourceWarning) return false;
+  if (!hasActualLiveQueueActivity(status, lastSnapshot)) return true;
+  if (!currentLiveDispatchState(status).active) return false;
+  if (String(currentSafety.private_status || "").toUpperCase() !== "READY") return false;
+  return true;
+}
+
+function renderLeadsCurrentQueueNote(status = lastLeadsStatus) {
+  if (!els.leadsCurrentQueueNote) return;
+  const live = currentLiveDispatchState(status);
+  if (!live.active || live.privatePending <= 0) {
+    setNodeText(els.leadsCurrentQueueNote, "");
+    els.leadsCurrentQueueNote.hidden = true;
+    return;
+  }
+  setNodeText(
+    els.leadsCurrentQueueNote,
+    `Current queue exists: Private JC ${live.privatePending.toLocaleString()} pending. Sender controls are on Dashboard.`,
+  );
+  els.leadsCurrentQueueNote.hidden = false;
+}
+
 function privateJcAuthIssueMessage(snapshot = lastSnapshot) {
   const alerts = Array.isArray(snapshot?.alerts) ? snapshot.alerts : [];
   const match = alerts.find((alert) => {
@@ -3507,94 +4276,153 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   if (!els.leadsCurrentRunPanel) return;
   const state = currentRunWorkflowState(status);
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
-  const confirmedQueue = confirmedDispatchQueueState(status);
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
+  const pipeline = status?.pipeline || {};
   const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0);
-  const fallbackRows = Number(latestTriage.keep_with_fallback_rows || 0);
   const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
-  const reviewRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
-  const checkRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows || 0);
-  const previewBlock = currentRunPreviewBlockMessage(dispatchSource, state);
-  const sendSafety = status?.current_send_safety || {};
-  const safetyReport = sendSafety.queue_safety || {};
-  const safetyReasons = Array.isArray(sendSafety.reasons) ? sendSafety.reasons : [];
-  const queuePlainResult = sendSafety.blocked
-    ? `Queue blocked: ${safetyReasons[0] || "recipient queue unsafe"}${safetyReport.intended_source_path ? ` · Source ${safetyReport.intended_source_path}` : ""}`
-    : "Queue safe to send";
-  const previewReady = state.previewStatus === "ready";
+  const quarantineRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
+  const inputRows = Number(latestCheck.input_rows || pipeline.input_rows || 0);
+  const cleanedRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || pipeline.cleaned_rows || 0);
+  const rejectedRows = Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || pipeline.rejected_rows || 0);
   const sourceRows = Number(dispatchSource.dispatch_eligible_row_count || dispatchSource.dispatch_source_row_count || 0);
-  const nextAction = currentRunNextAction(state, dispatchSource);
-  const readyForPreview = state.triageStatus === "completed" && sourceRows > 0 && !previewBlock;
-  const confirmedDispatchReady = confirmedQueue.liveMatches;
-  const currentRunTitle = confirmedDispatchReady ? "Dispatch complete" : readyForPreview || previewReady ? "Current run ready" : "Current run not ready";
-  const sourcePath = dispatchSource.dispatch_source_path || dispatchSource.dispatch_source_label || "-";
-  const previewStatusCopy = previewReady
-    ? "Current preview ready"
-    : readyForPreview
-      ? "Ready to preview"
-      : (previewBlock || "Preview not generated yet");
-  const displayStatusCopy = confirmedDispatchReady ? "Queues match confirmed dispatch" : previewStatusCopy;
-  const primaryLine = confirmedDispatchReady
-    ? `${confirmedQueue.totalQueued.toLocaleString()} queued`
-    : keepRows > 0
-    ? `${keepRows.toLocaleString()} leads ready for dispatch`
-    : "No leads ready for dispatch yet";
-  const fallbackLine = confirmedDispatchReady
-    ? `Private JC ${confirmedQueue.privateAdded.toLocaleString()} · SendGrid ${confirmedQueue.sendgridAdded.toLocaleString()} · Skipped ${confirmedQueue.skipped.toLocaleString()}`
-    : fallbackRows > 0
-    ? `${fallbackRows.toLocaleString()} will use BookTitle fallback`
-    : "No BookTitle fallback rows";
-  const actionTitle = confirmedDispatchReady ? "Use the Sender tab Start buttons when ready." : (nextAction.blocker || "");
+  const checkedEligibleRows = Number(
+    pipeline.dispatch_eligible_rows
+    || latestCheck.dispatch_eligible_rows
+    || latestCheck.eligible_rows
+    || latestCheck.cleaned_rows
+    || latestCheck.output_rows
+    || sourceRows
+    || 0,
+  );
+  if (els.leadsControlCheckResult) {
+    setNodeHtml(
+      els.leadsControlCheckResult,
+      cleanedRows || rejectedRows || inputRows
+        ? [
+          ["Input", inputRows],
+          ["Cleaned", cleanedRows],
+          ["Rejected", rejectedRows],
+          ["Keep", keepRows],
+          ["Reject", rejectRows],
+          ["Quarantine", quarantineRows],
+        ].map(([label, value]) => `<span>${escapeHtml(label)} <strong>${Number(value || 0).toLocaleString()}</strong></span>`).join("")
+        : "<span>No checked source loaded yet</span>",
+    );
+  }
+  const processingReady = state.checkStatus === "completed" && state.triageStatus === "completed";
+  const currentBlocker = state.checkStatus === "failed"
+    ? "Check Leads failed."
+    : state.triageStatus === "failed"
+      ? "Fast Triage failed."
+      : state.checkStatus === "running"
+        ? "Check Leads is running."
+        : state.triageStatus === "running"
+          ? "Fast Triage is running."
+          : "";
   const authIssue = privateJcAuthIssueMessage(lastSnapshot);
   setNodeHtml(
     els.leadsCurrentRunPanel,
     `
-      <article class="current-run-card ${confirmedDispatchReady || readyForPreview || previewReady ? "current-run-card-ready" : "current-run-card-wait"}">
+      <article class="current-run-card current-source-summary-card ${processingReady ? "current-run-card-ready" : "current-run-card-wait"}">
         <div class="current-run-head">
           <div>
-            <p class="eyebrow">Current Run</p>
-            <h3>${escapeHtml(currentRunTitle)}</h3>
-            <p class="current-run-subtitle">${confirmedDispatchReady
-              ? `Confirmed dispatch · Live queues match · ${escapeHtml(intakeModeLabelFromStatus(status))}`
-              : `${escapeHtml(intakeModeLabelFromStatus(status))} · Check ${escapeHtml(workflowStatusLabel(state.checkStatus))} · Fast Triage ${escapeHtml(workflowStatusLabel(state.triageStatus))}`}</p>
+            <p class="eyebrow">Source Summary</p>
+            <h3>${processingReady ? "Source ready for preview" : "Source not ready"}</h3>
+            <p class="current-run-subtitle">Counts below describe the current checked and triaged source only.</p>
           </div>
-          <span class="mini-pill">${escapeHtml(displayStatusCopy)}</span>
-        </div>
-        ${renderCurrentRunStatusStrip(state)}
-        <div class="current-run-hero">
-          <div>
-            <strong>${escapeHtml(primaryLine)}</strong>
-            <span>${escapeHtml(fallbackLine)}</span>
-          </div>
-          <button class="btn btn-primary current-run-next-action" type="button" data-leads-next-action="${escapeHtml(confirmedDispatchReady ? "" : nextAction.action)}" ${confirmedDispatchReady || nextAction.disabled ? "disabled" : ""} title="${escapeHtml(actionTitle)}">${escapeHtml(confirmedDispatchReady ? "Start SendGrid" : nextAction.label)}</button>
+          <span class="mini-pill">${processingReady ? "Ready" : "Waiting"}</span>
         </div>
         <div class="current-run-metrics">
-          ${confirmedDispatchReady
-            ? `
-              <div><span>Dispatch status</span><strong>Complete</strong></div>
-              <div><span>Private JC</span><strong>${confirmedQueue.privateAdded.toLocaleString()}</strong></div>
-              <div><span>SendGrid</span><strong>${confirmedQueue.sendgridAdded.toLocaleString()}</strong></div>
-              <div><span>Skipped</span><strong>${confirmedQueue.skipped.toLocaleString()}</strong></div>
-            `
-            : `
-              <div><span>Check status and count</span><strong>${escapeHtml(workflowStatusLabel(state.checkStatus))} · ${checkRows.toLocaleString()}</strong></div>
-              <div><span>Triage status and count</span><strong>${escapeHtml(workflowStatusLabel(state.triageStatus))} · ${keepRows.toLocaleString()} keep</strong></div>
-              <div><span>Reject rows</span><strong>${rejectRows.toLocaleString()}</strong></div>
-              <div><span>Review rows</span><strong>${reviewRows.toLocaleString()}</strong></div>
-            `}
-        </div>
-        <div class="current-run-source">
-          <span>Dispatch source path</span>
-          <strong class="path-ellipsis" title="${escapeHtml(confirmedDispatchReady ? confirmedQueue.sourcePath || sourcePath : sourcePath)}">${escapeHtml(confirmedDispatchReady ? confirmedQueue.sourcePath || sourcePath : sourcePath)}</strong>
+          <div><span>Input</span><strong>${inputRows.toLocaleString()}</strong></div>
+          <div><span>Cleaned</span><strong>${cleanedRows.toLocaleString()}</strong></div>
+          <div><span>Rejected</span><strong>${rejectedRows.toLocaleString()}</strong></div>
+          <div><span>Triage Keep</span><strong>${keepRows.toLocaleString()}</strong></div>
+          <div><span>Triage Reject</span><strong>${rejectRows.toLocaleString()}</strong></div>
+          <div><span>Quarantine</span><strong>${quarantineRows.toLocaleString()}</strong></div>
+          <div><span>Eligible checked output</span><strong>${checkedEligibleRows.toLocaleString()}</strong></div>
         </div>
         ${authIssue ? `<div class="current-run-auth-warning">${escapeHtml(authIssue)}</div>` : ""}
-        ${confirmedDispatchReady
-          ? `<div class="current-run-next-copy">${escapeHtml(queuePlainResult)} · Next step: Start SendGrid / Start sending</div>`
-          : sendSafety.blocked || previewBlock
-          ? `<div class="current-run-blocker">${escapeHtml(sendSafety.blocked ? queuePlainResult : previewBlock)}</div>`
-          : `<div class="current-run-next-copy">${escapeHtml(queuePlainResult)} · Next step: ${escapeHtml(nextAction.label)}</div>`}
+        ${currentBlocker ? `<div class="current-run-summary-line current-run-blocker"><span>${escapeHtml(currentBlocker)}</span></div>` : ""}
       </article>
+    `,
+  );
+}
+
+function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
+  if (!els.leadsWorkflowTaskList) return;
+  const state = currentRunWorkflowState(status);
+  const latestCheck = state.latestCheck || {};
+  const latestTriage = state.latestTriage || {};
+  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const checkRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows || 0);
+  const checkRejected = Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || 0);
+  const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_source_row_count || 0);
+  const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
+  const quarantineRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
+  const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
+  const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
+  const liveQueueExists = liveRecipientQueueTotal(status) > 0;
+  const tasks = [
+    {
+      step: "Check Leads",
+      status: state.checkStatus === "completed" ? "Complete" : workflowStatusLabel(state.checkStatus),
+      detail: checkRows ? `${checkRows.toLocaleString()} cleaned, ${checkRejected.toLocaleString()} rejected` : "Upload and check a CSV/XLSX source.",
+      tone: state.checkStatus === "completed" ? "good" : "warn",
+    },
+    {
+      step: "Triage",
+      status: state.triageStatus === "completed" ? "Complete" : workflowStatusLabel(state.triageStatus),
+      detail: keepRows ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine` : "Run Fast Triage after Check Leads.",
+      tone: state.triageStatus === "completed" ? "good" : "warn",
+    },
+    {
+      step: "Choose Campaign",
+      status: isCurrentSaferRecontactSource(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null)
+        ? "Current: Safer Recontact"
+        : selectedCampaign === "cold" ? "Current: Fresh Cold" : "Current: Recontact",
+      detail: `${selectedSource}. Changing source changes the count.`,
+      tone: "neutral",
+    },
+    {
+      step: "Preview Dispatch",
+      status: previewCurrent ? "Complete" : "Needed",
+      detail: previewCurrent ? "Preview matches selected source and cap." : "Run Preview Dispatch before confirming anything.",
+      tone: previewCurrent ? "good" : "warn",
+    },
+    {
+      step: "Confirm Queue",
+      status: confirmReady ? "Available" : "Locked until preview is current and safe",
+      detail: "Confirm writes queues only after preview passes.",
+      tone: confirmReady ? "good" : "warn",
+    },
+    {
+      step: "Start Senders",
+      status: liveQueueExists ? "Queues exist" : "Locked until queues exist",
+      detail: liveQueueExists ? "Start senders from the Dashboard sender table." : "No live recipient queues are ready to start.",
+      tone: liveQueueExists ? "good" : "neutral",
+    },
+  ];
+  setNodeHtml(
+    els.leadsWorkflowTaskList,
+    `
+      <div class="workflow-tracker-head">
+        <p class="eyebrow">Workflow Tracker</p>
+      </div>
+      <ol class="workflow-tracker-row" aria-label="Lead dispatch workflow">
+        ${tasks.map((task, index) => `
+          <li class="workflow-track-step workflow-track-step-${escapeHtml(task.tone)}">
+            <span class="workflow-track-number">${index + 1}</span>
+            <span class="workflow-track-copy">
+              <strong>${escapeHtml(task.step)}</strong>
+              <em>${escapeHtml(task.status)}</em>
+              <small>${escapeHtml(task.detail)}</small>
+            </span>
+          </li>
+        `).join("")}
+      </ol>
     `,
   );
 }
@@ -3604,6 +4432,8 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   const state = currentRunWorkflowState(status);
   const latestTriage = state.latestTriage || {};
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
+  const dispatchSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
   const confirmedQueue = confirmedDispatchQueueState(status);
   const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
     ? "New staged run not ready — previous dispatch is queued."
@@ -3611,21 +4441,27 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   const triageCounts = latestTriage?.generated_at_utc
     ? `input ${formatOperatorCount(latestTriage.total_input_rows)} · keep ${formatOperatorCount(latestTriage.keep_count)} · reject ${formatOperatorCount(latestTriage.reject_count)} · review ${formatOperatorCount(latestTriage.quarantine_count)}`
     : "";
+  const headline = dispatchSummary.sentLogOverlap > 0
+    ? `BLOCKED — Planned recipients overlap authoritative sent/contact logs: ${dispatchSummary.sentLogOverlap.toLocaleString()}.`
+    : dispatchSummary.skippedMathMismatch
+      ? `BLOCKED — Skipped rows ${dispatchSummary.skippedRows.toLocaleString()} do not match skipped reasons ${dispatchSummary.skippedReasonTotal.toLocaleString()}.`
+      : dispatchSummary.historyRemoved && state.previewStatus === "completed"
+        ? `SAFE — History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${dispatchSummary.uniquePlanned.toLocaleString()} cold-safe leads remain.`
+        : state.triageStatus === "completed" && state.previewStatus !== "completed"
+      ? "READY — Preview Dispatch required before Confirm."
+      : workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus);
   setNodeHtml(
     els.leadsWorkflowStatusBanner,
     `
-      <div class="workflow-banner-head">
-        <div>
-          <p class="eyebrow">Workflow Status</p>
-          <strong>${escapeHtml(workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus))}</strong>
-        </div>
+      <div class="workflow-banner-inline">
+        <span class="eyebrow">Safety Banner</span>
+        <strong>${escapeHtml(headline)}</strong>
+        <span class="workflow-banner-chip">Check: ${escapeHtml(workflowStatusLabel(state.checkStatus))}</span>
+        <span class="workflow-banner-chip">Triage: ${escapeHtml(workflowStatusLabel(state.triageStatus))}</span>
+        <span class="workflow-banner-chip">Preview: ${escapeHtml(workflowStatusLabel(state.previewStatus))}</span>
+        <span class="workflow-banner-chip">Confirm: ${escapeHtml(workflowStatusLabel(state.confirmStatus))}</span>
       </div>
-      <div class="workflow-step-grid">
-        ${renderWorkflowStep("Last check", state.checkStatus)}
-        ${renderWorkflowStep("Last triage", state.triageStatus, triageCounts)}
-        ${renderWorkflowStep("Preview dispatch", state.previewStatus)}
-        ${renderWorkflowStep("Confirm dispatch", state.confirmStatus)}
-      </div>
+      ${triageCounts ? `<div class="workflow-banner-meta">${escapeHtml(triageCounts)}</div>` : ""}
       ${stagedRunWarning ? `<div class="workflow-staged-warning">${escapeHtml(stagedRunWarning)}</div>` : ""}
     `,
   );
@@ -3661,11 +4497,37 @@ function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapsh
   const safety = leadsRunSafety(status, snapshot);
   const cards = [];
   if (safety.queueUnsafe) {
+    const currentSafety = status?.current_send_safety || {};
+    const newDispatchOnly = sourceComparisonOnlySafety(currentSafety) || newDispatchOnlySafetyWarning(currentSafety, status);
+    const context = queueSafetySourceContext(currentSafety);
+    const reasonText = (Array.isArray(currentSafety.reasons) && currentSafety.reasons.length
+      ? currentSafety.reasons.map(queueSafetyReasonLabel).join(" ")
+      : safety.reasons[0] || "Recipient queue unsafe.");
     cards.push({
-      severity: "bad",
-      title: "Current live queue blocked",
-      message: safety.reasons[0] || "Recipient queue unsafe. Rebuild queues from the current campaign source before starting.",
-      blocks: true,
+      severity: newDispatchOnly ? "warn" : "bad",
+      title: newDispatchOnly ? "New dispatch source warning" : "Current live queue blocked",
+      message: newDispatchOnly ? newDispatchWarningMessage(reasonText, context) : `${reasonText}${context ? ` ${context}.` : ""}`,
+      blocks: !newDispatchOnly,
+    });
+  } else if (Array.isArray(safety.queueWarnings) && safety.queueWarnings.length) {
+    const currentSafety = status?.current_send_safety || {};
+    const context = queueSafetySourceContext(currentSafety);
+    const reasonText = safety.queueWarnings.map(queueSafetyReasonLabel).join(" ");
+    const sourceWarning = safety.queueWarnings.every((reason) => isSourceComparisonSafetyReason(reason));
+    cards.push({
+      severity: "warn",
+      title: sourceWarning ? "New dispatch source warning" : "Inactive live queue warning",
+      message: sourceWarning
+        ? newDispatchWarningMessage(reasonText, context)
+        : `No live queue is active, so this does not block Preview Dispatch. ${reasonText}${context ? ` ${context}.` : ""}`.trim(),
+      blocks: false,
+    });
+  } else if (currentLiveDispatchState(status).hasLiveQueue) {
+    cards.push({
+      severity: "good",
+      title: "Current live dispatch: Ready",
+      message: "The already confirmed current live dispatch does not show a blocking start alert.",
+      blocks: false,
     });
   }
   const currentSafety = status?.current_send_safety || {};
@@ -3685,11 +4547,12 @@ function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapsh
     if (alertText.includes("booktitle") && sendgridPending <= 0 && !Boolean(alert?.blocks_sending)) {
       return;
     }
+    const alertNewDispatchOnly = alertLooksLikeNewDispatchSourceWarning(alert, currentSafety, status);
     cards.push({
-      severity: alert?.severity || "warn",
-      title: alert?.title || "Alert",
-      message: alert?.message || "",
-      blocks: Boolean(alert?.blocks_sending),
+      severity: alertNewDispatchOnly ? "warn" : (alert?.severity || "warn"),
+      title: alertNewDispatchOnly ? "New dispatch source warning" : (alert?.title || "Alert"),
+      message: alertNewDispatchOnly ? newDispatchWarningMessage(alert?.message || "") : (alert?.message || ""),
+      blocks: alertNewDispatchOnly ? false : Boolean(alert?.blocks_sending),
     });
   });
   if (!cards.length) {
@@ -3700,33 +4563,64 @@ function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapsh
       blocks: false,
     });
   }
+  const blockingCount = cards.filter((card) => Boolean(card.blocks)).length;
+  const warningCount = cards.filter((card) => !card.blocks && String(card.severity || "").toLowerCase() === "warn").length;
+  const infoCount = Math.max(0, cards.length - blockingCount - warningCount);
+  const leadCard = cards.find((card) => Boolean(card.blocks))
+    || cards.find((card) => String(card.severity || "").toLowerCase() === "warn")
+    || cards[0];
   setNodeHtml(
     els.leadsActiveAlerts,
-    cards.slice(0, 6).map((card) => `
-      <article class="leads-alert-card leads-alert-card-${escapeHtml(card.severity || "warn")}">
+    `
+      <div class="leads-alert-summary-row leads-alert-summary-${blockingCount ? "bad" : warningCount ? "warn" : "good"}">
         <div>
-          <strong>${escapeHtml(card.title)}</strong>
-          <p>${escapeHtml(card.message || "No details provided.")}</p>
+          <strong>${warningCount.toLocaleString()} warning${warningCount === 1 ? "" : "s"}</strong>
+          <span>${blockingCount.toLocaleString()} blocking · ${infoCount.toLocaleString()} info</span>
         </div>
-        <span class="mini-pill">${card.blocks ? "Blocking" : "Info"}</span>
-      </article>
-    `).join(""),
+        <p>${escapeHtml(leadCard?.title || "No active lead safety alerts")}</p>
+      </div>
+      <details class="leads-collapsible advanced-details leads-alert-details">
+        <summary>Safety messages</summary>
+        <div class="leads-alert-detail-list">
+          ${cards.slice(0, 6).map((card) => `
+            <article class="leads-alert-card leads-alert-card-${escapeHtml(card.severity || "warn")}">
+              <div>
+                <strong>${escapeHtml(card.title)}</strong>
+                <p>${escapeHtml(card.message || "No details provided.")}</p>
+              </div>
+              <span class="mini-pill">${card.blocks ? "Blocking" : String(card.severity || "").toLowerCase() === "warn" ? "Warning" : "Info"}</span>
+            </article>
+          `).join("")}
+        </div>
+      </details>
+    `,
   );
 }
 
 function renderLeadsRunSafety(status = lastLeadsStatus) {
   if (!els.leadsRunSafetyCard) return;
   const safety = leadsRunSafety(status);
-  const tone = safety.statusLabel === "SAFE TO CONTINUE" ? "safe-to-continue" : safety.statusLabel.toLowerCase().replace(/\s+/g, "-");
   const progress = safety.progress || {};
   const progressText = progress.total > 0
     ? `${progress.processed} / ${progress.total} (${progress.percent.toFixed(1)}%)`
     : "n/a";
   const reasons = safety.reasons.length
     ? safety.reasons
-    : ["Live recipient queues are approved for current sending."];
-  const currentSafetyTitle = safety.queueUnsafe ? "Current live queue blocked" : "Current live queue ready";
+    : (Array.isArray(safety.queueWarnings) && safety.queueWarnings.length
+      ? safety.queueWarnings
+      : ["Live recipient queues are approved for current sending."]);
+  const currentSafety = status?.current_send_safety || {};
+  const warningOnly = !safety.queueUnsafe && Array.isArray(safety.queueWarnings) && safety.queueWarnings.length > 0;
+  const sourceWarningOnly = warningOnly && safety.queueWarnings.every((reason) => isSourceComparisonSafetyReason(reason));
+  const newDispatchOnly = warningOnly || sourceComparisonOnlySafety(currentSafety) || newDispatchOnlySafetyWarning(currentSafety, status);
+  const displayStatusLabel = (safety.queueUnsafe && newDispatchOnly) || warningOnly ? "WARNING" : safety.statusLabel;
+  const tone = displayStatusLabel === "SAFE TO CONTINUE" ? "safe-to-continue" : displayStatusLabel.toLowerCase().replace(/\s+/g, "-");
+  const currentSafetyTitle = safety.queueUnsafe
+    ? (newDispatchOnly ? "New dispatch source warning" : "Current live queue blocked")
+    : (warningOnly ? (sourceWarningOnly ? "New dispatch source warning" : "Inactive live queue warning") : "Current live queue ready");
   const currentSafetyScope = "Current approved live queues only";
+  const sourceContext = queueSafetySourceContext(currentSafety);
+  const liveQueueDisplay = safety.queueUnsafe && !newDispatchOnly ? "Blocked" : "Ready";
   setNodeHtml(
     els.leadsRunSafetyCard,
     `
@@ -3734,16 +4628,17 @@ function renderLeadsRunSafety(status = lastLeadsStatus) {
         <div>
           <p class="eyebrow">Current Run Safety</p>
           <h3>${escapeHtml(currentSafetyTitle)}</h3>
-          <strong>${escapeHtml(safety.statusLabel)}</strong>
+          <strong>${escapeHtml(displayStatusLabel)}</strong>
         </div>
         <span class="mini-pill">${escapeHtml(currentSafetyScope)}</span>
       </div>
       <div class="leads-run-safety-body">
         <div class="leads-run-safety-reasons">
-          ${reasons.map((reason) => `<div>${escapeHtml(reason)}</div>`).join("")}
+          ${reasons.map((reason) => `<div>${escapeHtml(queueSafetyReasonLabel(reason))}</div>`).join("")}
+          ${sourceContext ? `<div>${escapeHtml(sourceContext)}</div>` : ""}
         </div>
         ${renderOperatorMetricStrip([
-          { label: "Live Queue", value: safety.queueUnsafe ? "Blocked" : "Ready", tone: safety.queueUnsafe ? "warn" : "good" },
+          { label: "Live Queue", value: liveQueueDisplay, tone: liveQueueDisplay === "Ready" ? "good" : "warn" },
           { label: "SendGrid", value: status?.current_send_safety?.sendgrid_status || "-", tone: status?.current_send_safety?.sendgrid_status === "READY" ? "good" : "warn" },
           { label: "Private JC", value: status?.current_send_safety?.private_status || "-", tone: status?.current_send_safety?.private_status === "READY" ? "good" : "warn" },
           { label: "Active Check", value: safety.checkRunning ? "Running" : "Idle", tone: safety.checkRunning ? "warn" : "good" },
@@ -3818,6 +4713,9 @@ function renderLeadsStatus(status) {
   lastImportantVerify = lastLeadsStatus?.latest_lead_triage || lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
+  if (lastLeadsStatus?.safer_recontact_source_summary && typeof lastLeadsStatus.safer_recontact_source_summary === "object") {
+    lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary;
+  }
   if (shouldResumeLeadJobs && !resumeImportantLeadCheckJob(activeCheckJob)) {
     renderImportantLeadCheck(lastImportantLeadCheck);
   } else if (!shouldResumeLeadJobs) {
@@ -3841,7 +4739,9 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadsWorkflowTaskList(lastLeadsStatus);
   renderLeadsCurrentRunPanel(lastLeadsStatus);
+  renderLeadsCurrentQueueNote(lastLeadsStatus);
   renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   renderLeadFunnelSummary(lastLeadsStatus?.lead_funnel || {});
   renderLeadsOperatorStatusStrip(lastLeadsStatus);
@@ -3960,7 +4860,7 @@ function renderLeadsPipeline(pipeline) {
       `Triage keep ${triageKeepRows}`,
       `Triage reject ${triageRejectRows}`,
       `Quarantine ${quarantineRows}`,
-      `Eligible ${Number(pipeline?.dispatch_eligible_rows || 0)}`,
+      `Eligible in checked output ${Number(pipeline?.dispatch_eligible_rows || 0)}`,
       archivePath ? `Archive ${archivePath.split(/[\\/]/).pop()}` : "",
     ].filter(Boolean).join(" | ");
     setNodeText(els.leadsPipelineMeta, summary);
@@ -4146,6 +5046,33 @@ async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
   }
 }
 
+function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
+  const errorCode = String(payload?.error || "").trim();
+  const rawMessage = String(payload?.message || fallbackMessage || "Preview Dispatch was blocked.").trim();
+  const retryAction = String(payload?.retry_action || "").trim();
+  const sourcePath = String(payload?.source_path || payload?.dispatch_source_path || "").trim();
+  const messageParts = [];
+  if (errorCode === "triage_not_ready" || rawMessage.toLowerCase().includes("current staged fast triage keep is empty")) {
+    messageParts.push("Current staged Fast Triage Keep is empty.");
+    messageParts.push("Run Check Leads / Fast Triage first.");
+  } else if (rawMessage) {
+    messageParts.push(rawMessage);
+  }
+  if (retryAction) {
+    messageParts.push(`Retry action: ${retryAction}`);
+  }
+  if (sourcePath) {
+    messageParts.push(`Source path: ${sourcePath}`);
+  }
+  return {
+    state: "blocked",
+    message: messageParts.join(" "),
+    error: errorCode,
+    source_path: sourcePath,
+    retry_action: retryAction,
+  };
+}
+
 async function previewImportantLeadDispatch() {
   const selectedDispatchSource = dispatchSourceForSelectedMode();
   const blockReason = dispatchPreviewBlockReason(selectedDispatchSource.source || {});
@@ -4168,9 +5095,12 @@ async function previewImportantLeadDispatch() {
     importantLeadDispatchPreviewLoading = true;
     lastImportantDispatchPreviewState = "running";
     lastImportantDispatchPreviewFeedback = { state: "running", message: "Preview Dispatch is running." };
-    setButtonBusy(els.leadsImportantDispatchPreviewBtn, true, "Previewing...");
+    [els.leadsImportantDispatchPreviewBtn, els.leadsImportantDispatchPreviewTopBtn].filter(Boolean).forEach((button) => {
+      setButtonBusy(button, true, "Previewing...");
+    });
     renderImportantDispatch(lastImportantDispatch);
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+    showMessage("Preview Dispatch request started.", "success");
   }
   try {
     const data = await fetchJson("/api/leads/dispatch-important/preview", {
@@ -4184,7 +5114,7 @@ async function previewImportantLeadDispatch() {
         _preview_key: currentDispatchPlanKey(),
       };
       lastImportantDispatchPreviewState = "ready";
-      lastImportantDispatchPreviewFeedback = { state: "ready", message: "Current preview ready." };
+      lastImportantDispatchPreviewFeedback = { state: "ready", message: "Preview ready." };
       if (data.status) {
         renderLeadsStatus(data.status || {});
       } else {
@@ -4198,16 +5128,27 @@ async function previewImportantLeadDispatch() {
       showMessage("Preview did not save. Please retry.", "error");
     }
   } catch (err) {
-    lastImportantDispatchPreviewState = "failed";
-    lastImportantDispatchPreviewFeedback = { state: "failed", message: String(err || "Preview Dispatch failed.") };
+    const payload = err?.payload || {};
+    const blocked = Boolean(payload?.blocked) || Boolean(payload?.error);
+    lastImportantDispatchPreviewState = blocked ? "blocked" : "failed";
+    lastImportantDispatchPreviewFeedback = blocked
+      ? previewDispatchBlockedFeedback(payload, String(err || "Preview Dispatch was blocked."))
+      : { state: "failed", message: `Preview Dispatch API failure: ${String(err || "Preview Dispatch failed.")}` };
     renderImportantDispatch(lastImportantDispatch);
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
-    showMessage(`Dispatch preview failed: ${err}`, "error");
+    showMessage(
+      blocked
+        ? `Dispatch preview blocked: ${lastImportantDispatchPreviewFeedback.message}`
+        : lastImportantDispatchPreviewFeedback.message,
+      "error",
+    );
   } finally {
     importantLeadDispatchPreviewLoading = false;
     if (els.leadsImportantDispatchPreviewBtn) {
       const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-      setButtonBusy(els.leadsImportantDispatchPreviewBtn, activeDispatch, "Preview Dispatch");
+      [els.leadsImportantDispatchPreviewBtn, els.leadsImportantDispatchPreviewTopBtn].filter(Boolean).forEach((button) => {
+        setButtonBusy(button, activeDispatch, "Preview Dispatch");
+      });
       renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
@@ -4233,6 +5174,13 @@ async function confirmImportantLeadDispatch() {
     lastImportantDispatchConfirmFeedback = { state: "blocked", message: "Run Preview Dispatch first for the current source and cap." };
     renderImportantDispatch(lastImportantDispatch);
     showMessage("Run Preview Dispatch first for the current source and cap.", "error");
+    return;
+  }
+  if (recontactRecencyOverrideRequired(lastImportantDispatchPreview)) {
+    const message = "Recontact preview has high recent-contact overlap. Confirm requires explicit override.";
+    lastImportantDispatchConfirmFeedback = { state: "blocked", message };
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(message, "error");
     return;
   }
   if (els.leadsImportantDispatchConfirmBtn) {
@@ -4266,11 +5214,71 @@ async function confirmImportantLeadDispatch() {
     importantLeadDispatchConfirmLoading = false;
     if (els.leadsImportantDispatchConfirmBtn) {
       const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-      setButtonBusy(els.leadsImportantDispatchConfirmBtn, activeDispatch, activeDispatch ? "Dispatching..." : "Confirm Dispatch");
+      setButtonBusy(els.leadsImportantDispatchConfirmBtn, activeDispatch, activeDispatch ? "Dispatching..." : importantDispatchConfirmButtonLabel());
       renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
     renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   }
+}
+
+async function createSaferRecontactPool() {
+  const preview = latestRecontactPreviewContext(lastImportantDispatchPreview);
+  if (!preview?.preview_id) {
+    lastSaferRecontactFeedback = { state: "bad", message: "Run a Recontact preview before creating safer leads." };
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage("Run a current Recontact preview before creating a safer pool.", "error");
+    return;
+  }
+  saferRecontactPoolLoading = true;
+  lastSaferRecontactFeedback = { state: "running", message: "Creating safer recontact leads..." };
+  renderImportantDispatch(lastImportantDispatch);
+  try {
+    const data = await fetchJson("/api/leads/dispatch-important/safer-recontact-pool", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...importantLeadDispatchPayload(false),
+        preview_id: preview.preview_id,
+        campaign_type: "recontact_cold",
+        dispatch_source_mode: "cleaned",
+      }),
+    });
+    lastSaferRecontactSummary = data.summary || null;
+    lastSaferRecontactFeedback = {
+      state: "good",
+      message: `${Number(lastSaferRecontactSummary?.safer_rows_written || 0).toLocaleString()} safer recontact leads created.`,
+    };
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(data.message || "Safer recontact pool created.", "success");
+  } catch (err) {
+    lastSaferRecontactFeedback = { state: "bad", message: `Create safer recontact leads failed: ${String(err || "Unknown error")}` };
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage(`Safer recontact pool failed: ${err}`, "error");
+  } finally {
+    saferRecontactPoolLoading = false;
+    renderImportantDispatch(lastImportantDispatch);
+  }
+}
+
+function useSaferRecontactPoolAsSelectedSource() {
+  const saferPath = String(lastSaferRecontactSummary?.output_path || "").trim();
+  if (!saferPath) {
+    void createSaferRecontactPool();
+    return;
+  }
+  if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "recontact_cold";
+  if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "cleaned";
+  if (els.leadsImportantOutputPath) els.leadsImportantOutputPath.value = saferPath;
+  if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
+  lastImportantDispatchPreview = null;
+  lastImportantDispatchPreviewState = "not_generated";
+  lastImportantDispatchPreviewFeedback = {
+    state: "ready",
+    message: "Safer recontact pool selected. Run Preview Dispatch to calculate queue assignments.",
+  };
+  syncImportantDispatchCampaignSource();
+  renderImportantDispatch(lastImportantDispatch);
+  showMessage("Safer recontact pool selected. Run Preview Dispatch before confirming.", "success");
 }
 
 function syncKeyedChildren(container, items, keyFn, createFn, updateFn) {
@@ -4531,36 +5539,161 @@ function updateSelectOptionNode(node, value, label) {
 
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
-  const total_awaiting_outcome = Number(summary.total_awaiting_outcome || 0);
+  const total_awaiting_outcome = Number(summary?.total_awaiting_outcome || 0);
   const alerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
   const profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
-  const fleetOrder = ["private_jc", "sendgrid_annette", "sendgrid_jordan", "sendgrid_jodi", "sendgrid_alison", "sendgrid_fiorela"];
-  const fleetProfiles = fleetOrder
-    .map((name) => profiles.find((profile) => profile.name === name))
-    .filter(Boolean);
+  const sendgridProfiles = profiles.filter((profile) => profileTelemetryChannel(profile) === "sendgrid");
+  const privateProfile = profiles.find((profile) => profile.name === "private_jc")
+    || profiles.find((profile) => profileTelemetryChannel(profile) === "private");
+  const activeStates = new Set(["starting", "running", "sleeping", "cooldown", "paused"]);
+  const sendgridRunning = sendgridProfiles.filter((profile) => activeStates.has(String(profile?.runtime_state || ""))).length;
+  const alertIsInfo = (alert) => ["ok", "info"].includes(String(alert?.severity || "").trim().toLowerCase())
+    || String(alert?.blocking_label || "").trim().toLowerCase() === "info";
+  const alertGroups = {
+    blocking: alerts.filter((alert) => Boolean(alert?.blocks_sending)),
+    warning: alerts.filter((alert) => !Boolean(alert?.blocks_sending) && !alertIsInfo(alert)),
+    info: alerts.filter((alert) => !Boolean(alert?.blocks_sending) && alertIsInfo(alert)),
+  };
+  const blockingAlerts = alertGroups.blocking.length;
+  const warningAlerts = alertGroups.warning.length;
+  const infoAlerts = alertGroups.info.length;
+  const progressTotals = summarizeAlertProgress(snapshot).reduce((acc, item) => {
+    acc[item.key] = item;
+    return acc;
+  }, {});
+  const controls = snapshot?.controls || {};
+  const automation = snapshot?.automation || {};
+  const targetWindowHours = Number(controls.send_target_window_hours || 18);
+  const sendgridDailyTime = automation?.sendgrid_daily?.enabled
+    ? automation.sendgrid_daily.local_time
+    : null;
+  const privateWindowHours = Number(snapshot?.activity_hours || 24);
+  const sendgridPending = Number(summary?.sendgrid_pending || 0);
+  const privatePending = privateProfile ? profilePendingCount(privateProfile) : Number(summary.astra_pending || 0);
+  const totalPending = Number(summary?.total_pending || (sendgridPending + privatePending) || 0);
+  const privateStatus = privateProfile ? senderStatusBadge(privateProfile).label : "Stopped";
+  const privateRunning = privateProfile && isProfileActive(privateProfile);
+  const privateQueueSafety = privateProfile ? providerQueueSafetyForProfile(privateProfile, snapshot) : {};
+  const privateVerifiedPartial = privateProfile && queueSafetyVerifiedSubset(privateQueueSafety);
+  const sendgridProgress = progressTotals.sendgrid || { sent: 0, active: 0, cap: 0 };
+  const privateProgress = progressTotals.private || { sent: 0, active: 0, cap: 0 };
+  const firstVisibleAlert = alertGroups.blocking[0] || alertGroups.warning[0] || alertGroups.info[0] || null;
+  const firstAlertTitle = firstVisibleAlert?.title || "No active alerts";
+  const nextAction = (() => {
+    if (privateRunning) {
+      return {
+        value: "Monitor Private JC",
+        note: `${privatePending.toLocaleString()} remaining`,
+        tone: "good",
+        detail: "Private JC is running. Remaining recipients are verified against the confirmed preview.",
+      };
+    }
+    if (blockingAlerts > 0) {
+      return {
+        value: "Review alerts",
+        note: `${blockingAlerts} blocking alert${blockingAlerts === 1 ? "" : "s"}`,
+        tone: "bad",
+        detail: "Resolve blocking alerts before starting senders.",
+      };
+    }
+    if (privatePending > 0 && privateVerifiedPartial && privateProfile && canStartProfile(privateProfile, snapshot)) {
+      return {
+        value: "Resume Private JC",
+        note: `${privatePending.toLocaleString()} remaining`,
+        tone: "good",
+        detail: "Queue partially consumed — remaining recipients verified safe.",
+      };
+    }
+    if (privatePending > 0 && privateProfile && canStartProfile(privateProfile, snapshot)) {
+      return {
+        value: "Start JC",
+        note: sendgridPending > 0 ? "Private JC ready" : "SendGrid complete · Private JC ready",
+        tone: "good",
+        detail: "Use the Private JC sender row below.",
+      };
+    }
+    if (sendgridPending > 0 && sendgridRunning === 0) {
+      return {
+        value: "Start SendGrid",
+        note: `${sendgridProfiles.length || 5} profiles available`,
+        tone: "warn",
+        detail: "Use the SendGrid sender rows below.",
+      };
+    }
+    if (totalPending > 0) {
+      return {
+        value: "Monitor",
+        note: `${totalPending.toLocaleString()} pending`,
+        tone: "neutral",
+        detail: "Sender rows below show the active control state.",
+      };
+    }
+    return {
+      value: "Run complete",
+      note: "No pending queues",
+      tone: "good",
+      detail: "No sender action is needed.",
+    };
+  })();
+  const alertDetailsHtml = `
+    <div class="summary-alert-counts" aria-label="Alert summary">
+      <span>Blocking: ${blockingAlerts.toLocaleString()}</span>
+      <span>Warning: ${warningAlerts.toLocaleString()}</span>
+      <span>Info: ${infoAlerts.toLocaleString()}</span>
+    </div>
+    <details class="summary-inline-details">
+      <summary>${escapeHtml(firstAlertTitle)}${alerts.length > 1 ? " · View all" : ""}</summary>
+      <div class="summary-inline-list">
+        ${(alerts.length ? alerts : [{ title: "No active alerts", message: "All thresholds clear." }]).slice(0, 5).map((alert) => `
+          <div class="summary-inline-row">
+            <strong>${escapeHtml(alert?.title || "Alert")}</strong>
+            <span>${escapeHtml(alert?.message || "No details provided.")}</span>
+          </div>
+        `).join("")}
+      </div>
+    </details>
+  `;
   const cards = [
     {
-      key: "pending_total",
-      label: "Pending Total",
-      value: Number(summary.total_pending || 0).toLocaleString(),
-      note: `Astra ${Number(summary.astra_pending || 0).toLocaleString()} · SendGrid ${Number(summary.sendgrid_pending || 0).toLocaleString()}`,
-      tone: Number(summary.total_pending || 0) > 0 ? "warn" : "neutral",
+      key: "private_jc",
+      label: "Private JC",
+      value: `${privatePending.toLocaleString()} pending`,
+      note: `${privateStatus} · ${Number(privateProgress.sent || 0).toLocaleString()} sent`,
+      tone: privatePending > 0 ? "warn" : "neutral",
+      detailsHtml: `<div class="summary-small-note">Cap ${privateProgress.cap ? Number(privateProgress.cap).toLocaleString() : "∞"} · ${privateWindowHours.toLocaleString()}h window</div>`,
     },
     {
-      key: "active_senders",
-      label: "Senders",
-      value: summary.active_profiles,
-      note: `${profiles.length || fleetProfiles.length} profiles · ${fleetProfiles.map((profile) => fleetProfileStatus(profile).label).join(" / ") || "No status"}`,
-      tone: Number(summary.active_profiles || 0) > 0 ? "good" : "neutral",
+      key: "total_pending",
+      label: "Total Pending",
+      value: totalPending.toLocaleString(),
+      note: `Astra ${privatePending.toLocaleString()} · SendGrid ${sendgridPending.toLocaleString()}`,
+      tone: totalPending > 0 ? "warn" : "neutral",
+    },
+    {
+      key: "sendgrid",
+      label: "SendGrid",
+      value: sendgridPending > 0 ? `${sendgridPending.toLocaleString()} pending` : "Complete",
+      note: `${sendgridPending.toLocaleString()} pending · ${Number(sendgridProgress.sent || 0).toLocaleString()} sent`,
+      tone: sendgridRunning > 0 ? "good" : sendgridPending > 0 ? "warn" : "neutral",
+      detailsHtml: `<div class="summary-small-note">Daily ${escapeHtml(sendgridDailyTime || "manual")} · ${targetWindowHours.toLocaleString()}h window</div>`,
     },
     {
       key: "alerts",
-      label: "Critical Alerts",
-      value: summary.active_alerts || alerts.length || 0,
+      label: "Alerts",
+      value: `${warningAlerts.toLocaleString()} warning${warningAlerts === 1 ? "" : "s"}`,
       note: Number(summary.active_alerts || alerts.length || 0) > 0
-        ? `Needs review · awaiting ${total_awaiting_outcome.toLocaleString()}`
+        ? `${blockingAlerts} blocking · awaiting ${total_awaiting_outcome.toLocaleString()}`
         : "Clear",
-      tone: Number(summary.active_alerts || alerts.length || 0) > 0 ? "bad" : "good",
+      tone: blockingAlerts > 0 ? "bad" : Number(summary.active_alerts || alerts.length || 0) > 0 ? "warn" : "good",
+      detailsHtml: `<div class="summary-small-note">${infoAlerts.toLocaleString()} info · ${alerts.length.toLocaleString()} total</div>`,
+    },
+    {
+      key: "next_action",
+      label: "Next Action",
+      value: nextAction.value,
+      note: nextAction.value === "Start JC" ? "Use JC sender row below" : nextAction.note,
+      tone: nextAction.tone,
+      detailsHtml: `<div class="summary-small-note">${escapeHtml(nextAction.detail)}</div>`,
     },
   ];
   syncKeyedChildren(
@@ -4592,15 +5725,27 @@ function renderSummary(snapshot) {
 }
 
 function ensureSenderStatusPanel() {
-  if (senderStatusPanel?.isConnected) return senderStatusPanel;
-  const anchor = els.summaryGrid?.closest(".queue-health-section") || els.summaryGrid;
+  if (senderStatusPanel?.isConnected) {
+    const anchor = document.querySelector(".ops-progress-strip")
+      || document.querySelector(".workspace-metric-details")
+      || els.summaryGrid?.closest(".queue-health-section")
+      || els.summaryGrid;
+    if (anchor?.parentNode && senderStatusPanel.previousElementSibling !== anchor) {
+      anchor.insertAdjacentElement("afterend", senderStatusPanel);
+    }
+    return senderStatusPanel;
+  }
+  const anchor = document.querySelector(".ops-progress-strip")
+    || document.querySelector(".workspace-metric-details")
+    || els.summaryGrid?.closest(".queue-health-section")
+    || els.summaryGrid;
   if (!anchor?.parentNode) return null;
   senderStatusPanel = elementFromHTML(`
     <section class="sender-status-panel panel-shell">
       <div class="ops-strip-head sender-status-head">
         <div>
-          <p class="eyebrow">Sender Status</p>
-          <p class="muted">Current queue, activity, and profile controls</p>
+          <p class="eyebrow">Senders</p>
+          <p class="muted">Queues, activity, controls</p>
         </div>
       </div>
       <div class="sender-status-table-wrap">
@@ -4608,7 +5753,7 @@ function ensureSenderStatusPanel() {
           <thead>
             <tr>
               <th>Sender</th>
-              <th>Status</th>
+              <th>State</th>
               <th>Pending</th>
               <th>Accepted</th>
               <th>Awaiting</th>
@@ -4625,18 +5770,32 @@ function ensureSenderStatusPanel() {
   return senderStatusPanel;
 }
 
+function syncProgressDetailsToggle() {
+  if (!els.opsProgressDetailsToggle || !els.opsProgressDetails) return;
+  const open = Boolean(els.opsProgressDetails.open);
+  setNodeText(els.opsProgressDetailsToggle, open ? "Close details" : "View details");
+  els.opsProgressDetailsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function senderStatusBadge(profile) {
+  const runtimeState = String(profile?.runtime_state || "").trim();
+  const pendingCount = profilePendingCount(profile);
+  const queueSafety = providerQueueSafetyForProfile(profile);
+  if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
+  if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
+  if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
+  if (pendingCount <= 0 && (profileTelemetryChannel(profile) === "sendgrid" || queueSafetyComplete(queueSafety))) {
+    return { label: "Complete", tone: "good" };
+  }
   if (profileTelemetryChannel(profile) === "sendgrid" && profile?.sendgrid_hourly_cap_waiting) {
     return { label: "Waiting · hourly cap", tone: "warn" };
   }
   if (queueSafetyBlockedForProfile(profile)) {
     return { label: "Blocked", tone: "bad" };
   }
-  const runtimeState = String(profile?.runtime_state || "").trim();
-  if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Live", tone: "good" };
-  if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
-  if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
-  if (canStartProfile(profile, lastSnapshot)) return { label: "Ready", tone: "neutral" };
+  if (pendingCount > 0 && queueSafetyVerifiedSubset(queueSafety)) return { label: "Resume", tone: "good" };
+  if (canStartProfile(profile, lastSnapshot)) return { label: "Ready", tone: "good" };
+  if (pendingCount <= 0) return { label: "Complete", tone: "good" };
   return { label: "Stopped", tone: "bad" };
 }
 
@@ -4656,23 +5815,29 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const pendingAction = pendingProfileActions.get(profile.name) || "";
       const stopAvailable = canStopProfile(profile);
       const startAvailable = canStartProfile(profile, snapshot);
+      const pendingCount = profilePendingCount(profile);
+      const noPendingQueue = !stopAvailable && pendingCount <= 0;
       const action = stopAvailable ? "stop" : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : stopAvailable ? "Stop" : "Start";
-      const actionDisabled = Boolean(pendingAction) || (!stopAvailable && !startAvailable);
+        : stopAvailable ? "Stop" : noPendingQueue ? "No queue" : "Start";
+      const actionDisabled = Boolean(pendingAction) || noPendingQueue || (!stopAvailable && !startAvailable);
       const lastActivity = profile.last_timestamp
         ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
         : profileLastAgeText(profile);
       return `
-        <tr class="${selectedProfile?.name === profile.name ? "is-selected" : ""}" data-profile="${escapeHtml(profile.name || "")}">
+        <tr class="${[
+          selectedProfile?.name === profile.name ? "is-selected" : "",
+          isProfileActive(profile) ? "is-live" : "",
+          pendingCount <= 0 ? "is-complete" : "",
+        ].filter(Boolean).join(" ")}" data-profile="${escapeHtml(profile.name || "")}">
           <td>
             <button class="sender-status-name-btn" type="button" data-profile="${escapeHtml(profile.name || "")}">
               ${escapeHtml(formatProfileName(profile.name))}
             </button>
           </td>
           <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
-          <td>${Number(profile.pending_count || 0).toLocaleString()}</td>
+          <td>${pendingCount.toLocaleString()}</td>
           <td>${Number(profileRunSentDisplay(profile) || 0).toLocaleString()}</td>
           <td>${Number(profile.awaiting_outcome || 0).toLocaleString()}</td>
           <td class="sender-status-activity" title="${escapeHtml(profile.last_email || profile.last_timestamp || "")}">${escapeHtml(lastActivity)}</td>
@@ -4682,6 +5847,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
+              title="${noPendingQueue ? "Start unavailable — no pending leads." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           </td>
@@ -4765,6 +5931,60 @@ function summarizeAlertProgress(snapshot) {
   return Object.values(totals);
 }
 
+function renderProgressSummaryStrip(snapshot) {
+  if (!els.opsProgressSummary) return;
+  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
+  const items = summarizeAlertProgress(snapshot).reduce((acc, item) => {
+    acc[item.key] = item;
+    return acc;
+  }, {});
+  const summary = snapshot?.summary || {};
+  const alerts = Array.isArray(snapshot?.alerts) ? snapshot.alerts : [];
+  const blockingAlerts = alerts.filter((alert) => Boolean(alert?.blocks_sending)).length;
+  const warningAlerts = alerts.filter((alert) => {
+    const severity = String(alert?.severity || "").trim().toLowerCase();
+    const label = String(alert?.blocking_label || "").trim().toLowerCase();
+    return !Boolean(alert?.blocks_sending) && !["ok", "info"].includes(severity) && label !== "info";
+  }).length;
+  const sendgridPending = Number(summary?.sendgrid_pending || 0);
+  const sendgridStatus = Number(items.sendgrid?.active || 0) > 0
+    ? `${Number(items.sendgrid?.active || 0).toLocaleString()} active`
+    : sendgridPending > 0
+      ? `${sendgridPending.toLocaleString()} pending`
+      : "complete";
+  const privateProfile = profiles.find((profile) => profile.name === "private_jc")
+    || profiles.find((profile) => profileTelemetryChannel(profile) === "private");
+  const privateStatus = privateProfile ? senderStatusBadge(privateProfile).label.toLowerCase() : "stopped";
+  const progressItems = [
+    {
+      label: "SendGrid",
+      value: `${sendgridStatus} · ${Number(items.sendgrid?.sent || 0).toLocaleString()} sent`,
+    },
+    {
+      label: "Private Email",
+      value: `${privateStatus} · ${Number(items.private?.sent || 0).toLocaleString()} sent`,
+    },
+    {
+      label: "Alerts",
+      value: `${blockingAlerts.toLocaleString()} blocking · ${warningAlerts.toLocaleString()} warning`,
+    },
+    {
+      label: "Awaiting outcomes",
+      value: Number(summary?.total_awaiting_outcome || 0).toLocaleString(),
+    },
+  ];
+  setNodeHtml(
+    els.opsProgressSummary,
+    progressItems.map((item) => `
+      <span class="ops-progress-summary-item">
+        <strong>${escapeHtml(item.label)}</strong>
+        <span>${escapeHtml(item.value)}</span>
+      </span>
+    `).join(""),
+  );
+  syncProgressDetailsToggle();
+}
+
 function renderAlertsProgress(snapshot) {
   if (!els.alertsProgress) return;
   const items = summarizeAlertProgress(snapshot);
@@ -4782,9 +6002,8 @@ function renderAlertsProgress(snapshot) {
   const renderSendGridMeta = (item) => {
     if (item.key !== "sendgrid") return "";
     return `
-      <span class="alerts-progress-meta alerts-progress-plan">Target window: ${Number(sendTarget || 0).toLocaleString()} emails · 6 PM to 12 PM (${Number(targetWindowHours || 18)}h)</span>
-      <span class="alerts-progress-meta alerts-progress-plan">Per-profile plan: ~${Number(perProfileTarget || 0).toLocaleString()} across ${Number(availableSenders || 0).toLocaleString()} SG</span>
-      <span class="alerts-progress-meta alerts-progress-plan">Daily cap: ${sendgridDailyTime ? `SG ${escapeHtml(sendgridDailyTime)}` : "manual"}</span>
+      <span class="alerts-progress-meta alerts-progress-plan">Target ${Number(sendTarget || 0).toLocaleString()} · ~${Number(perProfileTarget || 0).toLocaleString()}/profile</span>
+      <span class="alerts-progress-meta alerts-progress-plan">Daily ${sendgridDailyTime ? escapeHtml(sendgridDailyTime) : "manual"} · ${Number(targetWindowHours || 18)}h window</span>
     `;
   };
   setNodeHtml(
@@ -4818,28 +6037,75 @@ function renderAlertsProgress(snapshot) {
 
 function renderAlerts(snapshot) {
   if (!els.alertsGrid) return;
+  renderProgressSummaryStrip(snapshot);
   const activeAlerts = Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
-  const visibleAlerts = activeAlerts.slice(0, 2);
-  const hiddenAlertCount = Math.max(0, activeAlerts.length - visibleAlerts.length);
-  const cards = activeAlerts.length
-    ? [
-        ...visibleAlerts,
-        ...(hiddenAlertCount > 0
-          ? [{
-              key: "alerts-overflow",
-              severity: "ok",
-              title: "More alerts",
-              message: `+${hiddenAlertCount} more alert${hiddenAlertCount === 1 ? "" : "s"}`,
-            }]
-          : []),
-      ]
-    : [{ key: "ok", severity: "ok", title: "Thresholds clear", message: "Current metrics are below configured limits." }];
-  syncKeyedChildren(
+  const groups = [
+    {
+      key: "blocking",
+      title: "Blocking",
+      badge: "Blocked",
+      tone: "bad",
+      alerts: activeAlerts.filter((alert) => Boolean(alert?.blocks_sending)),
+      empty: "No blocking alerts.",
+    },
+    {
+      key: "warning",
+      title: "Warning",
+      badge: "Warning",
+      tone: "warn",
+      alerts: activeAlerts.filter((alert) => !Boolean(alert?.blocks_sending) && String(alert?.severity || "warn") !== "ok"),
+      empty: "No warnings.",
+    },
+    {
+      key: "info",
+      title: "Info",
+      badge: "Info",
+      tone: "neutral",
+      alerts: activeAlerts.filter((alert) => !Boolean(alert?.blocks_sending) && String(alert?.severity || "warn") === "ok"),
+      empty: "No informational alerts.",
+    },
+  ];
+  setNodeHtml(
     els.alertsGrid,
-    cards,
-    (alert, index) => alert.key || `${alert.severity}-${alert.title || index}`,
-    () => createAlertCardNode(),
-    (node, alert) => updateAlertCardNode(node, alert),
+    groups.map((group) => {
+      const visible = group.alerts.slice(0, group.key === "blocking" ? 2 : 1);
+      const overflow = Math.max(0, group.alerts.length - visible.length);
+      const overflowAlerts = group.alerts.slice(visible.length);
+      const renderAlertRow = (alert) => {
+        const alertProfile = String(alert?.profile || alert?.profile_name || "").trim();
+        const alertMessage = String(alert?.message || "").trim();
+        const messageWithProfile = alertProfile
+          ? `${alertMessage}${alertMessage ? " " : ""}Profile: ${formatProfileName(alertProfile)}.`
+          : alertMessage;
+        return `
+          <article class="alert-card alert-card-compact alert-row alert-${escapeHtml(alert?.severity || group.tone)}">
+            <div class="alert-row-main">
+              <h3>${escapeHtml(alert?.title || "Alert")}</h3>
+              <p class="alert-message">${escapeHtml(messageWithProfile || "No details provided.")}</p>
+            </div>
+          </article>
+        `;
+      };
+      return `
+        <section class="alert-group alert-group-${escapeHtml(group.key)}">
+          <div class="alert-group-head">
+            <strong>${escapeHtml(group.title)}</strong>
+            <span class="alert-pill alert-pill-${escapeHtml(group.tone)}">${escapeHtml(group.badge)} · ${group.alerts.length}</span>
+          </div>
+          <div class="alert-group-body">
+            ${visible.length
+              ? visible.map(renderAlertRow).join("")
+              : `<p class="muted alert-empty">${escapeHtml(group.empty)}</p>`}
+            ${overflow > 0 ? `
+              <details class="alert-overflow-details">
+                <summary>View all (${overflow} more)</summary>
+                <div class="alert-overflow-list">${overflowAlerts.map(renderAlertRow).join("")}</div>
+              </details>
+            ` : ""}
+          </div>
+        </section>
+      `;
+    }).join(""),
   );
   if (els.alertsCaption) {
     const blockingCount = activeAlerts.filter((alert) => Boolean(alert?.blocks_sending)).length;
@@ -5041,7 +6307,10 @@ function overviewGlowState(profile) {
 
 function profileActivityState(profile) {
   const runtimeState = String(profile?.runtime_state || "").trim();
-  if (["starting", "running", "cooldown", "sleeping"].includes(runtimeState)) {
+  if (runtimeState === "cooldown") {
+    return { label: "Cooldown", tone: "warn" };
+  }
+  if (["starting", "running", "sleeping"].includes(runtimeState)) {
     return { label: "Running", tone: "good" };
   }
   if (runtimeState === "paused") {
@@ -5051,6 +6320,15 @@ function profileActivityState(profile) {
     return { label: "Stalled", tone: "warn" };
   }
   return { label: "Stopped", tone: "bad" };
+}
+
+function profileDisplayStatus(profile) {
+  const runtimeState = String(profile?.runtime_state || "").trim();
+  if (runtimeState === "cooldown") return { label: "Cooldown", tone: "warn" };
+  if (["starting", "running", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
+  const readiness = String(profile?.readiness_label || "").trim();
+  if (readiness && readiness !== "Ready") return { label: readiness, tone: profile?.readiness_tone || "bad" };
+  return { label: profile?.runtime_label || "Stopped", tone: "bad" };
 }
 
 function overviewStateIndicator(profile) {
@@ -5191,6 +6469,15 @@ function strongestProfileWarning(profile) {
   const healthTone = String(profile?.health_tone || "").trim() || "neutral";
   const readiness = String(profile?.readiness_label || "").trim() || "Ready";
   const telemetry = String(profile?.telemetry_quality_label || "").trim();
+  if (isProfileActive(profile)) {
+    if (failed > 0) {
+      return { tone: "bad", label: "Failures", message: `${failed} delivery failure${failed === 1 ? "" : "s"} in the selected window.` };
+    }
+    if (awaiting > 0) {
+      return { tone: "warn", label: "Awaiting", message: `${awaiting} accepted recipient${awaiting === 1 ? "" : "s"} still awaiting final outcome.` };
+    }
+    return { tone: "neutral", label: "Active", message: profile?.runtime_note || "Sender is active." };
+  }
   if (profile?.tmux_dead || (profile?.runtime_state || "") === "error") {
     return { tone: "bad", label: reasonCode, message: reasonNote || profile?.runtime_note || "Sender process is not healthy." };
   }
@@ -5539,7 +6826,7 @@ function queueSafetyBlocked(snapshot = lastSnapshot) {
 
 function queueSafetyBlockMessage(snapshot = lastSnapshot) {
   const queueSafety = snapshot?.queue_safety || {};
-  return String(queueSafety.message || "Recipient queue unsafe. Rebuild queues from the current campaign source before starting.").trim();
+  return String(queueSafety.message || "Recipient queue needs review before starting.").trim();
 }
 
 function providerQueueSafetyForProfile(profile, snapshot = lastSnapshot) {
@@ -5556,11 +6843,14 @@ function queueSafetyBlockedForProfile(profile, snapshot = lastSnapshot) {
 
 function queueSafetyBlockMessageForProfile(profile, snapshot = lastSnapshot) {
   const queueSafety = providerQueueSafetyForProfile(profile, snapshot);
-  return String(queueSafety.message || "Recipient queue unsafe. Rebuild this provider queue from the current campaign source before starting.").trim();
+  return String(queueSafety.message || "Recipient queue needs review before starting this sender.").trim();
 }
 
 function canStartProfile(profile, snapshot = lastSnapshot) {
-  return !queueSafetyBlockedForProfile(profile, snapshot) && !isProfileActive(profile) && !Boolean(profile?.restart_blocked);
+  return profilePendingCount(profile) > 0
+    && !queueSafetyBlockedForProfile(profile, snapshot)
+    && !isProfileActive(profile)
+    && !Boolean(profile?.restart_blocked);
 }
 
 function canStopProfile(profile) {
@@ -5694,7 +6984,9 @@ function renderControls(snapshot) {
     if (hasActiveSender) {
       lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
     }
-    if (blockedByQueueSafety) {
+    const hasBlockingAlert = Array.isArray(snapshot?.alerts)
+      && snapshot.alerts.some((alert) => Boolean(alert?.blocks_sending));
+    if (blockedByQueueSafety && hasBlockingAlert) {
       lines.push(queueSafetyMessage);
     }
     const scheduleBits = [];
@@ -6136,6 +7428,7 @@ function renderDetailCoreRuntime(profile) {
     : "No recent sender log line";
   const acceptedCount = profileRunSentDisplay(profile);
   const cooldownDisplay = profileCooldownDisplay(profile);
+  const displayStatus = profileDisplayStatus(profile);
   const items = [
     { label: "Pending", value: profile.pending_count, tone: Number(profile.pending_count || 0) > 0 ? "warn" : "neutral" },
     { label: "Accepted", value: acceptedCount, tone: acceptedCount > 0 ? "good" : "neutral" },
@@ -6158,7 +7451,7 @@ function renderDetailCoreRuntime(profile) {
     <div class="detail-core-activity">
       <div class="detail-compact-row">
         <span class="detail-compact-label">Readiness</span>
-        <span class="detail-compact-value">${escapeHtml(profile.readiness_label || "Ready")}</span>
+        <span class="detail-compact-value">${escapeHtml(displayStatus.label || "Stopped")}</span>
       </div>
       <div class="detail-compact-row">
         <span class="detail-compact-label">Last activity</span>
@@ -6446,6 +7739,8 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const activity = profileActivityState(profile);
   const runtimeClass = `detail-runtime-${activity.tone || "neutral"}`;
   const pendingAction = pendingProfileActions.get(profile.name) || "";
+  const pendingCount = Number(profile.pending_count || 0);
+  const noPendingQueue = !canStopProfile(profile) && pendingCount <= 0;
   const startDisabled = Boolean(pendingAction) || !canStartProfile(profile, snapshot);
   const stopDisabled = Boolean(pendingAction) || !canStopProfile(profile);
   const effectiveSpacing = Number(profile.effective_spacing_seconds || 0);
@@ -6513,14 +7808,17 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const profileQueueBlocked = queueSafetyBlockedForProfile(profile, snapshot);
   setNodeText(
     refs.actionNote,
-    profileQueueBlocked
-      ? `NOT READY / BLOCKED: ${queueSafetyBlockMessageForProfile(profile, snapshot)}`
-      : (isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished") ? buildProfileActionNote(profile, snapshot) : "",
+    isProfileActive(profile) || profile?.restart_blocked || (profile.runtime_state || "") === "finished"
+      ? buildProfileActionNote(profile, snapshot)
+      : profileQueueBlocked
+        ? `NOT READY / BLOCKED: ${queueSafetyBlockMessageForProfile(profile, snapshot)}`
+        : "",
   );
 
   refs.startButton.dataset.profile = profile.name || "";
   refs.startButton.disabled = startDisabled;
-  setNodeText(refs.startButton, pendingAction === "start" ? "Starting..." : "Start");
+  refs.startButton.title = noPendingQueue ? "Start unavailable — no pending leads." : "";
+  setNodeText(refs.startButton, pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start");
 
   refs.stopButton.dataset.profile = profile.name || "";
   refs.stopButton.disabled = stopDisabled;
@@ -6654,9 +7952,17 @@ function renderSnapshot(snapshot) {
 async function fetchSnapshot() {
   const hours = currentActivityHours();
   const tail = currentTailLines();
-  const response = await fetch(`/api/snapshot?hours=${encodeURIComponent(hours)}&tail_lines=${encodeURIComponent(tail)}`);
-  const data = await response.json();
-  renderSnapshot(data);
+  try {
+    const response = await fetch(`/api/snapshot?hours=${encodeURIComponent(hours)}&tail_lines=${encodeURIComponent(tail)}`);
+    const data = await response.json();
+    snapshotFallbackHealthy = response.ok;
+    renderSnapshot(data);
+    if (!socketLive) setConnectionState(false);
+  } catch (err) {
+    snapshotFallbackHealthy = false;
+    if (!socketLive) setConnectionState(false);
+    throw err;
+  }
 }
 
 function rerenderCurrentSelection() {
@@ -7017,7 +8323,7 @@ async function runLeadShard() {
 }
 
 function connectSocket(forceReconnect = false) {
-  if (!authState.authenticated) {
+  if (!authState.authenticated && authState.authEnabled) {
     stopSocket();
     return;
   }
@@ -7056,16 +8362,18 @@ function connectSocket(forceReconnect = false) {
 
   nextSocket.addEventListener("close", () => {
     setConnectionState(false);
+    fetchSnapshot().catch(() => {});
     if (socket === nextSocket) {
       socket = null;
     }
-    if (socketShouldReconnect && authState.authenticated && isOpsTabVisible()) {
+    if (socketShouldReconnect && (authState.authenticated || !authState.authEnabled) && isOpsTabVisible()) {
       socketReconnectTimer = setTimeout(connectSocket, 1500);
     }
   });
 
   nextSocket.addEventListener("error", () => {
     setConnectionState(false);
+    fetchSnapshot().catch(() => {});
     if (socket === nextSocket) {
       socket.close();
     }
@@ -7090,6 +8398,9 @@ function stopSocket() {
 }
 
 async function bootstrapAuthenticatedDashboard() {
+  document.querySelectorAll(".profile-detail-panel[open], .campaign-history-panel[open]").forEach((node) => {
+    node.removeAttribute("open");
+  });
   if (isLeadsTabVisible()) {
     await fetchLeadsStatus();
     stopSocket();
@@ -7102,7 +8413,7 @@ async function bootstrapAuthenticatedDashboard() {
 async function bootstrapDashboard() {
   try {
     const auth = await fetchAuthStatus();
-    if (auth.authenticated) {
+    if (auth.authenticated || auth.auth_enabled === false) {
       await bootstrapAuthenticatedDashboard();
     } else {
       stopSocket();
@@ -7126,6 +8437,15 @@ if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWal
 if (els.startBtn) els.startBtn.addEventListener("click", () => postAction("/api/start"));
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
+if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
+  els.opsProgressDetailsToggle.addEventListener("click", () => {
+    els.opsProgressDetails.open = !els.opsProgressDetails.open;
+    syncProgressDetailsToggle();
+  });
+}
+if (els.opsProgressDetails) {
+  els.opsProgressDetails.addEventListener("toggle", () => syncProgressDetailsToggle());
+}
 if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
 if (els.leadsCurrentRunPanel) {
@@ -7137,6 +8457,34 @@ if (els.leadsCurrentRunPanel) {
     if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
+    if (action === "create_safer_recontact") void createSaferRecontactPool();
+    if (action === "use_safer_recontact") useSaferRecontactPoolAsSelectedSource();
+    if (action === "select_fresh_cold") {
+      if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "cold";
+      if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
+      if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
+      syncImportantDispatchCampaignSource();
+      renderImportantDispatch(lastImportantDispatch);
+    }
+  });
+}
+if (els.leadsRecommendedNextAction) {
+  els.leadsRecommendedNextAction.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-leads-next-action]");
+    if (!button || button.disabled) return;
+    const action = String(button.dataset.leadsNextAction || "");
+    if (action === "upload_check") void runImportantLeadUploadCheck();
+    if (action === "preview_dispatch") void previewImportantLeadDispatch();
+    if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
+    if (action === "create_safer_recontact") void createSaferRecontactPool();
+    if (action === "use_safer_recontact") useSaferRecontactPoolAsSelectedSource();
+    if (action === "select_fresh_cold") {
+      if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "cold";
+      if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
+      if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
+      syncImportantDispatchCampaignSource();
+      renderImportantDispatch(lastImportantDispatch);
+    }
   });
 }
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
@@ -7146,7 +8494,36 @@ if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("c
 if (els.leadsImportantVerifyStrictBtn) els.leadsImportantVerifyStrictBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_STRICT_PUBLIC_PROOF));
 if (els.leadsImportantVerifyStopBtn) els.leadsImportantVerifyStopBtn.addEventListener("click", () => stopImportantLeadVerify());
 if (els.leadsImportantDispatchPreviewBtn) els.leadsImportantDispatchPreviewBtn.addEventListener("click", () => previewImportantLeadDispatch());
+if (els.leadsImportantDispatchPreviewTopBtn) els.leadsImportantDispatchPreviewTopBtn.addEventListener("click", () => previewImportantLeadDispatch());
 if (els.leadsImportantDispatchConfirmBtn) els.leadsImportantDispatchConfirmBtn.addEventListener("click", () => confirmImportantLeadDispatch());
+if (els.leadsDispatchModeCards) {
+  els.leadsDispatchModeCards.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-dispatch-mode-card]");
+    if (!card) return;
+    const mode = String(card.dataset.dispatchModeCard || "");
+    if (mode === "safer-recontact") {
+      if (lastSaferRecontactSummary?.output_path) {
+        useSaferRecontactPoolAsSelectedSource();
+      } else {
+        void createSaferRecontactPool();
+      }
+      return;
+    }
+    if (mode === "recontact") {
+      if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "recontact_cold";
+      if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "cleaned";
+    } else {
+      if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "cold";
+      if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
+      if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
+    }
+    syncImportantDispatchCampaignSource();
+    renderImportantDispatch(lastImportantDispatch);
+  });
+}
+if (els.leadsRecontactRecencyOverride) {
+  els.leadsRecontactRecencyOverride.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+}
 if (els.leadsImportantInputText) {
   els.leadsImportantInputText.addEventListener("input", () => updateImportantLeadPasteGuardrails());
   els.leadsImportantInputText.addEventListener("change", () => updateImportantLeadPasteGuardrails());
@@ -7159,6 +8536,12 @@ if (els.leadsImportantDispatchSourceMode) {
 }
 if (els.leadsImportantDispatchCap) {
   els.leadsImportantDispatchCap.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+}
+if (els.leadsImportantDispatchCampaignType) {
+  els.leadsImportantDispatchCampaignType.addEventListener("change", () => {
+    syncImportantDispatchCampaignSource();
+    renderImportantDispatch(lastImportantDispatch);
+  });
 }
 if (els.leadsUploadBtn) els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
 if (els.leadsCleanBtn) els.leadsCleanBtn.addEventListener("click", () => runLeadClean());
@@ -7299,5 +8682,5 @@ renderImportantLeadCheck(lastImportantLeadCheck);
 renderImportantLeadVerify(lastImportantVerify);
 renderImportantDispatch(lastImportantDispatch);
 renderAuthUi();
-showAuthOverlay("Loading authentication status...");
+// Local mode: do not show the auth overlay while auth status loads.
 bootstrapDashboard();

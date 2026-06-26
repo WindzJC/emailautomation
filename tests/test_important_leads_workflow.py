@@ -4,6 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,9 +12,13 @@ import important_leads_verify
 import important_leads_workflow
 import lead_ledger
 from important_leads_workflow import (
+    _validate_dispatch_preview_contract,
+    _sent_email_set,
     check_master_leads,
     confirm_dispatch_preview,
+    create_safer_recontact_pool_from_preview,
     dispatch_master_leads,
+    is_safer_recontact_source_path,
     load_dispatch_preview,
     preview_dispatch_master_leads,
 )
@@ -27,7 +32,18 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
         writer.writerows(rows)
 
 
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        return list(csv.DictReader(handle))
+
+
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def test_safer_recontact_source_path_helper_classifies_safe_csv(self) -> None:
+        self.assertTrue(is_safer_recontact_source_path("_important/runs/check_x/leads_safer_recontact_not_seen_active_history.csv"))
+        self.assertTrue(is_safer_recontact_source_path("/tmp/leads_safer_recontact_not_seen_active_history.csv"))
+        self.assertFalse(is_safer_recontact_source_path("_important/runs/check_x/leads.csv"))
+        self.assertFalse(is_safer_recontact_source_path(""))
+
     def test_author_outreach_fields_survive_check_triage_preview_and_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -176,9 +192,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertIn("PersonalizedOpeningLine", preview["queue_headers"])
             self.assertIn("AuthorName", preview["queue_headers"])
             self.assertIn("AuthorEmail", preview["queue_headers"])
-            planned_sg_rows = [row for key, rows in preview["plan_rows_by_queue"].items() if key.startswith("sendgrid_") for row in rows]
-            self.assertEqual("The Quiet Harbor", planned_sg_rows[0]["BookTitle"])
-            self.assertEqual("I noticed your recent event for The Quiet Harbor.", planned_sg_rows[0]["PersonalizedOpeningLine"])
+            planned_rows = [row for rows in preview["plan_rows_by_queue"].values() for row in rows]
+            self.assertEqual("The Quiet Harbor", planned_rows[0]["BookTitle"])
+            self.assertEqual("I noticed your recent event for The Quiet Harbor.", planned_rows[0]["PersonalizedOpeningLine"])
 
             confirm_dispatch_preview(
                 preview["preview_id"],
@@ -190,7 +206,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
             queued_headers = set()
             queued_rows: list[dict[str, str]] = []
-            for path in sg_queues:
+            for path in [jc_queue, *sg_queues]:
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     reader = csv.DictReader(handle)
                     queued_headers.update(reader.fieldnames or [])
@@ -819,34 +835,34 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["dispatch_source_row_count"], 9)
             self.assertEqual(report["dispatch_eligible_row_count"], 9)
             self.assertFalse(report["verification_required"])
-            self.assertEqual(report["added_astra"], 3)
+            self.assertEqual(report["added_astra"], 2)
             self.assertEqual(report["skipped_astra_already_sent"], 2)
-            self.assertEqual(report["skipped_astra_already_queued"], 2)
-            self.assertEqual(report["added_sendgrid"], 3)
-            self.assertEqual(report["skipped_sendgrid_already_sent"], 2)
-            self.assertEqual(report["skipped_sendgrid_already_queued"], 2)
+            self.assertEqual(report["skipped_astra_already_queued"], 1)
+            self.assertEqual(report["added_sendgrid"], 1)
+            self.assertEqual(report["skipped_sendgrid_already_sent"], 1)
+            self.assertEqual(report["skipped_sendgrid_already_queued"], 1)
             self.assertEqual(report["suppressed_skipped"], 1)
             self.assertEqual(report["duplicate_master_skipped"], 1)
             self.assertEqual(report["assigned_sg1"], 1)
-            self.assertEqual(report["assigned_sg2"], 1)
-            self.assertEqual(report["assigned_sg3"], 1)
+            self.assertEqual(report["assigned_sg2"], 0)
+            self.assertEqual(report["assigned_sg3"], 0)
             self.assertEqual(report["assigned_sg4"], 0)
             self.assertEqual(report["assigned_sg5"], 0)
-            self.assertEqual(report["skipped_both"], 2)
+            self.assertEqual(report["skipped_both"], 1)
 
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
                 jc_rows = list(reader)
-            self.assertEqual(len(jc_rows), 5)
+            self.assertEqual(len(jc_rows), 2)
             self.assertIn("Source", reader.fieldnames or [])
             self.assertIn("FirstName", reader.fieldnames or [])
-            self.assertNotIn("AuthorName", reader.fieldnames or [])
+            self.assertIn("AuthorName", reader.fieldnames or [])
             jc_emails = {row["Email"] for row in jc_rows}
             self.assertIn("fresh-both@example.com", jc_emails)
-            self.assertIn("sg-sent@example.com", jc_emails)
             self.assertIn("queued-sg@example.com", jc_emails)
             self.assertNotIn("astra-sent@example.com", jc_emails)
-            self.assertIn("queued-astra@example.com", jc_emails)
+            self.assertNotIn("sg-sent@example.com", jc_emails)
+            self.assertNotIn("queued-astra@example.com", jc_emails)
 
             all_sg_emails: list[str] = []
             for path in sg_queues:
@@ -855,15 +871,15 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     sg_rows = list(reader)
                     self.assertIn("Source", reader.fieldnames or [])
                     self.assertIn("FirstName", reader.fieldnames or [])
-                    self.assertNotIn("AuthorName", reader.fieldnames or [])
+                    self.assertIn("AuthorName", reader.fieldnames or [])
                     all_sg_emails.extend(row["Email"] for row in sg_rows)
 
             self.assertEqual(len(all_sg_emails), len(set(all_sg_emails)))
-            self.assertIn("fresh-both@example.com", all_sg_emails)
-            self.assertIn("astra-sent@example.com", all_sg_emails)
+            self.assertNotIn("fresh-both@example.com", all_sg_emails)
+            self.assertNotIn("astra-sent@example.com", all_sg_emails)
             self.assertIn("queued-astra@example.com", all_sg_emails)
             self.assertNotIn("sg-sent@example.com", all_sg_emails)
-            self.assertIn("queued-sg@example.com", all_sg_emails)
+            self.assertNotIn("queued-sg@example.com", all_sg_emails)
 
             self.assertTrue(Path(report["backup_dir"]).exists())
             self.assertTrue((Path(report["backup_dir"]) / jc_queue.name).exists())
@@ -883,7 +899,15 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
             logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
 
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [{"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"}])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [
+                    {"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"},
+                    {"FullName": "Triaged One Person", "FirstName": "Triaged", "Email": "triaged1@example.com"},
+                    {"FullName": "Triaged Two Person", "FirstName": "Triaged", "Email": "triaged2@example.com"},
+                ],
+            )
             write_csv(
                 triaged_keep_path,
                 ["FullName", "FirstName", "Email", "Status"],
@@ -926,7 +950,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertFalse(report["verification_required"])
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual({row["Email"] for row in rows}, {"triaged1@example.com", "triaged2@example.com"})
+            all_rows = list(rows)
+            for path in sg_queues:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    all_rows.extend(list(csv.DictReader(handle)))
+            self.assertEqual({row["Email"] for row in all_rows}, {"triaged1@example.com", "triaged2@example.com"})
+            self.assertEqual(len(all_rows), len({row["Email"].lower() for row in all_rows}))
 
     def test_dispatch_master_leads_triaged_keep_blocks_missing_selected_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -934,7 +963,17 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             master_path = tmp / "leads.csv"
             triaged_keep_path = tmp / "missing_triaged_keep.csv"
             rejected_path = tmp / "leads_rejected.csv"
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [{"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"}])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [
+                    {"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"},
+                    {"FullName": "Verified One Person", "FirstName": "Verified", "Email": "verified1@example.com"},
+                    {"FullName": "Verified Two Person", "FirstName": "Verified", "Email": "verified2@example.com"},
+                    {"FullName": "Rejected Person", "FirstName": "Rejected", "Email": "rejected@example.com"},
+                    {"FullName": "Quarantine Person", "FirstName": "Q", "Email": "quarantine@example.com"},
+                ],
+            )
 
             with self.assertRaisesRegex(ValueError, "Fast Triage Keep dispatch source missing"):
                 dispatch_master_leads(
@@ -972,7 +1011,17 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
             logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
 
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [{"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"}])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [
+                    {"FullName": "Ignored Person", "FirstName": "Ignored", "Email": "ignored@example.com"},
+                    {"FullName": "Verified One Person", "FirstName": "Verified", "Email": "verified1@example.com"},
+                    {"FullName": "Verified Two Person", "FirstName": "Verified", "Email": "verified2@example.com"},
+                    {"FullName": "Rejected Person", "FirstName": "Rejected", "Email": "rejected@example.com"},
+                    {"FullName": "Quarantine Person", "FirstName": "Q", "Email": "quarantine@example.com"},
+                ],
+            )
             write_csv(
                 verified_path,
                 ["FullName", "FirstName", "Email", "Status"],
@@ -1016,11 +1065,16 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["dispatch_source_row_count"], 4)
             self.assertEqual(report["dispatch_eligible_row_count"], 2)
             self.assertTrue(report["verification_required"])
-            self.assertEqual(report["added_astra"], 2)
-            self.assertEqual(report["added_sendgrid"], 2)
+            self.assertEqual(report["added_astra"], 1)
+            self.assertEqual(report["added_sendgrid"], 1)
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual({row["Email"] for row in rows}, {"verified1@example.com", "verified2@example.com"})
+            all_rows = list(rows)
+            for path in sg_queues:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    all_rows.extend(list(csv.DictReader(handle)))
+            self.assertEqual({row["Email"] for row in all_rows}, {"verified1@example.com", "verified2@example.com"})
+            self.assertEqual(len(all_rows), len({row["Email"].lower() for row in all_rows}))
 
     def test_dispatch_master_leads_verified_mode_blocks_without_keep_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1176,7 +1230,15 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             unsubscribed_path = tmp / "unsubscribed.csv"
             sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
 
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [
+                    {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com"},
+                    {"FullName": "Beta Person", "FirstName": "Beta", "Email": "beta@example.com"},
+                    {"FullName": "Gamma Person", "FirstName": "Gamma", "Email": "gamma@example.com"},
+                ],
+            )
             write_csv(
                 triaged_keep_path,
                 ["FullName", "FirstName", "Email", "Status"],
@@ -1219,22 +1281,147 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             self.assertEqual("triaged_keep", preview["active_source_key"])
             self.assertEqual("Fast Triage Keep", preview["source_label"])
+            self.assertEqual(str(triaged_keep_path), preview["source_path"])
             self.assertEqual(str(triaged_keep_path), preview["source_file_path"])
+            self.assertEqual(5, preview["source_row_count"])
             self.assertEqual(5, preview["total_source_rows"])
             self.assertEqual(5, preview["eligible_rows"])
             self.assertEqual(1, preview["skipped_already_sent"])
-            self.assertEqual(1, preview["skipped_already_queued"])
+            self.assertEqual(0, preview["skipped_already_queued"])
             self.assertEqual(1, preview["skipped_suppressed"])
             self.assertEqual(1, preview["skipped_invalid_malformed"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(
-                {"sendgrid_1": 1, "sendgrid_2": 1, "sendgrid_3": 1, "sendgrid_4": 0, "sendgrid_5": 0},
+                {"sendgrid_1": 1, "sendgrid_2": 0, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
                 preview["rows_to_add_sendgrid_shards"],
             )
-            self.assertEqual(4, preview["total_rows_that_would_be_written"])
+            self.assertEqual("cold", preview["campaign_type"])
+            self.assertEqual("triaged_keep", preview["dispatch_source_mode"])
+            self.assertEqual(1, preview["private_jc_planned_count"])
+            self.assertEqual(1, preview["sendgrid_planned_count"])
+            self.assertEqual(2, preview["total_planned_unique_count"])
+            self.assertEqual(0, preview["duplicate_planned_email_count"])
+            self.assertEqual(2, preview["total_rows_that_would_be_written"])
+            self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             self.assertTrue((preview_dir / f"{preview['preview_id']}.json").exists())
             self.assertEqual(jc_before, jc_queue.read_text(encoding="utf-8"))
             self.assertEqual(sg_before, [path.read_text(encoding="utf-8") for path in sg_queues])
+
+    def test_fresh_cold_preview_allocates_to_sendgrid_without_writing_queues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+
+            rows = [
+                {"FullName": f"Fresh Person {idx}", "FirstName": f"Fresh{idx}", "Email": f"fresh{idx}@example.com", "Status": "KEEP"}
+                for idx in range(1, 7)
+            ]
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [{key: row[key] for key in ["FullName", "FirstName", "Email"]} for row in rows],
+            )
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            queue_before = {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]}
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                campaign_type="cold",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+
+            self.assertGreater(preview["rows_to_add_private_jc"], 0)
+            self.assertGreater(preview["rows_to_add_sendgrid"], 0)
+            self.assertEqual(preview["rows_to_add_sendgrid"], sum(preview["rows_to_add_sendgrid_shards"].values()))
+            self.assertEqual(0, preview["duplicate_planned_email_count"])
+            self.assertEqual("", preview["sendgrid_zero_reason"])
+            archived_preview = json.loads(Path(preview["assigned_preview_archive_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(preview["sendgrid_shard_planned_counts"], archived_preview["sendgrid_shard_planned_counts"])
+            self.assertEqual("", archived_preview["sendgrid_zero_reason"])
+            self.assertEqual(preview["rows_to_add_sendgrid"], archived_preview["rows_to_add_sendgrid"])
+
+            planned_email_routes: dict[str, str] = {}
+            for route, planned_rows in preview["plan_rows_by_queue"].items():
+                for row in planned_rows:
+                    email = row["Email"].lower()
+                    self.assertNotIn(email, planned_email_routes)
+                    planned_email_routes[email] = route
+            self.assertEqual(preview["total_planned_unique_count"], len(planned_email_routes))
+            self.assertEqual(queue_before, {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]})
+            self.assertEqual([], read_csv_rows(jc_queue))
+            for path in sg_queues:
+                self.assertEqual([], read_csv_rows(path))
+
+    def test_fresh_cold_sendgrid_zero_requires_visible_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+
+            rows = [
+                {"FullName": f"Fresh Person {idx}", "FirstName": f"Fresh{idx}", "Email": f"fresh{idx}@example.com", "Status": "KEEP"}
+                for idx in range(1, 5)
+            ]
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [{key: row[key] for key in ["FullName", "FirstName", "Email"]} for row in rows],
+            )
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": row["FirstName"]} for row in rows])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                campaign_type="cold",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(len(rows), preview["rows_to_add_private_jc"])
+            self.assertEqual(0, preview["duplicate_planned_email_count"])
+            self.assertIn("SendGrid received 0 rows", preview["sendgrid_zero_reason"])
+            self.assertIn("already queued", preview["sendgrid_zero_reason"])
 
     def test_confirm_dispatch_preview_writes_exact_previewed_rows_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1252,7 +1439,15 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             triaged_reject_path = tmp / "leads_triaged_reject.csv"
             triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
 
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [
+                    {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com"},
+                    {"FullName": "Beta Person", "FirstName": "Beta", "Email": "beta@example.com"},
+                    {"FullName": "Gamma Person", "FirstName": "Gamma", "Email": "gamma@example.com"},
+                ],
+            )
             write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
             write_csv(
                 triaged_keep_path,
@@ -1326,10 +1521,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 jc_rows = list(csv.DictReader(handle))
-            self.assertEqual(
-                ["existing-jc@example.com", "alpha@example.com", "beta@example.com", "gamma@example.com"],
-                [row["Email"] for row in jc_rows],
-            )
+            self.assertEqual(preview["plan_rows_by_queue"]["private_jc"], jc_rows)
             for index, path in enumerate(sg_queues, start=1):
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     rows = list(csv.DictReader(handle))
@@ -1343,22 +1535,538 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("Fast Triage Keep", history[0]["source_label"])
             self.assertEqual("completed", history[0]["status"])
             self.assertTrue(Path(report["report_path"]).exists())
-            self.assertEqual(6, report["dispatch_history_rows_created"])
+            self.assertEqual(3, report["dispatch_history_rows_created"])
 
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
             try:
                 alpha_id = lead_ledger.deterministic_lead_id("alpha@example.com")
                 beta_id = lead_ledger.deterministic_lead_id("beta@example.com")
                 gamma_id = lead_ledger.deterministic_lead_id("gamma@example.com")
-                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, alpha_id)))
-                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, beta_id)))
-                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, gamma_id)))
+                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, alpha_id)))
+                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, beta_id)))
+                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, gamma_id)))
                 alpha = lead_ledger.load_lead_by_id(conn, alpha_id)
-                self.assertEqual(2, alpha["dispatch_count"])
+                self.assertEqual(1, alpha["dispatch_count"])
                 self.assertTrue(alpha["last_dispatch_at"])
-                self.assertEqual("sendgrid_1", alpha["last_profile"])
+                self.assertEqual("private_jc", alpha["last_profile"])
             finally:
                 conn.close()
+
+    def test_fresh_cold_preview_excludes_sendgrid_already_sent_before_safety(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            report_dir = tmp / "reports"
+            backup_root = tmp / "backups"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            rows = [
+                {
+                    "FullName": "Alpha Person",
+                    "FirstName": "Alpha",
+                    "Email": "alpha@example.com",
+                    "AuthorEmail": "alpha@example.com",
+                    "AuthorName": "Alpha Person",
+                    "BookTitle": "Alpha Book",
+                    "Status": "KEEP",
+                },
+                {
+                    "FullName": "Beta Person",
+                    "FirstName": "Beta",
+                    "Email": "beta@example.com",
+                    "AuthorEmail": "beta@example.com",
+                    "AuthorName": "Beta Person",
+                    "BookTitle": "Beta Book",
+                    "Status": "KEEP",
+                },
+            ]
+
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"],
+                [
+                    {key: row[key] for key in ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"]}
+                    for row in rows
+                ],
+            )
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(
+                triaged_keep_path,
+                ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"],
+                rows,
+            )
+            write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(
+                logs[1],
+                ["Email", "Status"],
+                [
+                    {"Email": "alpha@example.com", "Status": "SENT"},
+                    {"Email": "beta@example.com", "Status": "SENT"},
+                ],
+            )
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                preview_dir=preview_dir,
+            )
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["skipped_already_sent"])
+            self.assertEqual(2, preview["skipped_rows"])
+            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
+            self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
+            sendgrid_emails: list[str] = []
+            for path in sg_queues:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    sendgrid_emails.extend(row["Email"] for row in csv.DictReader(handle))
+            self.assertEqual([], sendgrid_emails)
+            conn = lead_ledger.connect_lead_ledger(ledger_db_path)
+            try:
+                alpha_id = lead_ledger.deterministic_lead_id("alpha@example.com")
+                beta_id = lead_ledger.deterministic_lead_id("beta@example.com")
+                self.assertEqual([], lead_ledger.load_dispatch_events(conn, alpha_id))
+                self.assertEqual([], lead_ledger.load_dispatch_events(conn, beta_id))
+            finally:
+                conn.close()
+
+    def test_recontact_cold_preview_allows_good_history_and_blocks_bad_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            sendgrid_events_path = tmp / "sendgrid_events.jsonl"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
+            headers = ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"]
+            rows = [
+                {"FullName": "Sent Person", "FirstName": "Sent", "Email": "sent@example.com", "AuthorEmail": "sent@example.com", "AuthorName": "Sent Person", "BookTitle": "Sent Book", "Status": "KEEP"},
+                {"FullName": "Contacted Person", "FirstName": "Contacted", "Email": "contacted@example.com", "AuthorEmail": "contacted@example.com", "AuthorName": "Contacted Person", "BookTitle": "Contacted Book", "Status": "KEEP"},
+                {"FullName": "", "FirstName": "", "Email": "fresh@example.com", "AuthorEmail": "fresh@example.com", "AuthorName": "", "BookTitle": "", "Status": "KEEP"},
+                {"FullName": "Sent Again", "FirstName": "Sent", "Email": "sent@example.com", "AuthorEmail": "sent@example.com", "AuthorName": "Sent Person", "BookTitle": "Sent Book", "Status": "KEEP"},
+                {"FullName": "Bad Email", "FirstName": "Bad", "Email": "bad-email", "AuthorEmail": "bad-email", "AuthorName": "Bad Email", "BookTitle": "Bad Book", "Status": "KEEP"},
+                {"FullName": "Bounce Person", "FirstName": "Bounce", "Email": "bounce@example.com", "AuthorEmail": "bounce@example.com", "AuthorName": "Bounce Person", "BookTitle": "Bounce Book", "Status": "KEEP"},
+                {"FullName": "Spam Person", "FirstName": "Spam", "Email": "spam@example.com", "AuthorEmail": "spam@example.com", "AuthorName": "Spam Person", "BookTitle": "Spam Book", "Status": "KEEP"},
+                {"FullName": "Group Person", "FirstName": "Group", "Email": "group@example.com", "AuthorEmail": "group@example.com", "AuthorName": "Group Person", "BookTitle": "Group Book", "Status": "KEEP"},
+                {"FullName": "Unsub Event", "FirstName": "Unsub", "Email": "unsub-event@example.com", "AuthorEmail": "unsub-event@example.com", "AuthorName": "Unsub Event", "BookTitle": "Unsub Book", "Status": "KEEP"},
+                {"FullName": "Dropped Person", "FirstName": "Dropped", "Email": "dropped@example.com", "AuthorEmail": "dropped@example.com", "AuthorName": "Dropped Person", "BookTitle": "Dropped Book", "Status": "KEEP"},
+                {"FullName": "Invalid Event", "FirstName": "Invalid", "Email": "invalid-event@example.com", "AuthorEmail": "invalid-event@example.com", "AuthorName": "Invalid Event", "BookTitle": "Invalid Book", "Status": "KEEP"},
+                {"FullName": "Suppressed Person", "FirstName": "Supp", "Email": "suppressed@example.com", "AuthorEmail": "suppressed@example.com", "AuthorName": "Suppressed Person", "BookTitle": "Supp Book", "Status": "KEEP"},
+                {"FullName": "Sg Suppressed", "FirstName": "Sg", "Email": "sgsuppressed@example.com", "AuthorEmail": "sgsuppressed@example.com", "AuthorName": "Sg Suppressed", "BookTitle": "Sg Supp Book", "Status": "KEEP"},
+                {"FullName": "Unsubscribed Person", "FirstName": "Unsubscribed", "Email": "unsubscribed@example.com", "AuthorEmail": "unsubscribed@example.com", "AuthorName": "Unsubscribed Person", "BookTitle": "Unsubscribed Book", "Status": "KEEP"},
+            ]
+
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"],
+                [
+                    {key: row[key] for key in ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"]}
+                    for row in rows
+                ],
+            )
+            write_csv(triaged_keep_path, headers, rows)
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            write_csv(logs[0], ["Email", "Status"], [])
+            write_csv(
+                logs[1],
+                ["Email", "Status"],
+                [
+                    {"Email": "sent@example.com", "Status": "SENT"},
+                    {"Email": "invalid-event@example.com", "Status": "INVALID"},
+                ],
+            )
+            for path in logs[2:]:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(suppressed_path, ["Email"], [{"Email": "suppressed@example.com"}])
+            write_csv(unsubscribed_path, ["Email"], [{"Email": "unsubscribed@example.com"}])
+            write_csv(
+                sendgrid_suppressions_path,
+                ["email", "status", "code", "reason", "last_seen_utc", "is_permanent", "ttl_until_utc"],
+                [
+                    {
+                        "email": "sgsuppressed@example.com",
+                        "status": "bounce",
+                        "code": "550",
+                        "reason": "suppressed",
+                        "last_seen_utc": "2026-04-12T00:00:00+00:00",
+                        "is_permanent": "true",
+                        "ttl_until_utc": "",
+                    }
+                ],
+            )
+            sendgrid_events_path.write_text(
+                "\n".join(
+                    json.dumps({"email": email, "event": event})
+                    for email, event in [
+                        ("bounce@example.com", "bounce"),
+                        ("spam@example.com", "spamreport"),
+                        ("group@example.com", "group_unsubscribe"),
+                        ("unsub-event@example.com", "unsubscribe"),
+                        ("dropped@example.com", "dropped"),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            conn = lead_ledger.connect_lead_ledger(ledger_db_path)
+            try:
+                contacted = lead_ledger.upsert_lead(conn, email="contacted@example.com")
+                lead_ledger.record_dispatch_event(
+                    conn,
+                    lead_id=contacted["lead_id"],
+                    run_id="dispatch_run_prior",
+                    dispatch_source="triaged_keep",
+                    profile="sendgrid_1",
+                    queue_target="sendgrid_1",
+                    result_status="delivered",
+                    dispatched_at="2026-04-11T05:00:00+00:00",
+                )
+            finally:
+                conn.close()
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=sendgrid_suppressions_path,
+                suppressed_path=suppressed_path,
+                unsubscribed_path=unsubscribed_path,
+                lead_ledger_db_path=ledger_db_path,
+                sendgrid_events_path=sendgrid_events_path,
+                campaign_type="recontact_cold",
+                preview_dir=tmp / "previews",
+            )
+
+            self.assertEqual("recontact_cold", preview["campaign_type"])
+            self.assertTrue(preview["allow_previously_sent"])
+            self.assertEqual(14, preview["input_rows"])
+            self.assertEqual(13, preview["rows_with_booktitle"])
+            self.assertEqual(1, preview["rows_missing_booktitle"])
+            self.assertEqual(13, preview["rows_with_author_name"])
+            self.assertEqual(1, preview["rows_missing_author_name"])
+            self.assertEqual(1, preview["previously_sent_allowed_count"])
+            self.assertEqual(1, preview["already_contacted_allowed_count"])
+            self.assertEqual(0, preview["skipped_already_sent"])
+            self.assertEqual(0, preview["skipped_already_contacted"])
+            self.assertEqual(6, preview["skipped_bad_sendgrid_event"])
+            self.assertEqual(3, preview["skipped_suppressed"])
+            self.assertEqual(1, preview["duplicate_master_skipped"])
+            self.assertEqual(1, preview["invalid_malformed_skipped"])
+            self.assertEqual(9, preview["bad_suppressed_removed_count"])
+            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(3, preview["total_rows_would_write"])
+            self.assertIn("campaign_type", preview["queue_headers"])
+            planned_emails = [
+                row["Email"]
+                for rows_by_queue in preview["plan_rows_by_queue"].values()
+                for row in rows_by_queue
+            ]
+            self.assertEqual(1, planned_emails.count("sent@example.com"))
+            self.assertEqual(1, planned_emails.count("contacted@example.com"))
+            self.assertEqual(1, planned_emails.count("fresh@example.com"))
+            self.assertNotIn("bounce@example.com", planned_emails)
+            for rows_by_queue in preview["plan_rows_by_queue"].values():
+                for row in rows_by_queue:
+                    self.assertEqual("recontact_cold", row["campaign_type"])
+
+    def test_recontact_preview_counts_recent_history_and_requires_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rows = [
+                {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "Status": "KEEP"},
+                {"FullName": "Beta Person", "FirstName": "Beta", "Email": "beta@example.com", "Status": "KEEP"},
+                {"FullName": "Gamma Person", "FirstName": "Gamma", "Email": "gamma@example.com", "Status": "KEEP"},
+            ]
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [{key: row[key] for key in ["FullName", "FirstName", "Email"]} for row in rows])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+
+            conn = lead_ledger.connect_lead_ledger(ledger_db_path)
+            try:
+                month_seen = datetime.now(timezone.utc).replace(day=2, hour=12, minute=0, second=0, microsecond=0).isoformat()
+                for email, timestamp in [
+                    ("alpha@example.com", month_seen),
+                    ("beta@example.com", "2020-01-10T12:00:00+00:00"),
+                ]:
+                    lead = lead_ledger.upsert_lead(conn, email=email)
+                    lead_ledger.record_dispatch_event(
+                        conn,
+                        lead_id=lead["lead_id"],
+                        run_id="prior_dispatch",
+                        dispatch_source="triaged_keep",
+                        profile="private_jc",
+                        queue_target="private_jc",
+                        result_status="delivered",
+                        dispatched_at=timestamp,
+                    )
+            finally:
+                conn.close()
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                campaign_type="recontact_cold",
+                preview_dir=preview_dir,
+            )
+
+            self.assertEqual(3, preview["recontact_planned_unique"])
+            self.assertEqual(2, preview["recontact_found_in_active_history"])
+            self.assertEqual(1, preview["recontact_seen_this_month"])
+            self.assertEqual(1, preview["recontact_not_found_in_active_history"])
+            self.assertTrue(preview["recontact_recency_high_risk"])
+            self.assertEqual("red", preview["recontact_recency_risk_level"])
+            self.assertEqual("red", preview["recontact_recency"]["risk_level"])
+            self.assertEqual("Not recommended: most leads were contacted recently.", preview["recontact_recency_warning"])
+
+            with self.assertRaisesRegex(RuntimeError, "explicit override"):
+                confirm_dispatch_preview(
+                    preview["preview_id"],
+                    require_stopped=False,
+                    preview_dir=preview_dir,
+                )
+
+    def test_safer_recontact_pool_writes_separate_csv_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "runs" / "check_test" / "leads.csv"
+            triaged_keep_path = tmp / "runs" / "check_test" / "leads_triaged_keep.csv"
+            rejected_path = tmp / "runs" / "check_test" / "leads_rejected.csv"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            preview_dir = tmp / "previews"
+            state_dir = tmp / "state"
+            logs_dir = tmp / "logs"
+            summary_path = state_dir / "safer_recontact_source_summary.json"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rows = [
+                {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "BookTitle": "Alpha Book", "Status": "KEEP"},
+                {"FullName": "Beta Person", "FirstName": "Beta", "Email": "beta@example.com", "BookTitle": "Beta Book", "Status": "KEEP"},
+                {"FullName": "Gamma Person", "FirstName": "Gamma", "Email": "gamma@example.com", "BookTitle": "Gamma Book", "Status": "KEEP"},
+            ]
+            write_csv(master_path, ["FullName", "FirstName", "Email", "BookTitle"], [{key: row[key] for key in ["FullName", "FirstName", "Email", "BookTitle"]} for row in rows])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "BookTitle", "Status"], rows)
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(jc_queue, ["Email", "FirstName", "BookTitle"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName", "BookTitle"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="cleaned",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                campaign_type="recontact_cold",
+                preview_dir=preview_dir,
+            )
+
+            current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+            state_dir.mkdir(parents=True)
+            logs_dir.mkdir(parents=True)
+            write_csv(
+                logs_dir / "sendgrid_local_log.csv",
+                ["Email", "Status", "created_at_utc"],
+                [
+                    {"Email": "alpha@example.com", "Status": "SENT", "created_at_utc": f"{current_month}-02T12:00:00+00:00"},
+                    {"Email": "beta@example.com", "Status": "SENT", "created_at_utc": "2020-01-02T12:00:00+00:00"},
+                ],
+            )
+            (state_dir / "dispatch_run_history.json").write_text(
+                json.dumps(
+                    [
+                        {"email": "alpha@example.com", "dispatched_at": f"{current_month}-02T12:00:00+00:00"},
+                        {"email": "beta@example.com", "dispatched_at": "2020-01-02T12:00:00+00:00"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            summary = create_safer_recontact_pool_from_preview(
+                preview["preview_id"],
+                preview_dir=preview_dir,
+                summary_path=summary_path,
+                logs_dir=logs_dir,
+                state_dir=state_dir,
+            )
+
+            output_path = Path(str(summary["output_path"]))
+            self.assertTrue(output_path.exists())
+            headers, safer_rows = important_leads_workflow._read_csv_rows(output_path)
+            self.assertIn("Email", headers)
+            self.assertEqual(1, len(safer_rows))
+            self.assertEqual("gamma@example.com", safer_rows[0]["Email"])
+            self.assertEqual(3, summary["planned_unique"])
+            self.assertEqual(2, summary["found_in_active_history"])
+            self.assertEqual(1, summary["seen_this_month"])
+            self.assertEqual(1, summary["not_found_in_active_history"])
+            self.assertEqual(1, summary["safer_rows_written"])
+            self.assertEqual(0, summary["safer_found_in_active_history"])
+            self.assertTrue(summary_path.exists())
+            self.assertEqual(master_path, tmp / "runs" / "check_test" / "leads.csv")
+            self.assertNotEqual(output_path, master_path)
+
+    def test_confirm_dispatch_preview_allows_sendgrid_already_sent_for_recontact_cold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            report_dir = tmp / "reports"
+            backup_root = tmp / "backups"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            rows = [
+                {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "AuthorEmail": "alpha@example.com", "AuthorName": "Alpha Person", "BookTitle": "Alpha Book", "Status": "KEEP"},
+                {"FullName": "Beta Person", "FirstName": "Beta", "Email": "beta@example.com", "AuthorEmail": "beta@example.com", "AuthorName": "Beta Person", "BookTitle": "Beta Book", "Status": "KEEP"},
+            ]
+
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"],
+                [
+                    {key: row[key] for key in ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle"]}
+                    for row in rows
+                ],
+            )
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"], rows)
+            write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(
+                logs[1],
+                ["Email", "Status"],
+                [
+                    {"Email": "alpha@example.com", "Status": "SENT"},
+                    {"Email": "beta@example.com", "Status": "SENT"},
+                ],
+            )
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                campaign_type="recontact_cold",
+                preview_dir=preview_dir,
+            )
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
+
+            report = confirm_dispatch_preview(
+                preview["preview_id"],
+                require_stopped=False,
+                backup_root=backup_root,
+                report_dir=report_dir,
+                persist_state=False,
+                preview_dir=preview_dir,
+            )
+
+            self.assertEqual("completed", report["status"])
+            self.assertEqual("recontact_cold", report["campaign_type"])
+            self.assertEqual(0, report["confirm_filtered_sendgrid_already_sent"])
+            self.assertEqual(2, sum(report["rows_written_sendgrid_shards"].values()))
+            self.assertEqual(0, report["rows_written_private_jc"])
+            self.assertEqual(2, report["total_rows_would_write"])
+            with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], [row["Email"] for row in csv.DictReader(handle)])
+            sendgrid_emails: list[str] = []
+            for path in sg_queues:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    sendgrid_emails.extend(row["Email"] for row in csv.DictReader(handle))
+            self.assertEqual(["alpha@example.com", "beta@example.com"], sendgrid_emails)
 
     def test_confirm_dispatch_preview_failure_preserves_staged_files_and_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1372,7 +2080,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
             logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
 
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [{"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com"}],
+            )
             write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
             write_csv(
                 triaged_keep_path,
@@ -1492,6 +2204,80 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Active staged Fast Triage batch is empty"):
                 confirm_dispatch_preview(preview["preview_id"], require_stopped=False, preview_dir=preview_dir)
 
+    def test_confirm_dispatch_preview_rejects_missing_campaign_or_source_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            preview_dir = tmp / "previews"
+            preview_dir.mkdir()
+            preview_id = "dispatch_preview_missing_metadata"
+            payload = {
+                "preview_id": preview_id,
+                "status": "previewed",
+                "dispatch_source_path": str(tmp / "leads_triaged_keep.csv"),
+                "plan_rows_by_queue": {
+                    "private_jc": [],
+                    "sendgrid_1": [],
+                    "sendgrid_2": [],
+                    "sendgrid_3": [],
+                    "sendgrid_4": [],
+                    "sendgrid_5": [],
+                },
+                "private_jc_planned_count": 0,
+                "sendgrid_planned_count": 0,
+                "total_planned_unique_count": 0,
+                "total_rows_would_write": 0,
+            }
+            (preview_dir / f"{preview_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "missing campaign type"):
+                confirm_dispatch_preview(preview_id, require_stopped=False, preview_dir=preview_dir)
+
+            payload["campaign_type"] = "cold"
+            (preview_dir / f"{preview_id}.json").write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "missing dispatch source mode"):
+                confirm_dispatch_preview(preview_id, require_stopped=False, preview_dir=preview_dir)
+
+    def test_confirm_dispatch_preview_rejects_duplicate_email_across_planned_queues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            row = {"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "Status": "KEEP"}
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [{k: row[k] for k in ["FullName", "FirstName", "Email"]}])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], [row])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+            preview_path = preview_dir / f"{preview['preview_id']}.json"
+            stored_preview = json.loads(preview_path.read_text(encoding="utf-8"))
+            stored_preview["plan_rows_by_queue"]["sendgrid_1"] = [dict(stored_preview["plan_rows_by_queue"]["private_jc"][0])]
+            preview_path.write_text(json.dumps(stored_preview, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "duplicate planned recipients"):
+                confirm_dispatch_preview(preview["preview_id"], require_stopped=False, preview_dir=preview_dir)
+
     def test_confirm_dispatch_preview_blocks_when_senders_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1534,71 +2320,140 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Stop all senders before dispatching leads"):
                     confirm_dispatch_preview(preview["preview_id"], preview_dir=preview_dir)
 
+    def _preview_dispatch_cap_fixture(
+        self,
+        tmp: Path,
+        *,
+        row_count: int,
+        dispatch_cap: str,
+        contacted_count: int = 0,
+        preview_name: str = "previews",
+    ) -> dict[str, object]:
+        master_path = tmp / "leads.csv"
+        triaged_keep_path = tmp / "leads_triaged_keep.csv"
+        jc_queue = tmp / "recipients_private_jc.csv"
+        sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+        logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+        ledger_path = tmp / "lead_ledger.sqlite3"
+
+        write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+        rows = [
+            {
+                "FullName": f"Person {index}",
+                "FirstName": f"Person{index}",
+                "Email": f"person{index}@example.com",
+                "Status": "KEEP",
+            }
+            for index in range(row_count)
+        ]
+        write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+        write_csv(jc_queue, ["Email", "FirstName"], [])
+        for path in sg_queues:
+            write_csv(path, ["Email", "FirstName"], [])
+        for path in logs:
+            write_csv(path, ["Email", "Status"], [])
+
+        if contacted_count:
+            conn = lead_ledger.connect_lead_ledger(ledger_path)
+            try:
+                for row in rows[:contacted_count]:
+                    lead = lead_ledger.upsert_lead(conn, email=row["Email"])
+                    lead_ledger.record_dispatch_event(
+                        conn,
+                        lead_id=lead["lead_id"],
+                        run_id="dispatch_run_prior",
+                        dispatch_source="triaged_keep",
+                        profile="sendgrid_1",
+                        queue_target="sendgrid_1",
+                        result_status="delivered",
+                        dispatched_at="2026-04-11T05:00:00+00:00",
+                    )
+            finally:
+                conn.close()
+
+        return preview_dispatch_master_leads(
+            master_path=master_path,
+            triaged_keep_path=triaged_keep_path,
+            rejected_path=tmp / "leads_rejected.csv",
+            dispatch_source_mode="triaged_keep",
+            dispatch_cap=dispatch_cap,
+            jc_queue_path=jc_queue,
+            sendgrid_queue_paths=sg_queues,
+            jc_log_path=logs[0],
+            sendgrid_log_paths=logs[1:],
+            sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+            suppressed_path=tmp / "suppressed.csv",
+            unsubscribed_path=tmp / "unsubscribed.csv",
+            lead_ledger_db_path=ledger_path,
+            preview_dir=tmp / preview_name,
+        )
+
     def test_preview_dispatch_master_leads_applies_dispatch_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            master_path = tmp / "leads.csv"
-            triaged_keep_path = tmp / "leads_triaged_keep.csv"
-            jc_queue = tmp / "recipients_private_jc.csv"
-            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
-            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
-
-            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
-            rows = [
-                {
-                    "FullName": f"Person {index}",
-                    "FirstName": f"Person{index}",
-                    "Email": f"person{index}@example.com",
-                    "Status": "KEEP",
-                }
-                for index in range(150)
-            ]
-            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
-            write_csv(jc_queue, ["Email", "FirstName"], [])
-            for path in sg_queues:
-                write_csv(path, ["Email", "FirstName"], [])
-            for path in logs:
-                write_csv(path, ["Email", "Status"], [])
-
-            capped = preview_dispatch_master_leads(
-                master_path=master_path,
-                triaged_keep_path=triaged_keep_path,
-                rejected_path=tmp / "leads_rejected.csv",
-                dispatch_source_mode="triaged_keep",
+            capped = self._preview_dispatch_cap_fixture(
+                tmp,
+                row_count=150,
                 dispatch_cap="100",
-                jc_queue_path=jc_queue,
-                sendgrid_queue_paths=sg_queues,
-                jc_log_path=logs[0],
-                sendgrid_log_paths=logs[1:],
-                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
-                suppressed_path=tmp / "suppressed.csv",
-                unsubscribed_path=tmp / "unsubscribed.csv",
-                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
-                preview_dir=tmp / "previews_100",
+                preview_name="previews_100",
             )
-            all_rows = preview_dispatch_master_leads(
-                master_path=master_path,
-                triaged_keep_path=triaged_keep_path,
-                rejected_path=tmp / "leads_rejected.csv",
-                dispatch_source_mode="triaged_keep",
+            all_rows = self._preview_dispatch_cap_fixture(
+                tmp,
+                row_count=150,
                 dispatch_cap="all",
-                jc_queue_path=jc_queue,
-                sendgrid_queue_paths=sg_queues,
-                jc_log_path=logs[0],
-                sendgrid_log_paths=logs[1:],
-                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
-                suppressed_path=tmp / "suppressed.csv",
-                unsubscribed_path=tmp / "unsubscribed.csv",
-                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
-                preview_dir=tmp / "previews_all",
+                preview_name="previews_all",
             )
 
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(100, capped["selected_rows"])
-            self.assertEqual(200, capped["total_rows_that_would_be_written"])
+            self.assertEqual(100, capped["total_rows_that_would_be_written"])
             self.assertEqual("all", all_rows["dispatch_cap"])
             self.assertEqual(150, all_rows["selected_rows"])
-            self.assertEqual(300, all_rows["total_rows_that_would_be_written"])
+            self.assertEqual(150, all_rows["total_rows_that_would_be_written"])
+
+    def test_preview_dispatch_cap_counts_actual_sendgrid_additions_after_historical_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            capped = self._preview_dispatch_cap_fixture(
+                tmp,
+                row_count=150,
+                contacted_count=90,
+                dispatch_cap="100",
+            )
+
+            self.assertEqual("100", capped["dispatch_cap"])
+            self.assertEqual(150, capped["selected_rows"])
+            self.assertEqual(90, capped["skipped_already_contacted"])
+            self.assertEqual(30, capped["rows_to_add_private_jc"])
+            self.assertEqual(30, capped["rows_to_add_sendgrid"])
+            self.assertEqual(6, capped["assigned_sg1"])
+            self.assertEqual(6, capped["assigned_sg2"])
+            self.assertEqual(6, capped["assigned_sg3"])
+            self.assertEqual(6, capped["assigned_sg4"])
+            self.assertEqual(6, capped["assigned_sg5"])
+
+    def test_preview_dispatch_cap_keeps_scanning_until_sendgrid_cap_is_filled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            capped = self._preview_dispatch_cap_fixture(
+                tmp,
+                row_count=220,
+                contacted_count=90,
+                dispatch_cap="100",
+            )
+
+            self.assertEqual("100", capped["dispatch_cap"])
+            self.assertEqual(190, capped["selected_rows"])
+            self.assertEqual(90, capped["skipped_already_contacted"])
+            self.assertEqual(50, capped["rows_to_add_sendgrid"])
+            self.assertEqual(50, capped["rows_to_add_private_jc"])
+            self.assertEqual(10, capped["assigned_sg1"])
+            self.assertEqual(10, capped["assigned_sg2"])
+            self.assertEqual(10, capped["assigned_sg3"])
+            self.assertEqual(10, capped["assigned_sg4"])
+            self.assertEqual(10, capped["assigned_sg5"])
 
     def test_preview_dispatch_master_leads_missing_source_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1727,7 +2582,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     dispatch_source="triaged_keep",
                     profile="private_jc",
                     queue_target="private_jc",
-                    result_status="queued",
+                    result_status="delivered",
                     dispatched_at="2026-04-11T05:00:00+00:00",
                 )
             finally:
@@ -1751,7 +2606,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             self.assertEqual(1, preview["skipped_already_contacted"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
             self.assertEqual(1, preview["exclusion_reason_counts"]["already_contacted"])
             evidence = preview["already_contacted_evidence"][0]
             self.assertEqual("contacted@example.com", evidence["matched_email"])
@@ -1759,6 +2614,241 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("private_jc", evidence["channel"])
             self.assertEqual("dispatch_run_prior", evidence["campaign"])
             self.assertEqual("exact_normalized_email", evidence["matching_rule"])
+
+    def test_preview_dispatch_ignores_queued_staged_history_for_fresh_cold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            jc_log = tmp / "private_jc_log.csv"
+            staged_log_like_path = tmp / "data" / "state" / "backups" / "staged_batches" / "dispatch_test" / "leads_triaged_keep.csv"
+            sg_logs = [staged_log_like_path] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(2, 6)]
+
+            rows = [
+                {"FullName": "Queued Person", "FirstName": "Queued", "Email": "queued@example.com", "Status": "KEEP"},
+                {"FullName": "Fresh Person", "FirstName": "Fresh", "Email": "fresh@example.com", "Status": "KEEP"},
+            ]
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            write_csv(jc_log, ["Email", "Status"], [])
+            write_csv(staged_log_like_path, ["Email", "Status"], [{"Email": "queued@example.com", "Status": "SENT"}])
+            for path in sg_logs[1:]:
+                write_csv(path, ["Email", "Status"], [])
+
+            conn = lead_ledger.connect_lead_ledger(ledger_db_path)
+            try:
+                queued = lead_ledger.upsert_lead(conn, email="queued@example.com")
+                lead_ledger.record_dispatch_event(
+                    conn,
+                    lead_id=queued["lead_id"],
+                    run_id="dispatch_run_staged_only",
+                    dispatch_source="triaged_keep",
+                    profile="private_jc",
+                    queue_target="private_jc",
+                    result_status="queued",
+                    dispatched_at="2026-06-23T21:47:27+00:00",
+                )
+            finally:
+                conn.close()
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=jc_log,
+                sendgrid_log_paths=sg_logs,
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                preview_dir=tmp / "previews",
+            )
+
+            planned_emails = [
+                row["Email"]
+                for rows_by_queue in preview["plan_rows_by_queue"].values()
+                for row in rows_by_queue
+            ]
+            self.assertEqual(0, preview["skipped_already_contacted"])
+            self.assertEqual(0, preview["skipped_already_sent"])
+            self.assertCountEqual(["queued@example.com", "fresh@example.com"], planned_emails)
+            self.assertEqual(
+                1,
+                preview["history_source_category_counts"]["skipped_from_non_authoritative_history_ignored"],
+            )
+            self.assertEqual(0, preview["history_source_category_counts"]["already_contacted_from_contact_history"])
+            self.assertEqual(0, preview["history_source_category_counts"]["already_sent_from_actual_send_log"])
+
+    def test_fresh_cold_preview_excludes_authoritative_sendgrid_domain_sent_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            jc_log = tmp / "private_jc_log.csv"
+            sg_logs = [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            domain_log = tmp / "sendgrid_domain_log.csv"
+
+            source_rows = [
+                {"FullName": "Profile Sent", "FirstName": "Profile", "Email": "profile-sent@example.com", "Status": "KEEP"},
+                {"FullName": "Domain Attempt Sent", "FirstName": "Domain", "Email": "domain-sent@example.com", "Status": "KEEP"},
+                {"FullName": "Fresh One", "FirstName": "Fresh", "Email": "fresh-one@example.com", "Status": "KEEP"},
+                {"FullName": "Fresh Two", "FirstName": "Fresh", "Email": "fresh-two@example.com", "Status": "KEEP"},
+            ]
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], source_rows)
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            write_csv(jc_log, ["Email", "Status"], [])
+            write_csv(sg_logs[0], ["Email", "Status"], [{"Email": "profile-sent@example.com", "Status": "SENT"}])
+            for path in sg_logs[1:]:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(
+                domain_log,
+                ["TimestampUTC", "Email", "Status", "Info"],
+                [
+                    {
+                        "TimestampUTC": "2026-06-24T00:00:00Z",
+                        "Email": "domain-sent@example.com",
+                        "Status": "ATTEMPT",
+                        "Info": "provider=sendgrid outcome=sent message_id=test",
+                    }
+                ],
+            )
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+
+            queue_before = {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]}
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=jc_log,
+                sendgrid_log_paths=[*sg_logs, domain_log],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                preview_dir=tmp / "previews",
+            )
+
+            planned_emails = {
+                row["Email"].lower()
+                for rows_by_queue in preview["plan_rows_by_queue"].values()
+                for row in rows_by_queue
+            }
+            authoritative_sent = _sent_email_set([jc_log, *sg_logs, domain_log])
+
+            self.assertEqual({"fresh-one@example.com", "fresh-two@example.com"}, planned_emails)
+            self.assertFalse(planned_emails & authoritative_sent)
+            self.assertEqual(2, preview["skipped_already_sent"])
+            self.assertEqual(2, preview["skipped_rows"])
+            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
+            self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
+            self.assertEqual(
+                2,
+                preview["history_audit_counts"]["already_sent_from_actual_send_log"],
+            )
+            self.assertIn(str(domain_log), preview["sendgrid_log_paths"])
+            self.assertIn(str(domain_log), preview["authoritative_send_log_paths"])
+            self.assertEqual(queue_before, {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]})
+
+    def test_fresh_cold_preview_contract_allows_large_already_sent_exclusion_when_overlap_zero(self) -> None:
+        preview = {
+            "campaign_type": "cold",
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
+            "preview_id": "preview_safe",
+            "private_jc_planned_count": 621,
+            "sendgrid_planned_count": 621,
+            "total_planned_unique_count": 1242,
+            "total_rows_would_write": 1242,
+            "duplicate_planned_email_count": 0,
+            "skipped_rows": 2470,
+            "exclusion_reason_counts": {"already_sent": 2470},
+            "planned_authoritative_sent_overlap_count": 0,
+            "plan_rows_by_queue": {
+                "private_jc": [{"Email": f"fresh-private-{index}@example.com"} for index in range(621)],
+                "sendgrid_1": [{"Email": f"fresh-sg-{index}@example.com"} for index in range(621)],
+                "sendgrid_2": [],
+                "sendgrid_3": [],
+                "sendgrid_4": [],
+                "sendgrid_5": [],
+            },
+        }
+
+        _validate_dispatch_preview_contract(preview)
+
+    def test_fresh_cold_preview_contract_blocks_sent_log_overlap(self) -> None:
+        preview = {
+            "campaign_type": "cold",
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
+            "preview_id": "preview_overlap",
+            "private_jc_planned_count": 1,
+            "sendgrid_planned_count": 1,
+            "total_planned_unique_count": 2,
+            "total_rows_would_write": 2,
+            "duplicate_planned_email_count": 0,
+            "skipped_rows": 0,
+            "exclusion_reason_counts": {},
+            "planned_authoritative_sent_overlap_count": 1,
+            "plan_rows_by_queue": {
+                "private_jc": [{"Email": "overlap-private@example.com"}],
+                "sendgrid_1": [{"Email": "overlap-sg@example.com"}],
+                "sendgrid_2": [],
+                "sendgrid_3": [],
+                "sendgrid_4": [],
+                "sendgrid_5": [],
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "overlaps authoritative sent/contact logs"):
+            _validate_dispatch_preview_contract(preview)
+
+    def test_fresh_cold_preview_contract_blocks_skipped_math_mismatch(self) -> None:
+        preview = {
+            "campaign_type": "cold",
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
+            "preview_id": "preview_bad_math",
+            "private_jc_planned_count": 1,
+            "sendgrid_planned_count": 1,
+            "total_planned_unique_count": 2,
+            "total_rows_would_write": 2,
+            "duplicate_planned_email_count": 0,
+            "skipped_rows": 2,
+            "exclusion_reason_counts": {"already_sent": 1},
+            "planned_authoritative_sent_overlap_count": 0,
+            "plan_rows_by_queue": {
+                "private_jc": [{"Email": "fresh-private@example.com"}],
+                "sendgrid_1": [{"Email": "fresh-sg@example.com"}],
+                "sendgrid_2": [],
+                "sendgrid_3": [],
+                "sendgrid_4": [],
+                "sendgrid_5": [],
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "skipped row count does not match skipped reasons"):
+            _validate_dispatch_preview_contract(preview)
 
 
 if __name__ == "__main__":

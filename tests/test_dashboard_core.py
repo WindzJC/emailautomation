@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import dashboard_core
 import provider_pacing
+import settings
 import sendgrid_hygiene
 from tools import rebuild_recipient_queues
 from sendgrid_launch_auth import SendGridKeyResolution
@@ -182,6 +183,38 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertTrue(alert["blocks_sending"])
         self.assertEqual("dashboard_core.queue_safety_alert", alert["source_function"])
 
+    def test_queue_safety_alert_ignores_zero_count_overlap_reasons(self) -> None:
+        alert = dashboard_core.queue_safety_alert(
+            {
+                "safe": False,
+                "affected_provider": "sendgrid",
+                "unsafe_reasons": ["TRIAGED_REJECT_OVERLAP", "OUTSIDE_INTENDED_SOURCE"],
+                "overlap_with_triaged_reject": 0,
+                "outside_checked_output_count": 0,
+                "outside_intended_source_count": 0,
+                "intended_source_reject_overlap_count": 0,
+            }
+        )
+
+        self.assertIsNone(alert)
+
+    def test_queue_safety_alert_keeps_real_safety_errors(self) -> None:
+        alert = dashboard_core.queue_safety_alert(
+            {
+                "safe": False,
+                "affected_provider": "sendgrid",
+                "unsafe_reasons": ["QUEUE_SAFETY_CHECK_FAILED"],
+                "message": "Queue safety check failed: fixture error",
+                "overlap_with_triaged_reject": 0,
+                "outside_checked_output_count": 0,
+                "outside_intended_source_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(alert)
+        self.assertEqual("Sendgrid queue unsafe", alert["title"])
+        self.assertIn("fixture error", alert["message"])
+
     def test_provider_queue_safety_uses_only_provider_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             shards = Path(tmpdir)
@@ -218,6 +251,439 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertNotIn("recipients_private_jc.csv", [Path(path).name for path in sendgrid["validated_shard_paths"]])
         self.assertEqual("private_jc", private["affected_provider"])
         self.assertEqual(["recipients_private_jc.csv"], [Path(path).name for path in private["validated_shard_paths"]])
+
+    def test_sendgrid_queue_safety_matches_sendgrid_preview_rows_without_private_jc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_20260625_000210_synthetic"
+
+            private_rows = [
+                {"Email": f"private-{index}@example.test", "FirstName": "Private", "AuthorEmail": f"private-{index}@example.test", "AuthorName": "Private Writer", "BookTitle": "Private Book"}
+                for index in range(621)
+            ]
+            sendgrid_rows = [
+                {"Email": f"sendgrid-{index}@example.test", "FirstName": "Send", "AuthorEmail": f"sendgrid-{index}@example.test", "AuthorName": "Send Writer", "BookTitle": "Send Book"}
+                for index in range(621)
+            ]
+            rows_by_queue = {"private_jc": private_rows}
+            cursor = 0
+            for shard_index, count in enumerate([125, 124, 124, 124, 124], start=1):
+                rows = sendgrid_rows[cursor : cursor + count]
+                cursor += count
+                rows_by_queue[f"sendgrid_{shard_index}"] = rows
+                self._write_recipient_rows(shards / f"recipients_sendgrid_{shard_index}.csv", rows)
+            self._write_recipient_rows(shards / "recipients_private_jc.csv", private_rows)
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": rows_by_queue}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                    "shard_row_count_total": sum(1 for _ in (shard_paths or [])),
+                }
+
+            with patch.multiple(dashboard_core, ROOT=base, SHARDS_DIR=shards, STATE_DIR=state), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                sendgrid = dashboard_core.build_dashboard_queue_safety_report("sendgrid")
+                private = dashboard_core.build_dashboard_queue_safety_report("private_jc")
+                combined = dashboard_core.build_dashboard_queue_safety_report("all")
+
+        self.assertTrue(sendgrid["safe"])
+        self.assertEqual(621, sendgrid["expected_preview_unique_emails"])
+        self.assertEqual(621, sendgrid["live_preview_unique_emails"])
+        self.assertEqual(0, sendgrid["missing_from_preview_expected_count"])
+        self.assertEqual(0, sendgrid["extra_vs_preview_expected_count"])
+        self.assertNotIn("private-0@example.test", sendgrid["missing_from_preview_expected_fingerprint"])
+        self.assertIsNone(dashboard_core.queue_safety_alert(sendgrid))
+        self.assertTrue(private["safe"])
+        self.assertEqual(621, private["expected_preview_unique_emails"])
+        self.assertTrue(combined["safe"])
+        self.assertEqual(1242, combined["expected_preview_unique_emails"])
+        self.assertEqual(1242, combined["live_preview_unique_emails"])
+
+    def test_sendgrid_queue_safety_blocks_preview_missing_or_extra_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_20260625_000210_mismatch"
+            planned_rows = [
+                {"Email": "planned-a@example.test", "FirstName": "A"},
+                {"Email": "planned-b@example.test", "FirstName": "B"},
+            ]
+            live_rows = [
+                {"Email": "planned-a@example.test", "FirstName": "A"},
+                {"Email": "extra@example.test", "FirstName": "Extra"},
+            ]
+            self._write_recipient_rows(shards / "recipients_sendgrid_1.csv", live_rows)
+            for index in range(2, 6):
+                self._write_recipient_rows(shards / f"recipients_sendgrid_{index}.csv", [])
+            self._write_recipient_rows(shards / "recipients_private_jc.csv", [])
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": {"private_jc": [], "sendgrid_1": planned_rows}}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                }
+
+            with patch.multiple(dashboard_core, ROOT=base, SHARDS_DIR=shards, STATE_DIR=state), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                report = dashboard_core.build_dashboard_queue_safety_report("sendgrid")
+
+        self.assertFalse(report["safe"])
+        self.assertEqual(1, report["missing_from_preview_expected_count"])
+        self.assertEqual(1, report["extra_vs_preview_expected_count"])
+        self.assertIn("MISSING_PREVIEW_PLANNED_ROWS", report["unsafe_reasons"])
+        self.assertIn("EXTRA_ROWS_NOT_IN_PREVIEW", report["unsafe_reasons"])
+        alert = dashboard_core.queue_safety_alert(report)
+        self.assertIsNotNone(alert)
+        self.assertEqual("Sendgrid queue unsafe", alert["title"])
+
+    def test_private_queue_safety_allows_accounted_partial_consumption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            logs = base / "data" / "logs"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_partial_private"
+            planned_rows = [
+                {"Email": "remaining@example.test", "FirstName": "R"},
+                {"Email": "sent@example.test", "FirstName": "S"},
+                {"Email": "skipped@example.test", "FirstName": "K"},
+            ]
+            self._write_recipient_rows(shards / "recipients_private_jc.csv", [planned_rows[0]])
+            (logs / "private_jc_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-06-25T00:00:00+00:00,sent@example.test,SENT,\n"
+                "2026-06-25T00:00:01+00:00,skipped@example.test,SKIP,event_type=SKIPPED_ALREADY_SENT\n",
+                encoding="utf-8",
+            )
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": {"private_jc": planned_rows}}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                }
+
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": "recipients_private_jc.csv",
+                    "log": "private_jc_log.csv",
+                    "dashboard_enabled": True,
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=shards,
+                STATE_DIR=state,
+                PROFILES=profiles,
+                DASHBOARD_PROFILES=["private_jc"],
+                SENDGRID_PROFILES=[],
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                report = dashboard_core.build_dashboard_queue_safety_report("private_jc")
+
+        self.assertTrue(report["safe"])
+        self.assertTrue(report["partial_consumption_verified"])
+        self.assertEqual(3, report["expected_preview_unique_emails"])
+        self.assertEqual(1, report["live_preview_unique_emails"])
+        self.assertEqual(2, report["missing_from_preview_expected_count"])
+        self.assertEqual(2, report["accounted_missing_from_preview_expected_count"])
+        self.assertEqual(0, report["unaccounted_missing_from_preview_expected_count"])
+        self.assertEqual(0, report["extra_vs_preview_expected_count"])
+        self.assertEqual(0, report["live_already_sent_overlap_count"])
+        self.assertEqual("Queue partially consumed — remaining recipients verified safe.", report["message"])
+        self.assertIsNone(dashboard_core.queue_safety_alert(report))
+
+    def test_sendgrid_queue_safety_allows_empty_completed_queue_when_accounted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            logs = base / "data" / "logs"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_completed_sendgrid"
+            planned_rows = [
+                {"Email": "one@example.test", "FirstName": "One"},
+                {"Email": "two@example.test", "FirstName": "Two"},
+            ]
+            for index in range(1, 6):
+                self._write_recipient_rows(shards / f"recipients_sendgrid_{index}.csv", [])
+            (logs / "sendgrid_annette_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-06-25T00:00:00+00:00,one@example.test,SENT,\n"
+                "2026-06-25T00:00:01+00:00,two@example.test,ATTEMPT,outcome=sent\n",
+                encoding="utf-8",
+            )
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": {"sendgrid_1": planned_rows}}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                }
+
+            profiles = {
+                "sendgrid_annette": {
+                    "provider": "sendgrid",
+                    "csv": "recipients_sendgrid_1.csv",
+                    "log": "sendgrid_annette_log.csv",
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=shards,
+                STATE_DIR=state,
+                PROFILES=profiles,
+                DASHBOARD_PROFILES=["sendgrid_annette"],
+                SENDGRID_PROFILES=["sendgrid_annette"],
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                report = dashboard_core.build_dashboard_queue_safety_report("sendgrid")
+
+        self.assertTrue(report["safe"])
+        self.assertTrue(report["partial_consumption_verified"])
+        self.assertEqual(2, report["accounted_missing_from_preview_expected_count"])
+        self.assertEqual(0, report["live_preview_unique_emails"])
+        self.assertIsNone(dashboard_core.queue_safety_alert(report))
+
+    def test_queue_safety_blocks_live_row_already_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            logs = base / "data" / "logs"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_live_sent_overlap"
+            planned_rows = [{"Email": "sent-still-live@example.test", "FirstName": "Sent"}]
+            self._write_recipient_rows(shards / "recipients_private_jc.csv", planned_rows)
+            (logs / "private_jc_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-06-25T00:00:00+00:00,sent-still-live@example.test,SENT,\n",
+                encoding="utf-8",
+            )
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": {"private_jc": planned_rows}}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                }
+
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": "recipients_private_jc.csv",
+                    "log": "private_jc_log.csv",
+                    "dashboard_enabled": True,
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=shards,
+                STATE_DIR=state,
+                PROFILES=profiles,
+                DASHBOARD_PROFILES=["private_jc"],
+                SENDGRID_PROFILES=[],
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                report = dashboard_core.build_dashboard_queue_safety_report("private_jc")
+
+        self.assertFalse(report["safe"])
+        self.assertEqual(1, report["live_already_sent_overlap_count"])
+        self.assertIn("LIVE_ALREADY_SENT_OVERLAP", report["unsafe_reasons"])
+
+    def test_queue_safety_alert_uses_unaccounted_missing_count(self) -> None:
+        alert = dashboard_core.queue_safety_alert(
+            {
+                "safe": False,
+                "affected_provider": "private_jc",
+                "unsafe_reasons": ["LIVE_ALREADY_SENT_OVERLAP"],
+                "missing_from_preview_expected_count": 448,
+                "accounted_missing_from_preview_expected_count": 448,
+                "unaccounted_missing_from_preview_expected_count": 0,
+                "extra_vs_preview_expected_count": 0,
+                "live_already_sent_overlap_count": 1,
+                "overlap_with_triaged_reject": 0,
+                "outside_checked_output_count": 0,
+                "outside_intended_source_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(alert)
+        self.assertIn("0 expected preview row(s) are missing without accounting", alert["message"])
+        self.assertIn("1 live row(s) already appear in authoritative sent logs", alert["message"])
+
+    def test_queue_safety_blocks_unaccounted_missing_preview_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            state = base / "data" / "state"
+            logs = base / "data" / "logs"
+            preview_dir = base / "_important" / "dispatch_jobs" / "previews"
+            shards.mkdir(parents=True)
+            state.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_id = "dispatch_preview_unaccounted_missing"
+            planned_rows = [
+                {"Email": "remaining@example.test", "FirstName": "R"},
+                {"Email": "missing@example.test", "FirstName": "M"},
+            ]
+            self._write_recipient_rows(shards / "recipients_private_jc.csv", [planned_rows[0]])
+            (logs / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            (state / "active_campaign_snapshot.json").write_text(json.dumps({"preview_id": preview_id}), encoding="utf-8")
+            (preview_dir / f"{preview_id}.json").write_text(
+                json.dumps({"preview_id": preview_id, "plan_rows_by_queue": {"private_jc": planned_rows}}),
+                encoding="utf-8",
+            )
+
+            def fake_report(*, shard_paths=None, **kwargs):
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [{"path": str(path), "name": path.name} for path in (shard_paths or [])],
+                }
+
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": "recipients_private_jc.csv",
+                    "log": "private_jc_log.csv",
+                    "dashboard_enabled": True,
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=shards,
+                STATE_DIR=state,
+                PROFILES=profiles,
+                DASHBOARD_PROFILES=["private_jc"],
+                SENDGRID_PROFILES=[],
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                dashboard_core,
+                "build_queue_safety_report",
+                side_effect=fake_report,
+            ):
+                report = dashboard_core.build_dashboard_queue_safety_report("private_jc")
+
+        self.assertFalse(report["safe"])
+        self.assertEqual(1, report["unaccounted_missing_from_preview_expected_count"])
+        self.assertIn("MISSING_PREVIEW_PLANNED_ROWS", report["unsafe_reasons"])
+
+    def test_sendgrid_queue_safety_alert_still_blocks_sent_log_overlap(self) -> None:
+        alert = dashboard_core.queue_safety_alert(
+            {
+                "safe": False,
+                "affected_provider": "sendgrid",
+                "unsafe_reasons": ["SENDGRID_ALREADY_SENT_OVERLAP"],
+                "sendgrid_already_sent_overlap_count": 1,
+                "overlap_with_triaged_reject": 0,
+                "outside_checked_output_count": 0,
+                "outside_intended_source_count": 0,
+            }
+        )
+
+        self.assertIsNotNone(alert)
+        self.assertEqual("Sendgrid queue unsafe", alert["title"])
+        self.assertTrue(alert["blocks_sending"])
+
+    def test_sendgrid_sent_history_counts_attempt_outcome_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sendgrid_domain_log.csv"
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "TimestampUTC": "2026-06-25T00:00:00+00:00",
+                        "Email": "sent@example.test",
+                        "Status": "ATTEMPT",
+                        "Info": "profile=sendgrid; outcome=sent",
+                    }
+                )
+                writer.writerow(
+                    {
+                        "TimestampUTC": "2026-06-25T00:00:01+00:00",
+                        "Email": "failed@example.test",
+                        "Status": "ATTEMPT",
+                        "Info": "profile=sendgrid; outcome=failed",
+                    }
+                )
+
+            sent = rebuild_recipient_queues.sent_email_set(path)
+
+        self.assertEqual({"sent@example.test"}, sent)
 
     def test_sendgrid_queue_safety_blocks_missing_required_headers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1023,6 +1489,35 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertNotIn("private_jc", preflight_profiles)
         self.assertTrue(any(cmd[:2] == ["bash", "./run_sendgrid_tmux.sh"] for cmd in calls))
 
+    def test_active_or_locked_sender_profiles_includes_runtime_locks(self) -> None:
+        with patch.object(dashboard_core, "DASHBOARD_PROFILES", ["sendgrid_annette"]), patch.object(
+            dashboard_core,
+            "detect_running_sender_profiles",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "profile_runtime_lock_status",
+            return_value={"locked": True, "pid": 1234},
+        ):
+            self.assertEqual({"sendgrid_annette"}, dashboard_core.active_or_locked_sender_profiles(["sendgrid_annette"]))
+
+    def test_run_sendgrid_launcher_refuses_already_running_or_locked_profile(self) -> None:
+        with patch.multiple(
+            dashboard_core,
+            SENDGRID_PROFILES=["sendgrid_annette"],
+            DASHBOARD_PROFILES=["sendgrid_annette"],
+            START_ALL_PROFILES=["sendgrid_annette"],
+        ), patch.object(
+            dashboard_core,
+            "active_or_locked_sender_profiles",
+            return_value={"sendgrid_annette"},
+        ), patch.object(dashboard_core.subprocess, "run") as run_mock:
+            ok, message = dashboard_core.run_sendgrid_launcher()
+
+        self.assertFalse(ok)
+        self.assertIn("already running or locked", message)
+        run_mock.assert_not_called()
+
     def test_run_sendgrid_launcher_reports_success_only_when_all_five_profiles_active(self) -> None:
         profiles = [
             "sendgrid_annette",
@@ -1250,7 +1745,12 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("synthetic preflight failure", message)
-        self.assertEqual(2, run_mock.call_count)
+        preflight_calls = [
+            call.args[0]
+            for call in run_mock.call_args_list
+            if "send_shard.py" in call.args[0] and "--preflight" in call.args[0]
+        ]
+        self.assertEqual(2, len(preflight_calls))
 
     def test_sendgrid_hourly_cap_status_uses_dashboard_window_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1302,6 +1802,7 @@ class DashboardCoreTests(unittest.TestCase):
             SENDGRID_PROFILES=[],
             DASHBOARD_PROFILES=["private_jc"],
             START_ALL_PROFILES=[],
+            active_or_locked_sender_profiles=lambda profile_names=None: set(),
             _load_env_value=lambda name: "",
             load_dashboard_recovery_timer=lambda: {
                 "private_jc_recovery_start_at_utc": "",
@@ -1313,6 +1814,18 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual("PRIVATE_JC_PASSWORD is not available in the dashboard environment.", message)
+
+    def test_start_private_profile_refuses_runtime_locked_profile(self) -> None:
+        with patch.object(dashboard_core, "DASHBOARD_PROFILES", ["private_jc"]), patch.object(
+            dashboard_core,
+            "active_or_locked_sender_profiles",
+            return_value={"private_jc"},
+        ), patch.object(dashboard_core.subprocess, "run") as run_mock:
+            ok, message = dashboard_core.start_private_profile("private_jc", session="private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("already running or locked", message)
+        run_mock.assert_not_called()
 
     def test_start_private_profile_blocks_while_provider_cooldown_active(self) -> None:
         profiles = {
@@ -1353,6 +1866,7 @@ class DashboardCoreTests(unittest.TestCase):
                     SENDGRID_PROFILES=[],
                     DASHBOARD_PROFILES=["private_jc"],
                     START_ALL_PROFILES=[],
+                    active_or_locked_sender_profiles=lambda profile_names=None: set(),
                     _load_env_value=lambda name: "secret",
                 ):
                     ok, message = dashboard_core.start_private_profile("private_jc", session="private_jc")
@@ -2071,6 +2585,14 @@ class DashboardCoreTests(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=["Email"])
             writer.writeheader()
             writer.writerow({"Email": email})
+
+    def _write_recipient_rows(self, path: Path, rows: list[dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
 
     def _write_log(self, path: Path, rows: list[tuple[str, str, str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
