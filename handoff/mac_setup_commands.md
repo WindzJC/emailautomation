@@ -1,10 +1,10 @@
 # Mac Setup Commands
 
-Place `email_automation_mac_handoff_20260525_232900.tgz` in the Mac home directory, then run:
+Place `email_automation_mac_handoff_20260525_234519.tgz` in the Mac home directory, then run:
 
 ```bash
 cd ~
-tar -xzf email_automation_mac_handoff_20260525_232900.tgz
+tar -xzf email_automation_mac_handoff_20260525_234519.tgz
 cd email-automation
 python3 -m venv .venv
 source .venv/bin/activate

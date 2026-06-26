@@ -176,6 +176,118 @@ class RebuildRecipientQueuesTests(unittest.TestCase):
             self.assertIn("OUTSIDE_INTENDED_SOURCE", report["unsafe_reasons"])
             self.assertNotIn("outside@example.test", json.dumps(report))
 
+    def test_cold_queue_safety_blocks_triage_reject_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_private_jc.csv"
+            headers = ["Email", "FirstName", "AuthorName", "BookTitle", "VerificationReason"]
+            row = {
+                "Email": "missing-name@example.test",
+                "FirstName": "",
+                "AuthorName": "",
+                "BookTitle": "",
+                "VerificationReason": "MISSING_FULL_NAME",
+            }
+            write_csv(checked, headers, [row])
+            write_csv(reject, headers, [row])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": ""}])
+
+            report = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=checked,
+                checked_path=checked,
+                triaged_keep_path=tmp / "leads_triaged_keep.csv",
+                triaged_reject_path=reject,
+                campaign_type="cold",
+            )
+
+            self.assertFalse(report["safe"])
+            self.assertEqual(1, report["overlap_with_triaged_reject"])
+            self.assertEqual(1, report["blocked_triaged_reject_overlap_count"])
+            self.assertIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
+            self.assertIn("INTENDED_SOURCE_OVERLAPS_REJECT", report["unsafe_reasons"])
+
+    def test_recontact_cold_queue_safety_allows_missing_full_name_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_private_jc.csv"
+            export = tmp / "blocked.csv"
+            headers = ["Email", "FirstName", "AuthorName", "BookTitle", "Status", "VerificationReason", "VerificationEvidence"]
+            row = {
+                "Email": "missing-name@example.test",
+                "FirstName": "",
+                "AuthorName": "",
+                "BookTitle": "",
+                "Status": "REJECT",
+                "VerificationReason": "MISSING_FULL_NAME",
+                "VerificationEvidence": "FullName is missing.",
+            }
+            write_csv(checked, headers, [row])
+            write_csv(reject, headers, [row])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": ""}])
+
+            report = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=checked,
+                checked_path=checked,
+                triaged_keep_path=tmp / "leads_triaged_keep.csv",
+                triaged_reject_path=reject,
+                campaign_type="recontact_cold",
+                recontact_blocked_overlap_export_path=export,
+            )
+
+            self.assertTrue(report["safe"])
+            self.assertEqual(1, report["overlap_with_triaged_reject"])
+            self.assertEqual(1, report["allowed_triaged_reject_overlap_count"])
+            self.assertEqual(0, report["blocked_triaged_reject_overlap_count"])
+            self.assertNotIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
+            self.assertEqual([], read_rows(export))
+
+    def test_recontact_cold_queue_safety_blocks_local_bounce_risk_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_private_jc.csv"
+            export = tmp / "blocked.csv"
+            headers = ["Email", "FirstName", "AuthorName", "BookTitle", "Status", "VerificationReason", "VerificationEvidence"]
+            row = {
+                "Email": "bounce-risk@example.test",
+                "FirstName": "Risk",
+                "AuthorName": "Risk Writer",
+                "BookTitle": "Risk Book",
+                "Status": "REJECT",
+                "VerificationReason": "LOCAL_BOUNCE_RISK",
+                "VerificationEvidence": "Synthetic local marker.",
+            }
+            write_csv(checked, headers, [row])
+            write_csv(reject, headers, [row])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": "Risk"}])
+
+            report = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=checked,
+                checked_path=checked,
+                triaged_keep_path=tmp / "leads_triaged_keep.csv",
+                triaged_reject_path=reject,
+                campaign_type="recontact_cold",
+                recontact_blocked_overlap_export_path=export,
+            )
+
+            self.assertFalse(report["safe"])
+            self.assertEqual(1, report["blocked_triaged_reject_overlap_count"])
+            self.assertIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
+            self.assertIn("INTENDED_SOURCE_OVERLAPS_REJECT", report["unsafe_reasons"])
+            rows = read_rows(export)
+            self.assertEqual(1, len(rows))
+            self.assertEqual("bounce-risk@example.test", rows[0]["Email"])
+            self.assertEqual("private_jc", rows[0]["PlannedProfiles"])
+            self.assertIn("LOCAL_BOUNCE_RISK", rows[0]["RejectReason"])
+
     def test_rebuild_archives_first_and_preserves_logs_ledger_and_suppression_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -283,6 +395,65 @@ class RebuildRecipientQueuesTests(unittest.TestCase):
         self.assertEqual(0, report["outside_checked_output_count"])
         self.assertEqual(0, report["outside_intended_source_count"])
         self.assertEqual(0, report["overlap_with_triaged_reject"])
+
+    def test_queue_safety_uses_active_manifest_checked_path_over_stale_important_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            app_root = tmp / "app"
+            important = app_root / "_important"
+            state_dir = app_root / "data" / "state"
+            archive = state_dir / "backups" / "staged_batches" / "dispatch_current"
+            shards = [app_root / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            rows = [
+                {
+                    "Email": "current@example.test",
+                    "FirstName": "Current",
+                    "AuthorEmail": "current@example.test",
+                    "AuthorName": "Current Writer",
+                    "BookTitle": "Current Book",
+                }
+            ]
+            write_csv(
+                important / "leads.csv",
+                headers,
+                [
+                    {
+                        "Email": "stale@example.test",
+                        "FirstName": "Stale",
+                        "AuthorEmail": "stale@example.test",
+                        "AuthorName": "Stale Writer",
+                        "BookTitle": "Stale Book",
+                    }
+                ],
+            )
+            write_csv(important / "leads_triaged_keep.csv", headers, rows)
+            write_csv(important / "leads_triaged_reject.csv", headers, [])
+            write_csv(archive / "leads.csv", headers, rows)
+            write_csv(archive / "leads_triaged_keep.csv", headers, rows)
+            write_csv(archive / "leads_triaged_reject.csv", headers, [])
+            for index, path in enumerate(shards):
+                write_csv(path, headers, rows if index == 0 else [])
+
+            with (
+                patch.object(rebuild_tool.settings, "APP_ROOT", app_root),
+                patch.object(rebuild_tool.settings, "STATE_DIR", state_dir),
+                patch.object(rebuild_tool.settings, "BACKUPS_DIR", state_dir / "backups"),
+            ):
+                rebuild_tool.write_active_campaign_manifest(
+                    checked_path=archive / "leads.csv",
+                    triaged_keep_path=important / "leads_triaged_keep.csv",
+                    triaged_reject_path=archive / "leads_triaged_reject.csv",
+                    intended_source_path=important / "leads_triaged_keep.csv",
+                    state_dir=state_dir,
+                )
+                report = build_queue_safety_report(shard_paths=shards)
+
+        self.assertTrue(report["safe"])
+        self.assertEqual("active_campaign_manifest", report["source_resolution"])
+        self.assertEqual(str(archive / "leads.csv"), report["checked_path"])
+        self.assertEqual(str(important / "leads_triaged_keep.csv"), report["intended_source_path"])
+        self.assertEqual(0, report["outside_checked_output_count"])
 
     def test_sendgrid_safe_rebuild_normalizes_placeholder_like_book_titles(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -45,6 +45,130 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
             self.assertEqual(1, report["keep_count"])
             self.assertEqual(0, report["reject_count"])
             self.assertEqual(0, report["quarantine_count"])
+            self.assertEqual(1, report["keep_high_confidence_count"])
+            keep_rows = self._read_csv_rows(base / "triaged_keep.csv")
+            self.assertEqual("high", keep_rows[0]["TriageConfidence"])
+            self.assertEqual("KEEP_HIGH_CONFIDENCE_BUSINESS_DOMAIN", keep_rows[0]["KeepReason"])
+
+    def test_fast_triage_soft_keeps_valid_personal_email_with_usable_name(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            self._write_csv(
+                input_path,
+                ["FullName", "Email"],
+                [{"FullName": "Gina Baker", "Email": "gina.baker@gmail.com"}],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=base / "triaged_keep.csv",
+                    rejected_path=base / "triaged_reject.csv",
+                    quarantine_path=base / "triaged_quarantine.csv",
+                    persist_state=True,
+                    disposable_domains=set(),
+                )
+
+            self.assertEqual(1, report["keep_count"])
+            self.assertEqual(0, report["reject_count"])
+            self.assertEqual(0, report["quarantine_count"])
+            self.assertEqual(0, report["keep_high_confidence_count"])
+            self.assertEqual(1, report["keep_low_confidence_count"])
+            self.assertEqual(1, report["soft_warning_counts"]["WEAK_PERSONAL_EMAIL_ONLY"])
+            keep_rows = self._read_csv_rows(base / "triaged_keep.csv")
+            self.assertEqual("KEEP", keep_rows[0]["Status"])
+            self.assertEqual("KEEP_LOW_CONFIDENCE_PERSONAL_EMAIL", keep_rows[0]["VerificationReason"])
+            self.assertEqual("low", keep_rows[0]["TriageConfidence"])
+            self.assertEqual("WEAK_PERSONAL_EMAIL_ONLY", keep_rows[0]["TriageWarning"])
+            self.assertEqual("KEEP_LOW_CONFIDENCE_PERSONAL_EMAIL", keep_rows[0]["KeepReason"])
+
+    def test_fast_triage_keeps_personal_email_with_local_signal_as_low_confidence_warning(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            self._write_csv(
+                input_path,
+                ["FullName", "Email", "Website"],
+                [{"FullName": "Gina Baker", "Email": "gina.baker@yahoo.com", "Website": "ginabakerbooks.com"}],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=base / "triaged_keep.csv",
+                    rejected_path=base / "triaged_reject.csv",
+                    quarantine_path=base / "triaged_quarantine.csv",
+                    persist_state=True,
+                    disposable_domains=set(),
+                )
+
+            self.assertEqual(1, report["keep_count"])
+            self.assertEqual(0, report["reject_count"])
+            self.assertEqual(0, report["quarantine_count"])
+            self.assertEqual(1, report["soft_warning_counts"]["WEAK_PERSONAL_EMAIL_ONLY"])
+            self.assertEqual(1, report["soft_warning_counts"]["WEAK_LOCAL_CONFIDENCE"])
+            keep_rows = self._read_csv_rows(base / "triaged_keep.csv")
+            self.assertEqual("low", keep_rows[0]["TriageConfidence"])
+            self.assertIn("WEAK_LOCAL_CONFIDENCE", keep_rows[0]["VerificationEvidence"])
+
+    def test_fast_triage_personal_email_still_rejects_hard_blockers(self) -> None:
+        with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
+            base = Path(tmpdir)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            input_path = base / "leads.csv"
+            triage_state_path = state_dir / "important_leads_triage_state.json"
+            self._write_csv(
+                input_path,
+                ["FullName", "Email", "SuppressionStatus"],
+                [
+                    {"FullName": "Prince", "Email": "prince@gmail.com", "SuppressionStatus": ""},
+                    {"FullName": "Test User", "Email": "testuser@gmail.com", "SuppressionStatus": ""},
+                    {"FullName": "Suppressed Person", "Email": "suppressed.person@gmail.com", "SuppressionStatus": "suppressed"},
+                    {"FullName": "Placeholder Person", "Email": "placeholder@fake.com", "SuppressionStatus": ""},
+                    {"FullName": "Invalid Person", "Email": "not-an-email", "SuppressionStatus": ""},
+                    {"FullName": "Disposable Person", "Email": "disposable@tempmail.co", "SuppressionStatus": ""},
+                ],
+            )
+
+            with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
+                important_leads_verify.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path):
+                report = important_leads_verify.fast_triage_master_leads(
+                    input_path=input_path,
+                    keep_path=base / "triaged_keep.csv",
+                    rejected_path=base / "triaged_reject.csv",
+                    quarantine_path=base / "triaged_quarantine.csv",
+                    persist_state=True,
+                    disposable_domains={"tempmail.co"},
+                )
+
+            self.assertEqual(0, report["keep_count"])
+            self.assertEqual(6, report["reject_count"])
+            reasons = report["hard_reject_counts"]
+            self.assertEqual(1, reasons["WEAK_FULL_NAME"])
+            self.assertEqual(1, reasons["JUNK_NAME"])
+            self.assertEqual(1, reasons["LOCAL_BOUNCE_RISK"])
+            self.assertEqual(1, reasons["PLACEHOLDER_EMAIL_DOMAIN"])
+            self.assertEqual(1, reasons["INVALID_EMAIL_SYNTAX"])
+            self.assertEqual(1, reasons["DISPOSABLE_DOMAIN"])
 
     def test_fast_triage_preserves_lead_op_fields_in_keep_and_reject_outputs(self) -> None:
         with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
@@ -151,7 +275,7 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
             self.assertEqual(0, report["keep_count"])
             self.assertEqual(2, report["reject_count"])
 
-    def test_fast_triage_quarantines_missing_usable_name_and_role_email(self) -> None:
+    def test_fast_triage_rejects_missing_usable_name_and_role_email(self) -> None:
         with tempfile.TemporaryDirectory(dir=important_leads_verify.settings.APP_ROOT) as tmpdir:
             base = Path(tmpdir)
             state_dir = base / "state"
@@ -182,9 +306,9 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
                 )
 
             self.assertEqual(0, report["keep_count"])
-            self.assertEqual(0, report["reject_count"])
-            self.assertEqual(2, report["quarantine_count"])
-            self.assertEqual(1, report["reason_counts"]["MISSING_USABLE_NAME"])
+            self.assertEqual(2, report["reject_count"])
+            self.assertEqual(0, report["quarantine_count"])
+            self.assertEqual(1, report["reason_counts"]["WEAK_FULL_NAME"])
             self.assertEqual(1, report["reason_counts"]["ROLE_ACCOUNT"])
 
     def test_fast_triage_rejects_junk_name_and_disposable_domain(self) -> None:
@@ -629,7 +753,7 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
                 state_dir,
             ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path), patch.object(
                 important_leads_verify,
-                "VERIFY_CHECKPOINT_ROWS",
+                "FAST_TRIAGE_CHECKPOINT_ROWS",
                 1,
             ):
                 original_save = important_leads_verify._save_triage_checkpoint_state
@@ -684,7 +808,7 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
 
             def should_cancel() -> bool:
                 cancel_calls["count"] += 1
-                return cancel_calls["count"] > 2
+                return cancel_calls["count"] > 1
 
             with patch.object(important_leads_verify.settings, "APP_ROOT", base), patch.object(
                 important_leads_verify.settings,
@@ -692,8 +816,12 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
                 state_dir,
             ), patch.object(important_leads_verify, "TRIAGE_STATE_PATH", triage_state_path), patch.object(
                 important_leads_verify,
-                "VERIFY_CHECKPOINT_ROWS",
+                "FAST_TRIAGE_CHECKPOINT_ROWS",
                 2,
+            ), patch.object(
+                important_leads_verify,
+                "FAST_TRIAGE_CANCEL_POLL_ROWS",
+                1,
             ):
                 report = important_leads_verify.fast_triage_master_leads(
                     input_path=input_path,
@@ -754,11 +882,11 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
                 )
 
             self.assertEqual(1, report["keep_count"])
-            self.assertEqual(1, report["reject_count"])
-            self.assertEqual(1, report["quarantine_count"])
+            self.assertEqual(2, report["reject_count"])
+            self.assertEqual(0, report["quarantine_count"])
             self.assertEqual("KEEP", self._read_csv_rows(keep_path)[0]["Status"])
-            self.assertEqual("REJECT", self._read_csv_rows(rejected_path)[0]["Status"])
-            self.assertEqual("QUARANTINE", self._read_csv_rows(quarantine_path)[0]["Status"])
+            self.assertEqual(["REJECT", "REJECT"], [row["Status"] for row in self._read_csv_rows(rejected_path)])
+            self.assertEqual([], self._read_csv_rows(quarantine_path))
 
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
             try:
@@ -768,11 +896,11 @@ class ImportantLeadsVerifyTests(unittest.TestCase):
                 self.assertEqual(3, conn.execute("SELECT COUNT(*) FROM lead_ledger").fetchone()[0])
                 self.assertEqual(lead_ledger.FAST_TRIAGE_STAGE, alpha["current_stage"])
                 self.assertEqual("KEEP", alpha["current_status"])
-                self.assertIn("FAST_TRIAGE_LOCAL_CONFIDENCE", alpha["reason_codes"])
+                self.assertIn("FAST_TRIAGE_BUSINESS_DOMAIN", alpha["reason_codes"])
                 self.assertEqual("leads.csv", alpha["source_file"])
                 self.assertEqual(lead_ledger.FAST_TRIAGE_STAGE, prince["current_stage"])
-                self.assertEqual("QUARANTINE", prince["current_status"])
-                self.assertIn("MISSING_USABLE_NAME", prince["reason_codes"])
+                self.assertEqual("REJECT", prince["current_status"])
+                self.assertIn("WEAK_FULL_NAME", prince["reason_codes"])
                 self.assertEqual("REJECT", invalid["current_status"])
                 self.assertIn("INVALID_EMAIL_SYNTAX", invalid["reason_codes"])
             finally:

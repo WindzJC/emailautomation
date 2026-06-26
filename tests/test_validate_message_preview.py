@@ -31,7 +31,7 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": "",
-                        "Subject": "Independent author consignment review",
+                        "Subject": "Independent author shelf review opportunity",
                         "Body": f"Hi JC,\n\n{generic_opening}\n\nWe are opening consignment spots for independent authors.",
                     }
                 ],
@@ -54,11 +54,11 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": title,
-                        "Subject": f"Consignment review for {title}",
+                        "Subject": f"Shelf review opportunity for {title}",
                         "Body": (
                             "Hi JC,\n\n"
-                            f"Our team came across {title} and thought the book could benefit from a clearer, "
-                            "more polished online presentation for readers discovering your work.\n\n"
+                            f"Our team came across {title} and thought it may be a strong fit for readers "
+                            "discovering new independent books this summer.\n\n"
                             "We are opening consignment spots for independent authors."
                         ),
                     }
@@ -80,7 +80,7 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": "",
-                        "Subject": "Independent author consignment review",
+                        "Subject": "Independent author shelf review opportunity",
                         "Body": "Hi JC,\n\nWe came across your book.\n\nWe are opening consignment spots.",
                     }
                 ],

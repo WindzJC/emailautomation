@@ -48,7 +48,15 @@ VERIFY_CACHE_MAX_ITEMS = max(0, int(os.environ.get("IMPORTANT_LEADS_VERIFY_CACHE
 VERIFY_HTTP_CONNECT_TIMEOUT_SECONDS = max(0.2, float(os.environ.get("IMPORTANT_LEADS_VERIFY_CONNECT_TIMEOUT_SECONDS", "1.5") or 1.5))
 VERIFY_HTTP_READ_TIMEOUT_SECONDS = max(0.5, float(os.environ.get("IMPORTANT_LEADS_VERIFY_READ_TIMEOUT_SECONDS", "3.0") or 3.0))
 VERIFY_CANCEL_POLL_SECONDS = max(0.1, float(os.environ.get("IMPORTANT_LEADS_VERIFY_CANCEL_POLL_SECONDS", "0.5") or 0.5))
-VERIFY_AUDIT_HEADERS = ("Status", "VerificationReason", "VerificationEvidence", "VerifiedAtUtc")
+VERIFY_AUDIT_HEADERS = (
+    "Status",
+    "VerificationReason",
+    "VerificationEvidence",
+    "TriageConfidence",
+    "TriageWarning",
+    "KeepReason",
+    "VerifiedAtUtc",
+)
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -643,14 +651,14 @@ def _fast_triage_identity_rejection(row: dict[str, str], fieldnames: Sequence[st
         return "MISSING_FULL_NAME", "FullName is missing."
     if not full_name.strip():
         return "MISSING_USABLE_PERSON_NAME", "No usable person name was available for fast triage."
+    if _is_junk_name(full_name):
+        return "JUNK_NAME", "Name looks like a test, junk, or placeholder value."
     if first_token in TRIAGE_WEAK_FIRST_NAME_TOKENS:
         return "WEAK_FIRST_NAME", f"FirstName `{first_name or first_token}` is generic or not a usable person name."
     if first_header and _normalize_row_value(row, first_header):
         explicit_first = _triage_name_tokens(_normalize_row_value(row, first_header))
         if explicit_first and explicit_first[0] in TRIAGE_WEAK_FIRST_NAME_TOKENS:
             return "WEAK_FIRST_NAME", f"FirstName `{_normalize_row_value(row, first_header)}` is generic or not a usable person name."
-    if _is_junk_name(full_name):
-        return "JUNK_NAME", "Name looks like a test, junk, or placeholder value."
     if len(full_tokens) < 2:
         return "WEAK_FULL_NAME", "FullName has fewer than two real name tokens."
     if not _has_usable_full_name(full_name):
@@ -703,9 +711,10 @@ def _fast_triage_quality_gate(row: dict[str, str], fieldnames: Sequence[str], do
         return "REJECT", "PLACEHOLDER_EMAIL_DOMAIN", "Email domain is a placeholder or fake domain."
     has_local_signal, local_signal_evidence = _local_quality_signal(row, fieldnames)
     if normalized_domain in TRIAGE_FREE_PERSONAL_DOMAINS:
+        warning = "WEAK_PERSONAL_EMAIL_ONLY: Free personal email plus usable name is a low-confidence Fast Triage signal."
         if has_local_signal:
-            return "QUARANTINE", "WEAK_LOCAL_CONFIDENCE", f"Free personal email domain with only local context: {local_signal_evidence}"
-        return "REJECT", "WEAK_PERSONAL_EMAIL_ONLY", "Free personal email plus usable name is not enough for dispatch-safe Fast Triage."
+            warning = f"{warning}; WEAK_LOCAL_CONFIDENCE: Free personal email domain with only local context: {local_signal_evidence}"
+        return "KEEP", "KEEP_LOW_CONFIDENCE_PERSONAL_EMAIL", warning
     return "KEEP", "FAST_TRIAGE_BUSINESS_DOMAIN", "Usable person identity with non-personal custom/business email domain."
 
 
@@ -1305,6 +1314,19 @@ def _build_output_row(
     output["Status"] = status
     output["VerificationReason"] = reason
     output["VerificationEvidence"] = evidence[:1000]
+    output["TriageConfidence"] = ""
+    output["TriageWarning"] = ""
+    output["KeepReason"] = ""
+    if status == "KEEP":
+        output["KeepReason"] = reason
+        if reason == "KEEP_LOW_CONFIDENCE_PERSONAL_EMAIL":
+            output["TriageConfidence"] = "low"
+            output["TriageWarning"] = "WEAK_PERSONAL_EMAIL_ONLY"
+        elif reason == "FAST_TRIAGE_BUSINESS_DOMAIN":
+            output["TriageConfidence"] = "high"
+            output["KeepReason"] = "KEEP_HIGH_CONFIDENCE_BUSINESS_DOMAIN"
+        else:
+            output["TriageConfidence"] = "high" if "WARNING" not in reason and "WARNINGS" not in reason else "low"
     output["VerifiedAtUtc"] = iso_utc()
     return output
 
@@ -1753,6 +1775,26 @@ def fast_triage_master_leads(
         reason = str(row.get("VerificationReason") or "").strip()
         if reason:
             hard_reject_counts[reason] += 1
+    keep_high_confidence_rows = 0
+    keep_low_confidence_rows = 0
+    for row in keep_rows:
+        confidence = str(row.get("TriageConfidence") or "").strip().lower()
+        if confidence == "low":
+            keep_low_confidence_rows += 1
+        elif confidence == "high":
+            keep_high_confidence_rows += 1
+        row_warning_codes: set[str] = set()
+        warning = str(row.get("TriageWarning") or "").strip()
+        if warning:
+            for code in re.split(r"[;,]\s*", warning):
+                code = code.strip()
+                if code:
+                    row_warning_codes.add(code)
+        if normalized_mode != TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH:
+            for code in _manual_author_soft_warning_codes(str(row.get("VerificationEvidence") or "")):
+                row_warning_codes.add(code)
+        for code in sorted(row_warning_codes):
+            soft_warning_counts[code] += 1
 
     report = {
         "mode": normalized_mode,
@@ -1771,6 +1813,8 @@ def fast_triage_master_leads(
         "reason_counts": dict(reason_counts),
         "soft_warning_counts": dict(soft_warning_counts),
         "hard_reject_counts": dict(hard_reject_counts),
+        "keep_high_confidence_count": keep_high_confidence_rows,
+        "keep_low_confidence_count": keep_low_confidence_rows,
         "send_ready_keep_rows": len(keep_rows) if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,
         "keep_with_warnings_rows": keep_with_warnings_rows if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,
         "keep_with_fallback_rows": keep_with_fallback_rows if normalized_mode == TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH else 0,

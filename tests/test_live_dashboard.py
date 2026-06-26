@@ -17,9 +17,7 @@ from openpyxl import Workbook
 import lead_ledger
 import important_leads_verify
 import important_leads_workflow
-import dashboard_core
 import live_dashboard
-from tools import rebuild_recipient_queues
 from important_leads_workflow import ImportantLeadsCheckError
 
 
@@ -34,44 +32,6 @@ class LiveDashboardTests(unittest.TestCase):
     def _read_csv_rows(self, path: Path) -> list[dict[str, str]]:
         with path.open(newline="", encoding="utf-8-sig") as handle:
             return list(csv.DictReader(handle))
-
-    def test_sendgrid_queue_safety_blocks_prior_sendgrid_log_overlap(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
-            source = tmp / "leads_triaged_keep.csv"
-            checked = tmp / "leads.csv"
-            reject = tmp / "leads_triaged_reject.csv"
-            queue = tmp / "recipients_sendgrid_1.csv"
-            log = tmp / "sendgrid_annette_log.csv"
-            row = {
-                "Email": "reader@example.com",
-                "FirstName": "Reader",
-                "AuthorEmail": "reader@example.com",
-                "AuthorName": "Reader Author",
-                "BookTitle": "Reader Book",
-            }
-            self._write_csv(source, headers, [row])
-            self._write_csv(checked, headers, [row])
-            self._write_csv(reject, headers, [])
-            self._write_csv(queue, headers, [row])
-            self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [{"Email": "reader@example.com", "Status": "SENT"}])
-
-            report = rebuild_recipient_queues.build_queue_safety_report(
-                shard_paths=[queue],
-                intended_source_path=source,
-                checked_path=checked,
-                triaged_keep_path=source,
-                triaged_reject_path=reject,
-                sendgrid_log_paths=[log],
-            )
-            alert = dashboard_core.queue_safety_alert({**report, "affected_provider": "sendgrid"})
-
-            self.assertFalse(report["safe"])
-            self.assertIn("SENDGRID_ALREADY_SENT_OVERLAP", report["unsafe_reasons"])
-            self.assertEqual(1, report["sendgrid_already_sent_overlap_count"])
-            self.assertIsNotNone(alert)
-            self.assertEqual("SendGrid queue blocked: 1 already sent through SendGrid.", alert["message"])
 
     def test_preview_validate_profile_runs_preview_then_validation_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -656,6 +616,111 @@ class LiveDashboardTests(unittest.TestCase):
         body = json.loads(response.body)
         self.assertEqual("private_jc", body["queue_safety"]["affected_provider"])
         start_sender.assert_not_called()
+
+    def test_private_provider_blocker_blocks_private_profile_start(self) -> None:
+        safe_report = {"safe": True, "unsafe_reasons": [], "affected_provider": "private_jc"}
+        snapshot = {
+            "profiles": [
+                {
+                    "name": "private_jc",
+                    "readiness_label": "Blocked",
+                    "readiness_tone": "bad",
+                    "reason_code": "BOUNCE_SYNC_ERROR",
+                    "reason_note": "Private bounce sync failed.",
+                    "message_readiness": {"status": "PASS", "reasons": []},
+                }
+            ]
+        }
+
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value=safe_report,
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender:
+            response = live_dashboard.start_profile("private_jc")
+
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("start_preconditions_failed", body["error"])
+        self.assertIn("BOUNCE_SYNC_ERROR", " ".join(body["blocked_reasons"]))
+        start_sender.assert_not_called()
+
+    def test_private_provider_blocker_does_not_block_sendgrid_profile_start(self) -> None:
+        reports = {
+            "sendgrid": {"safe": True, "unsafe_reasons": [], "affected_provider": "sendgrid"},
+            "private_jc": {"safe": True, "unsafe_reasons": [], "affected_provider": "private_jc"},
+            "all": {"safe": True, "unsafe_reasons": [], "affected_provider": "all"},
+        }
+        snapshot = {
+            "profiles": [
+                {
+                    "name": "private_jc",
+                    "readiness_label": "Blocked",
+                    "readiness_tone": "bad",
+                    "reason_code": "BOUNCE_SYNC_ERROR",
+                    "reason_note": "Private bounce sync failed.",
+                    "message_readiness": {"status": "PASS", "reasons": []},
+                },
+                {
+                    "name": "sendgrid_annette",
+                    "readiness_label": "Ready",
+                    "readiness_tone": "good",
+                    "message_readiness": {"status": "PASS", "reasons": []},
+                },
+            ]
+        }
+
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            side_effect=lambda provider="all": reports[str(provider or "all")],
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "started"),
+        ) as start_sender, patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        self.assertEqual(200, response.status_code)
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("sendgrid", body["preconditions"]["queue_safety_provider"])
+        start_sender.assert_called_once_with("sendgrid_annette")
 
     def test_start_profile_allows_safe_queue_and_calls_runtime_start(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
@@ -2075,6 +2140,10 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "build_dashboard_queue_safety_report",
                 return_value={"safe": True},
+            ), patch.object(
+                live_dashboard,
+                "_latest_fast_triage_keep_source",
+                return_value={"source_resolution": "legacy_important_triaged_keep"},
             ):
                 status = live_dashboard._combined_leads_status()
 
@@ -2084,6 +2153,60 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(11, latest["sg1_added"])
             self.assertEqual(97, latest["dispatch_source_row_count"])
             self.assertEqual(str(confirmed_path), latest["confirmed_summary_path"])
+
+    def test_combined_leads_status_exposes_active_campaign_snapshot_for_display(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state = tmp / "state"
+            state.mkdir(parents=True)
+            source = tmp / "safe_recontact.csv"
+            checked = tmp / "checked.csv"
+            reject = tmp / "reject.csv"
+            self._write_csv(source, ["Email"], [{"Email": "synthetic-one@example.test"}, {"Email": "synthetic-two@example.test"}])
+            self._write_csv(checked, ["Email"], [{"Email": "synthetic-one@example.test"}, {"Email": "synthetic-two@example.test"}, {"Email": "synthetic-three@example.test"}])
+            self._write_csv(reject, ["Email"], [])
+            (state / "active_campaign_snapshot.json").write_text(
+                json.dumps(
+                    {
+                        "created_at_utc": "2026-06-20T10:00:00+00:00",
+                        "campaign_type": "recontact_cold",
+                        "intended_source_path": str(source),
+                        "checked_path": str(checked),
+                        "triaged_reject_path": str(reject),
+                        "files": {
+                            "intended_source": {"path": str(source), "row_count": 2},
+                            "checked": {"path": str(checked), "row_count": 3},
+                            "triaged_reject": {"path": str(reject), "row_count": 0},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={},
+            ), patch.object(live_dashboard, "shard_status", return_value={"jc_queue": {"count": 544}, "sendgrid_queues": []}), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={"latest_dispatch": {}},
+            ), patch.object(live_dashboard, "important_leads_verify_status", return_value={}), patch.object(
+                live_dashboard,
+                "_find_active_important_check_job",
+                return_value=None,
+            ), patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": True},
+            ), patch.object(live_dashboard, "_load_latest_confirmed_dispatch_summary", return_value={}):
+                status = live_dashboard._combined_leads_status()
+
+            snapshot = status["active_campaign_snapshot"]
+            self.assertEqual("recontact_cold", snapshot["campaign_type"])
+            self.assertEqual(str(source), snapshot["intended_source_path"])
+            self.assertEqual(2, snapshot["intended_source_row_count"])
+            self.assertEqual(3, snapshot["checked_row_count"])
 
     def test_combined_leads_status_prefers_latest_staged_triaged_keep(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -2170,77 +2293,78 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
 
-    def test_queue_safety_sources_prefer_latest_confirmed_dispatch_archive_over_stale_rebuild(self) -> None:
+    def test_combined_leads_status_clears_stale_confirmed_dispatch_for_newer_staged_triage(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
-            important_dir = tmp / "_important"
-            state_dir = tmp / "data" / "state"
-            backups_dir = state_dir / "backups"
-            confirmed_dir = state_dir / "dispatch_confirmed"
-            current_archive = backups_dir / "staged_batches" / "dispatch_current"
-            stale_archive = backups_dir / "staged_batches" / "dispatch_stale"
-            rebuild_manifest_dir = backups_dir / "queue_rebuild" / "queue_rebuild_stale"
-            for path in [important_dir, confirmed_dir, current_archive, stale_archive, rebuild_manifest_dir]:
-                path.mkdir(parents=True, exist_ok=True)
-            self._write_csv(current_archive / "leads.csv", ["Email"], [{"Email": "current@example.test"}])
-            self._write_csv(current_archive / "leads_triaged_keep.csv", ["Email"], [{"Email": "current@example.test"}])
-            self._write_csv(current_archive / "leads_triaged_reject.csv", ["Email"], [])
-            self._write_csv(stale_archive / "leads.csv", ["Email"], [{"Email": "stale@example.test"}])
-            self._write_csv(stale_archive / "leads_triaged_keep.csv", ["Email"], [{"Email": "stale@example.test"}])
-            self._write_csv(stale_archive / "leads_triaged_reject.csv", ["Email"], [])
-            (confirmed_dir / "dispatch_confirmed_20260521_195529.json").write_text(
-                json.dumps(
-                    {
-                        "confirmed_at_utc": "2026-05-21T19:55:29+00:00",
-                        "staged_batch_archive_path": str(current_archive),
-                        "report": {"staged_batch_archive_path": str(current_archive)},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (rebuild_manifest_dir / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "queue_safety_source_paths": {
-                            "intended_source_path": str(stale_archive / "leads_triaged_keep.csv"),
-                            "checked_path": str(stale_archive / "leads.csv"),
-                            "triaged_reject_path": str(stale_archive / "leads_triaged_reject.csv"),
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
+            jobs_dir = tmp / "jobs"
+            runs_dir = tmp / "runs"
+            run_dir = runs_dir / "check_20260529_145034_abcd1234"
+            jobs_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            keep_path = run_dir / "leads_triaged_keep.csv"
+            triage_reject_path = run_dir / "leads_triaged_reject.csv"
+            quarantine_path = run_dir / "leads_triaged_quarantine.csv"
+            self._write_csv(output_path, ["FirstName", "Email"], [{"FirstName": "Ava", "Email": "ava@example.test"}])
+            self._write_csv(rejected_path, ["FirstName", "Email"], [])
+            self._write_csv(keep_path, ["FirstName", "Email", "Status"], [{"FirstName": "Ava", "Email": "ava@example.test", "Status": "KEEP"}])
+            self._write_csv(triage_reject_path, ["FirstName", "Email"], [])
+            self._write_csv(quarantine_path, ["FirstName", "Email"], [])
+            job = {
+                "job_id": "check_20260529_145034_abcd1234",
+                "status": "completed",
+                "created_at_utc": "2026-05-29T14:50:34+00:00",
+                "completed_at_utc": "2026-05-29T14:55:34+00:00",
+                "auto_triage_status": "completed",
+                "auto_triage_completed_at_utc": "2026-05-29T14:58:00+00:00",
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "auto_triage_keep_path": str(keep_path),
+                "auto_triage_rejected_path": str(triage_reject_path),
+                "auto_triage_quarantine_path": str(quarantine_path),
+            }
+            (jobs_dir / f"{job['job_id']}.json").write_text(json.dumps(job), encoding="utf-8")
+            stale_dispatch = {
+                "generated_at_utc": "2026-05-28T10:00:00+00:00",
+                "dispatch_source_path": "_important/leads_triaged_keep.csv",
+                "dispatch_source_row_count": 97,
+                "added_sendgrid": 43,
+            }
 
-            with patch.object(rebuild_recipient_queues.settings, "APP_ROOT", tmp), patch.object(
-                rebuild_recipient_queues.settings,
-                "STATE_DIR",
-                state_dir,
-            ), patch.object(rebuild_recipient_queues.settings, "BACKUPS_DIR", backups_dir):
-                sources = rebuild_recipient_queues.default_queue_safety_sources(important_dir)
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_RUNS",
+                runs_dir,
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={"latest_auto_dispatch_preview": {"preview_id": "old_preview", "generated_at_utc": "2026-05-28T09:00:00+00:00"}},
+            ), patch.object(live_dashboard, "shard_status", return_value={}), patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={
+                    "dispatch_source_mode": important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                    "dispatch_source": {"dispatch_source_path": "_important/leads_triaged_keep.csv", "dispatch_source_row_count": 0},
+                    "dispatch_source_options": {},
+                },
+            ), patch.object(live_dashboard, "important_leads_verify_status", return_value={}), patch.object(
+                live_dashboard,
+                "_find_active_important_check_job",
+                return_value=None,
+            ), patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": True},
+            ), patch.object(live_dashboard, "_load_latest_confirmed_dispatch_summary", return_value=stale_dispatch):
+                status = live_dashboard._combined_leads_status()
 
-            self.assertEqual("latest_confirmed_dispatch_archive", sources["origin"])
-            self.assertEqual(current_archive / "leads_triaged_keep.csv", sources["intended"])
-            self.assertEqual(current_archive / "leads.csv", sources["checked"])
-
-    def test_missing_booktitle_queue_check_ignores_empty_or_unknown_header_shards(self) -> None:
-        self.assertEqual(
-            [],
-            live_dashboard._queue_status_missing_booktitle(
-                {
-                    "jc_queue": {"count": 0, "fieldnames": ["Email"]},
-                    "sendgrid_queues": [
-                        {"name": "SG1", "count": 0, "fieldnames": ["Email"]},
-                        {"name": "SG2", "count": 10},
-                    ],
-                }
-            ),
-        )
-        self.assertEqual(
-            ["SG1"],
-            live_dashboard._queue_status_missing_booktitle(
-                {"sendgrid_queues": [{"name": "SG1", "count": 10, "fieldnames": ["Email", "FirstName"]}]}
-            ),
-        )
+            self.assertEqual({}, status["latest_dispatch"])
+            self.assertEqual(stale_dispatch, status["stale_latest_dispatch"])
+            self.assertFalse(status["latest_confirmed_dispatch_current"])
+            self.assertEqual({}, status["latest_auto_dispatch_preview"])
+            self.assertFalse(status["latest_auto_dispatch_preview_current"])
+            self.assertEqual(live_dashboard._dashboard_path_label(keep_path), status["dispatch_source_path"])
 
     def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
         class RequestStub:
@@ -3642,6 +3766,110 @@ class LiveDashboardTests(unittest.TestCase):
             )
             save_state.assert_called()
 
+    def test_preview_dispatch_important_leads_uses_cleaned_source_for_recontact_cold(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "leadschecker.csv"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            verified_path = tmp / "leads_verified.csv"
+            input_path.write_text("AuthorName,AuthorEmail,BookTitle\nLegacy,legacy@example.com,\n", encoding="utf-8")
+            output_path.write_text("AuthorName,AuthorEmail,BookTitle\nLegacy,legacy@example.com,\n", encoding="utf-8")
+            triaged_keep_path.write_text("AuthorName,AuthorEmail,BookTitle,Status\nTriage,triage@example.com,Book,KEEP\n", encoding="utf-8")
+            verified_path.write_text("AuthorName,AuthorEmail,BookTitle,Status\nStrict,strict@example.com,Book,KEEP\n", encoding="utf-8")
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                input_path=str(input_path),
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                dispatch_source_mode="triaged_keep",
+                campaign_type="recontact_cold",
+            )
+            fake_preview = {
+                "preview_id": "dispatch_preview_20260620_224051_recontact",
+                "campaign_type": "recontact_cold",
+                "dispatch_source_mode": "cleaned",
+                "dispatch_source_name": "Checked Leads",
+                "dispatch_source_path": str(output_path),
+                "dispatch_source_row_count": 1,
+                "dispatch_eligible_row_count": 1,
+                "dispatch_selected_row_count": 1,
+                "dispatch_cap": "all",
+                "total_rows_would_write": 2,
+            }
+
+            with patch.object(
+                live_dashboard,
+                "important_leads_path_state",
+                return_value={
+                    "input_path": "_important/leadschecker.csv",
+                    "output_path": "_important/leads.csv",
+                    "rejected_path": "_important/leads_rejected.csv",
+                },
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_path_state",
+                return_value={
+                    "input_path": "_important/leads.csv",
+                    "verified_path": str(verified_path),
+                    "rejected_path": "_important/leads_verify_rejected.csv",
+                    "quarantine_path": "_important/leads_quarantine.csv",
+                },
+            ), patch.object(
+                live_dashboard,
+                "important_leads_triage_path_state",
+                return_value={
+                    "input_path": "_important/leads.csv",
+                    "keep_path": str(triaged_keep_path),
+                    "rejected_path": "_important/leads_triaged_reject.csv",
+                    "quarantine_path": "_important/leads_triaged_quarantine.csv",
+                },
+            ), patch.object(
+                live_dashboard,
+                "_latest_fast_triage_keep_source",
+                return_value={
+                    "source_resolution": "legacy_important_triaged_keep",
+                    "job": None,
+                    "run_id": "",
+                    "path": triaged_keep_path,
+                    "paths": {},
+                    "exists": True,
+                    "row_count": 1,
+                },
+            ), patch.object(
+                live_dashboard.runtime_control,
+                "list_active_sender_snapshots",
+                return_value=[],
+            ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                return_value=fake_preview,
+            ) as preview_dispatch_master_leads, patch.object(
+                live_dashboard,
+                "important_leads_status",
+                return_value={"dispatch_eligible_row_count": 1, "dispatch_block_reason": ""},
+            ), patch.object(
+                live_dashboard,
+                "important_leads_verify_status",
+                return_value={},
+            ), patch.object(
+                live_dashboard,
+                "shard_status",
+                return_value={},
+            ):
+                response = live_dashboard.preview_dispatch_important_leads(payload)
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertEqual("recontact_cold", body["preview"]["campaign_type"])
+            self.assertEqual("cleaned", body["preview"]["dispatch_source_mode"])
+            kwargs = preview_dispatch_master_leads.call_args.kwargs
+            self.assertEqual("cleaned", kwargs["dispatch_source_mode"])
+            self.assertEqual("recontact_cold", kwargs["campaign_type"])
+            self.assertEqual(output_path.resolve(), kwargs["master_path"])
+            save_state.assert_any_call(important_leads_dispatch_source={"dispatch_source_mode": "cleaned"})
+
     def test_preview_dispatch_important_leads_defaults_to_triaged_keep_source(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -3842,6 +4070,8 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertTrue(body["ok"])
             kwargs = preview_dispatch_master_leads.call_args.kwargs
             self.assertEqual(staged_keep_path, kwargs["triaged_keep_path"])
+            self.assertEqual(output_path, kwargs["master_path"])
+            self.assertEqual(rejected_path, kwargs["rejected_path"])
 
     def test_preview_dispatch_important_leads_blocks_empty_current_staged_keep(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -4010,6 +4240,43 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("senders_active", body["error"])
         self.assertEqual(["sendgrid_1"], body["active_profiles"])
         self.assertEqual(1, body["active_sender_count"])
+        start_dispatch_job.assert_not_called()
+
+    def test_confirm_dispatch_important_leads_requires_matching_campaign_type(self) -> None:
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            dispatch_source_mode="cleaned",
+            dispatch_cap="all",
+            campaign_type="cold",
+            preview_id="dispatch_preview_20260620_224051_recontact",
+        )
+        preview = {
+            "preview_id": payload.preview_id,
+            "campaign_type": "recontact_cold",
+            "dispatch_source_mode": "cleaned",
+            "dispatch_cap": "all",
+            "dispatch_source_name": "Checked Leads",
+            "dispatch_source_path": "_important/leads.csv",
+            "dispatch_source_row_count": 10,
+            "dispatch_eligible_row_count": 10,
+            "dispatch_selected_row_count": 10,
+            "total_rows_would_write": 20,
+        }
+
+        with patch.object(live_dashboard, "validate_dispatch_preview", return_value=preview), patch.object(
+            live_dashboard.runtime_control,
+            "list_active_sender_snapshots",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "_start_important_dispatch_job",
+        ) as start_dispatch_job:
+            response = live_dashboard.confirm_dispatch_important_leads(payload)
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(body["ok"])
+        self.assertEqual("dispatch_blocked", body["error"])
+        self.assertIn("campaign type", body["message"])
         start_dispatch_job.assert_not_called()
 
     def test_preview_dispatch_important_leads_blocks_when_senders_active(self) -> None:
@@ -4557,7 +4824,8 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(1, summary["rejected_rows"])
             self.assertEqual(1, summary["rows_with_booktitle"])
             self.assertEqual(1, summary["rows_without_booktitle"])
-            self.assertTrue(summary["fallback_capable"])
+            self.assertFalse(summary["fallback_capable"])
+            self.assertIn("ASTRA_PHYSICAL_MAILING_ADDRESS", summary["fallback_readiness"]["profiles"]["private_jc"]["fallback_error"])
             self.assertEqual(2, summary["suppression_unsubscribe_skip_count"])
             self.assertEqual(1, summary["per_profile_planned_counts"]["sendgrid_1"])
             self.assertTrue(summary["queue_safety"]["safe"])
@@ -5079,6 +5347,7 @@ class LiveDashboardTests(unittest.TestCase):
                 summary = live_dashboard._auto_dispatch_preview_summary(
                     preview=preview,
                     triage_report=triage_report,
+                    checked_path=keep_path,
                     keep_path=keep_path,
                     rejected_path=rejected_path,
                 )

@@ -21,15 +21,28 @@ PHONEISH_RE = re.compile(r"^[+()\d\s.\-]{7,}$")
 URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 BAD_LITERAL_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(?:nan|none)(?![A-Za-z0-9])")
 BAD_PLACEHOLDERS = ("{FirstName}", "{BookTitle}", "{PersonalizedOpeningLine}")
-CONSIGNMENT_SUBJECT_FALLBACK = "Independent author consignment review"
+CONSIGNMENT_SUBJECT_FALLBACK = "Independent author shelf review opportunity"
+CONSIGNMENT_SUBJECT_FALLBACKS = {
+    "Independent author shelf review opportunity",
+    "Independent author shelf consideration",
+    "Bookstore placement review",
+    "Regarding your book",
+    "Independent author review",
+}
 ASTRA_VISUAL_SUBJECT_FALLBACK = "A trailer idea for independent authors"
 BOOK_TITLE_GENERIC_OPENING = (
-    "My team works with independent authors to improve how their work is presented online, "
-    "especially through clearer websites, stronger book visuals, and more polished launch materials."
+    "Our team came across your author profile and thought your work may be a strong fit "
+    "for readers discovering new independent books this summer."
 )
 BOOK_TITLE_PERSONALIZED_OPENINGS = (
     "My team came across",
-    "Our team came across",
+)
+CONSIGNMENT_SUBJECT_TEMPLATES = (
+    "Shelf review opportunity for {book_title}",
+    "Shelf consideration for {book_title}",
+    "Reviewing {book_title} for bookstore placement",
+    "Regarding {book_title}",
+    "Independent author review: {book_title}",
 )
 BAD_AUTHOR_NAMES = {
     "authorhouseuk",
@@ -184,21 +197,22 @@ def book_title_failures(book_title: str) -> List[str]:
 
 def validate_consignment_subject(subject: str, book_title: str, book_failures: Sequence[str]) -> List[str]:
     if book_title and not book_failures:
-        expected = f"Consignment review for {book_title}"
-        if subject != expected:
+        expected_subjects = {template.format(book_title=book_title) for template in CONSIGNMENT_SUBJECT_TEMPLATES}
+        if subject not in expected_subjects:
             return ["consignment_subject_mismatch"]
         return []
-    if subject != CONSIGNMENT_SUBJECT_FALLBACK:
+    if subject not in CONSIGNMENT_SUBJECT_FALLBACKS:
         return ["consignment_subject_fallback_required"]
     return []
 
 
 def validate_book_title_fallback_rendering(subject: str, body: str, mode: PreviewMode) -> List[str]:
     failures: List[str] = []
-    expected_subject = CONSIGNMENT_SUBJECT_FALLBACK
     if mode == "astra_visual":
-        expected_subject = ASTRA_VISUAL_SUBJECT_FALLBACK
-    if subject != expected_subject:
+        expected_subjects = {ASTRA_VISUAL_SUBJECT_FALLBACK}
+    else:
+        expected_subjects = CONSIGNMENT_SUBJECT_FALLBACKS
+    if subject not in expected_subjects:
         failures.append("book_title_subject_fallback_required")
     if BOOK_TITLE_GENERIC_OPENING not in body:
         failures.append("book_title_generic_opening_missing")
@@ -207,7 +221,7 @@ def validate_book_title_fallback_rendering(subject: str, body: str, mode: Previe
         failures.append("book_title_personalized_opening_not_removed")
     if "{BookTitle}" in body:
         failures.append("body_unrendered_placeholder:{BookTitle}")
-    if "your book" in body_lower:
+    if re.search(r"\bcame across your book\b", body_lower):
         failures.append("body_generic_your_book")
     return failures
 
