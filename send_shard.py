@@ -952,30 +952,6 @@ You can see examples of our work here: astraproductions.co
 P.S. If you’d rather not hear from me again, just reply unsub.
 """
 
-PITCH_WARM_SUBJECT = "Quick idea for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "Quick idea for your book launch"
-
-PITCH_WARM_BODY = """Hi {FirstName},
-
-I came across {BookTitleOrProject} and saw this note around the launch: {NeedSignal}
-
-I wanted to reach out because if this is still something you’re working through, Astra Productions could help strengthen how the book is presented online before more readers, backers, or media opportunities see it.
-
-Based on what I saw, the strongest direction would likely be {RecommendedService} — something clean, cinematic, and built to make the project feel more polished and easier to understand at first glance.
-
-The angle I had in mind:
-{OutreachAngle}
-
-If this is already handled, no worries. But if you’re still looking at ways to improve the launch presentation, I’d be happy to send over a simple creative direction for how this could look.
-
-Windelle JC
-Creative Director, Astra Productions
-
-Examples: astraproductions.co
-
-P.S. If you’d rather not hear from me again, just reply unsub.
-"""
-
 
 # ===== PITCH REGISTRY =====
 PITCHES = {
