@@ -1144,6 +1144,12 @@ def check_warm_research_leads(
     }
 
 
+
+def _clean_warm_outreach_angle(value: str) -> str:
+    text = _strip_cell(value)
+    text = re.sub(r"^\s*pitch\s+", "", text, flags=re.IGNORECASE)
+    return text[:1].lower() + text[1:] if text else text
+
 def generate_warm_email_preview(
     *,
     email_ready_path: Path,
@@ -1171,7 +1177,7 @@ def generate_warm_email_preview(
             "BookTitleOrProject": book_title or "your book launch",
             "NeedSignal": _strip_cell(row.get("NeedSignal", "")) or "the launch could use a stronger online presentation",
             "RecommendedService": _strip_cell(row.get("RecommendedService", "")) or "a focused launch presentation",
-            "OutreachAngle": _strip_cell(row.get("OutreachAngle", "")) or "A clearer, more polished way to present the project online.",
+            "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")) or "a clearer, more polished way to present the project online.",
         }
         subject = (PITCH_WARM_SUBJECT if book_title else PITCH_WARM_SUBJECT_FALLBACK).format(**merge_values)
         body = PITCH_WARM_BODY.format(**merge_values)
@@ -1183,7 +1189,7 @@ def generate_warm_email_preview(
             "EmailBody": body,
             "NeedSignal": _strip_cell(row.get("NeedSignal", "")),
             "RecommendedService": _strip_cell(row.get("RecommendedService", "")),
-            "OutreachAngle": _strip_cell(row.get("OutreachAngle", "")),
+            "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")),
             "SourceURL": _strip_cell(row.get("SourceURL", "")),
             "ContactPath": _strip_cell(row.get("ContactPath", "")),
             "ResearchStatus": _strip_cell(row.get("ResearchStatus", "")) or "New",
