@@ -621,6 +621,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm upload checked. Sending is not enabled for warm leads yet.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
+            "Generate Warm Draft Preview",
+            "/api/leads/check-important/warm-preview",
+            "warm_email_preview.csv",
         ]:
             self.assertIn(expected, source)
         self.assertIn("#leads-view.warm-research-mode .leads-campaign-command", styles)

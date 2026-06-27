@@ -148,6 +148,7 @@ let lastSnapshot = null;
 let lastLeadsStatus = null;
 let lastShardPreview = null;
 let lastImportantLeadCheck = null;
+let warmDraftPreviewLoading = false;
 let lastImportantLeadCheckJob = null;
 let importantLeadCheckJobTimer = null;
 let importantLeadCheckJobPollId = "";
@@ -3541,6 +3542,7 @@ function warmResearchMetricMarkup(report = {}) {
     { label: "Rejected", value: Number(report.warm_rejected_rows || 0), tone: "warn" },
     { label: "Already contacted", value: Number(report.already_contacted_rows || 0), tone: Number(report.already_contacted_rows || 0) ? "warn" : "" },
     { label: "Suppressed", value: Number(report.suppressed_removed || 0), tone: Number(report.suppressed_removed || 0) ? "warn" : "" },
+    { label: "Draft previews", value: Number(report.warm_email_preview_rows || 0), tone: Number(report.warm_email_preview_rows || 0) ? "good" : "" },
   ]);
 }
 
@@ -4403,9 +4405,15 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
               <h3>${checked ? "Warm upload checked" : "Warm upload not checked"}</h3>
               <p class="current-run-subtitle">${checked ? "Sending is not enabled for warm leads yet." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
             </div>
-            <span class="mini-pill">Check only</span>
+            <div class="leads-action-slot">
+              <span class="mini-pill">Check only</span>
+              ${checked ? `<button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>` : ""}
+            </div>
           </div>
           ${warmResearchMetricMarkup(report)}
+          ${Number(report.warm_email_preview_rows || 0) > 0
+            ? `<div class="current-run-summary-line"><span>Warm draft preview ready: ${Number(report.warm_email_preview_rows || 0).toLocaleString()} row(s).</span><span class="path-ellipsis" title="${escapeHtml(report.warm_email_preview_label || "")}">${escapeHtml(report.warm_email_preview_label || "warm_email_preview.csv")}</span></div>`
+            : ""}
         </article>
       `,
     );
@@ -4507,6 +4515,14 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
           ? `${Number(report.warm_email_ready_rows || 0).toLocaleString()} email ready · ${Number(report.warm_contact_form_rows || 0).toLocaleString()} contact forms`
           : "Outputs appear after validation completes.",
         tone: checked ? "good" : "neutral",
+      },
+      {
+        step: "Generate Draft Preview",
+        status: Number(report.warm_email_preview_rows || 0) > 0 ? "Complete" : checked ? "Available" : "Waiting",
+        detail: Number(report.warm_email_preview_rows || 0) > 0
+          ? `${Number(report.warm_email_preview_rows || 0).toLocaleString()} preview-only drafts generated`
+          : "Creates warm_email_preview.csv without writing sender queues.",
+        tone: Number(report.warm_email_preview_rows || 0) > 0 ? "good" : checked ? "warn" : "neutral",
       },
       {
         step: "Sending",
@@ -4621,6 +4637,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
           <span class="workflow-banner-chip">Email ready: ${Number(report.warm_email_ready_rows || 0).toLocaleString()}</span>
           <span class="workflow-banner-chip">Contact forms: ${Number(report.warm_contact_form_rows || 0).toLocaleString()}</span>
           <span class="workflow-banner-chip">Rejected: ${Number(report.warm_rejected_rows || 0).toLocaleString()}</span>
+          <span class="workflow-banner-chip">Drafts: ${Number(report.warm_email_preview_rows || 0).toLocaleString()}</span>
         </div>
       `,
     );
@@ -5192,6 +5209,32 @@ async function runImportantLeadUploadCheck() {
     if (els.leadsImportantUploadCheckBtn) {
       setButtonBusy(els.leadsImportantUploadCheckBtn, false, "Upload & Check");
     }
+  }
+}
+
+async function generateWarmDraftPreview() {
+  if (!warmResearchUploadMode()) {
+    showMessage("Select Warm Research before generating a warm draft preview.", "error");
+    return;
+  }
+  warmDraftPreviewLoading = true;
+  renderLeadsCurrentRunPanel(lastLeadsStatus);
+  try {
+    const data = await fetchJson("/api/leads/check-important/warm-preview", { method: "POST" });
+    lastImportantLeadCheck = data.warm_check || lastImportantLeadCheck;
+    if (data.status) {
+      renderLeadsStatus(data.status);
+    } else {
+      renderLeadsCurrentRunPanel(lastLeadsStatus);
+      renderLeadsWorkflowTaskList(lastLeadsStatus);
+      renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+    }
+    showMessage(data.message || "Warm draft preview generated.", "success");
+  } catch (err) {
+    showMessage(`Warm draft preview failed: ${err}`, "error");
+  } finally {
+    warmDraftPreviewLoading = false;
+    renderLeadsCurrentRunPanel(lastLeadsStatus);
   }
 }
 
@@ -8660,6 +8703,7 @@ if (els.leadsCurrentRunPanel) {
     if (!button || button.disabled) return;
     const action = String(button.dataset.leadsNextAction || "");
     if (action === "upload_check") void runImportantLeadUploadCheck();
+    if (action === "generate_warm_preview") void generateWarmDraftPreview();
     if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();

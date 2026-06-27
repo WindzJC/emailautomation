@@ -95,6 +95,7 @@ from important_leads_workflow import (
     check_warm_research_leads,
     confirm_dispatch_preview,
     create_safer_recontact_pool_from_preview,
+    generate_warm_email_preview,
     important_leads_path_state,
     important_leads_status,
     load_dispatch_preview,
@@ -4073,6 +4074,59 @@ def get_active_check_important_leads_job() -> JSONResponse:
             "ok": True,
             "job": _find_active_important_check_job(),
             "status": {**shard_status(), **important_leads_status(), **important_leads_verify_status()},
+        }
+    )
+
+
+@app.post("/api/leads/check-important/warm-preview")
+def generate_warm_research_email_preview() -> JSONResponse:
+    job = _latest_completed_warm_check_job()
+    if not job:
+        return JSONResponse(
+            {"ok": False, "error": "warm_check_required", "message": "Run a Warm Research upload check first."},
+            status_code=404,
+        )
+    email_ready_path = Path(str(job.get("output_path") or ""))
+    if not email_ready_path.exists() or email_ready_path.name != "warm_email_ready.csv":
+        return JSONResponse(
+            {"ok": False, "error": "warm_email_ready_missing", "message": "The latest warm_email_ready.csv is missing. Re-run the Warm Research upload check."},
+            status_code=409,
+        )
+    preview_path = email_ready_path.with_name("warm_email_preview.csv")
+    try:
+        preview = generate_warm_email_preview(
+            email_ready_path=email_ready_path,
+            preview_path=preview_path,
+        )
+    except ImportantLeadsCheckError as exc:
+        return JSONResponse(
+            {"ok": False, "error": exc.code, "message": exc.message, "details": exc.details},
+            status_code=400,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": "warm_preview_failed", "message": f"Warm draft preview failed: {exc}"},
+            status_code=500,
+        )
+
+    updated_job = dict(job)
+    updated_check = dict(updated_job.get("check") or {})
+    updated_check.update({
+        "warm_email_preview_rows": int(preview.get("warm_email_preview_rows") or 0),
+        "warm_email_preview_label": str(preview.get("output_label") or ""),
+        "warm_email_preview_generated_at_utc": str(preview.get("generated_at_utc") or ""),
+    })
+    updated_job["check"] = updated_check
+    updated_job["warm_email_preview"] = preview
+    updated_job["warm_email_preview_path"] = str(preview_path)
+    _save_important_check_job(updated_job)
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": str(preview.get("message") or "Warm draft preview generated."),
+            "preview": preview,
+            "warm_check": updated_check,
+            "status": _combined_leads_status(),
         }
     )
 

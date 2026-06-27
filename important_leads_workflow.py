@@ -26,6 +26,9 @@ from important_leads_verify import important_leads_triage_path_state, important_
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
+    PITCH_WARM_BODY,
+    PITCH_WARM_SUBJECT,
+    PITCH_WARM_SUBJECT_FALLBACK,
     ROLE_LOCALPART_BLOCKLIST,
     is_recontact_cold_campaign,
     is_role_recipient,
@@ -171,6 +174,19 @@ WARM_REJECTED_HEADERS = (
     "ContactMethod",
     "reject_code",
     "reject_reason",
+)
+WARM_EMAIL_PREVIEW_HEADERS = (
+    "AuthorName",
+    "AuthorEmail",
+    "BookTitleOrProject",
+    "EmailSubject",
+    "EmailBody",
+    "NeedSignal",
+    "RecommendedService",
+    "OutreachAngle",
+    "SourceURL",
+    "ContactPath",
+    "ResearchStatus",
 )
 
 COMMON_DOMAIN_FIXES = {
@@ -1101,6 +1117,62 @@ def check_warm_research_leads(
         "output_preview_rows": [],
         "message": "Warm upload checked. Sending not enabled for warm leads yet.",
         "dispatch_enabled": False,
+    }
+
+
+def generate_warm_email_preview(
+    *,
+    email_ready_path: Path,
+    preview_path: Path,
+) -> Dict[str, object]:
+    fieldnames, rows = _read_csv_rows(email_ready_path)
+    required = {"AuthorName", "AuthorEmail", "BookTitleOrProject", "NeedSignal", "RecommendedService", "OutreachAngle"}
+    missing = sorted(required - set(fieldnames))
+    if missing:
+        raise ImportantLeadsCheckError(
+            "WARM_EMAIL_READY_HEADERS_MISSING",
+            "Warm email-ready source is missing required columns: " + ", ".join(missing),
+            details={"missing_headers": missing},
+        )
+
+    preview_rows: List[Dict[str, str]] = []
+    for row in rows:
+        email = norm_email(row.get("AuthorEmail", ""))
+        if not email or str(row.get("ContactMethod") or "email").strip().lower() != "email":
+            continue
+        first_name = _trimmed_first_name(row.get("AuthorName", "")) or "there"
+        book_title = _strip_cell(row.get("BookTitleOrProject", ""))
+        merge_values = {
+            "FirstName": first_name,
+            "BookTitleOrProject": book_title or "your book launch",
+            "NeedSignal": _strip_cell(row.get("NeedSignal", "")) or "the launch could use a stronger online presentation",
+            "RecommendedService": _strip_cell(row.get("RecommendedService", "")) or "a focused launch presentation",
+            "OutreachAngle": _strip_cell(row.get("OutreachAngle", "")) or "A clearer, more polished way to present the project online.",
+        }
+        subject = (PITCH_WARM_SUBJECT if book_title else PITCH_WARM_SUBJECT_FALLBACK).format(**merge_values)
+        body = PITCH_WARM_BODY.format(**merge_values)
+        preview_rows.append({
+            "AuthorName": _strip_cell(row.get("AuthorName", "")),
+            "AuthorEmail": email,
+            "BookTitleOrProject": book_title,
+            "EmailSubject": subject,
+            "EmailBody": body,
+            "NeedSignal": _strip_cell(row.get("NeedSignal", "")),
+            "RecommendedService": _strip_cell(row.get("RecommendedService", "")),
+            "OutreachAngle": _strip_cell(row.get("OutreachAngle", "")),
+            "SourceURL": _strip_cell(row.get("SourceURL", "")),
+            "ContactPath": _strip_cell(row.get("ContactPath", "")),
+            "ResearchStatus": _strip_cell(row.get("ResearchStatus", "")) or "New",
+        })
+
+    _write_csv_atomic(preview_path, WARM_EMAIL_PREVIEW_HEADERS, preview_rows)
+    return {
+        "generated_at_utc": iso_utc(),
+        "source_label": _display_path_label(email_ready_path),
+        "output_label": _display_path_label(preview_path),
+        "warm_email_preview_rows": len(preview_rows),
+        "dispatch_enabled": False,
+        "message": "Warm draft preview generated. Sending is not enabled for warm leads yet.",
     }
 
 

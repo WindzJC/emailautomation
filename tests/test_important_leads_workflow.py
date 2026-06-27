@@ -19,6 +19,7 @@ from important_leads_workflow import (
     confirm_dispatch_preview,
     create_safer_recontact_pool_from_preview,
     dispatch_master_leads,
+    generate_warm_email_preview,
     is_safer_recontact_source_path,
     load_dispatch_preview,
     preview_dispatch_master_leads,
@@ -145,6 +146,42 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("Qualified", ready[0]["ResearchStatus"])
             self.assertEqual("Reviewed", ready[1]["ResearchStatus"])
             self.assertNotIn("Status", ready[0])
+
+    def test_warm_email_preview_renders_title_and_fallback_without_queue_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            ready_path = tmp / "warm_email_ready.csv"
+            preview_path = tmp / "warm_email_preview.csv"
+            base = {
+                "NeedSignal": "The campaign page is still being refined.",
+                "SourcePlatform": "Synthetic source",
+                "SourceURL": "https://example.test/source",
+                "RecommendedService": "a premium campaign page",
+                "OutreachAngle": "Lead with a clearer visual story.",
+                "ResearchStatus": "New",
+            }
+            write_csv(
+                ready_path,
+                list(important_leads_workflow.WARM_EMAIL_READY_HEADERS),
+                [
+                    {**base, "AuthorName": "Sarah Author", "AuthorEmail": "sarah@example.com", "BookTitleOrProject": "The Silent Garden", "ContactPath": "sarah@example.com", "ContactMethod": "email"},
+                    {**base, "AuthorName": "", "AuthorEmail": "fallback@example.com", "BookTitleOrProject": "", "ContactPath": "fallback@example.com", "ContactMethod": "email"},
+                    {**base, "AuthorName": "Form Only", "AuthorEmail": "form@example.com", "BookTitleOrProject": "Form Project", "ContactPath": "https://example.test/contact", "ContactMethod": "contact_form"},
+                ],
+            )
+
+            report = generate_warm_email_preview(email_ready_path=ready_path, preview_path=preview_path)
+            rows = read_csv_rows(preview_path)
+
+            self.assertEqual(2, report["warm_email_preview_rows"])
+            self.assertFalse(report["dispatch_enabled"])
+            self.assertEqual(list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), list(rows[0].keys()))
+            self.assertEqual("Quick idea for The Silent Garden", rows[0]["EmailSubject"])
+            self.assertIn("Hi Sarah,", rows[0]["EmailBody"])
+            self.assertEqual("Quick idea for your book launch", rows[1]["EmailSubject"])
+            self.assertIn("Hi there,", rows[1]["EmailBody"])
+            self.assertNotIn("{FirstName}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
+            self.assertNotIn("{BookTitleOrProject}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
 
     def test_safer_recontact_source_path_helper_classifies_safe_csv(self) -> None:
         self.assertTrue(is_safer_recontact_source_path("_important/runs/check_x/leads_safer_recontact_not_seen_active_history.csv"))

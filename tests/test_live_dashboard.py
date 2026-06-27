@@ -1550,6 +1550,59 @@ class LiveDashboardTests(unittest.TestCase):
                 self.assertEqual(job["job_id"], live_dashboard._latest_completed_warm_check_job()["job_id"])
                 auto_triage.assert_not_called()
 
+    def test_warm_preview_endpoint_writes_preview_csv_without_dispatch_queues(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            run_dir = tmp / "runs" / "check_warm"
+            ready_path = run_dir / "warm_email_ready.csv"
+            jobs_dir.mkdir(parents=True, exist_ok=True)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._write_csv(
+                ready_path,
+                list(important_leads_workflow.WARM_EMAIL_READY_HEADERS),
+                [{
+                    "AuthorName": "Synthetic Author",
+                    "AuthorEmail": "author@example.com",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "NeedSignal": "Synthetic need",
+                    "SourcePlatform": "Synthetic platform",
+                    "SourceURL": "https://example.test/source",
+                    "ContactPath": "author@example.com",
+                    "RecommendedService": "a launch page",
+                    "OutreachAngle": "A clear project story.",
+                    "ResearchStatus": "New",
+                    "ContactMethod": "email",
+                }],
+            )
+            job = {
+                "job_id": "check_warm",
+                "status": "completed",
+                "created_at_utc": "2026-06-28T00:00:00+00:00",
+                "upload_type": "warm_research",
+                "output_path": str(ready_path),
+                "staged_run_dir": str(run_dir),
+                "check": {
+                    "upload_type": "warm_research",
+                    "generated_at_utc": "2026-06-28T00:00:00+00:00",
+                    "warm_email_ready_rows": 1,
+                },
+            }
+            (jobs_dir / "check_warm.json").write_text(json.dumps(job), encoding="utf-8")
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "_combined_leads_status",
+                return_value={},
+            ):
+                response = live_dashboard.generate_warm_research_email_preview()
+
+            body = json.loads(response.body)
+            self.assertTrue(body["ok"])
+            self.assertEqual(1, body["preview"]["warm_email_preview_rows"])
+            self.assertTrue((run_dir / "warm_email_preview.csv").exists())
+            self.assertFalse(any(run_dir.glob("recipients_*.csv")))
+
     def test_check_important_leads_upload_rejects_declared_size_over_check_upload_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
