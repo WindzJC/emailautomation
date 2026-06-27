@@ -38,3 +38,12 @@ _important/*
 !_important/README.md
 
 *.env
+
+# Local/generated recipient queues - never commit
+recipients_private_jc.csv
+recipients_sendgrid_*.csv
+data/shards/recipients_private_jc.csv
+data/shards/recipients_sendgrid_*.csv
+local_stale_queues_*/
+email_automation_stale_queues_*/
+tmp*/
