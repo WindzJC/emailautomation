@@ -552,7 +552,7 @@
               <div class="panel-header panel-header-compact">
                 <div>
                   <p class="eyebrow">Command Center</p>
-                  <h2>Prepare Dispatch</h2>
+                  <h2 id="leads-command-heading">Prepare Dispatch</h2>
                   <span id="leads-pipeline-meta" class="muted">Current source, preview, and queue confirmation in one place.</span>
                 </div>
               </div>
@@ -561,6 +561,13 @@
                   <p class="eyebrow">Upload / Source / Check</p>
                   <strong>Lead source</strong>
                   <span id="leads-important-check-meta" class="muted">Choose a CSV/XLSX file or check the stored intake source.</span>
+                  <label class="leads-upload-type-field">
+                    <span>Upload type</span>
+                    <select id="leads-important-upload-type" aria-label="Lead upload type">
+                      <option value="cold">Cold Leads</option>
+                      <option value="warm_research">Warm Research</option>
+                    </select>
+                  </label>
                   <input id="leads-important-input-path" type="hidden" value="_important/leadschecker.csv" />
                   <input id="leads-important-output-path" type="hidden" value="_important/leads.csv" />
                   <input id="leads-important-rejected-path" type="hidden" value="_important/leads_rejected.csv" />
@@ -624,7 +631,7 @@
                   </div>
                 </div>
 
-                <div class="leads-command-column leads-command-column-right">
+                <div id="leads-dispatch-command-column" class="leads-command-column leads-command-column-right">
                   <div class="leads-command-section leads-preview-command">
                     <div class="command-section-head">
                       <div>

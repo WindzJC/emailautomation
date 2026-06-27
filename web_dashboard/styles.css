@@ -8494,6 +8494,52 @@ body {
   min-width: 0;
 }
 
+#leads-view .leads-upload-type-field {
+  display: grid;
+  grid-template-columns: auto minmax(9rem, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+#leads-view .leads-upload-type-field select {
+  min-width: 0;
+  height: 2rem;
+  padding: 0 0.6rem;
+}
+
+#leads-view .warm-check-message {
+  margin-bottom: 0.75rem;
+}
+
+#leads-view.warm-research-mode .leads-command-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#leads-view.warm-research-mode .leads-campaign-command,
+#leads-view.warm-research-mode .leads-command-column-right,
+#leads-view.warm-research-mode .leads-advanced-diagnostics,
+#leads-view.warm-research-mode #leads-important-dispatch-preview-top-btn,
+#leads-view.warm-research-mode #leads-important-check-btn {
+  display: none !important;
+}
+
+#leads-view .warm-workflow-tracker {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#leads-view .warm-workflow-banner {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--border));
+}
+
+@media (max-width: 760px) {
+  #leads-view .warm-workflow-tracker {
+    grid-template-columns: 1fr;
+  }
+}
+
 #leads-view .leads-control-results {
   align-content: center;
   padding: 10px;

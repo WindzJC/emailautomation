@@ -92,6 +92,7 @@ from important_leads_workflow import (
     TRIAGED_KEEP_PATH,
     ImportantLeadsCheckError,
     check_master_leads,
+    check_warm_research_leads,
     confirm_dispatch_preview,
     create_safer_recontact_pool_from_preview,
     important_leads_path_state,
@@ -1300,14 +1301,24 @@ def _run_important_check_job(job_id: str) -> None:
             job["eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
             _save_important_check_job(job)
 
-        report = _execute_important_check(
-            input_path=Path(str(job.get("input_path") or "")),
-            output_path=Path(str(job.get("output_path") or "")),
-            rejected_path=Path(str(job.get("rejected_path") or "")),
-            effective_input_path=Path(str(job.get("effective_input_path") or "")),
-            intake_mode=str(job.get("intake_mode") or "STANDARD"),
-            progress_callback=save_progress,
-        )
+        is_warm_research = str(job.get("upload_type") or "").strip().lower() == "warm_research"
+        if is_warm_research:
+            report = check_warm_research_leads(
+                input_path=Path(str(job.get("effective_input_path") or "")),
+                email_ready_path=Path(str(job.get("output_path") or "")),
+                contact_form_review_path=Path(str(job.get("contact_form_review_path") or "")),
+                rejected_path=Path(str(job.get("rejected_path") or "")),
+                progress_callback=save_progress,
+            )
+        else:
+            report = _execute_important_check(
+                input_path=Path(str(job.get("input_path") or "")),
+                output_path=Path(str(job.get("output_path") or "")),
+                rejected_path=Path(str(job.get("rejected_path") or "")),
+                effective_input_path=Path(str(job.get("effective_input_path") or "")),
+                intake_mode=str(job.get("intake_mode") or "STANDARD"),
+                progress_callback=save_progress,
+            )
         if job.get("cancel_requested"):
             job["status"] = "canceled"
             job["stage"] = "canceled"
@@ -1332,12 +1343,17 @@ def _run_important_check_job(job_id: str) -> None:
         job["remaining_rows"] = 0
         job["eta_seconds"] = 0
         job["progress_percent"] = 100
-        job["message"] = (
-            f"Checked {report['input_label']} into {report['output_label']}. "
-            f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
-            f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
-        )
-        job = _run_auto_fast_triage_after_check(job)
+        if is_warm_research:
+            job["message"] = "Warm upload checked. Sending not enabled for warm leads yet."
+            job["auto_triage_status"] = "skipped"
+            job["auto_triage_skip_reason"] = "warm_research_upload"
+        else:
+            job["message"] = (
+                f"Checked {report['input_label']} into {report['output_label']}. "
+                f"Kept {int(report['cleaned_rows'] or 0)} row(s), rejected "
+                f"{sum(int(report['reason_counts'].get(reason, 0)) for reason in report.get('reason_counts', {}))}."
+            )
+            job = _run_auto_fast_triage_after_check(job)
         _save_important_check_job(job)
     except Exception as exc:
         job["status"] = "failed"
@@ -1366,13 +1382,21 @@ def _start_important_check_job(
     source_sheet: str = "",
     intake_mode: str = "STANDARD",
     total_input_rows: int = 0,
+    upload_type: str = "cold",
 ) -> dict[str, object]:
     job_id = f"check_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     staged_run_dir = IMPORTANT_LEADS_RUNS / job_id
+    normalized_upload_type = "warm_research" if str(upload_type or "").strip().lower() == "warm_research" else "cold"
+    contact_form_review_path = Path("")
     if str(source_mode or "").strip() == "uploaded_file":
         staged_run_dir.mkdir(parents=True, exist_ok=True)
-        output_path = staged_run_dir / "leads.csv"
-        rejected_path = staged_run_dir / "leads_rejected.csv"
+        if normalized_upload_type == "warm_research":
+            output_path = staged_run_dir / "warm_email_ready.csv"
+            contact_form_review_path = staged_run_dir / "warm_contact_form_review.csv"
+            rejected_path = staged_run_dir / "warm_rejected.csv"
+        else:
+            output_path = staged_run_dir / "leads.csv"
+            rejected_path = staged_run_dir / "leads_rejected.csv"
     job = {
         "job_id": job_id,
         "status": "queued",
@@ -1381,6 +1405,8 @@ def _start_important_check_job(
         "updated_at_utc": iso_utc(),
         "source_label": source_label,
         "source_mode": str(source_mode or "").strip() or "uploaded_file",
+        "upload_type": normalized_upload_type,
+        "upload_type_label": "Warm Research" if normalized_upload_type == "warm_research" else "Cold Leads",
         "original_uploaded_filename": str(original_uploaded_filename or "").strip() or source_label,
         "server_received_filename": str(server_received_filename or "").strip() or source_label,
         "selected_filename": str(selected_filename or "").strip() or source_label,
@@ -1394,6 +1420,7 @@ def _start_important_check_job(
         "saved_input_path": str(effective_input_path),
         "output_path": str(output_path),
         "rejected_path": str(rejected_path),
+        "contact_form_review_path": str(contact_form_review_path) if normalized_upload_type == "warm_research" else "",
         "effective_input_path": str(effective_input_path),
         "staged_run_dir": str(staged_run_dir) if str(source_mode or "").strip() == "uploaded_file" else "",
         "live_output_path": str(IMPORTANT_LEADS_OUTPUT),
@@ -1775,6 +1802,8 @@ def _latest_important_check_job() -> dict[str, object] | None:
             continue
         if not isinstance(job, dict):
             continue
+        if str(job.get("upload_type") or "cold").strip().lower() == "warm_research":
+            continue
         candidates.append((_check_job_created_sort_key(job, path), _job_progress_payload(job)))
     if not candidates:
         return None
@@ -1794,6 +1823,30 @@ def _latest_completed_important_check_job() -> dict[str, object] | None:
         if not isinstance(job, dict):
             continue
         if str(job.get("status") or "").strip().lower() not in {"completed", "done"}:
+            continue
+        if str(job.get("upload_type") or "cold").strip().lower() == "warm_research":
+            continue
+        candidates.append((_check_job_created_sort_key(job, path), job))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _latest_completed_warm_check_job() -> dict[str, object] | None:
+    if not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return None
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("status") or "").strip().lower() not in {"completed", "done"}:
+            continue
+        if str(job.get("upload_type") or "").strip().lower() != "warm_research":
             continue
         candidates.append((_check_job_created_sort_key(job, path), job))
     if not candidates:
@@ -2159,6 +2212,8 @@ def _build_current_live_funnel_summary() -> dict[str, object]:
 
 def _build_next_batch_funnel_summary(status: dict[str, object]) -> dict[str, object]:
     active_job = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    if active_job and str(active_job.get("upload_type") or "cold").strip().lower() == "warm_research":
+        active_job = None
     latest_job = active_job or _latest_important_check_job()
     if not latest_job:
         pending = _number_funnel_stage(None)
@@ -2468,6 +2523,7 @@ def _load_active_campaign_snapshot_summary() -> dict[str, object]:
 
 def _combined_leads_status() -> dict[str, object]:
     state = load_state()
+    latest_warm_job = _latest_completed_warm_check_job()
     latest_confirmed_dispatch = _load_latest_confirmed_dispatch_summary()
     active_campaign_snapshot = _load_active_campaign_snapshot_summary()
     status = {
@@ -2481,6 +2537,7 @@ def _combined_leads_status() -> dict[str, object]:
         "latest_confirmed_dispatch": latest_confirmed_dispatch,
         "active_campaign_snapshot": active_campaign_snapshot,
         "safer_recontact_source_summary": _load_safer_recontact_source_summary(),
+        "latest_warm_check": latest_warm_job.get("check", {}) if latest_warm_job else {},
     }
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
@@ -3831,6 +3888,7 @@ async def check_important_leads_upload(
     output_path: str = Form(""),
     rejected_path: str = Form(""),
     intake_mode: str = Form("standard"),
+    upload_type: str = Form("cold"),
 ) -> JSONResponse:
     current_paths = important_leads_path_state()
     resolved_output_path = _resolve_dashboard_csv_path_or_default(
@@ -3980,6 +4038,7 @@ async def check_important_leads_upload(
         source_sheet=source_sheet,
         intake_mode=_normalize_intake_mode(intake_mode),
         total_input_rows=total_input_rows,
+        upload_type=upload_type,
     )
     return JSONResponse(
         {

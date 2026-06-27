@@ -49,6 +49,7 @@ const els = {
   leadsImportantInputText: document.getElementById("leads-important-input-text"),
   leadsImportantPasteNote: document.getElementById("leads-important-paste-note"),
   leadsImportantUploadFile: document.getElementById("leads-important-upload-file"),
+  leadsImportantUploadType: document.getElementById("leads-important-upload-type"),
   leadsImportantUploadNote: document.getElementById("leads-important-upload-note"),
   leadsImportantUploadCheckBtn: document.getElementById("leads-important-upload-check-btn"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
@@ -94,6 +95,8 @@ const els = {
   leadsImportantDispatchResults: document.getElementById("leads-important-dispatch-results"),
   leadsCurrentQueueNote: document.getElementById("leads-current-queue-note"),
   leadsPipelineMeta: document.getElementById("leads-pipeline-meta"),
+  leadsCommandHeading: document.getElementById("leads-command-heading"),
+  leadsDispatchCommandColumn: document.getElementById("leads-dispatch-command-column"),
   leadsWorkflowTaskList: document.getElementById("leads-workflow-task-list"),
   leadsCurrentRunPanel: document.getElementById("leads-current-run-panel"),
   leadsOperatorStatusStrip: document.getElementById("leads-operator-status-strip"),
@@ -1336,6 +1339,7 @@ function importantLeadUploadPayload() {
   formData.append("client_selected_size_bytes", String(size || 0));
   formData.append("client_selected_extension", extension);
   formData.append("intake_mode", els.leadsImportantIntakeMode?.value || "standard");
+  formData.append("upload_type", els.leadsImportantUploadType?.value || "cold");
   formData.append("output_path", els.leadsImportantOutputPath?.value?.trim() || "");
   formData.append("rejected_path", els.leadsImportantRejectedPath?.value?.trim() || "");
   return { formData, file, filename, size, extension };
@@ -1536,6 +1540,7 @@ function renderImportantLeadCheckJob(job) {
           <div class="pill-row">
             <span class="mini-pill">Job ${escapeHtml(job.job_id || "-")}</span>
             <span class="mini-pill">Mode ${escapeHtml(job.source_mode || "uploaded_file")}</span>
+            <span class="mini-pill">Upload type ${escapeHtml(job.upload_type_label || (job.upload_type === "warm_research" ? "Warm Research" : "Cold Leads"))}</span>
             <span class="mini-pill">Intake mode ${escapeHtml(job.intake_mode_label || (job.intake_mode === VERIFY_MODE_MANUAL_AUTHOR_RESEARCH ? "Manual Author Research" : "Standard"))}</span>
             <span class="mini-pill">Selected ${escapeHtml(selectedFilename)}</span>
             <span class="mini-pill">Server ${escapeHtml(serverFilename)}</span>
@@ -1561,7 +1566,10 @@ async function pollImportantLeadCheckJob(jobId) {
       lastImportantLeadCheck = job.check || null;
       if (data.status) {
         renderLeadsStatus(data.status || {});
-      } else {
+      }
+      if (job.upload_type === "warm_research") {
+        renderImportantLeadCheck(lastImportantLeadCheck);
+      } else if (!data.status) {
         renderImportantLeadCheck(lastImportantLeadCheck);
       }
       showMessage(job.message || "Upload check complete.", "success");
@@ -1863,6 +1871,7 @@ function renderImportantLeadDispatchJob(job) {
 }
 
 function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
+  const warmUploadSelected = els.leadsImportantUploadType?.value === "warm_research";
   const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
   const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
   const previewBlockReason = dispatchPreviewBlockReason(dispatchSource);
@@ -1873,8 +1882,10 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   if (previewButtons.length) {
     const previewBusy = Boolean((importantLeadDispatchPreviewLoading && !previewReady) || activeDispatch);
     previewButtons.forEach((button) => {
-      button.disabled = previewBusy;
-      button.title = previewBlockReason || "";
+      button.disabled = previewBusy || warmUploadSelected;
+      button.title = warmUploadSelected
+        ? "Warm Research uploads are check-only. Sending is not enabled for warm leads yet."
+        : (previewBlockReason || "");
       if (!previewBusy) {
         const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
         setNodeText(button, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
@@ -1887,7 +1898,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   }
   if (els.leadsImportantDispatchConfirmBtn) {
     const confirmBusy = Boolean(importantLeadDispatchConfirmLoading || activeDispatch);
-    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || !safety.ready;
+    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || !safety.ready || warmUploadSelected;
     els.leadsImportantDispatchConfirmBtn.title = safety.buttonTitle || previewBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
     if (!confirmBusy) {
       els.leadsImportantDispatchConfirmBtn.classList.remove("is-loading");
@@ -3261,22 +3272,63 @@ function compactPreviewTable(rows = [], preferredHeaders = [], maxRows = 5, maxC
 }
 
 function renderImportantLeadCheck(result) {
+  const isWarmResearch = result?.upload_type === "warm_research" || els.leadsImportantUploadType?.value === "warm_research";
   if (els.leadsImportantCheckMeta) {
     if (result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantCheckMeta,
-        `Last check completed. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
+        isWarmResearch
+          ? "Warm upload checked. Sending not enabled for warm leads yet."
+          : `Last check completed. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
       );
     } else {
       setNodeText(
         els.leadsImportantCheckMeta,
-        "Ready. Put email-first leads in _important/leadschecker.csv, then click Check Leads. Keep FullName upstream when you have it.",
+        isWarmResearch
+          ? "Choose a Warm Research CSV/XLSX file, then click Upload & Check. Sending is not enabled for warm leads yet."
+          : "Ready. Put email-first leads in _important/leadschecker.csv, then click Check Leads. Keep FullName upstream when you have it.",
       );
     }
   }
 
   if (!result?.generated_at_utc) {
     setNodeHtml(els.leadsImportantCheckResults, "");
+    return;
+  }
+
+  if (isWarmResearch) {
+    const reasonRows = Object.entries(result.reason_counts || {}).map(([reason, count]) => ({ Reason: reason, Count: Number(count || 0) }));
+    setNodeHtml(
+      els.leadsImportantCheckResults,
+      `
+        <div class="operator-result-shell operator-check-shell warm-check-results">
+          <section class="operator-empty-state operator-empty-state-inline warm-check-message">
+            <strong>Warm upload checked.</strong>
+            <span>Sending not enabled for warm leads yet.</span>
+          </section>
+          ${renderOperatorMetricStrip([
+            { label: "Input", value: Number(result.input_rows || 0) },
+            { label: "Warm email ready", value: Number(result.warm_email_ready_rows || 0), tone: "good" },
+            { label: "Contact forms", value: Number(result.warm_contact_form_rows || 0) },
+            { label: "Rejected", value: Number(result.warm_rejected_rows || 0), tone: "warn" },
+            { label: "Already contacted", value: Number(result.already_contacted_rows || 0), tone: "warn" },
+          ])}
+          ${reasonRows.length
+            ? renderOperatorTableBlock("Warm rejection reasons", "Rejected warm rows remain outside all sender queues.", ["Reason", "Count"], reasonRows, "No warm rows were rejected.")
+            : ""}
+          <details class="dispatch-drawer advanced-details">
+            <summary>Warm output files</summary>
+            <div class="dispatch-disclosure-body">
+              ${renderOperatorPillStrip([
+                `Email ready ${result.email_ready_label || "-"}`,
+                `Contact forms ${result.contact_form_review_label || "-"}`,
+                `Rejected ${result.rejected_label || "-"}`,
+              ])}
+            </div>
+          </details>
+        </div>
+      `,
+    );
     return;
   }
 
@@ -3448,7 +3500,57 @@ function dispatchSkipReasonSummary(payload = {}) {
   ].filter(Boolean).join(", ");
 }
 
+function warmResearchUploadMode() {
+  return els.leadsImportantUploadType?.value === "warm_research";
+}
+
+function currentWarmResearchReport(status = lastLeadsStatus) {
+  const statusReport = status?.latest_warm_check;
+  if (statusReport?.upload_type === "warm_research") return statusReport;
+  return lastImportantLeadCheck?.upload_type === "warm_research" ? lastImportantLeadCheck : {};
+}
+
+function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
+  const leadsView = document.getElementById("leads-view");
+  leadsView?.classList.toggle("warm-research-mode", active);
+  if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Check Warm Research" : "Prepare Dispatch");
+  if (els.leadsPipelineMeta) {
+    setNodeText(
+      els.leadsPipelineMeta,
+      active
+        ? "Validate and split warm research. Sending is not enabled for warm leads yet."
+        : "Current source, preview, and queue confirmation in one place.",
+    );
+  }
+  const campaignPanel = document.querySelector("#leads-view .leads-campaign-command");
+  if (campaignPanel) campaignPanel.hidden = active;
+  if (els.leadsDispatchCommandColumn) els.leadsDispatchCommandColumn.hidden = active;
+  const advancedDiagnostics = document.querySelector("#leads-view .leads-advanced-diagnostics");
+  if (advancedDiagnostics) advancedDiagnostics.hidden = active;
+  if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.hidden = active;
+  if (els.leadsImportantDispatchPreviewTopBtn) {
+    els.leadsImportantDispatchPreviewTopBtn.hidden = active;
+    if (active) els.leadsImportantDispatchPreviewTopBtn.disabled = true;
+  }
+}
+
+function warmResearchMetricMarkup(report = {}) {
+  return renderOperatorMetricStrip([
+    { label: "Warm email ready", value: Number(report.warm_email_ready_rows || 0), tone: "good" },
+    { label: "Contact forms", value: Number(report.warm_contact_form_rows || 0) },
+    { label: "Rejected", value: Number(report.warm_rejected_rows || 0), tone: "warn" },
+    { label: "Already contacted", value: Number(report.already_contacted_rows || 0), tone: Number(report.already_contacted_rows || 0) ? "warn" : "" },
+    { label: "Suppressed", value: Number(report.suppressed_removed || 0), tone: Number(report.suppressed_removed || 0) ? "warn" : "" },
+  ]);
+}
+
 function renderImportantDispatch(result) {
+  if (warmResearchUploadMode()) {
+    applyWarmResearchLayoutState(true);
+    renderDispatchConfirmGuard({}, null);
+    return;
+  }
+  applyWarmResearchLayoutState(false);
   const selectedDispatchSource = dispatchSourceForSelectedMode();
   const dispatchSource = selectedDispatchSource.source || {};
   const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
@@ -4274,6 +4376,41 @@ function privateJcAuthIssueMessage(snapshot = lastSnapshot) {
 
 function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   if (!els.leadsCurrentRunPanel) return;
+  if (warmResearchUploadMode()) {
+    const report = currentWarmResearchReport(status);
+    const checked = Boolean(report?.generated_at_utc);
+    if (els.leadsControlCheckResult) {
+      setNodeHtml(
+        els.leadsControlCheckResult,
+        checked
+          ? [
+            ["Email ready", report.warm_email_ready_rows],
+            ["Contact forms", report.warm_contact_form_rows],
+            ["Rejected", report.warm_rejected_rows],
+            ["Already contacted", report.already_contacted_rows],
+            ["Suppressed", report.suppressed_removed],
+          ].map(([label, value]) => `<span>${escapeHtml(label)} <strong>${Number(value || 0).toLocaleString()}</strong></span>`).join("")
+          : "<span>No Warm Research upload checked yet</span>",
+      );
+    }
+    setNodeHtml(
+      els.leadsCurrentRunPanel,
+      `
+        <article class="current-run-card current-source-summary-card ${checked ? "current-run-card-ready" : "current-run-card-wait"}">
+          <div class="current-run-head">
+            <div>
+              <p class="eyebrow">Warm Research Outputs</p>
+              <h3>${checked ? "Warm upload checked" : "Warm upload not checked"}</h3>
+              <p class="current-run-subtitle">${checked ? "Sending is not enabled for warm leads yet." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
+            </div>
+            <span class="mini-pill">Check only</span>
+          </div>
+          ${warmResearchMetricMarkup(report)}
+        </article>
+      `,
+    );
+    return;
+  }
   const state = currentRunWorkflowState(status);
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
   const latestCheck = state.latestCheck || {};
@@ -4351,6 +4488,49 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
 
 function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   if (!els.leadsWorkflowTaskList) return;
+  if (warmResearchUploadMode()) {
+    const report = currentWarmResearchReport(status);
+    const activeJob = currentImportantCheckJob(status);
+    const running = isActiveImportantLeadCheckJob(activeJob) && activeJob?.upload_type === "warm_research";
+    const checked = Boolean(report?.generated_at_utc);
+    const tasks = [
+      {
+        step: "Upload Warm Research",
+        status: running ? "Running" : checked ? "Complete" : "Needed",
+        detail: checked ? `${Number(report.input_rows || 0).toLocaleString()} rows checked` : "Choose a CSV/XLSX file and click Upload & Check.",
+        tone: running ? "warn" : checked ? "good" : "neutral",
+      },
+      {
+        step: "Review Split Outputs",
+        status: checked ? "Available" : "Waiting",
+        detail: checked
+          ? `${Number(report.warm_email_ready_rows || 0).toLocaleString()} email ready · ${Number(report.warm_contact_form_rows || 0).toLocaleString()} contact forms`
+          : "Outputs appear after validation completes.",
+        tone: checked ? "good" : "neutral",
+      },
+      {
+        step: "Sending",
+        status: "Not enabled",
+        detail: "Warm rows cannot be previewed, confirmed, or sent yet.",
+        tone: "neutral",
+      },
+    ];
+    setNodeHtml(
+      els.leadsWorkflowTaskList,
+      `
+        <div class="workflow-tracker-head"><p class="eyebrow">Warm Research Workflow</p></div>
+        <ol class="workflow-tracker-row warm-workflow-tracker" aria-label="Warm Research check workflow">
+          ${tasks.map((task, index) => `
+            <li class="workflow-track-step workflow-track-step-${escapeHtml(task.tone)}">
+              <span class="workflow-track-number">${index + 1}</span>
+              <span class="workflow-track-copy"><strong>${escapeHtml(task.step)}</strong><em>${escapeHtml(task.status)}</em><small>${escapeHtml(task.detail)}</small></span>
+            </li>
+          `).join("")}
+        </ol>
+      `,
+    );
+    return;
+  }
   const state = currentRunWorkflowState(status);
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
@@ -4429,6 +4609,23 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
 
 function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   if (!els.leadsWorkflowStatusBanner) return;
+  if (warmResearchUploadMode()) {
+    const report = currentWarmResearchReport(status);
+    const checked = Boolean(report?.generated_at_utc);
+    setNodeHtml(
+      els.leadsWorkflowStatusBanner,
+      `
+        <div class="workflow-banner-inline warm-workflow-banner">
+          <span class="eyebrow">Warm Research</span>
+          <strong>${checked ? "Warm upload checked. Sending is not enabled for warm leads yet." : "Warm Research is check-only. Upload a source to begin."}</strong>
+          <span class="workflow-banner-chip">Email ready: ${Number(report.warm_email_ready_rows || 0).toLocaleString()}</span>
+          <span class="workflow-banner-chip">Contact forms: ${Number(report.warm_contact_form_rows || 0).toLocaleString()}</span>
+          <span class="workflow-banner-chip">Rejected: ${Number(report.warm_rejected_rows || 0).toLocaleString()}</span>
+        </div>
+      `,
+    );
+    return;
+  }
   const state = currentRunWorkflowState(status);
   const latestTriage = state.latestTriage || {};
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
@@ -4709,7 +4906,11 @@ function renderLeadsStatus(status) {
   syncImportantVerifyPathInputs(lastLeadsStatus);
   syncImportantDispatchSourceMode(lastLeadsStatus);
   updateImportantLeadPasteGuardrails();
-  lastImportantLeadCheck = lastLeadsStatus?.latest_master_check || lastImportantLeadCheck;
+  const warmUploadSelected = els.leadsImportantUploadType?.value === "warm_research";
+  applyWarmResearchLayoutState(warmUploadSelected);
+  lastImportantLeadCheck = warmUploadSelected
+    ? (lastLeadsStatus?.latest_warm_check || lastImportantLeadCheck)
+    : (lastLeadsStatus?.latest_master_check || lastImportantLeadCheck);
   lastImportantVerify = lastLeadsStatus?.latest_lead_triage || lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
   lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
@@ -4952,7 +5153,8 @@ async function runImportantLeadUploadCheck() {
   if (els.leadsImportantUploadCheckBtn) {
     setButtonBusy(els.leadsImportantUploadCheckBtn, true, "Uploading...");
   }
-  updateImportantLeadUploadNote(`Submitting ${filename} (${humanizeFileSize(size)}, ${extension || "no extension"}).`);
+  const uploadTypeLabel = els.leadsImportantUploadType?.value === "warm_research" ? "Warm Research" : "Cold Leads";
+  updateImportantLeadUploadNote(`Submitting ${filename} as ${uploadTypeLabel} (${humanizeFileSize(size)}, ${extension || "no extension"}).`);
   try {
     const data = await fetchJson("/api/leads/check-important/upload", {
       method: "POST",
@@ -5074,6 +5276,10 @@ function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
 }
 
 async function previewImportantLeadDispatch() {
+  if (els.leadsImportantUploadType?.value === "warm_research") {
+    showMessage("Warm Research uploads are check-only. Sending is not enabled for warm leads yet.", "error");
+    return;
+  }
   const selectedDispatchSource = dispatchSourceForSelectedMode();
   const blockReason = dispatchPreviewBlockReason(selectedDispatchSource.source || {});
   if (blockReason) {
@@ -8488,6 +8694,22 @@ if (els.leadsRecommendedNextAction) {
   });
 }
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
+if (els.leadsImportantUploadType) {
+  els.leadsImportantUploadType.addEventListener("change", () => {
+    const warmSelected = els.leadsImportantUploadType.value === "warm_research";
+    updateImportantLeadUploadNote(
+      warmSelected
+        ? "Warm Research is check-only. Direct emails and contact forms are split; dispatch is disabled."
+        : "Upload is file-only. Preview and confirm remain separate.",
+    );
+    const selectedReport = warmSelected ? lastLeadsStatus?.latest_warm_check : lastLeadsStatus?.latest_master_check;
+    lastImportantLeadCheck = selectedReport?.generated_at_utc
+      ? selectedReport
+      : warmSelected ? { upload_type: "warm_research" } : null;
+    applyWarmResearchLayoutState(warmSelected);
+    renderLeadsStatus(lastLeadsStatus || {});
+  });
+}
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
 if (els.leadsImportantIntakeMode) els.leadsImportantIntakeMode.addEventListener("change", () => renderLeadsOperatorStatusStrip(lastLeadsStatus || {}));
 if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE));

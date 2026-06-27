@@ -1478,6 +1478,78 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(live_output_before, live_output.read_text(encoding="utf-8"))
             self.assertEqual(live_rejected_before, live_rejected.read_text(encoding="utf-8"))
 
+    def test_warm_upload_job_writes_split_outputs_without_entering_cold_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            runs_dir = tmp / "_important" / "runs"
+            jobs_dir = tmp / "_important" / "check_runs" / "jobs"
+            input_path = tmp / "warm.csv"
+            input_path.write_text("AuthorName,BookTitleOrProject,NeedSignal,SourcePlatform,SourceURL,ContactPath,RecommendedService,OutreachAngle,Status\n", encoding="utf-8")
+
+            class NoopThread:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def start(self):
+                    return None
+
+            def fake_warm_check(**kwargs):
+                Path(kwargs["email_ready_path"]).write_text("AuthorName,AuthorEmail\n", encoding="utf-8")
+                Path(kwargs["contact_form_review_path"]).write_text("AuthorName,ContactMethod\n", encoding="utf-8")
+                Path(kwargs["rejected_path"]).write_text("AuthorName,reject_code\n", encoding="utf-8")
+                return {
+                    "upload_type": "warm_research",
+                    "generated_at_utc": "2026-06-28T00:00:00+00:00",
+                    "input_label": "warm.csv",
+                    "input_rows": 0,
+                    "total_input_rows": 0,
+                    "warm_email_ready_rows": 0,
+                    "warm_contact_form_rows": 0,
+                    "warm_rejected_rows": 0,
+                    "already_contacted_rows": 0,
+                    "reason_counts": {},
+                    "dispatch_enabled": False,
+                }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
+                live_dashboard.threading,
+                "Thread",
+                NoopThread,
+            ), patch.object(
+                live_dashboard,
+                "check_warm_research_leads",
+                side_effect=fake_warm_check,
+            ), patch.object(
+                live_dashboard,
+                "_run_auto_fast_triage_after_check",
+            ) as auto_triage:
+                job = live_dashboard._start_important_check_job(
+                    input_path=input_path,
+                    output_path=tmp / "cold_leads.csv",
+                    rejected_path=tmp / "cold_rejected.csv",
+                    effective_input_path=input_path,
+                    source_label="warm.csv",
+                    source_mode="uploaded_file",
+                    upload_type="warm_research",
+                )
+                live_dashboard._run_important_check_job(job["job_id"])
+
+                saved = json.loads((jobs_dir / f"{job['job_id']}.json").read_text(encoding="utf-8"))
+                self.assertEqual("completed", saved["status"])
+                self.assertEqual("warm_research", saved["upload_type"])
+                self.assertEqual("warm_email_ready.csv", Path(saved["output_path"]).name)
+                self.assertEqual("warm_contact_form_review.csv", Path(saved["contact_form_review_path"]).name)
+                self.assertEqual("warm_rejected.csv", Path(saved["rejected_path"]).name)
+                self.assertEqual("warm_research_upload", saved["auto_triage_skip_reason"])
+                self.assertFalse(saved["check"]["dispatch_enabled"])
+                self.assertIsNone(live_dashboard._latest_completed_important_check_job())
+                self.assertEqual(job["job_id"], live_dashboard._latest_completed_warm_check_job()["job_id"])
+                auto_triage.assert_not_called()
+
     def test_check_important_leads_upload_rejects_declared_size_over_check_upload_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)

@@ -152,6 +152,27 @@ AUTHOR_OUTREACH_HEADER_BY_KEY = {
     for header in AUTHOR_OUTREACH_HEADERS
 }
 
+WARM_RESEARCH_HEADERS = (
+    "AuthorName",
+    "BookTitleOrProject",
+    "NeedSignal",
+    "SourcePlatform",
+    "SourceURL",
+    "ContactPath",
+    "RecommendedService",
+    "OutreachAngle",
+)
+WARM_RESEARCH_OUTPUT_HEADERS = (*WARM_RESEARCH_HEADERS, "ResearchStatus")
+WARM_EMAIL_READY_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "AuthorEmail", "ContactMethod")
+WARM_CONTACT_FORM_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "ContactMethod")
+WARM_REJECTED_HEADERS = (
+    *WARM_RESEARCH_OUTPUT_HEADERS,
+    "AuthorEmail",
+    "ContactMethod",
+    "reject_code",
+    "reject_reason",
+)
+
 COMMON_DOMAIN_FIXES = {
     "gamil.com": "gmail.com",
     "gmial.com": "gmail.com",
@@ -891,6 +912,195 @@ def _blocked_email_set(
     return blocked, {
         "total_perm": int(suppression_summary.get("total_perm", 0) or 0),
         "total_temp_active": int(suppression_summary.get("total_temp_active", 0) or 0),
+    }
+
+
+def _warm_research_rows(path: Path) -> tuple[List[Dict[str, str]], int]:
+    text = _normalize_csv_text(path.read_text(encoding="utf-8-sig", errors="replace"))
+    if not text.strip():
+        raise ImportantLeadsCheckError("WARM_UPLOAD_EMPTY", "Warm Research upload is empty.")
+    fmt = _sniff_csv_format(text)
+    reader = csv.DictReader(
+        StringIO(text),
+        delimiter=str(fmt["delimiter"]),
+        quotechar=str(fmt["quotechar"]),
+        skipinitialspace=bool(fmt["skipinitialspace"]),
+    )
+    raw_headers = [str(value or "").lstrip("\ufeff").strip() for value in (reader.fieldnames or [])]
+    header_by_key = {_normalize_header_key(header): header for header in raw_headers if header}
+    missing = [header for header in WARM_RESEARCH_HEADERS if _normalize_header_key(header) not in header_by_key]
+    if missing:
+        raise ImportantLeadsCheckError(
+            "WARM_HEADERS_MISSING",
+            "Warm Research upload is missing required columns: " + ", ".join(missing),
+            details={"required_headers": list(WARM_RESEARCH_HEADERS), "missing_headers": missing},
+        )
+
+    rows: List[Dict[str, str]] = []
+    blank_rows = 0
+    status_header = header_by_key.get(_normalize_header_key("Status"), "")
+    research_status_header = header_by_key.get(_normalize_header_key("ResearchStatus"), "")
+    for raw_row in reader:
+        row = {
+            header: _strip_cell(raw_row.get(header_by_key[_normalize_header_key(header)], ""))
+            for header in WARM_RESEARCH_HEADERS
+        }
+        status_value = _strip_cell(raw_row.get(status_header, "")) if status_header else ""
+        research_status_value = _strip_cell(raw_row.get(research_status_header, "")) if research_status_header else ""
+        if not any(row.values()) and not status_value and not research_status_value:
+            blank_rows += 1
+            continue
+        row["ResearchStatus"] = research_status_value or status_value or "New"
+        rows.append(row)
+    return rows, blank_rows
+
+
+def check_warm_research_leads(
+    *,
+    input_path: Path,
+    email_ready_path: Path,
+    contact_form_review_path: Path,
+    rejected_path: Path,
+    log_paths: Sequence[Path] | None = None,
+    sendgrid_suppressions_path: Path = settings.SENDGRID_SUPPRESSIONS_PATH,
+    suppressed_path: Path = settings.SUPPRESSED_PATH,
+    unsubscribed_path: Path = settings.UNSUBSCRIBED_PATH,
+    bad_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
+    lead_ledger_db_path: Path | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> Dict[str, object]:
+    """Validate a warm-research upload without feeding cold dispatch state."""
+    rows, blank_rows = _warm_research_rows(input_path)
+    _jc_queue, _sendgrid_queues, jc_log, sendgrid_logs = _dispatch_profile_paths()
+    authoritative_logs = list(log_paths) if log_paths is not None else [jc_log, *sendgrid_logs]
+    already_contacted = _sent_email_set(authoritative_logs)
+    log_blocked = load_done_statuses_from_logs(
+        authoritative_logs,
+        {"INVALID", "BOUNCE", "BOUNCED", "DROPPED", "SPAMREPORT", "UNSUBSCRIBE", "UNSUBSCRIBED", "BLOCKED"},
+    )
+    blocked, suppression_summary = _blocked_email_set(
+        sendgrid_suppressions_path,
+        suppressed_path,
+        unsubscribed_path,
+    )
+    bad_event_emails = load_bad_sendgrid_event_emails(bad_events_path)
+    blocked |= log_blocked | bad_event_emails
+
+    parsed: List[tuple[Dict[str, str], str, str, str, str]] = []
+    source_lead_ids: set[str] = set()
+    for row in rows:
+        contact_path = _strip_cell(row.get("ContactPath", ""))
+        matches = list(dict.fromkeys(norm_email(value) for value in EMAIL_IN_TEXT_RE.findall(contact_path)))
+        matches = [value for value in matches if value]
+        email = ""
+        contact_method = ""
+        reject_code = ""
+        reject_reason = ""
+        if len(matches) > 1:
+            reject_code = "MULTIPLE_EMAILS_IN_CONTACT_PATH"
+            reject_reason = "ContactPath contains more than one email address."
+        elif matches:
+            validation = _email_validation_result(matches[0], check_deliverability=False)
+            email = norm_email(validation.get("normalized_email", ""))
+            if validation.get("reject_code") or not email:
+                reject_code = str(validation.get("reject_code") or "INVALID_EMAIL_SYNTAX")
+                reject_reason = str(validation.get("reject_reason") or "ContactPath contains an invalid email address.")
+            else:
+                contact_method = "email"
+                source_lead_ids.add(deterministic_lead_id(email))
+        elif "@" in contact_path:
+            reject_code = "INVALID_EMAIL_SYNTAX"
+            reject_reason = "ContactPath contains an invalid email address."
+        elif re.search(r"https?://", contact_path, flags=re.IGNORECASE):
+            contact_method = "contact_form"
+        else:
+            reject_code = "MISSING_CONTACT_PATH"
+            reject_reason = "ContactPath must contain a direct email or contact-form URL."
+        parsed.append((row, email, contact_method, reject_code, reject_reason))
+
+    ledger_contacted: set[str] = set()
+    ledger_path = _lead_ledger_db_path(lead_ledger_db_path)
+    ledger_conn = connect_lead_ledger(ledger_path)
+    try:
+        authoritative_ids, _ignored_ids = _dispatch_history_contact_sets(ledger_conn, source_lead_ids)
+        ledger_contacted = {
+            email
+            for _row, email, _method, _code, _reason in parsed
+            if email and deterministic_lead_id(email) in authoritative_ids
+        }
+    finally:
+        ledger_conn.close()
+    already_contacted |= ledger_contacted
+
+    email_ready: List[Dict[str, str]] = []
+    contact_forms: List[Dict[str, str]] = []
+    rejected: List[Dict[str, str]] = []
+    reason_counts: Counter[str] = Counter()
+    seen_emails: set[str] = set()
+    seen_contact_paths: set[str] = set()
+    total = len(parsed)
+    for index, (row, email, contact_method, reject_code, reject_reason) in enumerate(parsed, start=1):
+        code = reject_code
+        reason = reject_reason
+        if not code and contact_method == "email":
+            if email in seen_emails:
+                code, reason = "DUPLICATE_IN_BATCH", "Duplicate direct email in this Warm Research upload."
+            else:
+                seen_emails.add(email)
+                if email in blocked:
+                    code, reason = "SUPPRESSED", "Email is blocked by suppression, unsubscribe, or bad-event history."
+                elif email in already_contacted:
+                    code, reason = "ALREADY_CONTACTED", "Email appears in authoritative Private JC, SendGrid, or contact history."
+        elif not code and contact_method == "contact_form":
+            contact_key = _strip_cell(row.get("ContactPath", "")).lower().rstrip("/")
+            if contact_key in seen_contact_paths:
+                code, reason = "DUPLICATE_IN_BATCH", "Duplicate contact-form path in this Warm Research upload."
+            else:
+                seen_contact_paths.add(contact_key)
+
+        if code:
+            reason_counts[code] += 1
+            rejected.append({
+                **row,
+                "AuthorEmail": email,
+                "ContactMethod": contact_method,
+                "reject_code": code,
+                "reject_reason": reason,
+            })
+        elif contact_method == "email":
+            email_ready.append({**row, "AuthorEmail": email, "ContactMethod": "email"})
+        else:
+            contact_forms.append({**row, "ContactMethod": "contact_form"})
+        if progress_callback:
+            progress_callback(index, total)
+
+    _write_csv_atomic(email_ready_path, WARM_EMAIL_READY_HEADERS, email_ready)
+    _write_csv_atomic(contact_form_review_path, WARM_CONTACT_FORM_HEADERS, contact_forms)
+    _write_csv_atomic(rejected_path, WARM_REJECTED_HEADERS, rejected)
+    return {
+        "upload_type": "warm_research",
+        "upload_type_label": "Warm Research",
+        "generated_at_utc": iso_utc(),
+        "input_label": _display_path_label(input_path),
+        "email_ready_label": _display_path_label(email_ready_path),
+        "contact_form_review_label": _display_path_label(contact_form_review_path),
+        "rejected_label": _display_path_label(rejected_path),
+        "input_rows": len(rows),
+        "total_input_rows": len(rows),
+        "warm_email_ready_rows": len(email_ready),
+        "warm_contact_form_rows": len(contact_forms),
+        "warm_rejected_rows": len(rejected),
+        "already_contacted_rows": int(reason_counts.get("ALREADY_CONTACTED", 0)),
+        "duplicates_removed": int(reason_counts.get("DUPLICATE_IN_BATCH", 0)),
+        "invalid_removed": int(reason_counts.get("INVALID_EMAIL_SYNTAX", 0)) + int(reason_counts.get("MULTIPLE_EMAILS_IN_CONTACT_PATH", 0)),
+        "suppressed_removed": int(reason_counts.get("SUPPRESSED", 0)),
+        "blank_rows": blank_rows,
+        "reason_counts": dict(reason_counts),
+        "suppression_summary": suppression_summary,
+        "output_fieldnames": list(WARM_EMAIL_READY_HEADERS),
+        "output_preview_rows": [],
+        "message": "Warm upload checked. Sending not enabled for warm leads yet.",
+        "dispatch_enabled": False,
     }
 
 

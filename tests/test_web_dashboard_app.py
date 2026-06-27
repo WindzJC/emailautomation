@@ -578,6 +578,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "Upload / Source / Check",
             "Source actions",
             "leads-important-upload-file",
+            "leads-important-upload-type",
+            "Warm Research",
             "leads-important-upload-check-btn",
             "leads-important-check-btn",
             "leads-important-dispatch-preview-top-btn",
@@ -607,6 +609,22 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-active-alerts",
         ]:
             self.assertIn(expected, leads_html)
+        for expected in [
+            'formData.append("upload_type", els.leadsImportantUploadType?.value || "cold")',
+            "Warm upload checked. Sending not enabled for warm leads yet.",
+            "Warm email ready",
+            "Contact forms",
+            "Already contacted",
+            "Warm Research uploads are check-only",
+            "Warm Research Outputs",
+            "Warm rows cannot be previewed, confirmed, or sent yet.",
+            "Warm upload checked. Sending is not enabled for warm leads yet.",
+            "applyWarmResearchLayoutState",
+            "warm-research-mode",
+        ]:
+            self.assertIn(expected, source)
+        self.assertIn("#leads-view.warm-research-mode .leads-campaign-command", styles)
+        self.assertIn("#leads-view.warm-research-mode .leads-command-column-right", styles)
         for old_heading in [
             "Recommended Next Action",
             "Workflow and Source",

@@ -15,6 +15,7 @@ from important_leads_workflow import (
     _validate_dispatch_preview_contract,
     _sent_email_set,
     check_master_leads,
+    check_warm_research_leads,
     confirm_dispatch_preview,
     create_safer_recontact_pool_from_preview,
     dispatch_master_leads,
@@ -38,6 +39,113 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def test_warm_research_check_splits_email_contact_form_and_rejected_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "warm.csv"
+            ready_path = tmp / "warm_email_ready.csv"
+            forms_path = tmp / "warm_contact_form_review.csv"
+            rejected_path = tmp / "warm_rejected.csv"
+            log_path = tmp / "private_jc_log.csv"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            suppressions_path = tmp / "sendgrid_suppressions.csv"
+            bad_events_path = tmp / "sendgrid_events.jsonl"
+            headers = list(important_leads_workflow.WARM_RESEARCH_HEADERS)
+
+            def warm_row(name: str, contact_path: str) -> dict[str, str]:
+                return {
+                    "AuthorName": name,
+                    "BookTitleOrProject": "Synthetic Project",
+                    "NeedSignal": "Synthetic need",
+                    "SourcePlatform": "Synthetic source",
+                    "SourceURL": "https://example.test/source",
+                    "ContactPath": contact_path,
+                    "RecommendedService": "Website",
+                    "OutreachAngle": "Synthetic angle",
+                }
+
+            write_csv(
+                input_path,
+                headers,
+                [
+                    warm_row("Ready", "Email: ready@example.com"),
+                    warm_row("Form", "Contact form: https://example.test/contact"),
+                    warm_row("Duplicate", "ready@example.com"),
+                    warm_row("Contacted", "contacted@example.com"),
+                    warm_row("Suppressed", "suppressed@example.com"),
+                    warm_row("Unsubscribed", "unsubscribed@example.com"),
+                    warm_row("Bad event", "bad-event@example.com"),
+                    warm_row("Invalid", "not-an-email@"),
+                ],
+            )
+            write_csv(log_path, ["Email", "Status", "Info"], [{"Email": "contacted@example.com", "Status": "SENT", "Info": ""}])
+            write_csv(suppressed_path, ["Email"], [{"Email": "suppressed@example.com"}])
+            write_csv(unsubscribed_path, ["Email"], [{"Email": "unsubscribed@example.com"}])
+            write_csv(suppressions_path, ["email", "state", "type"], [])
+            bad_events_path.write_text('{"event":"bounce","email":"bad-event@example.com"}\n', encoding="utf-8")
+
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=ready_path,
+                contact_form_review_path=forms_path,
+                rejected_path=rejected_path,
+                log_paths=[log_path],
+                sendgrid_suppressions_path=suppressions_path,
+                suppressed_path=suppressed_path,
+                unsubscribed_path=unsubscribed_path,
+                bad_events_path=bad_events_path,
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            )
+
+            self.assertEqual(1, report["warm_email_ready_rows"])
+            self.assertEqual(1, report["warm_contact_form_rows"])
+            self.assertEqual(6, report["warm_rejected_rows"])
+            self.assertEqual(1, report["already_contacted_rows"])
+            self.assertEqual(3, report["suppressed_removed"])
+            self.assertFalse(report["dispatch_enabled"])
+            self.assertEqual("ready@example.com", read_csv_rows(ready_path)[0]["AuthorEmail"])
+            self.assertEqual("New", read_csv_rows(ready_path)[0]["ResearchStatus"])
+            self.assertEqual("contact_form", read_csv_rows(forms_path)[0]["ContactMethod"])
+            self.assertEqual(
+                {"DUPLICATE_IN_BATCH", "ALREADY_CONTACTED", "SUPPRESSED", "INVALID_EMAIL_SYNTAX"},
+                {row["reject_code"] for row in read_csv_rows(rejected_path)},
+            )
+
+    def test_warm_research_status_alias_maps_to_research_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            headers = [*important_leads_workflow.WARM_RESEARCH_HEADERS, "Status", "ResearchStatus"]
+            input_path = tmp / "warm_with_status.csv"
+            row = {header: "Synthetic" for header in important_leads_workflow.WARM_RESEARCH_HEADERS}
+            row.update({"ContactPath": "author@example.com", "Status": "Qualified", "ResearchStatus": ""})
+            research_status_row = dict(row)
+            research_status_row.update({"ContactPath": "reviewed@example.com", "Status": "Legacy", "ResearchStatus": "Reviewed"})
+            write_csv(input_path, headers, [row, research_status_row])
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+            (tmp / "events.jsonl").write_text("", encoding="utf-8")
+
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=tmp / "warm_email_ready.csv",
+                contact_form_review_path=tmp / "warm_contact_form_review.csv",
+                rejected_path=tmp / "warm_rejected.csv",
+                log_paths=[],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                bad_events_path=tmp / "events.jsonl",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            )
+
+            self.assertEqual(2, report["warm_email_ready_rows"])
+            ready = read_csv_rows(tmp / "warm_email_ready.csv")
+            self.assertEqual("Qualified", ready[0]["ResearchStatus"])
+            self.assertEqual("Reviewed", ready[1]["ResearchStatus"])
+            self.assertNotIn("Status", ready[0])
+
     def test_safer_recontact_source_path_helper_classifies_safe_csv(self) -> None:
         self.assertTrue(is_safer_recontact_source_path("_important/runs/check_x/leads_safer_recontact_not_seen_active_history.csv"))
         self.assertTrue(is_safer_recontact_source_path("/tmp/leads_safer_recontact_not_seen_active_history.csv"))
