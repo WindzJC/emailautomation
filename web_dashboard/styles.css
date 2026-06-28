@@ -10899,3 +10899,171 @@ body {
     flex-direction: column;
   }
 }
+
+/* Warm Research layout refinement. UI-only; existing controls and tokens. */
+#leads-view.warm-research-mode .leads-command-center {
+  width: 100%;
+}
+
+#leads-view.warm-research-mode .leads-control-bar {
+  grid-template-columns: minmax(340px, 1.05fr) minmax(460px, 0.95fr);
+  grid-template-rows: auto auto 1fr;
+  gap: 12px 14px;
+  align-items: start;
+  width: 100%;
+}
+
+#leads-view.warm-research-mode .leads-control-source,
+#leads-view.warm-research-mode .leads-control-results,
+#leads-view.warm-research-mode .leads-control-actions {
+  grid-column: 1;
+}
+
+#leads-view.warm-research-mode .leads-control-results {
+  padding: 11px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.13);
+  border-radius: 8px;
+  background: #0b1524;
+}
+
+#leads-view.warm-research-mode .leads-control-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-self: start;
+}
+
+#leads-view.warm-research-mode .leads-control-actions .btn {
+  width: 100%;
+}
+
+#leads-view.warm-research-mode .leads-current-run-panel {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  width: 100%;
+  min-width: 0;
+}
+
+#leads-view.warm-research-mode .leads-command-main {
+  display: none;
+  grid-template-columns: 1fr !important;
+}
+
+#leads-view.warm-research-mode .current-run-card {
+  gap: 12px;
+  padding: 14px;
+}
+
+#leads-view.warm-research-mode .warm-private-action-panel,
+#leads-view.warm-research-mode .warm-research-output-group,
+#leads-view.warm-research-mode .warm-private-lane-group,
+#leads-view.warm-research-mode .warm-safety-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.13);
+  border-radius: 8px;
+  background: #0e192a;
+}
+
+#leads-view.warm-research-mode .warm-private-action-panel {
+  border-color: rgba(120, 174, 248, 0.24);
+  background: #0d1b2e;
+}
+
+#leads-view.warm-research-mode .warm-private-action-panel > .warm-private-lane-group {
+  margin-top: 12px;
+  background: #0b1524;
+}
+
+#leads-view.warm-research-mode .warm-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+#leads-view.warm-research-mode .warm-panel-heading .eyebrow,
+#leads-view.warm-research-mode .warm-safety-card .eyebrow,
+#leads-view.warm-research-mode .warm-research-output-group > .eyebrow {
+  margin: 0;
+}
+
+#leads-view.warm-research-mode .warm-action-stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+#leads-view.warm-research-mode .warm-action-stack .btn {
+  width: 100%;
+  min-height: 42px;
+  justify-content: center;
+}
+
+#leads-view.warm-research-mode .warm-research-dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+#leads-view.warm-research-mode .warm-research-output-group .operator-metric-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#leads-view.warm-research-mode .warm-research-output-group .operator-metric {
+  min-height: 76px;
+  padding: 11px 12px;
+}
+
+#leads-view.warm-research-mode .warm-lane-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+#leads-view.warm-research-mode .warm-lane-metrics > div {
+  min-height: 68px;
+  padding: 9px 10px;
+}
+
+#leads-view.warm-research-mode .warm-safety-card {
+  padding: 10px 12px;
+  background: #091321;
+}
+
+#leads-view.warm-research-mode .warm-safety-rules {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 14px;
+  margin-top: 7px;
+  color: var(--console-muted);
+  font-size: 0.75rem;
+}
+
+#leads-view.warm-research-mode .warm-safety-rules span::before {
+  content: "\2022";
+  margin-right: 7px;
+  color: var(--console-label);
+}
+
+@media (max-width: 1100px) {
+  #leads-view.warm-research-mode .leads-control-bar {
+    grid-template-columns: 1fr;
+  }
+
+  #leads-view.warm-research-mode .leads-current-run-panel {
+    grid-column: 1;
+    grid-row: auto;
+  }
+}
+
+@media (max-width: 700px) {
+  #leads-view.warm-research-mode .warm-research-output-group .operator-metric-strip,
+  #leads-view.warm-research-mode .warm-lane-metrics,
+  #leads-view.warm-research-mode .warm-safety-rules {
+    grid-template-columns: 1fr;
+  }
+}

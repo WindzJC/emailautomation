@@ -985,7 +985,8 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn("Start unavailable — no pending leads.", source)
         self.assertIn('noPendingQueue ? "No queue" : "Start"', source)
-        self.assertIn("noPendingQueue || (!stopAvailable && !startAvailable)", source)
+        self.assertIn("|| noPendingQueue", source)
+        self.assertIn("|| (!warmProfile && !stopAvailable && !startAvailable)", source)
         self.assertIn("profilePendingCount(profile) > 0", source)
         self.assertIn("pendingCount <= 0", source)
 
@@ -1197,6 +1198,64 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm Private JC running",
         ]:
             self.assertIn(expected, source)
+
+    def test_navigation_uses_senders_and_lead_ops_labels(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn('setNodeText(els.opsTabBtn, "Senders")', source)
+        self.assertIn('setNodeText(els.leadsTabBtn, "Lead Ops")', source)
+
+    def test_warm_jc_sender_row_is_visible_but_opens_lead_ops_instead_of_starting(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        render_start = source.index("function renderSenderStatusConsole")
+        render_end = source.index("function createAlertCardNode", render_start)
+        render_body = source[render_start:render_end]
+        click_start = source.index("async function handleSenderStatusClick")
+        click_end = source.index("async function postAction", click_start)
+        click_body = source[click_start:click_end]
+
+        for expected in [
+            'warmProfile ? "open_lead_ops" : "start"',
+            'warmProfile ? "Open Lead Ops" : "Start"',
+            "private_jc_warm",
+            "recipients_private_jc_warm.csv",
+            "private_jc_warm_log.csv",
+        ]:
+            self.assertIn(expected, render_body)
+        self.assertIn('profile === "private_jc_warm" && action === "open_lead_ops"', click_body)
+        self.assertIn('setDashboardTab("leads")', click_body)
+
+    def test_warm_research_groups_outputs_and_lane_status_with_safety_copy(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "Warm Research Outputs",
+            "Warm Private JC Send Status",
+            "warm-private-action-panel",
+            "warm-action-stack",
+            "warm-research-output-group",
+            "warm-private-lane-group",
+            "warm-safety-card",
+            "Safety rules",
+            "Cold dispatch disabled for Warm Research.",
+            "Explicit confirmation required.",
+            "Warm confirmation stays separate.",
+            "Start All excludes warm.",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            "#leads-view.warm-research-mode .leads-control-bar",
+            "#leads-view.warm-research-mode .leads-current-run-panel",
+            "#leads-view.warm-research-mode .warm-action-stack .btn",
+            "#leads-view.warm-research-mode .warm-research-output-group .operator-metric",
+            "#leads-view.warm-research-mode .warm-safety-card",
+        ]:
+            self.assertIn(expected, styles)
+
+        self.assertIn("controlBar.appendChild(els.leadsCurrentRunPanel)", source)
+        self.assertIn("commandLeft.insertBefore(els.leadsCurrentRunPanel", source)
 
 
 if __name__ == "__main__":

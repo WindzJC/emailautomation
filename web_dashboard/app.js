@@ -469,6 +469,9 @@ function applyDashboardTab() {
   const leadsActive = activeDashboardTab === "leads" && !wallboardMode;
   mountExclusiveDashboardPanel(leadsActive);
 
+  if (els.opsTabBtn) setNodeText(els.opsTabBtn, "Senders");
+  if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Lead Ops");
+
   if (els.opsView) {
     els.opsView.classList.toggle("hidden", leadsActive);
     els.opsView.hidden = leadsActive;
@@ -672,7 +675,7 @@ function formatGeneratedAt(value) {
 }
 
 function formatProfileName(value) {
-  if (String(value || "") === "private_jc_warm") return "Warm Private JC";
+  if (String(value || "") === "private_jc_warm") return "Warm JC";
   const raw = String(value || "")
     .replace(/^sendgrid_/, "")
     .replace(/^private_/, "")
@@ -3514,6 +3517,8 @@ function currentWarmResearchReport(status = lastLeadsStatus) {
 
 function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const leadsView = document.getElementById("leads-view");
+  const controlBar = document.querySelector("#leads-view .leads-control-bar");
+  const commandLeft = document.querySelector("#leads-view .leads-command-column-left");
   leadsView?.classList.toggle("warm-research-mode", active);
   if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Check Warm Research" : "Prepare Dispatch");
   if (els.leadsPipelineMeta) {
@@ -3526,6 +3531,11 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   }
   const campaignPanel = document.querySelector("#leads-view .leads-campaign-command");
   if (campaignPanel) campaignPanel.hidden = active;
+  if (active && controlBar && els.leadsCurrentRunPanel?.parentElement !== controlBar) {
+    controlBar.appendChild(els.leadsCurrentRunPanel);
+  } else if (!active && commandLeft && els.leadsCurrentRunPanel?.parentElement !== commandLeft) {
+    commandLeft.insertBefore(els.leadsCurrentRunPanel, campaignPanel || commandLeft.firstChild);
+  }
   if (els.leadsDispatchCommandColumn) els.leadsDispatchCommandColumn.hidden = active;
   const advancedDiagnostics = document.querySelector("#leads-view .leads-advanced-diagnostics");
   if (advancedDiagnostics) advancedDiagnostics.hidden = active;
@@ -4409,28 +4419,57 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
         <article class="current-run-card current-source-summary-card ${checked ? "current-run-card-ready" : "current-run-card-wait"}">
           <div class="current-run-head">
             <div>
-              <p class="eyebrow">Warm Research Outputs</p>
+              <p class="eyebrow">Warm Private JC</p>
               <h3>${checked ? "Warm upload checked" : "Warm upload not checked"}</h3>
               <p class="current-run-subtitle">${checked ? "Generate drafts, then explicitly confirm the separate Warm Private JC lane." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
             </div>
-            <div class="leads-action-slot">
-              <span class="mini-pill">Check only</span>
+            <span class="mini-pill">Separate warm lane</span>
+          </div>
+          <section class="warm-private-action-panel">
+            <div class="warm-panel-heading">
+              <div>
+                <p class="eyebrow">Warm actions</p>
+                <strong>Preview, confirm, then start</strong>
+              </div>
+              <span class="mini-pill">Explicit confirmation</span>
+            </div>
+            <div class="leads-action-slot warm-action-stack">
               ${checked ? `<button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>` : ""}
               ${draftCount > 0 && !warmConfirmed ? `<button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc">Confirm Warm Private JC</button>` : ""}
               ${warmConfirmed && warmRemaining > 0 ? `<button class="btn btn-primary" type="button" data-leads-next-action="start_warm_private_jc" ${warmRunning ? "disabled" : ""}>${warmRunning ? "Warm Private JC running" : "Start Warm Private JC"}</button>` : ""}
             </div>
+            <section class="warm-private-lane-group">
+              <div class="warm-panel-heading">
+                <p class="eyebrow">Warm Private JC Send Status</p>
+                <span class="mini-pill">Live lane</span>
+              </div>
+              <div class="current-run-metrics warm-lane-metrics">
+                <div><span>Warm Private JC ready</span><strong>${draftCount.toLocaleString()}</strong></div>
+                <div><span>Warm Private JC confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
+                <div><span>Warm Private JC running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
+                <div><span>Warm Private JC sent</span><strong>${warmSent.toLocaleString()}</strong></div>
+                <div><span>Warm Private JC remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
+              </div>
+            </section>
+          </section>
+          <div class="warm-research-dashboard-grid">
+            <section class="warm-research-output-group">
+              <p class="eyebrow">Warm Research Outputs</p>
+              ${warmResearchMetricMarkup(report)}
+              ${Number(report.warm_email_preview_rows || 0) > 0
+                ? `<div class="current-run-summary-line"><span>Warm draft preview ready: ${Number(report.warm_email_preview_rows || 0).toLocaleString()} row(s).</span><span class="path-ellipsis" title="${escapeHtml(report.warm_email_preview_label || "")}">${escapeHtml(report.warm_email_preview_label || "warm_email_preview.csv")}</span></div>`
+                : ""}
+            </section>
           </div>
-          ${warmResearchMetricMarkup(report)}
-          ${Number(report.warm_email_preview_rows || 0) > 0
-            ? `<div class="current-run-summary-line"><span>Warm draft preview ready: ${Number(report.warm_email_preview_rows || 0).toLocaleString()} row(s).</span><span class="path-ellipsis" title="${escapeHtml(report.warm_email_preview_label || "")}">${escapeHtml(report.warm_email_preview_label || "warm_email_preview.csv")}</span></div>`
-            : ""}
-          <div class="current-run-metrics warm-lane-metrics">
-            <div><span>Warm Private JC ready</span><strong>${draftCount.toLocaleString()}</strong></div>
-            <div><span>Warm Private JC confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
-            <div><span>Warm Private JC running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
-            <div><span>Warm Private JC sent</span><strong>${warmSent.toLocaleString()}</strong></div>
-            <div><span>Warm Private JC remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
-          </div>
+          <aside class="warm-safety-card">
+            <p class="eyebrow">Safety rules</p>
+            <div class="warm-safety-rules">
+              <span>Cold dispatch disabled for Warm Research.</span>
+              <span>Explicit confirmation required.</span>
+              <span>Start All excludes warm.</span>
+              <span>Warm confirmation stays separate.</span>
+            </div>
+          </aside>
         </article>
       `,
     );
@@ -6107,17 +6146,24 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
   setNodeHtml(
     tbody,
     profiles.map((profile) => {
+      const warmProfile = profile?.name === "private_jc_warm";
       const status = senderStatusBadge(profile);
       const pendingAction = pendingProfileActions.get(profile.name) || "";
       const stopAvailable = canStopProfile(profile);
       const startAvailable = canStartProfile(profile, snapshot);
       const pendingCount = profilePendingCount(profile);
       const noPendingQueue = !stopAvailable && pendingCount <= 0;
-      const action = stopAvailable ? "stop" : "start";
+      const action = stopAvailable ? "stop" : warmProfile ? "open_lead_ops" : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : stopAvailable ? "Stop" : noPendingQueue ? "No queue" : "Start";
-      const actionDisabled = Boolean(pendingAction) || noPendingQueue || (!stopAvailable && !startAvailable);
+        : stopAvailable ? "Stop" : noPendingQueue ? "No queue" : warmProfile ? "Open Lead Ops" : "Start";
+      const actionDisabled = Boolean(pendingAction)
+        || noPendingQueue
+        || (!warmProfile && !stopAvailable && !startAvailable);
+      const warmMax = Number(profile?.max_total || profile?.max_messages_per_run || 0);
+      const warmMetadata = warmProfile
+        ? `<span class="sender-status-profile-meta">private_jc_warm · recipients_private_jc_warm.csv · private_jc_warm_log.csv${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
+        : "";
       const lastActivity = profile.last_timestamp
         ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
         : profileLastAgeText(profile);
@@ -6131,6 +6177,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
             <button class="sender-status-name-btn" type="button" data-profile="${escapeHtml(profile.name || "")}">
               ${escapeHtml(formatProfileName(profile.name))}
             </button>
+            ${warmMetadata}
           </td>
           <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
           <td>${pendingCount.toLocaleString()}</td>
@@ -6143,7 +6190,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
-              title="${noPendingQueue ? "Start unavailable — no pending leads." : ""}"
+              title="${noPendingQueue ? "No pending warm leads." : warmProfile && !stopAvailable ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           </td>
@@ -8385,6 +8432,10 @@ async function handleSenderStatusClick(event) {
     if (actionButton.disabled) return;
     const profile = actionButton.getAttribute("data-profile") || "";
     const action = actionButton.getAttribute("data-action") || "";
+    if (profile === "private_jc_warm" && action === "open_lead_ops") {
+      setDashboardTab("leads");
+      return;
+    }
     if (!profile || !["start", "stop"].includes(action)) return;
     await postAction(`/api/${action}/${profile}`, { profileName: profile, action });
     return;
