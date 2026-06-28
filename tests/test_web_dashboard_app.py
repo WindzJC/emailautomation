@@ -619,7 +619,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm Research uses its own draft, confirmation, and Private JC lane.",
             "Warm Research Outputs",
             "Explicit confirmation required",
-            "A separate, explicitly confirmed lane that never joins Start All.",
+            "Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? \"Yes\" : \"No\"}",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
             "Generate Warm Draft Preview",
@@ -1406,7 +1406,9 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("minute: \"2-digit\"", body)
         self.assertNotIn("second:", body)
         self.assertIn("formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)", source)
-        self.assertIn("formatWarmActivity(lane.last_sent_timestamp, lane.last_sent_email)", source)
+        self.assertIn("formatWarmActivity(lane.last_sent_timestamp)", source)
+        self.assertIn('href="mailto:${escapeHtml(lane.last_sent_email)}"', source)
+        self.assertIn('formatWarmActivity(event.timestamp || "")', source)
 
     def test_private_email_total_explains_cold_and_warm_composition(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1435,6 +1437,49 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("grid-template-rows: auto auto auto", styles)
         self.assertIn("align-content: start", styles)
         self.assertIn("height: auto", styles)
+
+    def test_warm_source_stack_and_timeline_are_compact_and_top_aligned(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "#leads-view.warm-research-mode .leads-control-source",
+            "#leads-view.warm-research-mode .leads-control-results",
+            "#leads-view.warm-research-mode .leads-control-actions",
+            "#leads-view.warm-research-mode .warm-timeline-list",
+            "max-height: 176px",
+            "overflow-y: auto",
+            "align-content: start",
+            "grid-row: 1 / span 3",
+        ]:
+            self.assertIn(expected, styles)
+        self.assertLess(styles.rfind("grid-row: 1;"), styles.rfind("grid-row: 2;"))
+        self.assertLess(styles.rfind("grid-row: 2;"), styles.rfind("grid-row: 3;"))
+        self.assertIn("warmTimeline.map((event)", source)
+        self.assertIn("event.type", source)
+        self.assertIn('formatWarmActivity(event.timestamp || "")', source)
+        self.assertNotIn("${escapeHtml(event.timestamp || \"\")}", source)
+
+    def test_warm_complete_summary_is_compact_and_human_readable(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        self.assertIn("Warm Private JC · ${warmState}", source)
+        self.assertIn('Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? "Yes" : "No"}', source)
+        self.assertIn("warm-status-summary", source)
+        self.assertIn("formatWarmActivity(lane.last_sent_timestamp)", source)
+        self.assertIn('href="mailto:${escapeHtml(lane.last_sent_email)}"', source)
+
+    def test_header_status_is_compact_and_overflow_safe(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        self.assertIn('els.wsLabel.textContent = "Live status"', source)
+        self.assertIn('els.wsLabel.textContent = "Connected"', source)
+        self.assertNotIn("Leads local snapshot loaded", source)
+        self.assertIn('setNodeText(els.toolbarGeneratedAt, "Local snapshot")', source)
+        self.assertIn(".app-shell > .app-rail #ws-label", styles)
+        self.assertIn("text-overflow: ellipsis", styles)
+        self.assertIn("white-space: nowrap", styles)
 
 
 if __name__ == "__main__":

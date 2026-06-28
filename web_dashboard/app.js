@@ -4471,7 +4471,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             <div>
               <p class="eyebrow">Warm Private JC</p>
               <h3>${escapeHtml(warmStateHeadline)}</h3>
-              <p class="current-run-subtitle">A separate, explicitly confirmed lane that never joins Start All.</p>
+              <p class="current-run-subtitle warm-status-summary">Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? "Yes" : "No"}</p>
             </div>
             <div class="warm-command-badges">
               <span class="mini-pill">Explicit confirmation</span>
@@ -4505,7 +4505,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
               </div>
               <div class="warm-live-details">
-                <span><strong>Last sent</strong>${escapeHtml(formatWarmActivity(lane.last_sent_timestamp, lane.last_sent_email))}</span>
+                <span><strong>Last sent</strong>${escapeHtml(formatWarmActivity(lane.last_sent_timestamp))}${lane.last_sent_email ? ` · <a href="mailto:${escapeHtml(lane.last_sent_email)}">${escapeHtml(lane.last_sent_email)}</a>` : ""}</span>
                 <span><strong>Next queued</strong>${escapeHtml(lane.next_queued_email || "None")}</span>
               </div>
             </section>
@@ -4516,7 +4516,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                   <div class="warm-timeline-event">
                     <strong>${escapeHtml(event.type || "EVENT")}</strong>
                     <span>${escapeHtml(event.email || event.reason || "Warm worker event")}</span>
-                    <time>${escapeHtml(event.timestamp || "")}</time>
+                    <time>${escapeHtml(formatWarmActivity(event.timestamp || ""))}</time>
                   </div>
                 `).join("") : `<span class="muted">No warm run events yet.</span>`}
               </div>
@@ -5032,7 +5032,7 @@ function renderLeadsStatus(status) {
   if (isLeadsTabVisible()) {
     setConnectionState(false);
     if (els.toolbarGeneratedAt) {
-      setNodeText(els.toolbarGeneratedAt, "Leads local snapshot loaded");
+      setNodeText(els.toolbarGeneratedAt, "Local snapshot");
     }
   }
   const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
