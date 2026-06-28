@@ -15,6 +15,7 @@ from unittest.mock import patch
 from openpyxl import Workbook
 
 import lead_ledger
+import dashboard_core
 import important_leads_verify
 import important_leads_workflow
 import live_dashboard
@@ -5512,6 +5513,66 @@ class LiveDashboardTests(unittest.TestCase):
             body["states"],
         )
         shard_cleaned_leads.assert_not_called()
+
+    def test_start_warm_private_jc_requires_explicit_confirmation(self) -> None:
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "warm_private_jc_lane_status",
+            return_value={"confirmed": False, "ready": False, "remaining": 0, "message": "Confirmation required."},
+        ), patch.object(live_dashboard.runtime_control, "start_sender") as start_sender, patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(live_dashboard, "_append_campaign_history"):
+            response = live_dashboard.start_profile("private_jc_warm")
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("warm_confirmation_required", body["error"])
+        start_sender.assert_not_called()
+
+    def test_warm_confirm_endpoint_uses_latest_warm_preview_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_path = Path(tmpdir) / "warm_email_preview.csv"
+            preview_path.write_text("AuthorEmail\nsynthetic@example.com\n", encoding="utf-8")
+            job = {"job_id": "warm-job", "warm_email_preview_path": str(preview_path), "check": {"upload_type": "warm_research"}}
+            confirmation = {"confirmation_id": "warm-confirm", "row_count": 1, "message": "Confirmed."}
+            with patch.object(live_dashboard, "_latest_completed_warm_check_job", return_value=job), patch.object(
+                live_dashboard,
+                "confirm_warm_private_jc_preview",
+                return_value=confirmation,
+            ) as confirm_preview, patch.object(live_dashboard, "_save_important_check_job"), patch.object(
+                live_dashboard,
+                "_combined_leads_status",
+                return_value={"warm_private_jc_lane": {"confirmed": True}},
+            ):
+                response = live_dashboard.confirm_warm_research_private_jc()
+
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        confirm_preview.assert_called_once_with(preview_path=preview_path)
+
+    def test_start_warm_private_jc_calls_runtime_only_when_confirmed(self) -> None:
+        lane = {"confirmed": True, "ready": True, "remaining": 1, "message": "Ready."}
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "warm_private_jc_lane_status",
+            return_value=lane,
+        ), patch.object(live_dashboard, "_active_sender_names", return_value=set()), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "Started warm lane."),
+        ) as start_sender, patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+        ), patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start_profile("private_jc_warm")
+
+        self.assertEqual(200, response.status_code)
+        start_sender.assert_called_once_with("private_jc_warm")
+
+    def test_start_all_profile_set_does_not_include_warm_lane(self) -> None:
+        self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
 
 
 if __name__ == "__main__":

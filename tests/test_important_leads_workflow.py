@@ -11,12 +11,14 @@ from unittest.mock import patch
 import important_leads_verify
 import important_leads_workflow
 import lead_ledger
+from tools.rebuild_recipient_queues import default_queue_paths
 from important_leads_workflow import (
     _validate_dispatch_preview_contract,
     _sent_email_set,
     check_master_leads,
     check_warm_research_leads,
     confirm_dispatch_preview,
+    confirm_warm_private_jc_preview,
     create_safer_recontact_pool_from_preview,
     dispatch_master_leads,
     generate_warm_email_preview,
@@ -2994,6 +2996,195 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "skipped row count does not match skipped reasons"):
             _validate_dispatch_preview_contract(preview)
+
+    def test_warm_confirmation_writes_only_separate_queue_from_previewed_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            manifest_path = root / "warm_private_jc_confirmation.json"
+            cold_queue = root / "recipients_private_jc.csv"
+            write_csv(cold_queue, ["Email"], [])
+            subject = "Previewed warm subject"
+            body = "Hi Taylor,\n\nPreviewed warm body.\n\nP.S. If you’d rather not hear from me again, just reply unsub."
+            write_csv(
+                preview_path,
+                list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS),
+                [{
+                    "AuthorName": "Taylor Example",
+                    "AuthorEmail": "taylor@example.com",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "EmailSubject": subject,
+                    "EmailBody": body,
+                    "NeedSignal": "Synthetic need",
+                    "RecommendedService": "Synthetic service",
+                    "OutreachAngle": "synthetic angle",
+                    "SourceURL": "https://example.com/source",
+                    "ContactPath": "mailto:taylor@example.com",
+                    "ResearchStatus": "New",
+                }],
+            )
+
+            result = confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+                log_paths=[],
+                cold_queue_paths=[cold_queue],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            queued = read_csv_rows(queue_path)
+
+        self.assertTrue(result["warm_private_jc_confirmed"])
+        self.assertEqual(1, len(queued))
+        self.assertEqual(subject, queued[0]["EmailSubject"])
+        self.assertEqual(body, queued[0]["EmailBody"])
+        self.assertEqual("warm_private_jc", queued[0]["campaign_type"])
+
+    def test_warm_confirmation_rejects_contact_form_and_does_not_write_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            write_csv(
+                preview_path,
+                list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS),
+                [{
+                    "AuthorName": "Taylor Example",
+                    "AuthorEmail": "taylor@example.com",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "EmailSubject": "Subject",
+                    "EmailBody": "Body",
+                    "NeedSignal": "Need",
+                    "RecommendedService": "Service",
+                    "OutreachAngle": "Angle",
+                    "SourceURL": "https://example.com/source",
+                    "ContactPath": "https://example.com/contact",
+                    "ResearchStatus": "New",
+                }],
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "not_direct_email"):
+                confirm_warm_private_jc_preview(
+                    preview_path=preview_path,
+                    queue_path=queue_path,
+                    confirmation_path=root / "manifest.json",
+                    log_paths=[],
+                    cold_queue_paths=[],
+                    sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                    suppressed_path=root / "suppressed.csv",
+                    unsubscribed_path=root / "unsubscribed.csv",
+                    bad_events_path=root / "events.jsonl",
+                    lead_ledger_db_path=root / "ledger.sqlite3",
+                )
+
+            self.assertFalse(queue_path.exists())
+
+    def test_warm_confirmation_rejects_recipient_already_in_cold_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            cold_queue = root / "recipients_private_jc.csv"
+            row = {
+                "AuthorName": "Taylor Example",
+                "AuthorEmail": "taylor@example.com",
+                "BookTitleOrProject": "Synthetic Project",
+                "EmailSubject": "Subject",
+                "EmailBody": "Body",
+                "NeedSignal": "Need",
+                "RecommendedService": "Service",
+                "OutreachAngle": "Angle",
+                "SourceURL": "https://example.com/source",
+                "ContactPath": "mailto:taylor@example.com",
+                "ResearchStatus": "New",
+            }
+            write_csv(preview_path, list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), [row])
+            write_csv(cold_queue, ["Email"], [{"Email": "taylor@example.com"}])
+
+            with self.assertRaisesRegex(RuntimeError, "already_queued_cold"):
+                confirm_warm_private_jc_preview(
+                    preview_path=preview_path,
+                    queue_path=queue_path,
+                    confirmation_path=root / "manifest.json",
+                    log_paths=[],
+                    cold_queue_paths=[cold_queue],
+                    sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                    suppressed_path=root / "suppressed.csv",
+                    unsubscribed_path=root / "unsubscribed.csv",
+                    bad_events_path=root / "events.jsonl",
+                    lead_ledger_db_path=root / "ledger.sqlite3",
+                )
+
+            self.assertFalse(queue_path.exists())
+
+    def test_warm_confirmation_status_allows_safely_consumed_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            manifest_path = root / "warm_private_jc_confirmation.json"
+            rows = []
+            for index in range(2):
+                email = f"synthetic-{index}@example.com"
+                rows.append({
+                    "AuthorName": f"Person {index}",
+                    "AuthorEmail": email,
+                    "BookTitleOrProject": "Synthetic Project",
+                    "EmailSubject": f"Subject {index}",
+                    "EmailBody": f"Body {index}",
+                    "NeedSignal": "Need",
+                    "RecommendedService": "Service",
+                    "OutreachAngle": "Angle",
+                    "SourceURL": "https://example.com/source",
+                    "ContactPath": f"mailto:{email}",
+                    "ResearchStatus": "New",
+                })
+            write_csv(preview_path, list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), rows)
+            confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+                log_paths=[],
+                cold_queue_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            queued = read_csv_rows(queue_path)
+            write_csv(queue_path, list(important_leads_workflow.WARM_PRIVATE_JC_QUEUE_HEADERS), queued[1:])
+
+            lane = important_leads_workflow.warm_private_jc_lane_status(
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+            )
+
+        self.assertTrue(lane["confirmed"])
+        self.assertTrue(lane["ready"])
+        self.assertEqual(1, lane["remaining"])
+
+    def test_cold_queue_rebuild_set_excludes_warm_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            names = {path.name for path in default_queue_paths(Path(tmpdir))}
+
+        self.assertNotIn("recipients_private_jc_warm.csv", names)
+        self.assertEqual(
+            {
+                "recipients_private_jc.csv",
+                "recipients_sendgrid_1.csv",
+                "recipients_sendgrid_2.csv",
+                "recipients_sendgrid_3.csv",
+                "recipients_sendgrid_4.csv",
+                "recipients_sendgrid_5.csv",
+            },
+            names,
+        )
 
 
 if __name__ == "__main__":

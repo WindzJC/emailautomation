@@ -94,6 +94,7 @@ from important_leads_workflow import (
     check_master_leads,
     check_warm_research_leads,
     confirm_dispatch_preview,
+    confirm_warm_private_jc_preview,
     create_safer_recontact_pool_from_preview,
     generate_warm_email_preview,
     important_leads_path_state,
@@ -101,6 +102,7 @@ from important_leads_workflow import (
     load_dispatch_preview,
     preview_dispatch_master_leads,
     validate_dispatch_preview,
+    warm_private_jc_lane_status,
 )
 from lead_ledger import (
     apply_quarantine_review_action,
@@ -1345,7 +1347,7 @@ def _run_important_check_job(job_id: str) -> None:
         job["eta_seconds"] = 0
         job["progress_percent"] = 100
         if is_warm_research:
-            job["message"] = "Warm upload checked. Sending not enabled for warm leads yet."
+            job["message"] = "Warm upload checked. Generate Warm Draft Preview before explicit Warm Private JC confirmation."
             job["auto_triage_status"] = "skipped"
             job["auto_triage_skip_reason"] = "warm_research_upload"
         else:
@@ -2539,6 +2541,7 @@ def _combined_leads_status() -> dict[str, object]:
         "active_campaign_snapshot": active_campaign_snapshot,
         "safer_recontact_source_summary": _load_safer_recontact_source_summary(),
         "latest_warm_check": latest_warm_job.get("check", {}) if latest_warm_job else {},
+        "warm_private_jc_lane": warm_private_jc_lane_status(),
     }
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
@@ -2882,6 +2885,7 @@ def _build_automation_status() -> dict[str, object]:
 def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
     snapshot = build_dashboard_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
     snapshot["automation"] = _build_automation_status()
+    snapshot["warm_private_jc_lane"] = warm_private_jc_lane_status()
     return snapshot
 
 
@@ -3792,6 +3796,33 @@ def start_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     _append_campaign_history("start_profile_requested", profile=profile_name, snapshot=_build_live_snapshot())
+    if profile_name == "private_jc_warm":
+        lane = warm_private_jc_lane_status()
+        if not bool(lane.get("ready")):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "warm_confirmation_required",
+                    "message": str(lane.get("message") or "Confirm Warm Private JC before starting."),
+                    "warm_private_jc_lane": lane,
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=409,
+            )
+        if profile_name in _active_sender_names():
+            return JSONResponse(
+                {"ok": False, "blocked": True, "error": "profile_active", "message": "Warm Private JC is already running."},
+                status_code=409,
+            )
+        ok, message = runtime_control.start_sender(profile_name)
+        time.sleep(0.6)
+        return JSONResponse({
+            "ok": ok,
+            "message": message,
+            "warm_private_jc_lane": warm_private_jc_lane_status(),
+            "snapshot": _build_live_snapshot(),
+        })
     preconditions = _build_start_preconditions_report(profile_name=profile_name)
     blocked = _start_preconditions_block_response(preconditions)
     if blocked is not None:
@@ -4129,6 +4160,46 @@ def generate_warm_research_email_preview() -> JSONResponse:
             "status": _combined_leads_status(),
         }
     )
+
+
+@app.post("/api/leads/check-important/warm-confirm")
+def confirm_warm_research_private_jc() -> JSONResponse:
+    job = _latest_completed_warm_check_job()
+    if not job:
+        return JSONResponse(
+            {"ok": False, "error": "warm_check_required", "message": "Run a Warm Research upload check first."},
+            status_code=404,
+        )
+    preview_path = Path(str(job.get("warm_email_preview_path") or ""))
+    if not preview_path.exists() or preview_path.name != "warm_email_preview.csv":
+        return JSONResponse(
+            {"ok": False, "error": "warm_preview_required", "message": "Generate the current Warm Draft Preview before confirming Warm Private JC."},
+            status_code=409,
+        )
+    try:
+        confirmation = confirm_warm_private_jc_preview(preview_path=preview_path)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "blocked": True, "error": "warm_confirm_blocked", "message": str(exc)},
+            status_code=409,
+        )
+    updated_job = dict(job)
+    updated_check = dict(updated_job.get("check") or {})
+    updated_check.update({
+        "warm_private_jc_confirmed": True,
+        "warm_private_jc_confirmed_rows": int(confirmation.get("row_count") or 0),
+        "warm_private_jc_confirmation_id": str(confirmation.get("confirmation_id") or ""),
+    })
+    updated_job["check"] = updated_check
+    updated_job["warm_private_jc_confirmation"] = confirmation
+    _save_important_check_job(updated_job)
+    return JSONResponse({
+        "ok": True,
+        "message": str(confirmation.get("message") or "Warm Private JC confirmed."),
+        "confirmation": confirmation,
+        "warm_check": updated_check,
+        "status": _combined_leads_status(),
+    })
 
 
 @app.post("/api/leads/clean")

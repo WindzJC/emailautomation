@@ -611,14 +611,14 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, leads_html)
         for expected in [
             'formData.append("upload_type", els.leadsImportantUploadType?.value || "cold")',
-            "Warm upload checked. Sending not enabled for warm leads yet.",
+            "Warm upload checked. Generate drafts before explicit Warm Private JC confirmation.",
             "Warm email ready",
             "Contact forms",
             "Already contacted",
-            "Warm Research uploads are check-only",
+            "Warm Research uses its own draft, confirmation, and Private JC lane.",
             "Warm Research Outputs",
-            "Warm rows cannot be previewed, confirmed, or sent yet.",
-            "Warm upload checked. Sending is not enabled for warm leads yet.",
+            "Explicit confirmation required",
+            "Generate drafts, then explicitly confirm Warm Private JC.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
             "Generate Warm Draft Preview",
@@ -1182,6 +1182,19 @@ class WebDashboardAppTests(unittest.TestCase):
             "quarantine-list-row",
             "quarantine-list-shell",
             "Lead Inspector",
+        ]:
+            self.assertIn(expected, source)
+
+    def test_warm_lane_requires_explicit_confirm_and_separate_start(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        for expected in [
+            "Confirm Warm Private JC",
+            "Start Warm Private JC",
+            "/api/leads/check-important/warm-confirm",
+            "/api/start/private_jc_warm",
+            "Warm Private JC ready",
+            "Warm Private JC running",
         ]:
             self.assertIn(expected, source)
 
