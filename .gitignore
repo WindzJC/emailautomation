@@ -1,4 +1,5 @@
 .venv/
+node_modules/
 __pycache__/
 *.pyc
 emailautomation/
@@ -11,6 +12,7 @@ uploads/
 cleaned/
 reports/
 run_logs/
+logs/
 temp_reports/
 runtime_dumps/
 *.tar
@@ -47,3 +49,15 @@ data/shards/recipients_sendgrid_*.csv
 local_stale_queues_*/
 email_automation_stale_queues_*/
 tmp*/
+temp*/
+audit*/
+
+# Root-level runtime artifacts retained locally, never versioned.
+/leads.csv
+/leads_prechecked.csv
+/recipients*.csv
+/suppressed.csv
+/unsubscribed.csv
+/*_log.csv
+/*_log_worker.jsonl
+/warm_email_preview*.csv
