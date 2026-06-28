@@ -15,6 +15,7 @@ from unittest.mock import patch
 import send_shard
 import settings
 import dashboard_core
+import live_dashboard
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
@@ -1229,7 +1230,7 @@ class SendShardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             warm_log = Path(tmpdir) / "private_jc_warm_log.csv"
             warm_log.write_text(
-                "Timestamp,Email,Status,Info\n"
+                "TimestampUTC,Email,Status,Info\n"
                 "2026-06-28T12:00:00+00:00,support@example.com,SENT,warm\n",
                 encoding="utf-8",
             )
@@ -1249,6 +1250,158 @@ class SendShardTests(unittest.TestCase):
 
     def test_start_all_still_excludes_warm_private_jc(self) -> None:
         self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
+
+    def test_live_warm_status_uses_real_queue_log_and_worker_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "shards"
+            logs = root / "logs"
+            shards.mkdir()
+            logs.mkdir()
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            log_path = logs / "private_jc_warm_log.csv"
+            worker_path = logs / "private_jc_warm_log_worker.jsonl"
+            queue_path.write_text("Email,EmailSubject,EmailBody\n", encoding="utf-8")
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-06-28T10:00:00+00:00,one@example.com,SENT,warm\n"
+                "2026-06-28T10:01:00+00:00,two@example.com,SENT,warm\n",
+                encoding="utf-8",
+            )
+            worker_path.write_text(
+                json.dumps({"timestamp": "2026-06-28T10:01:01+00:00", "event_type": "DONE", "reason": "queue_complete"}) + "\n",
+                encoding="utf-8",
+            )
+            lane = {"confirmed": True, "confirmed_rows": 2, "ready": False, "remaining": 99}
+
+            with patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(
+                live_dashboard, "warm_private_jc_lane_status", return_value=lane
+            ), patch.object(
+                live_dashboard, "_active_dashboard_profiles", return_value=set()
+            ):
+                status = live_dashboard.build_warm_private_jc_live_status()
+
+            self.assertEqual(2, status["sent_count"])
+            self.assertEqual(0, status["queued_remaining_count"])
+            self.assertEqual("Complete", status["state"])
+            self.assertEqual("two@example.com", status["last_sent_email"])
+            self.assertEqual("2026-06-28T10:01:00+00:00", status["last_sent_timestamp"])
+            self.assertEqual("", status["next_queued_email"])
+            self.assertEqual("DONE", status["last_worker_event"])
+            self.assertEqual("queue_complete", status["last_worker_reason"])
+            self.assertTrue(any(event["type"] == "SENT" for event in status["timeline"]))
+
+    def test_live_warm_status_detects_partial_running_and_blocked_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "shards"
+            logs = root / "logs"
+            shards.mkdir()
+            logs.mkdir()
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            log_path = logs / "private_jc_warm_log.csv"
+            worker_path = logs / "private_jc_warm_log_worker.jsonl"
+            queue_path.write_text(
+                "Email,EmailSubject,EmailBody\n"
+                "contact@example.com,Subject,Body\n"
+                "hello@example.com,Subject,Body\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "Timestamp,Email,Status,Info\n"
+                "2026-06-28T10:00:00+00:00,sent@example.com,SENT,warm\n",
+                encoding="utf-8",
+            )
+            lane = {"confirmed": True, "confirmed_rows": 3, "ready": True, "remaining": 77}
+
+            with patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(
+                live_dashboard, "warm_private_jc_lane_status", return_value=lane
+            ), patch.object(
+                live_dashboard, "_active_dashboard_profiles", return_value=set()
+            ):
+                partial = live_dashboard.build_warm_private_jc_live_status()
+
+            self.assertEqual("Partial", partial["state"])
+            self.assertEqual(2, partial["queued_remaining_count"])
+            self.assertEqual(1, partial["sent_count"])
+            self.assertEqual("contact@example.com", partial["next_queued_email"])
+
+            with patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(
+                live_dashboard, "warm_private_jc_lane_status", return_value=lane
+            ), patch.object(
+                live_dashboard, "_active_dashboard_profiles", return_value={"private_jc_warm"}
+            ):
+                running = live_dashboard.build_warm_private_jc_live_status()
+
+            self.assertEqual("Running", running["state"])
+            self.assertTrue(running["running"])
+
+            worker_path.write_text(
+                json.dumps({
+                    "timestamp": "2026-06-28T10:02:00+00:00",
+                    "event_type": "DONE",
+                    "reason": "queue_exhausted_no_eligible_rows",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(settings, "SHARDS_DIR", shards), patch.object(
+                settings, "LOGS_DIR", logs
+            ), patch.object(
+                live_dashboard, "warm_private_jc_lane_status", return_value=lane
+            ), patch.object(
+                live_dashboard, "_active_dashboard_profiles", return_value=set()
+            ):
+                blocked = live_dashboard.build_warm_private_jc_live_status()
+
+            self.assertEqual("Blocked", blocked["state"])
+            self.assertTrue(blocked["blocked"])
+            self.assertEqual("queue_exhausted_no_eligible_rows", blocked["last_worker_reason"])
+
+    def test_live_snapshot_overrides_stale_warm_profile_counts_only(self) -> None:
+        warm_status = {
+            "queued_remaining_count": 0,
+            "sent_count": 8,
+            "last_sent_email": "last@example.com",
+            "last_sent_timestamp": "2026-06-28T10:08:00+00:00",
+            "running": False,
+        }
+        base_snapshot = {
+            "profiles": [
+                {
+                    "name": "private_jc_warm",
+                    "pending_count": 5,
+                    "run_sent_display": 3,
+                    "runtime_state": "running",
+                },
+                {
+                    "name": "private_jc",
+                    "pending_count": 12,
+                    "run_sent_display": 4,
+                    "runtime_state": "stopped",
+                },
+            ]
+        }
+
+        with patch.object(live_dashboard, "build_dashboard_snapshot", return_value=base_snapshot), patch.object(
+            live_dashboard, "_build_automation_status", return_value={}
+        ), patch.object(
+            live_dashboard, "build_warm_private_jc_live_status", return_value=warm_status
+        ):
+            snapshot = live_dashboard._build_live_snapshot()
+
+        warm_profile, cold_profile = snapshot["profiles"]
+        self.assertIs(snapshot["warm_private_jc_status"], warm_status)
+        self.assertEqual(0, warm_profile["pending_count"])
+        self.assertEqual(8, warm_profile["run_sent_display"])
+        self.assertEqual("stopped", warm_profile["runtime_state"])
+        self.assertEqual(12, cold_profile["pending_count"])
+        self.assertEqual(4, cold_profile["run_sent_display"])
 
     def test_warm_message_uses_previewed_subject_and_body_verbatim(self) -> None:
         row = {

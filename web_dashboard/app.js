@@ -246,7 +246,7 @@ function setConnectionState(live) {
   if (live) {
     els.wsLabel.textContent = "Ops socket live";
   } else if (isLeadsTabVisible() && lastLeadsStatus) {
-    els.wsLabel.textContent = "Leads local snapshot loaded";
+    els.wsLabel.textContent = "Lead Ops live file status loaded";
   } else if (snapshotFallbackHealthy && lastSnapshot) {
     els.wsLabel.textContent = "Snapshot connected";
   } else {
@@ -3516,6 +3516,14 @@ function currentWarmResearchReport(status = lastLeadsStatus) {
   return lastImportantLeadCheck?.upload_type === "warm_research" ? lastImportantLeadCheck : {};
 }
 
+function currentWarmPrivateJcStatus(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  return status?.warm_private_jc_status
+    || snapshot?.warm_private_jc_status
+    || status?.warm_private_jc_lane
+    || snapshot?.warm_private_jc_lane
+    || {};
+}
+
 function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const leadsView = document.getElementById("leads-view");
   const appShell = leadsView?.closest(".app-shell");
@@ -4401,23 +4409,30 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   if (warmResearchUploadMode()) {
     const report = currentWarmResearchReport(status);
     const checked = Boolean(report?.generated_at_utc);
-    const lane = status?.warm_private_jc_lane || lastSnapshot?.warm_private_jc_lane || {};
-    const warmProfile = (lastSnapshot?.profiles || []).find((profile) => profile?.name === "private_jc_warm") || {};
-    const warmRunning = isProfileActive(warmProfile);
+    const lane = currentWarmPrivateJcStatus(status, lastSnapshot);
+    const warmRunning = Boolean(lane.running);
     const warmConfirmed = Boolean(lane.confirmed);
-    const warmRemaining = Number(lane.remaining || warmProfile.pending_count || 0);
-    const warmSent = Number(profileRunSentDisplay(warmProfile) || 0);
+    const warmRemaining = Number(lane.queued_remaining_count ?? lane.remaining ?? 0);
+    const warmSent = Number(lane.sent_count ?? 0);
     const draftCount = Number(report.warm_email_preview_rows || 0);
-    const warmCap = Number(lane.cap || warmProfile.max_total || warmProfile.max_messages_per_run || 10);
-    const warmStateHeadline = warmRunning
-      ? "Warm Private JC is running"
-      : warmConfirmed && warmRemaining > 0
-        ? "Confirmed and ready to start"
-        : draftCount > 0
-          ? "Draft preview ready for confirmation"
-          : checked
-            ? "Ready to generate draft preview"
-            : "Waiting for a checked warm source";
+    const warmCap = Number(lane.cap ?? 10);
+    const warmOriginal = Number(lane.ready_original_count ?? lane.original_count ?? draftCount ?? 0);
+    const warmState = String(lane.state || "No queue");
+    const warmStateHeadline = warmState === "Partial"
+      ? "Warm send partially complete"
+      : warmState === "Blocked"
+        ? "Warm send blocked · no eligible rows"
+        : `Warm Private JC · ${warmState}`;
+    const warmTimeline = Array.isArray(lane.timeline) ? lane.timeline : [];
+    const warmStartAction = warmRunning ? "stop_warm_private_jc" : "start_warm_private_jc";
+    const warmStartLabel = warmRunning
+      ? "Stop Warm Private JC"
+      : warmState === "Complete"
+        ? "Warm Private JC Complete"
+        : warmRemaining > 0 && warmConfirmed
+          ? warmSent > 0 ? "Resume Warm Private JC" : "Start Warm Private JC"
+          : "No Warm Queue";
+    const warmStartDisabled = !warmRunning && (!warmConfirmed || warmRemaining <= 0);
     if (els.leadsControlCheckResult) {
       setNodeHtml(
         els.leadsControlCheckResult,
@@ -4457,20 +4472,37 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             <div class="leads-action-slot warm-action-stack">
               <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>
               <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Private JC Confirmed" : "Confirm Warm Private JC"}</button>
-              <button class="btn btn-primary" type="button" data-leads-next-action="start_warm_private_jc" ${!warmConfirmed || warmRemaining <= 0 || warmRunning ? "disabled" : ""}>${warmRunning ? "Warm Private JC Running" : warmConfirmed && warmRemaining <= 0 ? "No Warm Leads Remaining" : "Start Warm Private JC"}</button>
+              <button class="btn ${warmRunning ? "btn-danger" : "btn-primary"}" type="button" data-leads-next-action="${escapeHtml(warmStartAction)}" ${warmStartDisabled ? "disabled" : ""}>${escapeHtml(warmStartLabel)}</button>
             </div>
+            ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
             <section class="warm-private-lane-group">
               <div class="warm-panel-heading">
                 <p class="eyebrow">Warm Private JC Send Status</p>
                 <span class="mini-pill">Live lane</span>
               </div>
               <div class="current-run-metrics warm-lane-metrics">
-                <div><span>Ready</span><strong>${draftCount.toLocaleString()}</strong></div>
+                <div><span>Ready / Original</span><strong>${warmOriginal.toLocaleString()}</strong></div>
                 <div><span>Confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
                 <div><span>Running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
                 <div><span>Sent</span><strong>${warmSent.toLocaleString()}</strong></div>
                 <div><span>Remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
                 <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
+              </div>
+              <div class="warm-live-details">
+                <span><strong>Last sent</strong>${lane.last_sent_email ? `${escapeHtml(lane.last_sent_email)} · ${escapeHtml(lane.last_sent_timestamp || "")}` : "None"}</span>
+                <span><strong>Next queued</strong>${escapeHtml(lane.next_queued_email || "None")}</span>
+              </div>
+            </section>
+            <section class="warm-run-timeline">
+              <div class="warm-panel-heading"><p class="eyebrow">Warm run timeline</p><span class="mini-pill">Live files</span></div>
+              <div class="warm-timeline-list">
+                ${warmTimeline.length ? warmTimeline.map((event) => `
+                  <div class="warm-timeline-event">
+                    <strong>${escapeHtml(event.type || "EVENT")}</strong>
+                    <span>${escapeHtml(event.email || event.reason || "Warm worker event")}</span>
+                    <time>${escapeHtml(event.timestamp || "")}</time>
+                  </div>
+                `).join("") : `<span class="muted">No warm run events yet.</span>`}
               </div>
             </section>
           </section>
@@ -6135,16 +6167,10 @@ function warmDraftPreviewCount(snapshot = lastSnapshot) {
 }
 
 function warmSenderDisplayState(profile, snapshot = lastSnapshot) {
-  const lane = snapshot?.warm_private_jc_lane || {};
-  const pending = profilePendingCount(profile);
-  const sent = Number(profileRunSentDisplay(profile) || 0);
-  if (isProfileActive(profile)) return { label: "Running", tone: "good" };
-  if (Boolean(lane.confirmed) && pending > 0) return { label: "Ready", tone: "good" };
-  if (Boolean(lane.confirmed) && pending <= 0 && sent > 0) return { label: "Complete", tone: "good" };
-  if (!Boolean(lane.confirmed) && (pending > 0 || warmDraftPreviewCount(snapshot) > 0)) {
-    return { label: "Not confirmed", tone: "warn" };
-  }
-  return { label: "No queue", tone: "neutral" };
+  const lane = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
+  const label = String(lane.state || "No queue");
+  const tone = label === "Blocked" ? "bad" : ["Running", "Ready", "Complete"].includes(label) ? "good" : label === "Partial" || label === "Not confirmed" ? "warn" : "neutral";
+  return { label, tone };
 }
 
 function senderStatusBadge(profile) {
@@ -6187,15 +6213,21 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     tbody,
     profiles.map((profile) => {
       const warmProfile = profile?.name === "private_jc_warm";
+      const warmStatus = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
       const status = senderStatusBadge(profile);
       const pendingAction = pendingProfileActions.get(profile.name) || "";
-      const stopAvailable = canStopProfile(profile);
+      const stopAvailable = warmProfile ? Boolean(warmStatus.running) : canStopProfile(profile);
       const startAvailable = canStartProfile(profile, snapshot);
-      const pendingCount = profilePendingCount(profile);
-      const warmLane = snapshot?.warm_private_jc_lane || {};
+      const pendingCount = warmProfile
+        ? Number(warmStatus.queued_remaining_count ?? warmStatus.remaining ?? 0)
+        : profilePendingCount(profile);
+      const acceptedCount = warmProfile
+        ? Number(warmStatus.sent_count ?? 0)
+        : Number(profileRunSentDisplay(profile) || 0);
       const warmHasDraftPreview = warmDraftPreviewCount(snapshot) > 0;
       const warmCanOpenLeadOps = warmProfile
-        && ((Boolean(warmLane.confirmed) && pendingCount > 0) || warmHasDraftPreview);
+        && status.label !== "Complete"
+        && (pendingCount > 0 || warmHasDraftPreview || ["Partial", "Blocked", "Ready", "Not confirmed"].includes(status.label));
       const noPendingQueue = !stopAvailable && pendingCount <= 0;
       const action = stopAvailable
         ? "stop"
@@ -6204,7 +6236,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : action === "stop" ? "Stop" : action === "open_lead_ops" ? "Open Lead Ops" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
+        : action === "stop" ? "Stop" : action === "open_lead_ops" ? status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : status.label === "Complete" ? "Complete" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
       const actionDisabled = Boolean(pendingAction)
         || action === "no_queue"
         || (!warmProfile && noPendingQueue)
@@ -6213,7 +6245,9 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const warmMetadata = warmProfile
         ? `<span class="sender-status-profile-meta">Warm Private JC${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
         : "";
-      const lastActivity = warmProfile && !profile.last_timestamp
+      const lastActivity = warmProfile && warmStatus.last_sent_timestamp
+        ? `${warmStatus.last_sent_timestamp}${warmStatus.last_sent_email ? ` · ${truncateMiddle(warmStatus.last_sent_email, 34)}` : ""}`
+        : warmProfile
         ? "No warm sends yet"
         : profile.last_timestamp
         ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
@@ -6221,7 +6255,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       return `
         <tr class="${[
           selectedProfile?.name === profile.name ? "is-selected" : "",
-          isProfileActive(profile) ? "is-live" : "",
+          (warmProfile ? Boolean(warmStatus.running) : isProfileActive(profile)) ? "is-live" : "",
           pendingCount <= 0 ? "is-complete" : "",
           warmProfile ? "is-warm-jc" : "",
         ].filter(Boolean).join(" ")}" data-profile="${escapeHtml(profile.name || "")}">
@@ -6235,7 +6269,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           </td>
           <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
           <td>${pendingCount.toLocaleString()}</td>
-          <td>${Number(profileRunSentDisplay(profile) || 0).toLocaleString()}</td>
+          <td>${acceptedCount.toLocaleString()}</td>
           <td>${Number(profile.awaiting_outcome || 0).toLocaleString()}</td>
           <td class="sender-status-activity" title="${escapeHtml(profile.last_email || profile.last_timestamp || "")}">${escapeHtml(lastActivity)}</td>
           <td>
@@ -8881,6 +8915,7 @@ if (els.leadsCurrentRunPanel) {
     if (action === "generate_warm_preview") void generateWarmDraftPreview();
     if (action === "confirm_warm_private_jc") void confirmWarmPrivateJc();
     if (action === "start_warm_private_jc") void startWarmPrivateJc();
+    if (action === "stop_warm_private_jc") void postAction("/api/stop/private_jc_warm", { profileName: "private_jc_warm", action: "stop" });
     if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();

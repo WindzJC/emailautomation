@@ -1195,7 +1195,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "/api/leads/check-important/warm-confirm",
             "/api/start/private_jc_warm",
             "Warm Private JC Send Status",
-            "<div><span>Ready</span>",
+            "<div><span>Ready / Original</span>",
             "<div><span>Running</span>",
             "<div><span>Cap</span>",
         ]:
@@ -1218,7 +1218,8 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             'warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"',
-            'action === "open_lead_ops" ? "Open Lead Ops"',
+            'action === "open_lead_ops"',
+            'status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
             "private_jc_warm",
             "Warm Private JC",
             "No warm sends yet",
@@ -1230,11 +1231,10 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, render_body)
         for expected in [
             "function warmSenderDisplayState",
-            'label: "Not confirmed"',
-            'label: "Ready"',
-            'label: "Running"',
-            'label: "Complete"',
-            'label: "No queue"',
+            'const label = String(lane.state || "No queue")',
+            'label === "Blocked"',
+            '"Running", "Ready", "Complete"',
+            'label === "Partial" || label === "Not confirmed"',
         ]:
             self.assertIn(expected, source)
         self.assertNotIn("recipients_private_jc_warm.csv", render_body)
@@ -1356,6 +1356,42 @@ class WebDashboardAppTests(unittest.TestCase):
         for state in ["Complete", "Available", "Waiting", "Required"]:
             self.assertIn(state, warm_workflow)
         self.assertNotIn("workflow-banner-inline warm-workflow-banner", source)
+
+    def test_lead_ops_and_senders_share_live_warm_status_counts_and_states(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        lead_start = source.index("function renderLeadsCurrentRunPanel")
+        lead_end = source.index("function renderLeadsWorkflowTaskList", lead_start)
+        lead_body = source[lead_start:lead_end]
+        sender_start = source.index("function renderSenderStatusConsole")
+        sender_end = source.index("async function hydrateWarmSenderLeadStatus", sender_start)
+        sender_body = source[sender_start:sender_end]
+
+        self.assertIn("function currentWarmPrivateJcStatus", source)
+        self.assertIn("status?.warm_private_jc_status", source)
+        self.assertIn("snapshot?.warm_private_jc_status", source)
+        self.assertIn("currentWarmPrivateJcStatus(status, lastSnapshot)", lead_body)
+        self.assertIn("currentWarmPrivateJcStatus(lastLeadsStatus, snapshot)", sender_body)
+        for field in [
+            "queued_remaining_count",
+            "sent_count",
+            "ready_original_count",
+            "last_sent_email",
+            "last_sent_timestamp",
+            "next_queued_email",
+            "last_worker_reason",
+            "timeline",
+        ]:
+            self.assertIn(field, source)
+        for state in ["Partial", "Running", "Complete", "Blocked"]:
+            self.assertIn(state, source)
+        self.assertIn("Resume Warm Private JC", lead_body)
+        self.assertIn("Stop Warm Private JC", lead_body)
+        self.assertIn("Resume in Lead Ops", sender_body)
+        self.assertIn("warm-run-timeline", lead_body)
+        self.assertIn("warm-live-warning", lead_body)
+        self.assertIn("#leads-view.warm-research-mode .warm-run-timeline", styles)
+        self.assertIn("Lead Ops live file status loaded", source)
 
 
 if __name__ == "__main__":

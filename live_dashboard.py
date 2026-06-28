@@ -2527,6 +2527,7 @@ def _load_active_campaign_snapshot_summary() -> dict[str, object]:
 def _combined_leads_status() -> dict[str, object]:
     state = load_state()
     latest_warm_job = _latest_completed_warm_check_job()
+    warm_status = build_warm_private_jc_live_status()
     latest_confirmed_dispatch = _load_latest_confirmed_dispatch_summary()
     active_campaign_snapshot = _load_active_campaign_snapshot_summary()
     status = {
@@ -2541,7 +2542,8 @@ def _combined_leads_status() -> dict[str, object]:
         "active_campaign_snapshot": active_campaign_snapshot,
         "safer_recontact_source_summary": _load_safer_recontact_source_summary(),
         "latest_warm_check": latest_warm_job.get("check", {}) if latest_warm_job else {},
-        "warm_private_jc_lane": warm_private_jc_lane_status(),
+        "warm_private_jc_status": warm_status,
+        "warm_private_jc_lane": warm_status,
     }
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
@@ -2885,8 +2887,137 @@ def _build_automation_status() -> dict[str, object]:
 def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
     snapshot = build_dashboard_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
     snapshot["automation"] = _build_automation_status()
-    snapshot["warm_private_jc_lane"] = warm_private_jc_lane_status()
+    warm_status = build_warm_private_jc_live_status()
+    snapshot["warm_private_jc_status"] = warm_status
+    snapshot["warm_private_jc_lane"] = warm_status
+    for profile in snapshot.get("profiles", []):
+        if str(profile.get("name") or "") != "private_jc_warm":
+            continue
+        profile["pending_count"] = int(warm_status["queued_remaining_count"])
+        profile["pending"] = int(warm_status["queued_remaining_count"])
+        profile["run_sent_display"] = int(warm_status["sent_count"])
+        profile["sent_today"] = int(warm_status["sent_count"])
+        profile["last_email"] = str(warm_status["last_sent_email"])
+        profile["last_timestamp"] = str(warm_status["last_sent_timestamp"])
+        profile["runtime_state"] = "running" if warm_status["running"] else "stopped"
     return snapshot
+
+
+def _read_csv_dict_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    except (OSError, csv.Error):
+        return []
+
+
+def _read_worker_events(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, object]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    payload = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    events.append(payload)
+    except OSError:
+        return []
+    return events
+
+
+def build_warm_private_jc_live_status() -> dict[str, object]:
+    profile = PROFILES.get("private_jc_warm", {})
+    queue_path = settings.SHARDS_DIR / str(profile.get("csv") or "recipients_private_jc_warm.csv")
+    log_path = settings.LOGS_DIR / str(profile.get("log") or "private_jc_warm_log.csv")
+    worker_path = settings.LOGS_DIR / "private_jc_warm_log_worker.jsonl"
+    lane = warm_private_jc_lane_status()
+    queue_rows = _read_csv_dict_rows(queue_path)
+    sent_rows = [
+        row for row in _read_csv_dict_rows(log_path)
+        if str(row.get("Status") or "").strip().upper() == "SENT"
+    ]
+    worker_events = _read_worker_events(worker_path)
+    last_sent = sent_rows[-1] if sent_rows else {}
+    last_worker = worker_events[-1] if worker_events else {}
+    last_worker_event = str(last_worker.get("event_type") or last_worker.get("event") or "").strip()
+    last_worker_reason = str(last_worker.get("reason") or last_worker.get("message") or "").strip()
+    running = "private_jc_warm" in _active_dashboard_profiles()
+    remaining = len(queue_rows)
+    sent_count = len(sent_rows)
+    confirmed = bool(lane.get("confirmed"))
+    blocked = bool(
+        remaining > 0
+        and not running
+        and last_worker_reason == "queue_exhausted_no_eligible_rows"
+    )
+    if running:
+        state = "Running"
+    elif blocked:
+        state = "Blocked"
+    elif sent_count > 0 and remaining == 0:
+        state = "Complete"
+    elif sent_count > 0 and remaining > 0:
+        state = "Partial"
+    elif confirmed and remaining > 0:
+        state = "Ready"
+    elif remaining > 0:
+        state = "Not confirmed"
+    else:
+        state = "No queue"
+
+    timeline: list[dict[str, str]] = []
+    for row in sent_rows:
+        timeline.append({
+            "type": "SENT",
+            "timestamp": str(row.get("TimestampUTC") or row.get("Timestamp") or row.get("timestamp") or ""),
+            "email": str(row.get("Email") or row.get("email") or ""),
+            "reason": "",
+        })
+    for event in worker_events:
+        event_type = str(event.get("event_type") or event.get("event") or "").strip().upper()
+        reason = str(event.get("reason") or event.get("message") or "").strip()
+        if event_type not in {"START", "DONE"} and reason != "queue_exhausted_no_eligible_rows":
+            continue
+        timeline.append({
+            "type": event_type or "DONE",
+            "timestamp": str(event.get("ts_utc") or event.get("timestamp") or event.get("timestamp_utc") or event.get("created_at_utc") or ""),
+            "email": str(event.get("email") or ""),
+            "reason": reason,
+        })
+    timeline.sort(key=lambda item: item.get("timestamp") or "")
+
+    original_count = int(lane.get("confirmed_rows") or 0)
+    return {
+        **lane,
+        "profile": "private_jc_warm",
+        "confirmed": confirmed,
+        "running": running,
+        "blocked": blocked,
+        "state": state,
+        "queue_path": str(queue_path),
+        "log_path": str(log_path),
+        "worker_log_path": str(worker_path),
+        "queued_remaining_count": remaining,
+        "remaining": remaining,
+        "sent_count": sent_count,
+        "cap": int(profile.get("max_total") or 10),
+        "original_count": original_count,
+        "ready_original_count": original_count or sent_count + remaining,
+        "last_sent_email": str(last_sent.get("Email") or last_sent.get("email") or ""),
+        "last_sent_timestamp": str(last_sent.get("TimestampUTC") or last_sent.get("Timestamp") or last_sent.get("timestamp") or ""),
+        "next_queued_email": str(
+            (queue_rows[0].get("Email") or queue_rows[0].get("AuthorEmail") or "") if queue_rows else ""
+        ),
+        "last_worker_event": last_worker_event,
+        "last_worker_reason": last_worker_reason,
+        "timeline": timeline[-10:],
+    }
 
 
 def _active_dashboard_profiles() -> set[str]:
