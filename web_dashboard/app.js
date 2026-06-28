@@ -3517,9 +3517,12 @@ function currentWarmResearchReport(status = lastLeadsStatus) {
 
 function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const leadsView = document.getElementById("leads-view");
+  const appShell = leadsView?.closest(".app-shell");
   const controlBar = document.querySelector("#leads-view .leads-control-bar");
   const commandLeft = document.querySelector("#leads-view .leads-command-column-left");
+  const commandCenter = document.querySelector("#leads-view .leads-command-center");
   leadsView?.classList.toggle("warm-research-mode", active);
+  appShell?.classList.toggle("warm-research-shell", active);
   if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Check Warm Research" : "Prepare Dispatch");
   if (els.leadsPipelineMeta) {
     setNodeText(
@@ -3536,6 +3539,11 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   } else if (!active && commandLeft && els.leadsCurrentRunPanel?.parentElement !== commandLeft) {
     commandLeft.insertBefore(els.leadsCurrentRunPanel, campaignPanel || commandLeft.firstChild);
   }
+  if (active && commandCenter && els.leadsWorkflowTaskList && els.leadsWorkflowStatusBanner) {
+    commandCenter.insertBefore(els.leadsWorkflowTaskList, els.leadsWorkflowStatusBanner);
+  } else if (!active && commandCenter && els.leadsWorkflowTaskList && els.leadsWorkflowStatusBanner) {
+    commandCenter.insertBefore(els.leadsWorkflowStatusBanner, els.leadsWorkflowTaskList);
+  }
   if (els.leadsDispatchCommandColumn) els.leadsDispatchCommandColumn.hidden = active;
   const advancedDiagnostics = document.querySelector("#leads-view .leads-advanced-diagnostics");
   if (advancedDiagnostics) advancedDiagnostics.hidden = active;
@@ -3548,7 +3556,7 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
 
 function warmResearchMetricMarkup(report = {}) {
   return renderOperatorMetricStrip([
-    { label: "Warm email ready", value: Number(report.warm_email_ready_rows || 0), tone: "good" },
+    { label: "Warm Email Ready", value: Number(report.warm_email_ready_rows || 0), tone: "good" },
     { label: "Contact forms", value: Number(report.warm_contact_form_rows || 0) },
     { label: "Rejected", value: Number(report.warm_rejected_rows || 0), tone: "warn" },
     { label: "Already contacted", value: Number(report.already_contacted_rows || 0), tone: Number(report.already_contacted_rows || 0) ? "warn" : "" },
@@ -4399,6 +4407,16 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     const warmRemaining = Number(lane.remaining || warmProfile.pending_count || 0);
     const warmSent = Number(profileRunSentDisplay(warmProfile) || 0);
     const draftCount = Number(report.warm_email_preview_rows || 0);
+    const warmCap = Number(lane.cap || warmProfile.max_total || warmProfile.max_messages_per_run || 10);
+    const warmStateHeadline = warmRunning
+      ? "Warm Private JC is running"
+      : warmConfirmed && warmRemaining > 0
+        ? "Confirmed and ready to start"
+        : draftCount > 0
+          ? "Draft preview ready for confirmation"
+          : checked
+            ? "Ready to generate draft preview"
+            : "Waiting for a checked warm source";
     if (els.leadsControlCheckResult) {
       setNodeHtml(
         els.leadsControlCheckResult,
@@ -4420,10 +4438,13 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
           <div class="current-run-head">
             <div>
               <p class="eyebrow">Warm Private JC</p>
-              <h3>${checked ? "Warm upload checked" : "Warm upload not checked"}</h3>
-              <p class="current-run-subtitle">${checked ? "Generate drafts, then explicitly confirm the separate Warm Private JC lane." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
+              <h3>${escapeHtml(warmStateHeadline)}</h3>
+              <p class="current-run-subtitle">A separate, explicitly confirmed lane that never joins Start All.</p>
             </div>
-            <span class="mini-pill">Separate warm lane</span>
+            <div class="warm-command-badges">
+              <span class="mini-pill">Explicit confirmation</span>
+              ${warmCap > 0 ? `<span class="mini-pill">Cap ${warmCap.toLocaleString()}</span>` : ""}
+            </div>
           </div>
           <section class="warm-private-action-panel">
             <div class="warm-panel-heading">
@@ -4431,12 +4452,11 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 <p class="eyebrow">Warm actions</p>
                 <strong>Preview, confirm, then start</strong>
               </div>
-              <span class="mini-pill">Explicit confirmation</span>
             </div>
             <div class="leads-action-slot warm-action-stack">
-              ${checked ? `<button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>` : ""}
-              ${draftCount > 0 && !warmConfirmed ? `<button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc">Confirm Warm Private JC</button>` : ""}
-              ${warmConfirmed && warmRemaining > 0 ? `<button class="btn btn-primary" type="button" data-leads-next-action="start_warm_private_jc" ${warmRunning ? "disabled" : ""}>${warmRunning ? "Warm Private JC running" : "Start Warm Private JC"}</button>` : ""}
+              <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>
+              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Private JC Confirmed" : "Confirm Warm Private JC"}</button>
+              <button class="btn btn-primary" type="button" data-leads-next-action="start_warm_private_jc" ${!warmConfirmed || warmRemaining <= 0 || warmRunning ? "disabled" : ""}>${warmRunning ? "Warm Private JC Running" : warmConfirmed && warmRemaining <= 0 ? "No Warm Leads Remaining" : "Start Warm Private JC"}</button>
             </div>
             <section class="warm-private-lane-group">
               <div class="warm-panel-heading">
@@ -4444,32 +4464,15 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 <span class="mini-pill">Live lane</span>
               </div>
               <div class="current-run-metrics warm-lane-metrics">
-                <div><span>Warm Private JC ready</span><strong>${draftCount.toLocaleString()}</strong></div>
-                <div><span>Warm Private JC confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
-                <div><span>Warm Private JC running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
-                <div><span>Warm Private JC sent</span><strong>${warmSent.toLocaleString()}</strong></div>
-                <div><span>Warm Private JC remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
+                <div><span>Ready</span><strong>${draftCount.toLocaleString()}</strong></div>
+                <div><span>Confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
+                <div><span>Running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
+                <div><span>Sent</span><strong>${warmSent.toLocaleString()}</strong></div>
+                <div><span>Remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
+                <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
               </div>
             </section>
           </section>
-          <div class="warm-research-dashboard-grid">
-            <section class="warm-research-output-group">
-              <p class="eyebrow">Warm Research Outputs</p>
-              ${warmResearchMetricMarkup(report)}
-              ${Number(report.warm_email_preview_rows || 0) > 0
-                ? `<div class="current-run-summary-line"><span>Warm draft preview ready: ${Number(report.warm_email_preview_rows || 0).toLocaleString()} row(s).</span><span class="path-ellipsis" title="${escapeHtml(report.warm_email_preview_label || "")}">${escapeHtml(report.warm_email_preview_label || "warm_email_preview.csv")}</span></div>`
-                : ""}
-            </section>
-          </div>
-          <aside class="warm-safety-card">
-            <p class="eyebrow">Safety rules</p>
-            <div class="warm-safety-rules">
-              <span>Cold dispatch disabled for Warm Research.</span>
-              <span>Explicit confirmation required.</span>
-              <span>Start All excludes warm.</span>
-              <span>Warm confirmation stays separate.</span>
-            </div>
-          </aside>
         </article>
       `,
     );
@@ -4560,7 +4563,7 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     const tasks = [
       {
         step: "Upload Warm Research",
-        status: running ? "Running" : checked ? "Complete" : "Needed",
+        status: running ? "Waiting" : checked ? "Complete" : "Available",
         detail: checked ? `${Number(report.input_rows || 0).toLocaleString()} rows checked` : "Choose a CSV/XLSX file and click Upload & Check.",
         tone: running ? "warn" : checked ? "good" : "neutral",
       },
@@ -4582,7 +4585,7 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
       },
       {
         step: "Warm Private JC",
-        status: status?.warm_private_jc_lane?.confirmed ? "Confirmed" : "Explicit confirmation required",
+        status: status?.warm_private_jc_lane?.confirmed ? "Complete" : Number(report.warm_email_preview_rows || 0) > 0 ? "Required" : "Waiting",
         detail: "Uses the separate Warm Private JC queue and never routes through SendGrid.",
         tone: status?.warm_private_jc_lane?.confirmed ? "good" : "neutral",
       },
@@ -4683,17 +4686,29 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   if (!els.leadsWorkflowStatusBanner) return;
   if (warmResearchUploadMode()) {
     const report = currentWarmResearchReport(status);
-    const checked = Boolean(report?.generated_at_utc);
     setNodeHtml(
       els.leadsWorkflowStatusBanner,
       `
-        <div class="workflow-banner-inline warm-workflow-banner">
-          <span class="eyebrow">Warm Research</span>
-          <strong>${checked ? "Warm upload checked. Generate drafts, then explicitly confirm Warm Private JC." : "Upload Warm Research to validate and split it before any confirmation."}</strong>
-          <span class="workflow-banner-chip">Email ready: ${Number(report.warm_email_ready_rows || 0).toLocaleString()}</span>
-          <span class="workflow-banner-chip">Contact forms: ${Number(report.warm_contact_form_rows || 0).toLocaleString()}</span>
-          <span class="workflow-banner-chip">Rejected: ${Number(report.warm_rejected_rows || 0).toLocaleString()}</span>
-          <span class="workflow-banner-chip">Drafts: ${Number(report.warm_email_preview_rows || 0).toLocaleString()}</span>
+        <div class="warm-post-command-grid">
+          <section class="warm-research-output-group">
+            <div class="warm-panel-heading">
+              <div>
+                <p class="eyebrow">Research outputs</p>
+                <strong>Warm Research Outputs</strong>
+              </div>
+              ${Number(report.warm_email_preview_rows || 0) > 0 ? `<span class="mini-pill">Draft preview ready</span>` : ""}
+            </div>
+            ${warmResearchMetricMarkup(report)}
+          </section>
+          <aside class="warm-safety-card">
+            <p class="eyebrow">Safety Rules</p>
+            <div class="warm-safety-rules">
+              <span>Cold dispatch disabled for Warm Research</span>
+              <span>Explicit confirmation required</span>
+              <span>Start All excludes warm</span>
+              <span>Warm confirmation stays separate</span>
+            </div>
+          </aside>
         </div>
       `,
     );

@@ -618,7 +618,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm Research uses its own draft, confirmation, and Private JC lane.",
             "Warm Research Outputs",
             "Explicit confirmation required",
-            "Generate drafts, then explicitly confirm Warm Private JC.",
+            "A separate, explicitly confirmed lane that never joins Start All.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
             "Generate Warm Draft Preview",
@@ -1194,8 +1194,10 @@ class WebDashboardAppTests(unittest.TestCase):
             "Start Warm Private JC",
             "/api/leads/check-important/warm-confirm",
             "/api/start/private_jc_warm",
-            "Warm Private JC ready",
-            "Warm Private JC running",
+            "Warm Private JC Send Status",
+            "<div><span>Ready</span>",
+            "<div><span>Running</span>",
+            "<div><span>Cap</span>",
         ]:
             self.assertIn(expected, source)
 
@@ -1237,11 +1239,12 @@ class WebDashboardAppTests(unittest.TestCase):
             "warm-research-output-group",
             "warm-private-lane-group",
             "warm-safety-card",
-            "Safety rules",
-            "Cold dispatch disabled for Warm Research.",
-            "Explicit confirmation required.",
-            "Warm confirmation stays separate.",
-            "Start All excludes warm.",
+            "warm-post-command-grid",
+            "Safety Rules",
+            "Cold dispatch disabled for Warm Research",
+            "Explicit confirmation required",
+            "Warm confirmation stays separate",
+            "Start All excludes warm",
         ]:
             self.assertIn(expected, source)
 
@@ -1251,11 +1254,34 @@ class WebDashboardAppTests(unittest.TestCase):
             "#leads-view.warm-research-mode .warm-action-stack .btn",
             "#leads-view.warm-research-mode .warm-research-output-group .operator-metric",
             "#leads-view.warm-research-mode .warm-safety-card",
+            ".app-shell.warm-research-shell",
+            "grid-template-columns: repeat(4, minmax(0, 1fr))",
         ]:
             self.assertIn(expected, styles)
 
         self.assertIn("controlBar.appendChild(els.leadsCurrentRunPanel)", source)
         self.assertIn("commandLeft.insertBefore(els.leadsCurrentRunPanel", source)
+        self.assertIn("commandCenter.insertBefore(els.leadsWorkflowTaskList, els.leadsWorkflowStatusBanner)", source)
+        self.assertEqual(source.count('<p class="eyebrow">Warm Research Outputs</p>'), 0)
+        self.assertEqual(source.count("Warm Private JC Send Status"), 1)
+        self.assertEqual(source.count('<p class="eyebrow">Safety Rules</p>'), 1)
+
+    def test_warm_research_uses_one_compact_four_step_workflow(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        warm_start = source.index("if (warmResearchUploadMode()) {", source.index("function renderLeadsWorkflowTaskList"))
+        warm_end = source.index("const state = currentRunWorkflowState", warm_start)
+        warm_workflow = source[warm_start:warm_end]
+
+        for step in [
+            "Upload Warm Research",
+            "Review Split Outputs",
+            "Generate Draft Preview",
+            "Warm Private JC",
+        ]:
+            self.assertEqual(warm_workflow.count(f'step: "{step}"'), 1)
+        for state in ["Complete", "Available", "Waiting", "Required"]:
+            self.assertIn(state, warm_workflow)
+        self.assertNotIn("workflow-banner-inline warm-workflow-banner", source)
 
 
 if __name__ == "__main__":
