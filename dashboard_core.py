@@ -247,7 +247,7 @@ def _managed_path(base_dir: Path, value: object) -> Path:
 def _profile_csv_path(cfg: Dict[str, object]) -> Path:
     path = _managed_path(SHARDS_DIR, cfg.get("csv") or "")
     name = Path(str(cfg.get("csv") or "")).name
-    if name:
+    if name and not bool(cfg.get("pre_rendered_message")):
         settings.ensure_managed_shard_file(path, name)
     return path
 
@@ -486,6 +486,8 @@ def iso_mtime(path: Path) -> str:
 
 
 def profile_expected_pitch_mode(profile_name: str) -> str:
+    if profile_name == "private_jc_warm":
+        return "astra_warm"
     return "astra_visual" if profile_name == "private_jc" else "consignment"
 
 
@@ -493,6 +495,8 @@ def profile_actual_pitch_mode(profile_name: str) -> str:
     pitch_key = str(PROFILES.get(profile_name, {}).get("pitch") or "").strip()
     if pitch_key == "pitch_jc":
         return "astra_visual"
+    if pitch_key == "pitch_warm":
+        return "astra_warm"
     if pitch_key in {"pitch1", "pitch2", "pitch3", "pitch4", "pitch5"}:
         return "consignment"
     return pitch_key or "unknown"
@@ -549,6 +553,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     csv_path = _profile_csv_path(cfg)
     fieldnames, row_count, rows = _csv_row_count_with_fieldnames(csv_path)
     field_by_lower = {field.lower(): field for field in fieldnames}
+    pre_rendered_message = bool(cfg.get("pre_rendered_message"))
     book_title_field = field_by_lower.get("booktitle", "")
     book_title_present = bool(book_title_field)
     rows_with_book_title = sum(1 for row in rows if book_title_field and str(row.get(book_title_field) or "").strip())
@@ -570,7 +575,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     preview_path = message_preview_path_for_profile(profile_name)
     validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
     _preview_fields, preview_row_count, _preview_rows = _csv_row_count_with_fieldnames(preview_path)
-    preview_exists = preview_path.exists()
+    preview_exists = preview_path.exists() or (pre_rendered_message and row_count > 0)
     validation_artifacts = [path for path in (validated_path, failed_path, summary_path) if path.exists()]
     validation_time_utc = max((iso_mtime(path) for path in validation_artifacts), default="")
     preview_time_utc = iso_mtime(preview_path) if preview_exists else ""
@@ -583,12 +588,25 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     expected_mode = profile_expected_pitch_mode(profile_name)
     actual_mode = profile_actual_pitch_mode(profile_name)
     reasons: List[str] = []
-    validation_status = "NOT RUN"
+    validation_status = "PASS" if pre_rendered_message and row_count > 0 else "NOT RUN"
     if preview_exists and failed_count is not None:
         validation_status = "FAIL" if failed_count > 0 else "PASS"
 
     status = "PASS"
-    if not book_title_present:
+    if pre_rendered_message:
+        required = {"authoremail", "emailsubject", "emailbody", "contactpath"}
+        missing = sorted(required - set(field_by_lower))
+        if missing:
+            status = "FAIL"
+            reasons.append("Warm queue is missing previewed message columns: " + ", ".join(missing) + ".")
+        for row in rows:
+            subject_field = field_by_lower.get("emailsubject", "")
+            body_field = field_by_lower.get("emailbody", "")
+            if not str(row.get(subject_field) or "").strip() or not str(row.get(body_field) or "").strip():
+                status = "FAIL"
+                reasons.append("Warm queue contains a row without previewed subject/body.")
+                break
+    elif not book_title_present:
         status = "FAIL"
         reasons.append("BookTitle column is missing.")
     if invalid_count > 0:
@@ -621,6 +639,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "recipient_file": csv_path.name,
         "recipient_row_count": row_count,
         "book_title_column_present": book_title_present,
+        "pre_rendered_message": pre_rendered_message,
         "rows_with_book_title": rows_with_book_title,
         "fallback_row_count": fallback_rows,
         "invalid_email_count": invalid_count,
@@ -3940,6 +3959,8 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
             run_sent = int(profile.get("run_sent", 0) or 0)
             # Default display value is the canonical run_sent.
             display_val = run_sent
+            if str(profile.get("name") or "") == "private_jc_warm":
+                display_val = max(display_val, int(profile.get("sent_today", 0) or 0))
             # When webhook intake is stale, prefer the attempts-derived accepted_recent
             # if it is larger than the anchored run_sent. This is strictly a display
             # fallback and does not mutate the canonical `run_sent` field.

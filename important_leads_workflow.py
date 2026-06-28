@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,9 @@ from recipient_file_lock import lock_files
 from important_leads_verify import important_leads_triage_path_state, important_leads_verify_path_state
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
+    PITCH_WARM_BODY,
+    PITCH_WARM_SUBJECT,
+    PITCH_WARM_SUBJECT_FALLBACK,
     PROFILES,
     ROLE_LOCALPART_BLOCKLIST,
     is_recontact_cold_campaign,
@@ -34,32 +38,6 @@ from send_shard import (
     load_done_statuses_from_logs,
     normalize_campaign_type,
 )
-
-# ===== WARM NEED-SIGNAL PREVIEW COPY =====
-# Preview-only. Do not move into send_shard.py unless warm sending is intentionally enabled.
-PITCH_WARM_SUBJECT = "Quick idea for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "Quick idea for your book launch"
-
-PITCH_WARM_BODY = """Hi {FirstName},
-
-I came across {BookTitleOrProject} and noticed you’ve been building momentum around the launch, including: {NeedSignal}
-
-I’m reaching out because if this is still active, Astra Productions could help strengthen how the book is presented online before more readers, backers, or media opportunities see it.
-
-Based on what I saw, the strongest direction would be {RecommendedService} — a cleaner, more cinematic presentation that makes the project feel polished and easier to understand at first glance.
-
-A strong creative direction here would be:
-{OutreachAngle}
-
-If this is already handled, no worries. But if you’re still looking at ways to improve the launch presentation, I’d be happy to send over a simple direction for how this could look.
-
-Windelle JC
-Creative Director, Astra Productions
-
-Examples: astraproductions.co
-
-P.S. If you’d rather not hear from me again, just reply unsub.
-"""
 
 from sendgrid_hygiene import load_active_suppressed_emails, norm_email
 from tools.rebuild_recipient_queues import SENDGRID_REQUIRED_HEADERS, build_queue_safety_report, default_sendgrid_log_paths, write_active_campaign_manifest
@@ -212,6 +190,15 @@ WARM_EMAIL_PREVIEW_HEADERS = (
     "ContactPath",
     "ResearchStatus",
 )
+WARM_PRIVATE_JC_QUEUE_HEADERS = (
+    "Email",
+    "FirstName",
+    *WARM_EMAIL_PREVIEW_HEADERS,
+    "campaign_type",
+    "campaign_id",
+)
+WARM_PRIVATE_JC_QUEUE_PATH = settings.SHARDS_DIR / "recipients_private_jc_warm.csv"
+WARM_PRIVATE_JC_CONFIRMATION_PATH = settings.STATE_DIR / "warm_private_jc_confirmation.json"
 
 COMMON_DOMAIN_FIXES = {
     "gamil.com": "gmail.com",
@@ -1011,8 +998,7 @@ def check_warm_research_leads(
 ) -> Dict[str, object]:
     """Validate a warm-research upload without feeding cold dispatch state."""
     rows, blank_rows = _warm_research_rows(input_path)
-    _jc_queue, _sendgrid_queues, jc_log, sendgrid_logs = _dispatch_profile_paths()
-    authoritative_logs = list(log_paths) if log_paths is not None else [jc_log, *sendgrid_logs]
+    authoritative_logs = list(log_paths) if log_paths is not None else _warm_authoritative_log_paths()
     already_contacted = _sent_email_set(authoritative_logs)
     log_blocked = load_done_statuses_from_logs(
         authoritative_logs,
@@ -1139,7 +1125,7 @@ def check_warm_research_leads(
         "suppression_summary": suppression_summary,
         "output_fieldnames": list(WARM_EMAIL_READY_HEADERS),
         "output_preview_rows": [],
-        "message": "Warm upload checked. Sending not enabled for warm leads yet.",
+        "message": "Warm upload checked. Generate Warm Draft Preview before explicit Warm Private JC confirmation.",
         "dispatch_enabled": False,
     }
 
@@ -1210,7 +1196,216 @@ def generate_warm_email_preview(
         "output_label": _display_path_label(preview_path),
         "warm_email_preview_rows": len(preview_rows),
         "dispatch_enabled": False,
-        "message": "Warm draft preview generated. Sending is not enabled for warm leads yet.",
+        "warm_confirmation_enabled": True,
+        "message": "Warm draft preview generated. Explicit Warm Private JC confirmation is required before queue creation.",
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _warm_authoritative_log_paths() -> List[Path]:
+    paths: List[Path] = []
+    for cfg in PROFILES.values():
+        if str(cfg.get("provider") or "").strip().lower() not in {"private", "sendgrid"}:
+            continue
+        for key in ("log", "domain_log"):
+            value = str(cfg.get(key) or "").strip()
+            if not value:
+                continue
+            path = settings.log_path(value)
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _warm_cold_queue_paths() -> List[Path]:
+    paths: List[Path] = []
+    for name, cfg in PROFILES.items():
+        if name == "private_jc_warm":
+            continue
+        value = str(cfg.get("csv") or "").strip()
+        if not value or not value.startswith("recipients_"):
+            continue
+        path = settings.shard_path(value)
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def warm_private_jc_lane_status(
+    *,
+    queue_path: Path = WARM_PRIVATE_JC_QUEUE_PATH,
+    confirmation_path: Path = WARM_PRIVATE_JC_CONFIRMATION_PATH,
+) -> Dict[str, object]:
+    manifest: Dict[str, object] = {}
+    if confirmation_path.exists():
+        try:
+            loaded = json.loads(confirmation_path.read_text(encoding="utf-8"))
+            manifest = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            manifest = {}
+    _headers, rows = _read_csv_rows(queue_path)
+    queue_fingerprint = _file_sha256(queue_path) if queue_path.exists() else ""
+    source_value = str(manifest.get("source_path") or "").strip()
+    source_path = Path(source_value) if source_value else Path("__missing_warm_preview__")
+    source_matches = source_path.is_file() and _file_sha256(source_path) == str(manifest.get("source_sha256") or "")
+    _source_headers, source_rows = _read_csv_rows(source_path) if source_matches else ([], [])
+    source_emails = {norm_email(row.get("AuthorEmail", "")) for row in source_rows if norm_email(row.get("AuthorEmail", ""))}
+    queue_emails = {norm_email(row.get("Email", "") or row.get("AuthorEmail", "")) for row in rows if norm_email(row.get("Email", "") or row.get("AuthorEmail", ""))}
+    no_queue_duplicates = len(queue_emails) == len(rows)
+    queue_is_safe_subset = queue_emails <= source_emails and no_queue_duplicates
+    original_count = int(manifest.get("row_count") or 0)
+    original_queue_matches = len(rows) != original_count or queue_fingerprint == str(manifest.get("queue_sha256") or "")
+    confirmed = bool(manifest.get("confirmed")) and source_matches and queue_is_safe_subset and original_queue_matches
+    return {
+        "profile": "private_jc_warm",
+        "queue_path": str(queue_path),
+        "confirmation_path": str(confirmation_path),
+        "confirmed": confirmed,
+        "ready": confirmed and bool(rows),
+        "remaining": len(rows),
+        "confirmed_rows": original_count,
+        "confirmation_id": str(manifest.get("confirmation_id") or ""),
+        "source_path": str(manifest.get("source_path") or ""),
+        "source_sha256": str(manifest.get("source_sha256") or ""),
+        "queue_sha256": queue_fingerprint,
+        "message": (
+            "Warm Private JC confirmed and ready."
+            if confirmed and rows
+            else "Warm Private JC complete."
+            if confirmed and not rows
+            else "Generate and explicitly confirm a warm draft preview before starting."
+        ),
+    }
+
+
+def confirm_warm_private_jc_preview(
+    *,
+    preview_path: Path,
+    queue_path: Path = WARM_PRIVATE_JC_QUEUE_PATH,
+    confirmation_path: Path = WARM_PRIVATE_JC_CONFIRMATION_PATH,
+    log_paths: Sequence[Path] | None = None,
+    cold_queue_paths: Sequence[Path] | None = None,
+    sendgrid_suppressions_path: Path = settings.SENDGRID_SUPPRESSIONS_PATH,
+    suppressed_path: Path = settings.SUPPRESSED_PATH,
+    unsubscribed_path: Path = settings.UNSUBSCRIBED_PATH,
+    bad_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
+    lead_ledger_db_path: Path | None = None,
+) -> Dict[str, object]:
+    preview_path = Path(preview_path)
+    if preview_path.name != EXPECTED_WARM_PREVIEW_FILENAME:
+        raise ValueError(f"Warm confirmation source must be {EXPECTED_WARM_PREVIEW_FILENAME}.")
+    fieldnames, rows = _read_csv_rows(preview_path)
+    missing = sorted(set(WARM_EMAIL_PREVIEW_HEADERS) - set(fieldnames))
+    if missing:
+        raise ValueError("Warm preview is missing required columns: " + ", ".join(missing))
+    if not rows:
+        raise ValueError("Warm preview has no email-ready rows to confirm.")
+    if queue_path.exists():
+        _queue_headers, existing_warm_rows = _read_csv_rows(queue_path)
+        if existing_warm_rows:
+            raise RuntimeError("Warm Private JC queue already contains rows. Finish it before confirming another warm preview.")
+
+    authoritative_logs = list(log_paths) if log_paths is not None else _warm_authoritative_log_paths()
+    already_sent = _sent_email_set(authoritative_logs)
+    blocked, _suppression_summary = _blocked_email_set(
+        sendgrid_suppressions_path,
+        suppressed_path,
+        unsubscribed_path,
+    )
+    blocked |= load_done_statuses_from_logs(
+        authoritative_logs,
+        {"INVALID", "BOUNCE", "BOUNCED", "DROPPED", "SPAMREPORT", "UNSUBSCRIBE", "UNSUBSCRIBED", "BLOCKED"},
+    )
+    blocked |= load_bad_sendgrid_event_emails(bad_events_path)
+    cold_queued: set[str] = set()
+    for path in list(cold_queue_paths) if cold_queue_paths is not None else _warm_cold_queue_paths():
+        _headers, queued_rows = _read_queue_rows(Path(path))
+        cold_queued |= {norm_email(row.get("Email", "")) for row in queued_rows if norm_email(row.get("Email", ""))}
+
+    source_emails = {norm_email(row.get("AuthorEmail", "")) for row in rows if norm_email(row.get("AuthorEmail", ""))}
+    ledger_contacted: set[str] = set()
+    ledger_conn = connect_lead_ledger(_lead_ledger_db_path(lead_ledger_db_path))
+    try:
+        lead_id_by_email = {email: deterministic_lead_id(email) for email in source_emails}
+        contacted_ids, _ignored_ids = _dispatch_history_contact_sets(ledger_conn, set(lead_id_by_email.values()))
+        ledger_contacted = {email for email, lead_id in lead_id_by_email.items() if lead_id in contacted_ids}
+    finally:
+        ledger_conn.close()
+
+    seen: set[str] = set()
+    queue_rows: List[Dict[str, str]] = []
+    violations: Counter[str] = Counter()
+    confirmation_id = f"warm_private_jc_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    for row in rows:
+        email = norm_email(row.get("AuthorEmail", ""))
+        contact_emails = {norm_email(value) for value in EMAIL_IN_TEXT_RE.findall(_strip_cell(row.get("ContactPath", "")))}
+        if not email or not EMAIL_RE.match(email):
+            violations["invalid_email"] += 1
+            continue
+        if email in seen:
+            violations["duplicate_email"] += 1
+            continue
+        seen.add(email)
+        if email not in contact_emails:
+            violations["not_direct_email"] += 1
+            continue
+        if not _strip_cell(row.get("EmailSubject", "")) or not _strip_cell(row.get("EmailBody", "")):
+            violations["missing_preview_copy"] += 1
+            continue
+        if re.search(r"{[A-Za-z][A-Za-z0-9_]*}", _strip_cell(row.get("EmailSubject", "")) + _strip_cell(row.get("EmailBody", ""))):
+            violations["unresolved_preview_placeholder"] += 1
+            continue
+        if email in blocked:
+            violations["suppressed_or_bad_outcome"] += 1
+            continue
+        if email in already_sent or email in ledger_contacted:
+            violations["already_contacted"] += 1
+            continue
+        if email in cold_queued:
+            violations["already_queued_cold"] += 1
+            continue
+        queue_rows.append({
+            "Email": email,
+            "FirstName": _trimmed_first_name(row.get("AuthorName", "")) or "there",
+            **{header: _strip_cell(row.get(header, "")) for header in WARM_EMAIL_PREVIEW_HEADERS},
+            "campaign_type": "warm_private_jc",
+            "campaign_id": confirmation_id,
+        })
+
+    if violations:
+        details = ", ".join(f"{key}={value}" for key, value in sorted(violations.items()))
+        raise RuntimeError(f"Warm preview is no longer safe to confirm ({details}). Regenerate the Warm Research check and draft preview.")
+
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    confirmation_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_files([queue_path]):
+        _write_csv_atomic(queue_path, WARM_PRIVATE_JC_QUEUE_HEADERS, queue_rows)
+        manifest = {
+            "schema_version": 1,
+            "confirmation_id": confirmation_id,
+            "confirmed": True,
+            "confirmed_at_utc": iso_utc(),
+            "profile": "private_jc_warm",
+            "source_path": str(preview_path),
+            "source_sha256": _file_sha256(preview_path),
+            "queue_path": str(queue_path),
+            "queue_sha256": _file_sha256(queue_path),
+            "row_count": len(queue_rows),
+        }
+        write_json_atomic(confirmation_path, manifest)
+    return {
+        **manifest,
+        "ok": True,
+        "warm_private_jc_confirmed": True,
+        "warm_private_jc_remaining": len(queue_rows),
+        "message": f"Warm Private JC confirmed with {len(queue_rows)} previewed recipient(s).",
     }
 
 
@@ -2702,15 +2897,33 @@ def _build_dispatch_plan(
             queue_headers_by_path[path] = headers
             queue_rows_by_path[path] = rows
 
-        authoritative_jc_logs, ignored_jc_logs = _authoritative_history_paths([jc_log])
+        warm_cfg = PROFILES.get("private_jc_warm", {})
+        warm_log_value = str(warm_cfg.get("log") or "").strip()
+        private_history_paths = [jc_log]
+        if warm_log_value:
+            private_history_paths.append(settings.log_path(warm_log_value))
+        authoritative_jc_logs, ignored_jc_logs = _authoritative_history_paths(private_history_paths)
         authoritative_sg_logs, ignored_sg_logs = _authoritative_history_paths(sg_logs)
         authoritative_log_paths = [*authoritative_jc_logs, *authoritative_sg_logs]
         ignored_history_paths = [*ignored_jc_logs, *ignored_sg_logs]
         jc_sent = _sent_email_set(authoritative_jc_logs)
         sendgrid_sent = _sent_email_set(authoritative_sg_logs)
         bad_event_emails = load_bad_sendgrid_event_emails(sendgrid_events_path) | load_done_statuses_from_logs(authoritative_log_paths, {"INVALID"})
-        jc_queued = _existing_queue_email_set({jc_path: queue_rows_by_path[jc_path]})
-        sendgrid_queued = _existing_queue_email_set({path: queue_rows_by_path[path] for path in sendgrid_paths})
+        jc_queue_block_emails = _existing_queue_email_set({jc_path: queue_rows_by_path[jc_path]})
+        sendgrid_queue_block_emails = _existing_queue_email_set(
+            {path: queue_rows_by_path[path] for path in sendgrid_paths}
+        )
+        warm_queue_path = (
+            WARM_PRIVATE_JC_QUEUE_PATH
+            if jc_queue_path is None
+            else jc_path.with_name("recipients_private_jc_warm.csv")
+        )
+        _warm_headers, warm_queue_rows = _read_queue_rows(warm_queue_path)
+        warm_queue_block_emails = _existing_queue_email_set({warm_queue_path: warm_queue_rows})
+        # Warm recipients remain on Private JC warm. These unions only prevent
+        # either cold route from planning the same recipient at the same time.
+        jc_queue_block_emails |= warm_queue_block_emails
+        sendgrid_queue_block_emails |= warm_queue_block_emails
         source_email_by_lead_id: Dict[str, str] = {}
         source_emails: set[str] = set()
         for row in source_rows:
@@ -2841,12 +3054,12 @@ def _build_dispatch_plan(
                     skipped_astra_already_sent += 1
                     route_failure_reasons.append("already_sent")
                     return False
-                if email in jc_queued:
+                if email in jc_queue_block_emails:
                     skipped_astra_already_queued += 1
                     route_failure_reasons.append("already_queued")
                     return False
                 added_astra_rows.append(normalized)
-                jc_queued.add(email)
+                jc_queue_block_emails.add(email)
                 added_astra += 1
                 plan_dispatch_events_by_queue["private_jc"].append(
                     {
@@ -2868,14 +3081,14 @@ def _build_dispatch_plan(
                     skipped_sendgrid_already_sent += 1
                     route_failure_reasons.append("already_sent")
                     return False
-                if email in sendgrid_queued:
+                if email in sendgrid_queue_block_emails:
                     skipped_sendgrid_already_queued += 1
                     route_failure_reasons.append("already_queued")
                     return False
                 bucket_index = sg_assign_cursor % len(sendgrid_paths)
                 sg_assign_cursor += 1
                 added_sendgrid_rows_by_index[bucket_index].append(normalized)
-                sendgrid_queued.add(email)
+                sendgrid_queue_block_emails.add(email)
                 added_sendgrid += 1
                 queue_key = f"sendgrid_{bucket_index + 1}"
                 plan_dispatch_events_by_queue[queue_key].append(

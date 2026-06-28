@@ -125,6 +125,7 @@ def _short_sha256(*parts: object, length: int = 24) -> str:
 
 CAMPAIGN_TYPE_COLD = "cold"
 CAMPAIGN_TYPE_RECONTACT_COLD = "recontact_cold"
+CAMPAIGN_TYPE_WARM_PRIVATE_JC = "warm_private_jc"
 BAD_SENDGRID_EVENT_STATUSES = {
     "blocked",
     "bounce",
@@ -144,6 +145,8 @@ def normalize_campaign_type(value: object) -> str:
     text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if text in {"recontact", "recontact_cold", "cold_recontact", "followup_cold"}:
         return CAMPAIGN_TYPE_RECONTACT_COLD
+    if text in {"warm", "warm_private_jc", "private_jc_warm"}:
+        return CAMPAIGN_TYPE_WARM_PRIVATE_JC
     return CAMPAIGN_TYPE_COLD
 
 
@@ -361,6 +364,33 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "dashboard_enabled": True,
         "dashboard_manual_only": True,
         "tmux_session": "private_jc",
+    },
+    "private_jc_warm": {
+        "provider": "private",
+        "csv": "recipients_private_jc_warm.csv",
+        "log": "private_jc_warm_log.csv",
+        "pitch": "pitch_warm",
+        "from_email": "jc@astraproductions.co",
+        "my_domains": "astraproductions.co,astraproductionsbyjc.com",
+        "interval": 60,
+        "batch_size": 1,
+        "cooldown_seconds": 60,
+        "max_messages_1h": 30,
+        "repeat": True,
+        "human_mode": True,
+        "max_total": 10,
+        "stop_at_local": "12:00",
+        "domain_log": "private_domain_log.csv",
+        "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "",
+        "prune_sent": True,
+        "password_env": "PRIVATE_JC_PASSWORD",
+        "dashboard_enabled": True,
+        "dashboard_manual_only": True,
+        "tmux_session": "private_jc_warm",
+        "pre_rendered_message": True,
     },
 
         #SEND GRID
@@ -718,6 +748,20 @@ def reserve_send_idempotency(
     now = datetime.now(timezone.utc).isoformat()
     with sqlite3.connect(path, timeout=30) as conn:
         _init_send_idempotency_db(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        clean_profile = str(profile or "").strip()
+        if clean_profile == "private_jc_warm":
+            cross_lane = conn.execute(
+                "SELECT 1 FROM send_reservations WHERE email = ? LIMIT 1",
+                (clean_email,),
+            ).fetchone()
+        else:
+            cross_lane = conn.execute(
+                "SELECT 1 FROM send_reservations WHERE email = ? AND profile = 'private_jc_warm' LIMIT 1",
+                (clean_email,),
+            ).fetchone()
+        if cross_lane:
+            return False, "cross_lane_reservation"
         try:
             conn.execute(
                 """
@@ -725,7 +769,7 @@ def reserve_send_idempotency(
                     (campaign_id, provider, email, profile, queue_file, status, reserved_at_utc, updated_at_utc)
                 VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?)
                 """,
-                (clean_campaign, clean_provider, clean_email, str(profile or ""), str(queue_file or ""), now, now),
+                (clean_campaign, clean_provider, clean_email, clean_profile, str(queue_file or ""), now, now),
             )
             conn.commit()
             return True, "reserved"
@@ -952,6 +996,29 @@ You can see examples of our work here: astraproductions.co
 P.S. If you’d rather not hear from me again, just reply unsub.
 """
 
+PITCH_WARM_SUBJECT = "Quick idea for {BookTitleOrProject}"
+PITCH_WARM_SUBJECT_FALLBACK = "Quick idea for your book launch"
+PITCH_WARM_BODY = """Hi {FirstName},
+
+I came across {BookTitleOrProject} and noticed you’ve been building momentum around the launch, including: {NeedSignal}
+
+I’m reaching out because if this is still active, Astra Productions could help strengthen how the book is presented online before more readers, backers, or media opportunities see it.
+
+Based on what I saw, the strongest direction would be {RecommendedService} — a cleaner, more cinematic presentation that makes the project feel polished and easier to understand at first glance.
+
+A strong creative direction here would be:
+{OutreachAngle}
+
+If this is already handled, no worries. But if you’re still looking at ways to improve the launch presentation, I’d be happy to send over a simple direction for how this could look.
+
+Windelle JC
+Creative Director, Astra Productions
+
+Examples: astraproductions.co
+
+P.S. If you’d rather not hear from me again, just reply unsub.
+"""
+
 
 # ===== PITCH REGISTRY =====
 PITCHES = {
@@ -995,6 +1062,12 @@ PITCHES = {
         "subject_fallback": PITCH_JC_SUBJECT_FALLBACK,
         "body": PITCH_JC_BODY,
         "body_fallback": PITCH_JC_GENERIC_BODY,
+    },
+    "pitch_warm": {
+        "subject": PITCH_WARM_SUBJECT,
+        "subject_fallback": PITCH_WARM_SUBJECT_FALLBACK,
+        "body": PITCH_WARM_BODY,
+        "pre_rendered_message": True,
     },
 }
 
@@ -1855,7 +1928,7 @@ def dedupe_scope_for_runtime(provider: str, current_csv: Path) -> str:
     name = current_csv.name.lower()
     if str(provider or "").strip().lower() == "sendgrid":
         return "sendgrid"
-    if name == "recipients_private_jc.csv":
+    if name in {"recipients_private_jc.csv", "recipients_private_jc_warm.csv"}:
         return "astra"
     return "global"
 
@@ -1868,8 +1941,8 @@ def _path_matches_dedupe_scope(path: Path, scope: str, kind: str) -> bool:
         return name.startswith("sendgrid_")
     if scope == "astra":
         if kind == "recipient":
-            return name == "recipients_private_jc.csv"
-        return name == "private_jc_log.csv"
+            return name in {"recipients_private_jc.csv", "recipients_private_jc_warm.csv"}
+        return name in {"private_jc_log.csv", "private_jc_warm_log.csv"}
     return True
 
 
@@ -2288,6 +2361,72 @@ def build_message(
         )
 
     return msg, subject_text, body_text, html_body, cid
+
+
+WARM_QUEUE_REQUIRED_HEADERS = {
+    "AuthorName",
+    "AuthorEmail",
+    "BookTitleOrProject",
+    "EmailSubject",
+    "EmailBody",
+    "NeedSignal",
+    "RecommendedService",
+    "OutreachAngle",
+    "SourceURL",
+    "ContactPath",
+    "ResearchStatus",
+}
+
+
+def validate_warm_queue_contract(csv_path: Path, rows: Sequence[Dict[str, str]]) -> bool:
+    fieldnames = set(rows[0].keys()) if rows else set()
+    if not rows:
+        print(f"ERROR: warm queue is empty: {csv_path}")
+        return False
+    missing = sorted(WARM_QUEUE_REQUIRED_HEADERS - fieldnames)
+    if missing:
+        print("ERROR: warm queue is missing required columns: " + ", ".join(missing))
+        return False
+    for index, row in enumerate(rows, start=1):
+        email = resolve_recipient_email(row)
+        subject_text = str(row.get("EmailSubject") or "").strip()
+        body_text = str(row.get("EmailBody") or "").strip()
+        contact_path = str(row.get("ContactPath") or "").strip().lower()
+        if not email or email not in contact_path:
+            print(f"ERROR: warm queue row {index} is not a direct-email row.")
+            return False
+        if not subject_text or not body_text:
+            print(f"ERROR: warm queue row {index} is missing previewed subject/body.")
+            return False
+        if UNRESOLVED_PLACEHOLDER_RE.search(subject_text) or UNRESOLVED_PLACEHOLDER_RE.search(body_text):
+            print(f"ERROR: warm queue row {index} contains unresolved placeholders.")
+            return False
+    return True
+
+
+def build_pre_rendered_message(
+    from_email: str,
+    to_email: str,
+    row: Dict[str, str],
+    unsub_email: str,
+) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
+    subject_text = str(row.get("EmailSubject") or "").strip()
+    body_text = str(row.get("EmailBody") or "").strip()
+    if not subject_text or not body_text:
+        raise ValueError("Warm queue row is missing previewed EmailSubject or EmailBody.")
+    if UNRESOLVED_PLACEHOLDER_RE.search(subject_text) or UNRESOLVED_PLACEHOLDER_RE.search(body_text):
+        raise ValueError("Warm queue row contains an unresolved recipient placeholder.")
+    unsub_mailto = make_unsub_mailto(unsub_email)
+    html_body = text_to_html(body_text, unsub_mailto, cid=None)
+    msg = EmailMessage()
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg["Subject"] = subject_text
+    msg["Reply-To"] = from_email
+    msg["List-Unsubscribe"] = f"<mailto:{unsub_email}?subject=unsubscribe>"
+    msg.set_content(body_text)
+    msg.add_alternative(html_body, subtype="html")
+    return msg, subject_text, body_text, html_body, None
 
 
 def append_sendgrid_unsubscribe_footer(
@@ -3182,7 +3321,12 @@ def main():
         my_domains = {DEFAULT_DOMAIN}
 
     rows = read_rows(csv_path)
-    if not validate_book_title_queue_contract(
+    pre_rendered_message = bool(pitch.get("pre_rendered_message"))
+    if pre_rendered_message:
+        if not validate_warm_queue_contract(csv_path, rows):
+            emit_worker_event("ERROR", "invalid_warm_queue", csv_path=str(csv_path))
+            return
+    elif not validate_book_title_queue_contract(
         csv_path=csv_path,
         rows=rows,
         subject=subject,
@@ -4051,14 +4195,22 @@ def main():
                 first_name = author.split()[0] if author else GENERIC_SALUTATION
                 merge_fields = row_merge_fields(r, to_email, first_name, book_title)
 
-                msg, subject_text, body_text, html_body, cid = build_message(
-                    from_user, to_email, author, book_title,
-                    subject, body_template, unsub_email,
-                    signature_file=sig_path,
-                    merge_fields=merge_fields,
-                    subject_fallback=subject_fallback,
-                    body_fallback=body_fallback,
-                )
+                if pre_rendered_message:
+                    msg, subject_text, body_text, html_body, cid = build_pre_rendered_message(
+                        from_user,
+                        to_email,
+                        r,
+                        unsub_email,
+                    )
+                else:
+                    msg, subject_text, body_text, html_body, cid = build_message(
+                        from_user, to_email, author, book_title,
+                        subject, body_template, unsub_email,
+                        signature_file=sig_path,
+                        merge_fields=merge_fields,
+                        subject_fallback=subject_fallback,
+                        body_fallback=body_fallback,
+                    )
 
                 next_index = idx + 1
                 attempt_slot_token = ""

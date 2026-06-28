@@ -97,8 +97,8 @@ class SendShardTests(unittest.TestCase):
 
     def test_private_jc_pacing_remains_unchanged(self) -> None:
         profile = send_shard.PROFILES["private_jc"]
-        self.assertEqual(120, profile["interval"])
-        self.assertEqual(120, profile["cooldown_seconds"])
+        self.assertEqual(60, profile["interval"])
+        self.assertEqual(60, profile["cooldown_seconds"])
         self.assertEqual("12:00", profile["stop_at_local"])
 
     def test_attempt_outcome_sent_counts_as_authoritative_sent(self) -> None:
@@ -395,7 +395,13 @@ class SendShardTests(unittest.TestCase):
             def fake_read_rows(path: Path):
                 if Path(path).resolve() == csv_path.resolve():
                     csv_reads["count"] += 1
-                    return original_read_rows(path) if csv_reads["count"] == 1 else refreshed_rows
+                    if csv_reads["count"] == 1:
+                        return original_read_rows(path)
+                    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
+                        writer.writeheader()
+                        writer.writerows(refreshed_rows)
+                    return refreshed_rows
                 return original_read_rows(path)
 
             stdout = io.StringIO()
@@ -432,7 +438,13 @@ class SendShardTests(unittest.TestCase):
                 stack.enter_context(patch.object(send_shard, "sleep_with_jitter", return_value=None))
                 stack.enter_context(patch.dict(send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False))
                 stack.enter_context(patch.dict(send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False))
-                stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette"]))
+                stack.enter_context(
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["send_shard.py", "--profile", "sendgrid_annette", "--max_total", "1"],
+                    )
+                )
                 stack.enter_context(redirect_stdout(stdout))
                 send_shard.main()
 
@@ -700,10 +712,9 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("I came across your author profile", body_text)
+        self.assertIn("Our team came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
-        self.assertNotIn("Our team came across", body_text)
-        self.assertNotIn("your book", body_text)
+        self.assertNotIn("I came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
         _msg, subject_text, body_text, _html_body, _cid = build_message(
@@ -719,9 +730,8 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("I came across your author profile", body_text)
-        self.assertNotIn("Our team came across", body_text)
-        self.assertNotIn("your book", body_text)
+        self.assertIn("Our team came across your author profile", body_text)
+        self.assertNotIn("I came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
     def test_present_book_title_renders_personalized_subject_and_body(self) -> None:
@@ -737,11 +747,10 @@ class SendShardTests(unittest.TestCase):
         )
 
         self.assertEqual("Consignment review for The Quiet Harbor", subject_text)
-        self.assertIn("I came across The Quiet Harbor", body_text)
-        self.assertNotIn("Our team came across The Quiet Harbor", body_text)
+        self.assertIn("Our team came across The Quiet Harbor", body_text)
+        self.assertNotIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("I came across your author profile", body_text)
-        self.assertNotIn("your book", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
     def test_raw_title_alias_resolves_to_canonical_book_title_before_render(self) -> None:
@@ -766,7 +775,7 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("The Alias Harbor", merge_fields["BookTitle"])
         self.assertEqual("Consignment review for The Alias Harbor", subject_text)
-        self.assertIn("I came across The Alias Harbor", body_text)
+        self.assertIn("Our team came across The Alias Harbor", body_text)
         self.assertNotIn("{Title}", body_text)
 
     def test_unsafe_title_alias_is_blanked_and_uses_author_profile_fallback(self) -> None:
@@ -794,7 +803,7 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("", merge_fields["BookTitle"])
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("I came across your author profile", body_text)
+        self.assertIn("Our team came across your author profile", body_text)
         self.assertNotIn("Completed", body_text)
         self.assertNotIn("Tina Writer", subject_text)
 
@@ -820,7 +829,7 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual("", merge_fields["BookTitle"])
         self.assertEqual("Independent author consignment review", subject_text)
-        self.assertIn("I came across your author profile", body_text)
+        self.assertIn("Our team came across your author profile", body_text)
         self.assertNotIn("I came across Tina Writer", body_text)
 
     def test_title_template_placeholder_is_blocked(self) -> None:
@@ -964,11 +973,10 @@ class SendShardTests(unittest.TestCase):
                 subject_fallback="Independent author consignment review",
             )
             self.assertEqual("Consignment review for The Quiet Harbor", titled_subject)
-            self.assertIn("I came across The Quiet Harbor", titled_body)
-            self.assertNotIn("Our team came across The Quiet Harbor", titled_body)
+            self.assertIn("Our team came across The Quiet Harbor", titled_body)
+            self.assertNotIn("I came across The Quiet Harbor", titled_body)
             self.assertNotIn("My team came across The Quiet Harbor", titled_body)
             self.assertNotIn("{BookTitle}", titled_body)
-            self.assertNotIn("your book", titled_body)
 
             untitled = rows[1]
             fallback_subject, fallback_body, _html_body, _cid = render_message_parts(
@@ -982,11 +990,10 @@ class SendShardTests(unittest.TestCase):
                 subject_fallback="Independent author consignment review",
             )
             self.assertEqual("Independent author consignment review", fallback_subject)
-            self.assertIn("I came across your author profile", fallback_body)
+            self.assertIn("Our team came across your author profile", fallback_body)
             self.assertNotIn("My team came across", fallback_body)
-            self.assertNotIn("Our team came across", fallback_body)
+            self.assertNotIn("I came across", fallback_body)
             self.assertNotIn("{BookTitle}", fallback_body)
-            self.assertNotIn("your book", fallback_body)
 
     def test_fallback_capable_book_title_pitch_passes_preflight_with_mixed_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1044,12 +1051,11 @@ class SendShardTests(unittest.TestCase):
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("A trailer idea for independent authors", subject_text)
-        self.assertIn("I came across your author profile", body_text)
+        self.assertEqual("A website direction for your book", subject_text)
+        self.assertIn("Our team came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
-        self.assertNotIn("Our team came across", body_text)
+        self.assertNotIn("I came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
-        self.assertNotIn("your book", body_text)
 
     def test_pitch_jc_present_book_title_renders_personalized_subject_and_body(self) -> None:
         pitch = send_shard.PITCHES["pitch_jc"]
@@ -1064,13 +1070,12 @@ class SendShardTests(unittest.TestCase):
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("A trailer idea for The Quiet Harbor", subject_text)
+        self.assertEqual("A website direction for The Quiet Harbor", subject_text)
         self.assertIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
         self.assertNotIn("I came across your author profile", body_text)
         self.assertNotIn("{BookTitle}", body_text)
-        self.assertNotIn("your book", body_text)
 
     def test_pitch_jc_fallback_capable_queue_contract_allows_missing_book_title_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1148,6 +1153,69 @@ class SendShardTests(unittest.TestCase):
 
         self.assertIn("<mailto:unsubscribe@barnesnoblemarketing.com?subject=unsubscribe&body=unsubscribe>", header)
         self.assertIn("<%asm_group_unsubscribe_raw_url%>", header)
+
+    def test_warm_private_jc_profile_uses_separate_queue_lock_and_pitch(self) -> None:
+        cold = send_shard.PROFILES["private_jc"]
+        warm = send_shard.PROFILES["private_jc_warm"]
+
+        self.assertEqual("recipients_private_jc_warm.csv", warm["csv"])
+        self.assertNotEqual(cold["csv"], warm["csv"])
+        self.assertEqual("private_jc_warm_log.csv", warm["log"])
+        self.assertNotEqual(cold["log"], warm["log"])
+        self.assertEqual("private_jc_warm", warm["tmux_session"])
+        self.assertNotEqual(cold["tmux_session"], warm["tmux_session"])
+        self.assertNotEqual(cold["pitch"], warm["pitch"])
+        self.assertEqual("pitch_jc", cold["pitch"])
+        self.assertEqual("pitch_warm", warm["pitch"])
+        self.assertTrue(all(cfg.get("pitch") != "pitch_warm" for name, cfg in send_shard.PROFILES.items() if name.startswith("sendgrid_")))
+        self.assertNotEqual(
+            send_shard.profile_runtime_lock_path("private_jc"),
+            send_shard.profile_runtime_lock_path("private_jc_warm"),
+        )
+        self.assertTrue(warm["pre_rendered_message"])
+        self.assertFalse(any(name.startswith("sendgrid_warm") for name in send_shard.PROFILES))
+
+    def test_warm_message_uses_previewed_subject_and_body_verbatim(self) -> None:
+        row = {
+            "EmailSubject": "Previewed warm subject",
+            "EmailBody": "Hi Jamie,\n\nPreviewed warm body.\n\nP.S. reply unsub.",
+        }
+
+        message, subject, body, _html, _cid = send_shard.build_pre_rendered_message(
+            "jc@astraproductions.co",
+            "synthetic@example.com",
+            row,
+            "jc@astraproductions.co",
+        )
+
+        self.assertEqual(row["EmailSubject"], subject)
+        self.assertEqual(row["EmailBody"], body)
+        self.assertEqual(row["EmailSubject"], message["Subject"])
+        self.assertNotIn(send_shard.PITCH_JC_BODY, body)
+
+    def test_warm_reservation_blocks_cross_lane_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "idempotency.sqlite3"
+            cold_reserved, _ = send_shard.reserve_send_idempotency(
+                campaign_id="cold-campaign",
+                provider="private",
+                email="synthetic@example.com",
+                profile="private_jc",
+                queue_file="recipients_private_jc.csv",
+                db_path=db_path,
+            )
+            warm_reserved, reason = send_shard.reserve_send_idempotency(
+                campaign_id="warm-campaign",
+                provider="private",
+                email="synthetic@example.com",
+                profile="private_jc_warm",
+                queue_file="recipients_private_jc_warm.csv",
+                db_path=db_path,
+            )
+
+        self.assertTrue(cold_reserved)
+        self.assertFalse(warm_reserved)
+        self.assertEqual("cross_lane_reservation", reason)
 
 
 if __name__ == "__main__":

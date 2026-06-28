@@ -672,6 +672,7 @@ function formatGeneratedAt(value) {
 }
 
 function formatProfileName(value) {
+  if (String(value || "") === "private_jc_warm") return "Warm Private JC";
   const raw = String(value || "")
     .replace(/^sendgrid_/, "")
     .replace(/^private_/, "")
@@ -1885,7 +1886,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
     previewButtons.forEach((button) => {
       button.disabled = previewBusy || warmUploadSelected;
       button.title = warmUploadSelected
-        ? "Warm Research uploads are check-only. Sending is not enabled for warm leads yet."
+        ? "Warm Research uses its own draft, confirmation, and Private JC lane. Cold Dispatch Preview is disabled."
         : (previewBlockReason || "");
       if (!previewBusy) {
         const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
@@ -3279,14 +3280,14 @@ function renderImportantLeadCheck(result) {
       setNodeText(
         els.leadsImportantCheckMeta,
         isWarmResearch
-          ? "Warm upload checked. Sending not enabled for warm leads yet."
+          ? "Warm upload checked. Generate drafts before explicit Warm Private JC confirmation."
           : `Last check completed. Cleaned ${Number(result.cleaned_rows || 0)} row(s), rejected ${Number((result.input_rows || 0) - (result.cleaned_rows || 0))} row(s).`,
       );
     } else {
       setNodeText(
         els.leadsImportantCheckMeta,
         isWarmResearch
-          ? "Choose a Warm Research CSV/XLSX file, then click Upload & Check. Sending is not enabled for warm leads yet."
+          ? "Choose a Warm Research CSV/XLSX file, then click Upload & Check. Cold dispatch remains disabled."
           : "Ready. Put email-first leads in _important/leadschecker.csv, then click Check Leads. Keep FullName upstream when you have it.",
       );
     }
@@ -3305,7 +3306,7 @@ function renderImportantLeadCheck(result) {
         <div class="operator-result-shell operator-check-shell warm-check-results">
           <section class="operator-empty-state operator-empty-state-inline warm-check-message">
             <strong>Warm upload checked.</strong>
-            <span>Sending not enabled for warm leads yet.</span>
+            <span>Warm sending requires draft preview and explicit Warm Private JC confirmation.</span>
           </section>
           ${renderOperatorMetricStrip([
             { label: "Input", value: Number(result.input_rows || 0) },
@@ -3519,7 +3520,7 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
     setNodeText(
       els.leadsPipelineMeta,
       active
-        ? "Validate and split warm research. Sending is not enabled for warm leads yet."
+        ? "Validate warm research, generate drafts, then explicitly confirm the separate Warm Private JC lane."
         : "Current source, preview, and queue confirmation in one place.",
     );
   }
@@ -4381,6 +4382,13 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   if (warmResearchUploadMode()) {
     const report = currentWarmResearchReport(status);
     const checked = Boolean(report?.generated_at_utc);
+    const lane = status?.warm_private_jc_lane || lastSnapshot?.warm_private_jc_lane || {};
+    const warmProfile = (lastSnapshot?.profiles || []).find((profile) => profile?.name === "private_jc_warm") || {};
+    const warmRunning = isProfileActive(warmProfile);
+    const warmConfirmed = Boolean(lane.confirmed);
+    const warmRemaining = Number(lane.remaining || warmProfile.pending_count || 0);
+    const warmSent = Number(profileRunSentDisplay(warmProfile) || 0);
+    const draftCount = Number(report.warm_email_preview_rows || 0);
     if (els.leadsControlCheckResult) {
       setNodeHtml(
         els.leadsControlCheckResult,
@@ -4403,17 +4411,26 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             <div>
               <p class="eyebrow">Warm Research Outputs</p>
               <h3>${checked ? "Warm upload checked" : "Warm upload not checked"}</h3>
-              <p class="current-run-subtitle">${checked ? "Sending is not enabled for warm leads yet." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
+              <p class="current-run-subtitle">${checked ? "Generate drafts, then explicitly confirm the separate Warm Private JC lane." : "Upload a Warm Research CSV/XLSX file to validate and split it."}</p>
             </div>
             <div class="leads-action-slot">
               <span class="mini-pill">Check only</span>
               ${checked ? `<button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>` : ""}
+              ${draftCount > 0 && !warmConfirmed ? `<button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc">Confirm Warm Private JC</button>` : ""}
+              ${warmConfirmed && warmRemaining > 0 ? `<button class="btn btn-primary" type="button" data-leads-next-action="start_warm_private_jc" ${warmRunning ? "disabled" : ""}>${warmRunning ? "Warm Private JC running" : "Start Warm Private JC"}</button>` : ""}
             </div>
           </div>
           ${warmResearchMetricMarkup(report)}
           ${Number(report.warm_email_preview_rows || 0) > 0
             ? `<div class="current-run-summary-line"><span>Warm draft preview ready: ${Number(report.warm_email_preview_rows || 0).toLocaleString()} row(s).</span><span class="path-ellipsis" title="${escapeHtml(report.warm_email_preview_label || "")}">${escapeHtml(report.warm_email_preview_label || "warm_email_preview.csv")}</span></div>`
             : ""}
+          <div class="current-run-metrics warm-lane-metrics">
+            <div><span>Warm Private JC ready</span><strong>${draftCount.toLocaleString()}</strong></div>
+            <div><span>Warm Private JC confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
+            <div><span>Warm Private JC running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
+            <div><span>Warm Private JC sent</span><strong>${warmSent.toLocaleString()}</strong></div>
+            <div><span>Warm Private JC remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
+          </div>
         </article>
       `,
     );
@@ -4525,10 +4542,10 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
         tone: Number(report.warm_email_preview_rows || 0) > 0 ? "good" : checked ? "warn" : "neutral",
       },
       {
-        step: "Sending",
-        status: "Not enabled",
-        detail: "Warm rows cannot be previewed, confirmed, or sent yet.",
-        tone: "neutral",
+        step: "Warm Private JC",
+        status: status?.warm_private_jc_lane?.confirmed ? "Confirmed" : "Explicit confirmation required",
+        detail: "Uses the separate Warm Private JC queue and never routes through SendGrid.",
+        tone: status?.warm_private_jc_lane?.confirmed ? "good" : "neutral",
       },
     ];
     setNodeHtml(
@@ -4633,7 +4650,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
       `
         <div class="workflow-banner-inline warm-workflow-banner">
           <span class="eyebrow">Warm Research</span>
-          <strong>${checked ? "Warm upload checked. Sending is not enabled for warm leads yet." : "Warm Research is check-only. Upload a source to begin."}</strong>
+          <strong>${checked ? "Warm upload checked. Generate drafts, then explicitly confirm Warm Private JC." : "Upload Warm Research to validate and split it before any confirmation."}</strong>
           <span class="workflow-banner-chip">Email ready: ${Number(report.warm_email_ready_rows || 0).toLocaleString()}</span>
           <span class="workflow-banner-chip">Contact forms: ${Number(report.warm_contact_form_rows || 0).toLocaleString()}</span>
           <span class="workflow-banner-chip">Rejected: ${Number(report.warm_rejected_rows || 0).toLocaleString()}</span>
@@ -5238,6 +5255,30 @@ async function generateWarmDraftPreview() {
   }
 }
 
+async function confirmWarmPrivateJc() {
+  if (!warmResearchUploadMode()) {
+    showMessage("Select Warm Research before confirming Warm Private JC.", "error");
+    return;
+  }
+  try {
+    const data = await fetchJson("/api/leads/check-important/warm-confirm", { method: "POST" });
+    lastImportantLeadCheck = data.warm_check || lastImportantLeadCheck;
+    if (data.status) renderLeadsStatus(data.status);
+    showMessage(data.message || "Warm Private JC confirmed.", "success");
+    await fetchSnapshot();
+  } catch (err) {
+    showMessage(`Warm Private JC confirmation failed: ${err}`, "error");
+  }
+}
+
+async function startWarmPrivateJc() {
+  if (!warmResearchUploadMode()) {
+    showMessage("Select Warm Research before starting Warm Private JC.", "error");
+    return;
+  }
+  await postAction("/api/start/private_jc_warm", { profileName: "private_jc_warm", action: "start" });
+}
+
 async function runImportantLeadVerify(mode = VERIFY_MODE_FAST_TRIAGE) {
   let normalizedMode = String(mode || VERIFY_MODE_FAST_TRIAGE).toUpperCase() === VERIFY_MODE_STRICT_PUBLIC_PROOF
     ? VERIFY_MODE_STRICT_PUBLIC_PROOF
@@ -5320,7 +5361,7 @@ function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
 
 async function previewImportantLeadDispatch() {
   if (els.leadsImportantUploadType?.value === "warm_research") {
-    showMessage("Warm Research uploads are check-only. Sending is not enabled for warm leads yet.", "error");
+    showMessage("Warm Research does not use Cold Dispatch Preview. Generate drafts and confirm Warm Private JC instead.", "error");
     return;
   }
   const selectedDispatchSource = dispatchSourceForSelectedMode();
@@ -6033,6 +6074,12 @@ function senderStatusBadge(profile) {
   if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
   if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
   if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
+  if (profile?.name === "private_jc_warm") {
+    const lane = lastSnapshot?.warm_private_jc_lane || {};
+    if (pendingCount <= 0 && lane.confirmed) return { label: "Complete", tone: "good" };
+    if (pendingCount > 0 && lane.confirmed) return { label: "Ready", tone: "good" };
+    return { label: "Not confirmed", tone: "warn" };
+  }
   if (pendingCount <= 0 && (profileTelemetryChannel(profile) === "sendgrid" || queueSafetyComplete(queueSafety))) {
     return { label: "Complete", tone: "good" };
   }
@@ -7096,6 +7143,14 @@ function queueSafetyBlockMessageForProfile(profile, snapshot = lastSnapshot) {
 }
 
 function canStartProfile(profile, snapshot = lastSnapshot) {
+  if (profile?.name === "private_jc_warm") {
+    const lane = snapshot?.warm_private_jc_lane || {};
+    return profilePendingCount(profile) > 0
+      && Boolean(lane.confirmed)
+      && Boolean(lane.ready)
+      && !isProfileActive(profile)
+      && !Boolean(profile?.restart_blocked);
+  }
   return profilePendingCount(profile) > 0
     && !queueSafetyBlockedForProfile(profile, snapshot)
     && !isProfileActive(profile)
@@ -8704,6 +8759,8 @@ if (els.leadsCurrentRunPanel) {
     const action = String(button.dataset.leadsNextAction || "");
     if (action === "upload_check") void runImportantLeadUploadCheck();
     if (action === "generate_warm_preview") void generateWarmDraftPreview();
+    if (action === "confirm_warm_private_jc") void confirmWarmPrivateJc();
+    if (action === "start_warm_private_jc") void startWarmPrivateJc();
     if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
@@ -8743,7 +8800,7 @@ if (els.leadsImportantUploadType) {
     const warmSelected = els.leadsImportantUploadType.value === "warm_research";
     updateImportantLeadUploadNote(
       warmSelected
-        ? "Warm Research is check-only. Direct emails and contact forms are split; dispatch is disabled."
+        ? "Warm Research splits direct emails and contact forms. Cold dispatch is disabled; warm confirmation stays separate."
         : "Upload is file-only. Preview and confirm remain separate.",
     );
     const selectedReport = warmSelected ? lastLeadsStatus?.latest_warm_check : lastLeadsStatus?.latest_master_check;
