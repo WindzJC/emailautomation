@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import send_shard
 import settings
+import dashboard_core
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
@@ -1173,7 +1174,81 @@ class SendShardTests(unittest.TestCase):
             send_shard.profile_runtime_lock_path("private_jc_warm"),
         )
         self.assertTrue(warm["pre_rendered_message"])
+        self.assertTrue(warm["allow_confirmed_warm_role_recipients"])
+        self.assertNotIn("allow_confirmed_warm_role_recipients", cold)
         self.assertFalse(any(name.startswith("sendgrid_warm") for name in send_shard.PROFILES))
+
+    def test_confirmed_warm_queue_allows_public_role_contact_paths_only_for_warm_profile(self) -> None:
+        warm_queue = Path("recipients_private_jc_warm.csv")
+        role_set = {"contact", "hello", "support"}
+
+        for email in ["contact@example.com", "hello@example.com", "support@example.com"]:
+            self.assertFalse(
+                send_shard.should_block_role_recipient_for_runtime(
+                    email,
+                    role_set,
+                    profile_name="private_jc_warm",
+                    queue_path=warm_queue,
+                    block_role_recipients=True,
+                    allow_confirmed_warm_role_recipients=True,
+                )
+            )
+            self.assertTrue(
+                send_shard.should_block_role_recipient_for_runtime(
+                    email,
+                    role_set,
+                    profile_name="private_jc",
+                    queue_path=Path("recipients_private_jc.csv"),
+                    block_role_recipients=True,
+                    allow_confirmed_warm_role_recipients=False,
+                )
+            )
+            self.assertTrue(
+                send_shard.should_block_role_recipient_for_runtime(
+                    email,
+                    role_set,
+                    profile_name="sendgrid_annette",
+                    queue_path=Path("recipients_sendgrid_1.csv"),
+                    block_role_recipients=True,
+                    allow_confirmed_warm_role_recipients=False,
+                )
+            )
+
+        self.assertTrue(
+            send_shard.should_block_role_recipient_for_runtime(
+                "contact@example.com",
+                role_set,
+                profile_name="private_jc_warm",
+                queue_path=Path("some_other_queue.csv"),
+                block_role_recipients=True,
+                allow_confirmed_warm_role_recipients=True,
+            )
+        )
+
+    def test_warm_role_bypass_does_not_override_sent_log_suppression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            warm_log = Path(tmpdir) / "private_jc_warm_log.csv"
+            warm_log.write_text(
+                "Timestamp,Email,Status,Info\n"
+                "2026-06-28T12:00:00+00:00,support@example.com,SENT,warm\n",
+                encoding="utf-8",
+            )
+
+            already_done = send_shard.load_already_done(warm_log)
+            role_blocked = send_shard.should_block_role_recipient_for_runtime(
+                "support@example.com",
+                {"support"},
+                profile_name="private_jc_warm",
+                queue_path=Path("recipients_private_jc_warm.csv"),
+                block_role_recipients=True,
+                allow_confirmed_warm_role_recipients=True,
+            )
+
+        self.assertFalse(role_blocked)
+        self.assertIn("support@example.com", already_done)
+
+    def test_start_all_still_excludes_warm_private_jc(self) -> None:
+        self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
 
     def test_warm_message_uses_previewed_subject_and_body_verbatim(self) -> None:
         row = {

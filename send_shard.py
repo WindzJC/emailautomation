@@ -391,6 +391,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "dashboard_manual_only": True,
         "tmux_session": "private_jc_warm",
         "pre_rendered_message": True,
+        "allow_confirmed_warm_role_recipients": True,
     },
 
         #SEND GRID
@@ -1816,6 +1817,27 @@ def is_role_recipient(email_addr: str, role_set: Set[str]) -> bool:
     return lp in role_set
 
 
+def should_block_role_recipient_for_runtime(
+    email_addr: str,
+    role_set: Set[str],
+    *,
+    profile_name: str,
+    queue_path: Path,
+    block_role_recipients: bool,
+    allow_confirmed_warm_role_recipients: bool,
+) -> bool:
+    if not block_role_recipients or not role_set:
+        return False
+    confirmed_warm_queue = (
+        profile_name == "private_jc_warm"
+        and Path(queue_path).name == "recipients_private_jc_warm.csv"
+        and allow_confirmed_warm_role_recipients
+    )
+    if confirmed_warm_queue:
+        return False
+    return is_role_recipient(email_addr, role_set)
+
+
 def load_already_done(sent_log: Path) -> Set[str]:
     if not sent_log.exists():
         return set()
@@ -2967,9 +2989,12 @@ def main():
         help="Rebuild sendgrid_daily_counters.json from sendgrid logs for today.",
     )
 
+    ap.set_defaults(
+        block_role_recipients=True,
+        allow_confirmed_warm_role_recipients=False,
+    )
     if profile_defaults:
         ap.set_defaults(**profile_defaults)
-    ap.set_defaults(block_role_recipients=True)
 
     args = ap.parse_args()
     args.campaign_type = normalize_campaign_type(getattr(args, "campaign_type", CAMPAIGN_TYPE_COLD))
@@ -3478,8 +3503,17 @@ def main():
             is_recontact_row = is_recontact_cold_campaign(row_campaign_type)
             if exclude_logged_always_send and is_always_send and email_addr in current_already_done:
                 continue
-            if args.block_role_recipients and role_block_set and not is_always_send:
-                if is_role_recipient(email_addr, role_block_set):
+            if not is_always_send:
+                if should_block_role_recipient_for_runtime(
+                    email_addr,
+                    role_block_set,
+                    profile_name=str(args.profile or ""),
+                    queue_path=csv_path,
+                    block_role_recipients=bool(args.block_role_recipients),
+                    allow_confirmed_warm_role_recipients=bool(
+                        getattr(args, "allow_confirmed_warm_role_recipients", False)
+                    ),
+                ):
                     snapshot_stats["skipped_role_recipients"] += 1
                     continue
             if args.require_valid_status and not is_always_send:
