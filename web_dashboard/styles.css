@@ -11268,3 +11268,99 @@ body {
     justify-content: flex-start;
   }
 }
+
+/* Lead Ops density polish. Presentation only. */
+#leads-view .leads-command-center {
+  gap: 9px;
+  padding: 11px 12px;
+}
+
+#leads-view .leads-command-center > .panel-header {
+  min-height: 0;
+  padding-bottom: 2px;
+}
+
+#leads-view .leads-control-bar {
+  gap: 8px 10px;
+  padding: 10px 11px;
+}
+
+#leads-view .leads-command-main,
+#leads-view .leads-command-column {
+  align-items: start;
+  align-content: start;
+}
+
+#leads-view .leads-command-column,
+#leads-view .current-run-card {
+  gap: 7px;
+}
+
+#leads-view .leads-command-section,
+#leads-view .current-run-card,
+#leads-view .dispatch-preview-card {
+  padding: 9px 10px;
+}
+
+#leads-view .leads-workflow-task-list,
+#leads-view .leads-workflow-status-banner {
+  margin: 0;
+}
+
+#leads-view.warm-research-mode .leads-control-bar {
+  grid-template-rows: auto auto auto;
+  gap: 8px 12px;
+  padding: 11px 12px;
+}
+
+#leads-view.warm-research-mode .leads-current-run-panel,
+#leads-view.warm-research-mode .current-run-card {
+  align-self: start;
+  height: auto;
+}
+
+#leads-view.warm-research-mode .current-run-card {
+  gap: 9px;
+  padding: 11px;
+}
+
+#leads-view.warm-research-mode .warm-private-action-panel,
+#leads-view.warm-research-mode .warm-research-output-group,
+#leads-view.warm-research-mode .warm-private-lane-group,
+#leads-view.warm-research-mode .warm-safety-card,
+#leads-view.warm-research-mode .warm-run-timeline {
+  padding: 9px 10px;
+}
+
+#leads-view.warm-research-mode .warm-action-stack {
+  gap: 6px;
+}
+
+#leads-view.warm-research-mode .warm-action-stack .btn {
+  min-height: 38px;
+}
+
+#leads-view.warm-research-mode .warm-lane-metrics > div,
+#leads-view.warm-research-mode .warm-research-output-group .operator-metric {
+  min-height: 64px;
+  padding: 9px 10px;
+}
+
+#ops-view .summary-private-breakdown {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 5px 10px;
+  align-items: center;
+  color: var(--console-muted);
+  font-size: 0.72rem;
+}
+
+#ops-view .summary-private-breakdown strong {
+  color: var(--console-label);
+}
+
+@media (max-width: 700px) {
+  #ops-view .summary-private-breakdown {
+    grid-template-columns: 1fr;
+  }
+}

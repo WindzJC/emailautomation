@@ -246,9 +246,9 @@ function setConnectionState(live) {
   if (live) {
     els.wsLabel.textContent = "Ops socket live";
   } else if (isLeadsTabVisible() && lastLeadsStatus) {
-    els.wsLabel.textContent = "Lead Ops live file status loaded";
+    els.wsLabel.textContent = "Live status";
   } else if (snapshotFallbackHealthy && lastSnapshot) {
-    els.wsLabel.textContent = "Snapshot connected";
+    els.wsLabel.textContent = "Connected";
   } else {
     els.wsLabel.textContent = "Ops socket disconnected";
   }
@@ -673,6 +673,22 @@ function formatGeneratedAt(value) {
     timeZoneName: "short",
   }).formatToParts(dt).find((part) => part.type === "timeZoneName")?.value || "";
   return zone ? `${stamp} ${zone}` : stamp;
+}
+
+function formatWarmActivity(timestamp, email = "") {
+  if (!timestamp) return "No activity yet";
+  const dt = new Date(timestamp);
+  if (Number.isNaN(dt.getTime())) return email ? `${timestamp} · ${email}` : timestamp;
+  const stamp = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(dt).replace(",", "");
+  return `${stamp} UTC${email ? ` · ${email}` : ""}`;
 }
 
 function formatProfileName(value) {
@@ -4489,7 +4505,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
               </div>
               <div class="warm-live-details">
-                <span><strong>Last sent</strong>${lane.last_sent_email ? `${escapeHtml(lane.last_sent_email)} · ${escapeHtml(lane.last_sent_timestamp || "")}` : "None"}</span>
+                <span><strong>Last sent</strong>${escapeHtml(formatWarmActivity(lane.last_sent_timestamp, lane.last_sent_email))}</span>
                 <span><strong>Next queued</strong>${escapeHtml(lane.next_queued_email || "None")}</span>
               </div>
             </section>
@@ -5954,6 +5970,7 @@ function renderSummary(snapshot) {
   const privateVerifiedPartial = privateProfile && queueSafetyVerifiedSubset(privateQueueSafety);
   const sendgridProgress = progressTotals.sendgrid || { sent: 0, active: 0, cap: 0 };
   const privateProgress = progressTotals.private || { sent: 0, active: 0, cap: 0 };
+  const privateSent = privateEmailSentBreakdown(snapshot);
   const firstVisibleAlert = alertGroups.blocking[0] || alertGroups.warning[0] || alertGroups.info[0] || null;
   const firstAlertTitle = firstVisibleAlert?.title || "No active alerts";
   const nextAction = (() => {
@@ -6037,7 +6054,14 @@ function renderSummary(snapshot) {
       value: `${privatePending.toLocaleString()} pending`,
       note: `${privateStatus} · ${Number(privateProgress.sent || 0).toLocaleString()} sent`,
       tone: privatePending > 0 ? "warn" : "neutral",
-      detailsHtml: `<div class="summary-small-note">Cap ${privateProgress.cap ? Number(privateProgress.cap).toLocaleString() : "∞"} · ${privateWindowHours.toLocaleString()}h window</div>`,
+      detailsHtml: `
+        <div class="summary-private-breakdown">
+          <strong>Private Email total: ${privateSent.total.toLocaleString()}</strong>
+          <span>JC cold: ${privateSent.cold.toLocaleString()}</span>
+          <span>Warm JC: ${privateSent.warm.toLocaleString()}</span>
+        </div>
+        <div class="summary-small-note">Cap ${privateProgress.cap ? Number(privateProgress.cap).toLocaleString() : "∞"} · ${privateWindowHours.toLocaleString()}h window</div>
+      `,
     },
     {
       key: "total_pending",
@@ -6246,9 +6270,9 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         ? `<span class="sender-status-profile-meta">Warm Private JC${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
         : "";
       const lastActivity = warmProfile && warmStatus.last_sent_timestamp
-        ? `${warmStatus.last_sent_timestamp}${warmStatus.last_sent_email ? ` · ${truncateMiddle(warmStatus.last_sent_email, 34)}` : ""}`
+        ? formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)
         : warmProfile
-        ? "No warm sends yet"
+        ? "No activity yet"
         : profile.last_timestamp
         ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
         : profileLastAgeText(profile);
@@ -6374,6 +6398,16 @@ function summarizeAlertProgress(snapshot) {
   return Object.values(totals);
 }
 
+function privateEmailSentBreakdown(snapshot = lastSnapshot) {
+  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
+  const coldProfile = profiles.find((profile) => profile?.name === "private_jc") || {};
+  const warmStatus = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
+  const warmProfile = profiles.find((profile) => profile?.name === "private_jc_warm") || {};
+  const cold = Number(profileRunSentDisplay(coldProfile) || 0);
+  const warm = Number(warmStatus.sent_count ?? profileRunSentDisplay(warmProfile) ?? 0);
+  return { cold, warm, total: cold + warm };
+}
+
 function renderProgressSummaryStrip(snapshot) {
   if (!els.opsProgressSummary) return;
   const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
@@ -6398,6 +6432,7 @@ function renderProgressSummaryStrip(snapshot) {
   const privateProfile = profiles.find((profile) => profile.name === "private_jc")
     || profiles.find((profile) => profileTelemetryChannel(profile) === "private");
   const privateStatus = privateProfile ? senderStatusBadge(privateProfile).label.toLowerCase() : "stopped";
+  const privateSent = privateEmailSentBreakdown(snapshot);
   const progressItems = [
     {
       label: "SendGrid",
@@ -6405,7 +6440,7 @@ function renderProgressSummaryStrip(snapshot) {
     },
     {
       label: "Private Email",
-      value: `${privateStatus} · ${Number(items.private?.sent || 0).toLocaleString()} sent`,
+      value: `Private Email total: ${privateSent.total.toLocaleString()} · JC cold: ${privateSent.cold.toLocaleString()} · Warm JC: ${privateSent.warm.toLocaleString()} · ${privateStatus}`,
     },
     {
       label: "Alerts",

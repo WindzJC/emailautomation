@@ -287,7 +287,8 @@ class WebDashboardAppTests(unittest.TestCase):
         for expected in [
             "let socketLive = false;",
             "let snapshotFallbackHealthy = false;",
-            "Snapshot connected",
+            'els.wsLabel.textContent = "Connected"',
+            'els.wsLabel.textContent = "Live status"',
             "snapshotFallbackHealthy = response.ok;",
             "if (!socketLive) setConnectionState(false);",
         ]:
@@ -295,7 +296,7 @@ class WebDashboardAppTests(unittest.TestCase):
         start = source.index("function setConnectionState(live)")
         end = source.index("function showMessage", start)
         body = source[start:end]
-        self.assertLess(body.index("Snapshot connected"), body.index("Ops socket disconnected"))
+        self.assertLess(body.index('"Connected"'), body.index("Ops socket disconnected"))
 
     def test_leads_run_safety_card_reports_wait_blocked_freshness_and_stale_pipeline(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1222,7 +1223,7 @@ class WebDashboardAppTests(unittest.TestCase):
             'status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
             "private_jc_warm",
             "Warm Private JC",
-            "No warm sends yet",
+            "No activity yet",
             "warmDraftPreviewCount",
             "warmHasDraftPreview",
             "No queue",
@@ -1391,7 +1392,49 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("warm-run-timeline", lead_body)
         self.assertIn("warm-live-warning", lead_body)
         self.assertIn("#leads-view.warm-research-mode .warm-run-timeline", styles)
-        self.assertIn("Lead Ops live file status loaded", source)
+        self.assertIn('els.wsLabel.textContent = "Live status"', source)
+
+    def test_warm_activity_uses_readable_utc_timestamp_and_empty_copy(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function formatWarmActivity")
+        end = source.index("function formatProfileName", start)
+        body = source[start:end]
+
+        self.assertIn('if (!timestamp) return "No activity yet"', body)
+        self.assertIn('timeZone: "UTC"', body)
+        self.assertIn("year: \"numeric\"", body)
+        self.assertIn("minute: \"2-digit\"", body)
+        self.assertNotIn("second:", body)
+        self.assertIn("formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)", source)
+        self.assertIn("formatWarmActivity(lane.last_sent_timestamp, lane.last_sent_email)", source)
+
+    def test_private_email_total_explains_cold_and_warm_composition(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        self.assertIn("function privateEmailSentBreakdown", source)
+        self.assertIn("const warm = Number(warmStatus.sent_count", source)
+        self.assertIn("return { cold, warm, total: cold + warm }", source)
+        self.assertIn("Private Email total:", source)
+        self.assertIn("JC cold:", source)
+        self.assertIn("Warm JC:", source)
+        self.assertIn("#ops-view .summary-private-breakdown", styles)
+
+    def test_lead_ops_density_polish_applies_to_warm_and_cold_layouts(self) -> None:
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for selector in [
+            "#leads-view .leads-command-center",
+            "#leads-view .leads-control-bar",
+            "#leads-view .leads-command-main",
+            "#leads-view .leads-command-section",
+            "#leads-view.warm-research-mode .leads-control-bar",
+            "#leads-view.warm-research-mode .current-run-card",
+        ]:
+            self.assertIn(selector, styles)
+        self.assertIn("grid-template-rows: auto auto auto", styles)
+        self.assertIn("align-content: start", styles)
+        self.assertIn("height: auto", styles)
 
 
 if __name__ == "__main__":
