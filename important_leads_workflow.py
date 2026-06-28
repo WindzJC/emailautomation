@@ -1150,11 +1150,19 @@ def _clean_warm_outreach_angle(value: str) -> str:
     text = re.sub(r"^\s*pitch\s+", "", text, flags=re.IGNORECASE)
     return text[:1].lower() + text[1:] if text else text
 
+EXPECTED_WARM_PREVIEW_FILENAME = "warm_email_preview.csv"
+
 def generate_warm_email_preview(
     *,
     email_ready_path: Path,
     preview_path: Path,
 ) -> Dict[str, object]:
+    preview_path = Path(preview_path)
+    if preview_path.name != EXPECTED_WARM_PREVIEW_FILENAME:
+        raise ValueError(
+            f"Warm preview output filename must be {EXPECTED_WARM_PREVIEW_FILENAME}"
+        )
+
     fieldnames, rows = _read_csv_rows(email_ready_path)
     required = {"AuthorName", "AuthorEmail", "BookTitleOrProject", "NeedSignal", "RecommendedService", "OutreachAngle"}
     missing = sorted(required - set(fieldnames))
