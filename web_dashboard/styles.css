@@ -10373,6 +10373,42 @@ body {
   background: rgba(120, 174, 248, 0.055);
 }
 
+#ops-view .sender-status-table tr.is-warm-jc td {
+  height: 50px;
+  padding-block: 7px;
+}
+
+#ops-view .sender-status-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+#ops-view .sender-status-profile-meta {
+  display: block;
+  overflow: hidden;
+  color: var(--console-muted);
+  font-size: 0.7rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ops-view .sender-status-table tr.is-warm-jc .sender-status-name-btn {
+  width: fit-content;
+  line-height: 1.15;
+}
+
+#ops-view .sender-status-table tr.is-warm-jc .sender-status-activity {
+  color: var(--console-muted);
+  font-size: 0.78rem;
+}
+
+#ops-view .sender-status-table tr.is-warm-jc .sender-status-action-btn {
+  min-width: 96px;
+  white-space: nowrap;
+}
+
 #ops-view .sender-status-pill {
   min-width: 74px;
   padding: 4px 8px;

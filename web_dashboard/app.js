@@ -186,6 +186,7 @@ let socketLive = false;
 let snapshotFallbackHealthy = false;
 let selectedProfileName = "";
 let senderStatusPanel = null;
+let warmSenderLeadStatusRequested = false;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
 let activeDashboardTab = "ops";
@@ -6121,19 +6122,35 @@ function syncProgressDetailsToggle() {
   els.opsProgressDetailsToggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
+function warmDraftPreviewCount(snapshot = lastSnapshot) {
+  const report = lastLeadsStatus?.latest_warm_check
+    || snapshot?.latest_warm_check
+    || (lastImportantLeadCheck?.upload_type === "warm_research" ? lastImportantLeadCheck : {});
+  const value = Number(report?.warm_email_preview_rows || 0);
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function warmSenderDisplayState(profile, snapshot = lastSnapshot) {
+  const lane = snapshot?.warm_private_jc_lane || {};
+  const pending = profilePendingCount(profile);
+  const sent = Number(profileRunSentDisplay(profile) || 0);
+  if (isProfileActive(profile)) return { label: "Running", tone: "good" };
+  if (Boolean(lane.confirmed) && pending > 0) return { label: "Ready", tone: "good" };
+  if (Boolean(lane.confirmed) && pending <= 0 && sent > 0) return { label: "Complete", tone: "good" };
+  if (!Boolean(lane.confirmed) && (pending > 0 || warmDraftPreviewCount(snapshot) > 0)) {
+    return { label: "Not confirmed", tone: "warn" };
+  }
+  return { label: "No queue", tone: "neutral" };
+}
+
 function senderStatusBadge(profile) {
   const runtimeState = String(profile?.runtime_state || "").trim();
   const pendingCount = profilePendingCount(profile);
   const queueSafety = providerQueueSafetyForProfile(profile);
+  if (profile?.name === "private_jc_warm") return warmSenderDisplayState(profile, lastSnapshot);
   if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
   if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
   if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
-  if (profile?.name === "private_jc_warm") {
-    const lane = lastSnapshot?.warm_private_jc_lane || {};
-    if (pendingCount <= 0 && lane.confirmed) return { label: "Complete", tone: "good" };
-    if (pendingCount > 0 && lane.confirmed) return { label: "Ready", tone: "good" };
-    return { label: "Not confirmed", tone: "warn" };
-  }
   if (pendingCount <= 0 && (profileTelemetryChannel(profile) === "sendgrid" || queueSafetyComplete(queueSafety))) {
     return { label: "Complete", tone: "good" };
   }
@@ -6167,19 +6184,30 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const stopAvailable = canStopProfile(profile);
       const startAvailable = canStartProfile(profile, snapshot);
       const pendingCount = profilePendingCount(profile);
+      const warmLane = snapshot?.warm_private_jc_lane || {};
+      const warmHasDraftPreview = warmDraftPreviewCount(snapshot) > 0;
+      const warmCanOpenLeadOps = warmProfile
+        && ((Boolean(warmLane.confirmed) && pendingCount > 0) || warmHasDraftPreview);
       const noPendingQueue = !stopAvailable && pendingCount <= 0;
-      const action = stopAvailable ? "stop" : warmProfile ? "open_lead_ops" : "start";
+      const action = stopAvailable
+        ? "stop"
+        : warmProfile
+          ? warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"
+          : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : stopAvailable ? "Stop" : noPendingQueue ? "No queue" : warmProfile ? "Open Lead Ops" : "Start";
+        : action === "stop" ? "Stop" : action === "open_lead_ops" ? "Open Lead Ops" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
       const actionDisabled = Boolean(pendingAction)
-        || noPendingQueue
+        || action === "no_queue"
+        || (!warmProfile && noPendingQueue)
         || (!warmProfile && !stopAvailable && !startAvailable);
-      const warmMax = Number(profile?.max_total || profile?.max_messages_per_run || 0);
+      const warmMax = Number(profile?.max_total || profile?.max_messages_per_run || 10);
       const warmMetadata = warmProfile
-        ? `<span class="sender-status-profile-meta">private_jc_warm · recipients_private_jc_warm.csv · private_jc_warm_log.csv${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
+        ? `<span class="sender-status-profile-meta">Warm Private JC${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
         : "";
-      const lastActivity = profile.last_timestamp
+      const lastActivity = warmProfile && !profile.last_timestamp
+        ? "No warm sends yet"
+        : profile.last_timestamp
         ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
         : profileLastAgeText(profile);
       return `
@@ -6187,12 +6215,15 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           selectedProfile?.name === profile.name ? "is-selected" : "",
           isProfileActive(profile) ? "is-live" : "",
           pendingCount <= 0 ? "is-complete" : "",
+          warmProfile ? "is-warm-jc" : "",
         ].filter(Boolean).join(" ")}" data-profile="${escapeHtml(profile.name || "")}">
           <td>
-            <button class="sender-status-name-btn" type="button" data-profile="${escapeHtml(profile.name || "")}">
-              ${escapeHtml(formatProfileName(profile.name))}
-            </button>
-            ${warmMetadata}
+            <div class="sender-status-identity">
+              <button class="sender-status-name-btn" type="button" data-profile="${escapeHtml(profile.name || "")}">
+                ${escapeHtml(formatProfileName(profile.name))}
+              </button>
+              ${warmMetadata}
+            </div>
           </td>
           <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
           <td>${pendingCount.toLocaleString()}</td>
@@ -6205,7 +6236,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
-              title="${noPendingQueue ? "No pending warm leads." : warmProfile && !stopAvailable ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
+              title="${warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : action === "no_queue" || noPendingQueue ? "No pending leads." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           </td>
@@ -6213,6 +6244,18 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       `;
     }).join(""),
   );
+}
+
+async function hydrateWarmSenderLeadStatus() {
+  if (warmSenderLeadStatusRequested) return;
+  warmSenderLeadStatusRequested = true;
+  try {
+    const data = await fetchJson("/api/leads/status");
+    lastLeadsStatus = data.status || lastLeadsStatus;
+    if (lastSnapshot) renderSenderStatusConsole(lastSnapshot, resolveSelectedProfile(lastSnapshot));
+  } catch (_err) {
+    // Sender rows remain usable from the live snapshot if lead status is unavailable.
+  }
 }
 
 function createAlertCardNode() {
@@ -8291,6 +8334,9 @@ function renderSnapshot(snapshot) {
   renderAlerts(snapshot);
   renderSummary(snapshot);
   renderSenderStatusConsole(snapshot, selectedProfile);
+  if ((snapshot?.profiles || []).some((profile) => profile?.name === "private_jc_warm")) {
+    void hydrateWarmSenderLeadStatus();
+  }
   renderTrends(snapshot);
   renderWebhookHealth(snapshot);
   renderAwaitingAging(snapshot, selectedProfile);

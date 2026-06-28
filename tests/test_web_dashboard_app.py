@@ -1217,15 +1217,38 @@ class WebDashboardAppTests(unittest.TestCase):
         click_body = source[click_start:click_end]
 
         for expected in [
-            'warmProfile ? "open_lead_ops" : "start"',
-            'warmProfile ? "Open Lead Ops" : "Start"',
+            'warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"',
+            'action === "open_lead_ops" ? "Open Lead Ops"',
             "private_jc_warm",
-            "recipients_private_jc_warm.csv",
-            "private_jc_warm_log.csv",
+            "Warm Private JC",
+            "No warm sends yet",
+            "warmDraftPreviewCount",
+            "warmHasDraftPreview",
+            "No queue",
+            "is-warm-jc",
         ]:
             self.assertIn(expected, render_body)
+        for expected in [
+            "function warmSenderDisplayState",
+            'label: "Not confirmed"',
+            'label: "Ready"',
+            'label: "Running"',
+            'label: "Complete"',
+            'label: "No queue"',
+        ]:
+            self.assertIn(expected, source)
+        self.assertNotIn("recipients_private_jc_warm.csv", render_body)
+        self.assertNotIn("private_jc_warm_log.csv", render_body)
+        self.assertNotIn('Age ${profile.last_age}', render_body)
         self.assertIn('profile === "private_jc_warm" && action === "open_lead_ops"', click_body)
         self.assertIn('setDashboardTab("leads")', click_body)
+        self.assertIn("async function hydrateWarmSenderLeadStatus", source)
+        self.assertIn('fetchJson("/api/leads/status")', source)
+        self.assertIn("void hydrateWarmSenderLeadStatus()", source)
+
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        self.assertIn("#ops-view .sender-status-table tr.is-warm-jc td", styles)
+        self.assertIn("#ops-view .sender-status-profile-meta", styles)
 
     def test_warm_research_groups_outputs_and_lane_status_with_safety_copy(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
