@@ -692,7 +692,7 @@ function formatWarmActivity(timestamp, email = "") {
 }
 
 function formatProfileName(value) {
-  if (String(value || "") === "private_jc_warm") return "Warm JC";
+  if (String(value || "") === "private_jc_warm") return "Warm Outreach";
   const raw = String(value || "")
     .replace(/^sendgrid_/, "")
     .replace(/^private_/, "")
@@ -6267,7 +6267,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         || (!warmProfile && !stopAvailable && !startAvailable);
       const warmMax = Number(profile?.max_total || profile?.max_messages_per_run || 10);
       const warmMetadata = warmProfile
-        ? `<span class="sender-status-profile-meta">Warm Private JC${warmMax > 0 ? ` · Max ${warmMax.toLocaleString()}` : ""}</span>`
+        ? `<span class="sender-status-profile-meta">Private JC sender${warmMax > 0 ? ` · max ${warmMax.toLocaleString()}` : ""}</span>`
         : "";
       const lastActivity = warmProfile && warmStatus.last_sent_timestamp
         ? formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)

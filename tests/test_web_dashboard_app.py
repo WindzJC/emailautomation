@@ -1222,7 +1222,8 @@ class WebDashboardAppTests(unittest.TestCase):
             'action === "open_lead_ops"',
             'status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
             "private_jc_warm",
-            "Warm Private JC",
+            "Private JC sender",
+            "· max ${warmMax.toLocaleString()}",
             "No activity yet",
             "warmDraftPreviewCount",
             "warmHasDraftPreview",
@@ -1250,6 +1251,8 @@ class WebDashboardAppTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
         self.assertIn("#ops-view .sender-status-table tr.is-warm-jc td", styles)
         self.assertIn("#ops-view .sender-status-profile-meta", styles)
+        self.assertIn('if (String(value || "") === "private_jc_warm") return "Warm Outreach";', source)
+        self.assertNotIn("Warm Private JC${warmMax", render_body)
 
     def test_sender_table_render_is_idempotent_across_snapshot_and_tab_cycles(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1274,7 +1277,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
         # Repeated snapshot/refresh renders replace the one tbody; they never append a panel.
         self.assertEqual(render_body.count("ensureSenderStatusPanel()"), 1)
-        self.assertEqual(render_body.count("Warm Private JC"), 1)
+        self.assertEqual(render_body.count("Private JC sender"), 1)
         self.assertEqual(render_body.count('profile?.name === "private_jc_warm"'), 1)
 
     def test_sender_panel_lookup_survives_detached_ops_view_during_lead_ops_tab(self) -> None:
