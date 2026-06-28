@@ -1166,7 +1166,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "syncProgressDetailsToggle",
             "opsProgressDetailsToggle",
             "els.opsProgressDetails.open = !els.opsProgressDetails.open",
-            'document.querySelector(".ops-progress-strip")',
+            'opsRoot?.querySelector(".ops-progress-strip")',
             "data.auth_enabled === false",
             "is-auth-disabled",
             "ops-progress-summary-item",
@@ -1249,6 +1249,57 @@ class WebDashboardAppTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
         self.assertIn("#ops-view .sender-status-table tr.is-warm-jc td", styles)
         self.assertIn("#ops-view .sender-status-profile-meta", styles)
+
+    def test_sender_table_render_is_idempotent_across_snapshot_and_tab_cycles(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        ensure_start = source.index("function ensureSenderStatusPanel")
+        ensure_end = source.index("function syncProgressDetailsToggle", ensure_start)
+        ensure_body = source[ensure_start:ensure_end]
+        render_start = source.index("function renderSenderStatusConsole")
+        render_end = source.index("async function hydrateWarmSenderLeadStatus", render_start)
+        render_body = source[render_start:render_end]
+        snapshot_start = source.index("function renderSnapshot")
+        snapshot_end = source.index("async function fetchSnapshot", snapshot_start)
+        snapshot_body = source[snapshot_start:snapshot_end]
+
+        self.assertEqual(ensure_body.count('id="senders-table-panel"'), 1)
+        self.assertIn('opsRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
+        self.assertIn("panels.shift()", ensure_body)
+        self.assertIn("panels.forEach((panel) => panel.remove())", ensure_body)
+        self.assertNotIn("senderStatusPanel?.isConnected", ensure_body)
+        self.assertIn("setNodeHtml(", render_body)
+        self.assertIn("allProfiles.findIndex", render_body)
+        self.assertEqual(snapshot_body.count("renderSenderStatusConsole(snapshot, selectedProfile)"), 1)
+
+        # Repeated snapshot/refresh renders replace the one tbody; they never append a panel.
+        self.assertEqual(render_body.count("ensureSenderStatusPanel()"), 1)
+        self.assertEqual(render_body.count("Warm Private JC"), 1)
+        self.assertEqual(render_body.count('profile?.name === "private_jc_warm"'), 1)
+
+    def test_sender_panel_lookup_survives_detached_ops_view_during_lead_ops_tab(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        ensure_start = source.index("function ensureSenderStatusPanel")
+        ensure_end = source.index("function syncProgressDetailsToggle", ensure_start)
+        ensure_body = source[ensure_start:ensure_end]
+        mount_start = source.index("function mountExclusiveDashboardPanel")
+        mount_end = source.index("function applyDashboardTab", mount_start)
+        mount_body = source[mount_start:mount_end]
+
+        self.assertIn("if (els.opsView?.isConnected) els.opsView.remove()", mount_body)
+        self.assertIn("const opsRoot = els.opsView", ensure_body)
+        self.assertIn('opsRoot?.querySelector(".ops-progress-strip")', ensure_body)
+        self.assertIn('opsRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
+
+    def test_sender_rows_dedupe_warm_jc_and_jc_by_profile_name(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        render_start = source.index("function renderSenderStatusConsole")
+        render_end = source.index("async function hydrateWarmSenderLeadStatus", render_start)
+        render_body = source[render_start:render_end]
+
+        self.assertIn("allProfiles.findIndex", render_body)
+        self.assertIn("candidate?.name === profile?.name", render_body)
+        self.assertIn('profile?.name === "private_jc_warm"', render_body)
+        self.assertIn("formatProfileName(profile.name)", render_body)
 
     def test_warm_research_groups_outputs_and_lane_status_with_safety_copy(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

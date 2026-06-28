@@ -6070,23 +6070,27 @@ function renderSummary(snapshot) {
 }
 
 function ensureSenderStatusPanel() {
-  if (senderStatusPanel?.isConnected) {
-    const anchor = document.querySelector(".ops-progress-strip")
-      || document.querySelector(".workspace-metric-details")
-      || els.summaryGrid?.closest(".queue-health-section")
-      || els.summaryGrid;
-    if (anchor?.parentNode && senderStatusPanel.previousElementSibling !== anchor) {
+  const opsRoot = els.opsView;
+  const anchor = opsRoot?.querySelector(".ops-progress-strip")
+    || opsRoot?.querySelector(".workspace-metric-details")
+    || els.summaryGrid?.closest(".queue-health-section")
+    || els.summaryGrid;
+  if (!anchor?.parentNode) return null;
+
+  const panels = Array.from(opsRoot?.querySelectorAll(".sender-status-panel") || []);
+  senderStatusPanel = panels.shift() || null;
+  panels.forEach((panel) => panel.remove());
+
+  if (senderStatusPanel) {
+    senderStatusPanel.id = "senders-table-panel";
+    if (senderStatusPanel.previousElementSibling !== anchor) {
       anchor.insertAdjacentElement("afterend", senderStatusPanel);
     }
     return senderStatusPanel;
   }
-  const anchor = document.querySelector(".ops-progress-strip")
-    || document.querySelector(".workspace-metric-details")
-    || els.summaryGrid?.closest(".queue-health-section")
-    || els.summaryGrid;
-  if (!anchor?.parentNode) return null;
+
   senderStatusPanel = elementFromHTML(`
-    <section class="sender-status-panel panel-shell">
+    <section id="senders-table-panel" class="sender-status-panel panel-shell">
       <div class="ops-strip-head sender-status-head">
         <div>
           <p class="eyebrow">Senders</p>
@@ -6170,7 +6174,11 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
   const panel = ensureSenderStatusPanel();
   if (!panel) return;
   const tbody = panel.querySelector("tbody");
-  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
+  const profiles = Array.isArray(snapshot?.profiles)
+    ? snapshot.profiles.filter((profile, index, allProfiles) => (
+      allProfiles.findIndex((candidate) => candidate?.name === profile?.name) === index
+    ))
+    : [];
   if (!profiles.length) {
     setNodeHtml(tbody, `<tr><td colspan="7" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
     return;
