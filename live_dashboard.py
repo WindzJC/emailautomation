@@ -3930,11 +3930,12 @@ def start_profile(profile_name: str) -> JSONResponse:
     if profile_name == "private_jc_warm":
         lane = warm_private_jc_lane_status()
         if not bool(lane.get("ready")):
+            warm_error = str(lane.get("integrity_reason") or "warm_confirmation_required")
             return JSONResponse(
                 {
                     "ok": False,
                     "blocked": True,
-                    "error": "warm_confirmation_required",
+                    "error": warm_error,
                     "message": str(lane.get("message") or "Confirm Warm Private JC before starting."),
                     "warm_private_jc_lane": lane,
                     "snapshot": _build_live_snapshot(),

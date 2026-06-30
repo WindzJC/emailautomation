@@ -1051,12 +1051,13 @@ class SendShardTests(unittest.TestCase):
             body_template=pitch["body"],
             unsub_email="jc@astraproductions.co",
             subject_fallback=pitch["subject_fallback"],
+            body_fallback=pitch["body_fallback"],
         )
 
-        self.assertEqual("A website direction for your book", subject_text)
-        self.assertIn("Our team came across your author profile", body_text)
+        self.assertEqual("Website direction for your author brand", subject_text)
+        self.assertIn("I came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
-        self.assertNotIn("I came across", body_text)
+        self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
     def test_pitch_jc_present_book_title_renders_personalized_subject_and_body(self) -> None:
@@ -1072,7 +1073,7 @@ class SendShardTests(unittest.TestCase):
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("A website direction for The Quiet Harbor", subject_text)
+        self.assertEqual("Website direction for The Quiet Harbor", subject_text)
         self.assertIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
@@ -1094,6 +1095,7 @@ class SendShardTests(unittest.TestCase):
                     body_template=pitch["body"],
                     profile_name="private_jc",
                     subject_fallback=pitch["subject_fallback"],
+                    body_fallback=pitch["body_fallback"],
                 )
             )
 
@@ -1178,6 +1180,39 @@ class SendShardTests(unittest.TestCase):
         self.assertTrue(warm["allow_confirmed_warm_role_recipients"])
         self.assertNotIn("allow_confirmed_warm_role_recipients", cold)
         self.assertFalse(any(name.startswith("sendgrid_warm") for name in send_shard.PROFILES))
+
+    def test_warm_sender_preflight_refuses_confirmation_payload_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "shards"
+            logs = root / "logs"
+            state = root / "state"
+            shards.mkdir()
+            logs.mkdir()
+            state.mkdir()
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            queue_path.write_text("Email,EmailSubject,EmailBody\nsynthetic@example.com,Changed,Changed\n", encoding="utf-8")
+            stdout = io.StringIO()
+            integrity = {
+                "valid": False,
+                "reason": "warm_queue_payload_mismatch",
+                "message": "Warm queue payload no longer matches confirmed field EmailSubject.",
+                "field": "EmailSubject",
+            }
+
+            with patch.object(send_shard, "SHARDS_DIR", shards), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(send_shard, "STATE_DIR", state), patch.object(
+                send_shard, "validate_warm_queue_contract", return_value=True
+            ), patch.object(send_shard, "load_warm_confirmation_manifest", return_value={"confirmed": True}), patch.object(
+                send_shard, "validate_warm_confirmed_queue", return_value=integrity
+            ), patch.object(send_shard, "smtp_login") as smtp_login, patch.object(
+                sys, "argv", ["send_shard.py", "--profile", "private_jc_warm", "--preflight"]
+            ), redirect_stdout(stdout):
+                send_shard.main()
+
+        smtp_login.assert_not_called()
+        self.assertIn("warm_queue_payload_mismatch", stdout.getvalue())
 
     def test_confirmed_warm_queue_allows_public_role_contact_paths_only_for_warm_profile(self) -> None:
         warm_queue = Path("recipients_private_jc_warm.csv")

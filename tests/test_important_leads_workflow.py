@@ -3169,6 +3169,134 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
         self.assertTrue(lane["ready"])
         self.assertEqual(1, lane["remaining"])
 
+    def test_warm_confirmation_manifest_stores_protected_payload_and_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            manifest_path = root / "warm_private_jc_confirmation.json"
+            row = {
+                "AuthorName": "Taylor Example",
+                "AuthorEmail": "taylor@example.com",
+                "BookTitleOrProject": "Synthetic Project",
+                "EmailSubject": "Previewed subject",
+                "EmailBody": "Previewed body",
+                "NeedSignal": "Need",
+                "RecommendedService": "Service",
+                "OutreachAngle": "Angle",
+                "SourceURL": "https://example.com/source",
+                "ContactPath": "mailto:taylor@example.com",
+                "ResearchStatus": "New",
+            }
+            write_csv(preview_path, list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), [row])
+            confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+                log_paths=[],
+                cold_queue_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        approved = manifest["approved_rows"]["taylor@example.com"]
+        self.assertEqual(2, manifest["schema_version"])
+        self.assertEqual("Previewed subject", approved["payload"]["EmailSubject"])
+        self.assertEqual("Previewed body", approved["payload"]["EmailBody"])
+        self.assertEqual(64, len(approved["payload_sha256"]))
+
+    def test_warm_confirmation_rejects_modified_or_unconfirmed_remaining_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            manifest_path = root / "warm_private_jc_confirmation.json"
+            preview_rows = []
+            for index in range(2):
+                email = f"person-{index}@example.com"
+                preview_rows.append({
+                    "AuthorName": f"Person {index}",
+                    "AuthorEmail": email,
+                    "BookTitleOrProject": "Synthetic Project",
+                    "EmailSubject": f"Subject {index}",
+                    "EmailBody": f"Body {index}",
+                    "NeedSignal": "Need",
+                    "RecommendedService": "Service",
+                    "OutreachAngle": "Angle",
+                    "SourceURL": "https://example.com/source",
+                    "ContactPath": f"mailto:{email}",
+                    "ResearchStatus": "New",
+                })
+            write_csv(preview_path, list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), preview_rows)
+            confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+                log_paths=[], cold_queue_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            confirmed_rows = read_csv_rows(queue_path)
+            remaining = confirmed_rows[1]
+
+            cases = []
+            for field in ("EmailSubject", "EmailBody"):
+                changed = dict(remaining)
+                changed[field] = changed[field] + " changed"
+                cases.append((field, [changed], "warm_queue_payload_mismatch"))
+            unconfirmed = dict(remaining)
+            unconfirmed["Email"] = unconfirmed["AuthorEmail"] = "new@example.com"
+            unconfirmed["ContactPath"] = "mailto:new@example.com"
+            cases.append(("unconfirmed", [unconfirmed], "warm_queue_unconfirmed_email"))
+            cases.append(("duplicate", [remaining, dict(remaining)], "warm_queue_duplicate_email"))
+            missing = dict(remaining)
+            missing.pop("EmailBody")
+            cases.append(("missing", [missing], "warm_queue_missing_required_field"))
+
+            for label, rows, expected_reason in cases:
+                with self.subTest(label=label):
+                    fieldnames = [field for field in important_leads_workflow.WARM_PRIVATE_JC_QUEUE_HEADERS if any(field in row for row in rows)]
+                    write_csv(queue_path, fieldnames, rows)
+                    lane = important_leads_workflow.warm_private_jc_lane_status(
+                        queue_path=queue_path,
+                        confirmation_path=manifest_path,
+                    )
+                    self.assertFalse(lane["confirmed"])
+                    self.assertFalse(lane["ready"])
+                    self.assertEqual(expected_reason, lane["integrity_reason"])
+
+    def test_old_warm_confirmation_without_row_hashes_requires_reconfirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            manifest_path = root / "warm_private_jc_confirmation.json"
+            preview_path.write_text("AuthorEmail\nsynthetic@example.com\n", encoding="utf-8")
+            queue_path.write_text("Email\nsynthetic@example.com\n", encoding="utf-8")
+            manifest_path.write_text(json.dumps({
+                "schema_version": 1,
+                "confirmed": True,
+                "source_path": str(preview_path),
+                "source_sha256": important_leads_workflow._file_sha256(preview_path),
+                "row_count": 1,
+            }), encoding="utf-8")
+
+            lane = important_leads_workflow.warm_private_jc_lane_status(
+                queue_path=queue_path,
+                confirmation_path=manifest_path,
+            )
+
+        self.assertFalse(lane["confirmed"])
+        self.assertFalse(lane["ready"])
+        self.assertEqual("warm_confirmation_manifest_upgrade_required", lane["integrity_reason"])
+
     def test_cold_queue_rebuild_set_excludes_warm_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             names = {path.name for path in default_queue_paths(Path(tmpdir))}

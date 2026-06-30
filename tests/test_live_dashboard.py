@@ -5571,6 +5571,30 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         start_sender.assert_called_once_with("private_jc_warm")
 
+    def test_start_warm_private_jc_blocks_payload_mismatch_without_runtime_call(self) -> None:
+        lane = {
+            "confirmed": False,
+            "ready": False,
+            "remaining": 1,
+            "integrity_reason": "warm_queue_payload_mismatch",
+            "message": "Warm queue payload no longer matches confirmed field EmailSubject.",
+        }
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard,
+            "warm_private_jc_lane_status",
+            return_value=lane,
+        ), patch.object(live_dashboard.runtime_control, "start_sender") as start_sender, patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(live_dashboard, "_append_campaign_history"):
+            response = live_dashboard.start_profile("private_jc_warm")
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("warm_queue_payload_mismatch", body["error"])
+        start_sender.assert_not_called()
+
     def test_start_all_profile_set_does_not_include_warm_lane(self) -> None:
         self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
 

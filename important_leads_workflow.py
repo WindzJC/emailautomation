@@ -37,6 +37,9 @@ from send_shard import (
     load_bad_sendgrid_event_emails,
     load_done_statuses_from_logs,
     normalize_campaign_type,
+    normalized_warm_confirmation_payload,
+    validate_warm_confirmed_queue,
+    warm_confirmation_payload_hash,
 )
 
 from sendgrid_hygiene import load_active_suppressed_emails, norm_email
@@ -1255,14 +1258,27 @@ def warm_private_jc_lane_status(
     source_value = str(manifest.get("source_path") or "").strip()
     source_path = Path(source_value) if source_value else Path("__missing_warm_preview__")
     source_matches = source_path.is_file() and _file_sha256(source_path) == str(manifest.get("source_sha256") or "")
-    _source_headers, source_rows = _read_csv_rows(source_path) if source_matches else ([], [])
-    source_emails = {norm_email(row.get("AuthorEmail", "")) for row in source_rows if norm_email(row.get("AuthorEmail", ""))}
-    queue_emails = {norm_email(row.get("Email", "") or row.get("AuthorEmail", "")) for row in rows if norm_email(row.get("Email", "") or row.get("AuthorEmail", ""))}
-    no_queue_duplicates = len(queue_emails) == len(rows)
-    queue_is_safe_subset = queue_emails <= source_emails and no_queue_duplicates
+    integrity = validate_warm_confirmed_queue(rows, manifest) if manifest else {
+        "valid": False,
+        "reason": "warm_confirmation_required",
+        "message": "Generate and explicitly confirm a warm draft preview before starting.",
+    }
     original_count = int(manifest.get("row_count") or 0)
-    original_queue_matches = len(rows) != original_count or queue_fingerprint == str(manifest.get("queue_sha256") or "")
-    confirmed = bool(manifest.get("confirmed")) and source_matches and queue_is_safe_subset and original_queue_matches
+    confirmed = bool(manifest.get("confirmed")) and source_matches and bool(integrity.get("valid"))
+    reason = "" if confirmed else (
+        "warm_confirmation_source_mismatch"
+        if bool(manifest.get("confirmed")) and not source_matches
+        else str(integrity.get("reason") or "warm_confirmation_required")
+    )
+    message = (
+        "Warm Private JC confirmed and ready."
+        if confirmed and rows
+        else "Warm Private JC complete."
+        if confirmed and not rows
+        else "Warm confirmation source no longer matches the reviewed preview. Re-confirm before starting."
+        if bool(manifest.get("confirmed")) and not source_matches
+        else str(integrity.get("message") or "Generate and explicitly confirm a warm draft preview before starting.")
+    )
     return {
         "profile": "private_jc_warm",
         "queue_path": str(queue_path),
@@ -1275,13 +1291,11 @@ def warm_private_jc_lane_status(
         "source_path": str(manifest.get("source_path") or ""),
         "source_sha256": str(manifest.get("source_sha256") or ""),
         "queue_sha256": queue_fingerprint,
-        "message": (
-            "Warm Private JC confirmed and ready."
-            if confirmed and rows
-            else "Warm Private JC complete."
-            if confirmed and not rows
-            else "Generate and explicitly confirm a warm draft preview before starting."
-        ),
+        "integrity_valid": bool(integrity.get("valid")),
+        "integrity_reason": reason,
+        "integrity_email": str(integrity.get("email") or ""),
+        "integrity_field": str(integrity.get("field") or ""),
+        "message": message,
     }
 
 
@@ -1388,7 +1402,7 @@ def confirm_warm_private_jc_preview(
     with lock_files([queue_path]):
         _write_csv_atomic(queue_path, WARM_PRIVATE_JC_QUEUE_HEADERS, queue_rows)
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "confirmation_id": confirmation_id,
             "confirmed": True,
             "confirmed_at_utc": iso_utc(),
@@ -1398,6 +1412,14 @@ def confirm_warm_private_jc_preview(
             "queue_path": str(queue_path),
             "queue_sha256": _file_sha256(queue_path),
             "row_count": len(queue_rows),
+            "protected_fields": list(WARM_PRIVATE_JC_QUEUE_HEADERS),
+            "approved_rows": {
+                normalized_warm_confirmation_payload(row)["Email"]: {
+                    "payload": normalized_warm_confirmation_payload(row),
+                    "payload_sha256": warm_confirmation_payload_hash(row),
+                }
+                for row in queue_rows
+            },
         }
         write_json_atomic(confirmation_path, manifest)
     return {
