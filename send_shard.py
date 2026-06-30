@@ -944,57 +944,54 @@ If this is not a fit, no problem — just reply “no” and we will not follow 
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
 # Keep {BookTitle} and {{FirstName}} exactly formatted.
+
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle} and thought the book could benefit from a stronger, "
-    "more polished first impression for readers discovering it online."
+    "I came across {BookTitle} and thought it deserved a sharper online presence: "
+    "one that makes the book easier to understand, easier to trust, "
+    "and easier for the right reader to take seriously."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your author profile and thought your work could benefit from a stronger, "
-    "more polished first impression for readers discovering you online."
+    "I came across your author profile and thought your work deserved a sharper online presence: "
+    "one that makes your books easier to understand, easier to trust, "
+    "and easier for the right reader to take seriously."
 )
 
-PITCH_JC_SUBJECT = "A website direction for {BookTitle}"
-PITCH_JC_SUBJECT_FALLBACK = "A website direction for your book"
+PITCH_JC_SUBJECT = "Website direction for {BookTitle}"
+PITCH_JC_SUBJECT_FALLBACK = "Website direction for your author brand"
 
 PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-I’m reaching out because many authors have a strong book, but their online presence doesn’t always make that strength obvious when someone searches for them.
+That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
 
-Before a reader, reviewer, publisher, or media opportunity takes the next step, they often look you up first. If your website, visuals, or book presentation feel unclear, outdated, or incomplete, the book can feel less polished than it really is.
+Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals built around clarity, trust, and presentation.
 
-At Astra Productions, we work as a strategic creative partner for authors, helping turn that first impression into something more credible, cinematic, and memorable through premium author websites, book trailers, and launch visuals.
-
-Would you be open to seeing a clean author website direction for how your book and author brand could stand out online?
+If useful, I can send over a clean website direction for how {BookTitle} could be positioned more strongly online.
 
 Windelle JC
-Creative Director, Astra Productions
+Founder & CEO, Astra Productions
+astraproductions.co
 
-You can see examples of our work here: astraproductions.co
-
-P.S. If you’d rather not hear from me again, just reply unsub.
+If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-I’m reaching out because many authors have strong work, but their online presence doesn’t always make that strength obvious when someone searches for them.
+That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
 
-Before a reader, reviewer, publisher, or media opportunity takes the next step, they often look you up first. If your website, visuals, or book presentation feel unclear, outdated, or incomplete, your work can feel less polished than it really is.
+Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals built around clarity, trust, and presentation.
 
-At Astra Productions, we work as a strategic creative partner for authors, helping turn that first impression into something more credible, cinematic, and memorable through premium author websites, book trailers, and launch visuals.
-
-Would you be open to seeing a clean author website direction for how your author brand could stand out online?
+If useful, I can send over a clean website direction for how your author brand could be positioned more strongly online.
 
 Windelle JC
-Creative Director, Astra Productions
+Founder & CEO, Astra Productions
+astraproductions.co
 
-You can see examples of our work here: astraproductions.co
-
-P.S. If you’d rather not hear from me again, just reply unsub.
+If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_WARM_SUBJECT = "Quick idea for {BookTitleOrProject}"
@@ -2399,6 +2396,143 @@ WARM_QUEUE_REQUIRED_HEADERS = {
     "ResearchStatus",
 }
 
+WARM_CONFIRMATION_PROTECTED_FIELDS = (
+    "Email",
+    "AuthorEmail",
+    "FirstName",
+    "AuthorName",
+    "BookTitleOrProject",
+    "EmailSubject",
+    "EmailBody",
+    "NeedSignal",
+    "RecommendedService",
+    "OutreachAngle",
+    "SourceURL",
+    "ContactPath",
+    "ResearchStatus",
+    "campaign_type",
+    "campaign_id",
+)
+
+
+def normalized_warm_confirmation_payload(row: Dict[str, str]) -> Dict[str, str]:
+    payload: Dict[str, str] = {}
+    for field in WARM_CONFIRMATION_PROTECTED_FIELDS:
+        value = str(row.get(field) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if field in {"Email", "AuthorEmail"}:
+            value = norm_email(value)
+        payload[field] = value
+    return payload
+
+
+def warm_confirmation_payload_hash(payload_or_row: Dict[str, str]) -> str:
+    payload = normalized_warm_confirmation_payload(payload_or_row)
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _masked_warm_email(value: str) -> str:
+    email = norm_email(value)
+    if "@" not in email:
+        return ""
+    local, domain = email.split("@", 1)
+    return f"{local[:1]}***@{domain}"
+
+
+def validate_warm_confirmed_queue(
+    rows: Sequence[Dict[str, str]],
+    manifest: Dict[str, object],
+) -> Dict[str, object]:
+    if not bool(manifest.get("confirmed")):
+        return {"valid": False, "reason": "warm_confirmation_required", "message": "Warm Private JC requires explicit confirmation."}
+    approved_rows = manifest.get("approved_rows")
+    if not isinstance(approved_rows, dict) or not approved_rows:
+        return {
+            "valid": False,
+            "reason": "warm_confirmation_manifest_upgrade_required",
+            "message": "Warm confirmation metadata is missing per-row payload hashes. Re-confirm the reviewed warm preview.",
+        }
+
+    seen: Set[str] = set()
+    required_values = {"Email", "AuthorEmail", "FirstName", "EmailSubject", "EmailBody", "campaign_type", "campaign_id"}
+    for row in rows:
+        payload = normalized_warm_confirmation_payload(row)
+        email = payload["Email"] or payload["AuthorEmail"]
+        for field in WARM_CONFIRMATION_PROTECTED_FIELDS:
+            if field not in row:
+                return {
+                    "valid": False,
+                    "reason": "warm_queue_missing_required_field",
+                    "message": f"Warm queue row is missing required field {field}.",
+                    "email": _masked_warm_email(email),
+                    "field": field,
+                }
+        for field in required_values:
+            if not payload[field]:
+                return {
+                    "valid": False,
+                    "reason": "warm_queue_missing_required_field",
+                    "message": f"Warm queue row is missing required field {field}.",
+                    "email": _masked_warm_email(email),
+                    "field": field,
+                }
+        if email in seen:
+            return {
+                "valid": False,
+                "reason": "warm_queue_duplicate_email",
+                "message": "Warm queue contains a duplicate confirmed recipient.",
+                "email": _masked_warm_email(email),
+            }
+        seen.add(email)
+        approved = approved_rows.get(email)
+        if not isinstance(approved, dict):
+            return {
+                "valid": False,
+                "reason": "warm_queue_unconfirmed_email",
+                "message": "Warm queue contains a recipient outside the confirmed preview.",
+                "email": _masked_warm_email(email),
+            }
+        approved_payload = approved.get("payload")
+        approved_hash = str(approved.get("payload_sha256") or "")
+        if not isinstance(approved_payload, dict) or not approved_hash:
+            return {
+                "valid": False,
+                "reason": "warm_confirmation_manifest_upgrade_required",
+                "message": "Warm confirmation metadata is missing a protected row payload. Re-confirm the reviewed warm preview.",
+                "email": _masked_warm_email(email),
+            }
+        expected_payload = normalized_warm_confirmation_payload(approved_payload)
+        for field in WARM_CONFIRMATION_PROTECTED_FIELDS:
+            if payload[field] != expected_payload[field]:
+                return {
+                    "valid": False,
+                    "reason": "warm_queue_payload_mismatch",
+                    "message": f"Warm queue payload no longer matches confirmed field {field}.",
+                    "email": _masked_warm_email(email),
+                    "field": field,
+                }
+        actual_hash = warm_confirmation_payload_hash(payload)
+        if actual_hash != approved_hash or warm_confirmation_payload_hash(expected_payload) != approved_hash:
+            return {
+                "valid": False,
+                "reason": "warm_queue_payload_mismatch",
+                "message": "Warm queue payload hash no longer matches confirmation.",
+                "email": _masked_warm_email(email),
+                "field": "payload_sha256",
+            }
+    return {"valid": True, "reason": "", "message": "Warm confirmed queue payload is valid.", "remaining": len(rows)}
+
+
+def load_warm_confirmation_manifest(path: Optional[Path] = None) -> Dict[str, object]:
+    manifest_path = Path(path) if path is not None else STATE_DIR / "warm_private_jc_confirmation.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
 
 def validate_warm_queue_contract(csv_path: Path, rows: Sequence[Dict[str, str]]) -> bool:
     fieldnames = set(rows[0].keys()) if rows else set()
@@ -3347,7 +3481,22 @@ def main():
 
     rows = read_rows(csv_path)
     pre_rendered_message = bool(pitch.get("pre_rendered_message"))
+    warm_confirmation_manifest: Dict[str, object] = {}
     if pre_rendered_message:
+        if str(args.profile or "").strip() == "private_jc_warm":
+            warm_confirmation_manifest = load_warm_confirmation_manifest()
+            warm_integrity = validate_warm_confirmed_queue(rows, warm_confirmation_manifest)
+            if not bool(warm_integrity.get("valid")):
+                reason = str(warm_integrity.get("reason") or "warm_queue_payload_mismatch")
+                message = str(warm_integrity.get("message") or "Warm confirmed queue integrity validation failed.")
+                emit_worker_event(
+                    "ERROR",
+                    reason,
+                    csv_path=str(csv_path),
+                    field=str(warm_integrity.get("field") or ""),
+                )
+                print(f"ERROR: {reason}: {message}")
+                return
         if not validate_warm_queue_contract(csv_path, rows):
             emit_worker_event("ERROR", "invalid_warm_queue", csv_path=str(csv_path))
             return
@@ -4091,6 +4240,21 @@ def main():
                 if not to_email:
                     next_index = idx + 1
                     continue
+                if str(args.profile or "").strip() == "private_jc_warm":
+                    current_warm_rows = read_rows(csv_path)
+                    warm_integrity = validate_warm_confirmed_queue(current_warm_rows, warm_confirmation_manifest)
+                    if not bool(warm_integrity.get("valid")):
+                        reason = str(warm_integrity.get("reason") or "warm_queue_payload_mismatch")
+                        message = str(warm_integrity.get("message") or "Warm confirmed queue integrity validation failed.")
+                        emit_worker_event(
+                            "ERROR",
+                            reason,
+                            csv_path=str(csv_path),
+                            field=str(warm_integrity.get("field") or ""),
+                        )
+                        print(f"ERROR: {reason}: {message}")
+                        stop_reason = reason
+                        break
                 row_campaign_type = normalize_campaign_type(get_row_value_ci(r, ["campaign_type", "CampaignType", "campaign type"]) or args.campaign_type)
                 row_campaign_id = campaign_id_for_row(r, row_campaign_type)
                 idempotency_reserved = False
