@@ -968,7 +968,7 @@ That online first impression matters. Before a reader, reviewer, publisher, book
 
 Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals built around clarity, trust, and presentation.
 
-If useful, I can send over a clean website direction for how {BookTitle} could be positioned more strongly online.
+If useful, I can send over a clean website direction for how {{BookTitle}} could be positioned more strongly online.
 
 Windelle JC
 Founder & CEO, Astra Productions
