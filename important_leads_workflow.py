@@ -91,6 +91,20 @@ NON_AUTHORITATIVE_HISTORY_STATUSES = {
     "queued",
     "staged",
 }
+GLOBAL_BAD_CONTACT_HISTORY_STATUSES = {
+    "blocked",
+    "bounce",
+    "bounced",
+    "complained",
+    "complaint",
+    "drop",
+    "dropped",
+    "invalid",
+    "spam_report",
+    "spamreport",
+    "unsubscribe",
+    "unsubscribed",
+}
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EMAIL_IN_TEXT_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -1051,7 +1065,11 @@ def check_warm_research_leads(
     ledger_path = _lead_ledger_db_path(lead_ledger_db_path)
     ledger_conn = connect_lead_ledger(ledger_path)
     try:
-        authoritative_ids, _ignored_ids = _dispatch_history_contact_sets(ledger_conn, source_lead_ids)
+        astra_ids, astra_warm_ids, _sendgrid_ids, global_bad_ids, _ignored_ids = _dispatch_history_contact_sets(
+            ledger_conn,
+            source_lead_ids,
+        )
+        authoritative_ids = astra_ids | astra_warm_ids | global_bad_ids
         ledger_contacted = {
             email
             for _row, email, _method, _code, _reason in parsed
@@ -1348,8 +1366,11 @@ def confirm_warm_private_jc_preview(
     ledger_conn = connect_lead_ledger(_lead_ledger_db_path(lead_ledger_db_path))
     try:
         lead_id_by_email = {email: deterministic_lead_id(email) for email in source_emails}
-        contacted_ids, _ignored_ids = _dispatch_history_contact_sets(ledger_conn, set(lead_id_by_email.values()))
-        ledger_contacted = {email for email, lead_id in lead_id_by_email.items() if lead_id in contacted_ids}
+        astra_contacted_ids, astra_warm_contacted_ids, _sendgrid_contacted_ids, global_bad_ids, _ignored_ids = (
+            _dispatch_history_contact_sets(ledger_conn, set(lead_id_by_email.values()))
+        )
+        blocked_astra_ids = astra_contacted_ids | astra_warm_contacted_ids | global_bad_ids
+        ledger_contacted = {email for email, lead_id in lead_id_by_email.items() if lead_id in blocked_astra_ids}
     finally:
         ledger_conn.close()
 
@@ -1931,8 +1952,11 @@ def _source_email_matches_in_paths(source_emails: set[str], paths: Sequence[Path
 def _dispatch_history_contact_sets(
     conn,
     source_lead_ids: set[str],
-) -> tuple[set[str], set[str]]:
-    authoritative: set[str] = set()
+) -> tuple[set[str], set[str], set[str], set[str], set[str]]:
+    astra_contacted: set[str] = set()
+    astra_warm_contacted: set[str] = set()
+    sendgrid_contacted: set[str] = set()
+    global_bad_contact: set[str] = set()
     non_authoritative_seen: set[str] = set()
     sorted_ids = sorted(lead_id for lead_id in source_lead_ids if str(lead_id or "").strip())
     for index in range(0, len(sorted_ids), 500):
@@ -1940,7 +1964,7 @@ def _dispatch_history_contact_sets(
         placeholders = ",".join("?" for _ in chunk)
         rows = conn.execute(
             f"""
-            SELECT lead_id, result_status
+            SELECT lead_id, profile, queue_target, result_status
             FROM lead_dispatch_history
             WHERE lead_id IN ({placeholders})
             """,
@@ -1948,14 +1972,36 @@ def _dispatch_history_contact_sets(
         ).fetchall()
         for row in rows:
             lead_id = str(row["lead_id"] if hasattr(row, "keys") else row[0] or "").strip()
-            status = row["result_status"] if hasattr(row, "keys") else row[1]
+            profile = row["profile"] if hasattr(row, "keys") else row[1]
+            queue_target = row["queue_target"] if hasattr(row, "keys") else row[2]
+            status = row["result_status"] if hasattr(row, "keys") else row[3]
             if not lead_id:
                 continue
-            if _is_authoritative_contact_history_status(status):
-                authoritative.add(lead_id)
-            elif _history_status_key(status) in NON_AUTHORITATIVE_HISTORY_STATUSES:
+            status_key = _history_status_key(status)
+            if status_key in GLOBAL_BAD_CONTACT_HISTORY_STATUSES:
+                global_bad_contact.add(lead_id)
+            elif status_key in AUTHORITATIVE_CONTACT_HISTORY_STATUSES:
+                lane_label = f"{profile or ''} {queue_target or ''}".strip().lower()
+                if "private_jc_warm" in lane_label or ("warm" in lane_label and "jc" in lane_label):
+                    astra_warm_contacted.add(lead_id)
+                elif "private_jc" in lane_label:
+                    astra_contacted.add(lead_id)
+                elif "sendgrid" in lane_label:
+                    sendgrid_contacted.add(lead_id)
+                else:
+                    # Legacy events without a route cannot be safely attributed.
+                    astra_contacted.add(lead_id)
+                    sendgrid_contacted.add(lead_id)
+            elif status_key in NON_AUTHORITATIVE_HISTORY_STATUSES:
                 non_authoritative_seen.add(lead_id)
-    return authoritative, non_authoritative_seen - authoritative
+    authoritative = astra_contacted | astra_warm_contacted | sendgrid_contacted | global_bad_contact
+    return (
+        astra_contacted,
+        astra_warm_contacted,
+        sendgrid_contacted,
+        global_bad_contact,
+        non_authoritative_seen - authoritative,
+    )
 
 
 def _recontact_recency_summary(
@@ -2965,10 +3011,8 @@ def _build_dispatch_plan(
         )
         _warm_headers, warm_queue_rows = _read_queue_rows(warm_queue_path)
         warm_queue_block_emails = _existing_queue_email_set({warm_queue_path: warm_queue_rows})
-        # Warm recipients remain on Private JC warm. These unions only prevent
-        # either cold route from planning the same recipient at the same time.
+        # Warm Private JC is part of the Astra lane, so it blocks only Astra.
         jc_queue_block_emails |= warm_queue_block_emails
-        sendgrid_queue_block_emails |= warm_queue_block_emails
         source_email_by_lead_id: Dict[str, str] = {}
         source_emails: set[str] = set()
         for row in source_rows:
@@ -2981,10 +3025,14 @@ def _build_dispatch_plan(
                 continue
             source_email_by_lead_id[lead_id] = email
             source_emails.add(email)
-        contacted_lead_ids, ignored_contact_history_lead_ids = _dispatch_history_contact_sets(
-            ledger_conn,
-            set(source_email_by_lead_id),
-        )
+        (
+            astra_contacted_lead_ids,
+            astra_warm_contacted_lead_ids,
+            sendgrid_contacted_lead_ids,
+            global_bad_contact_lead_ids,
+            ignored_contact_history_lead_ids,
+        ) = _dispatch_history_contact_sets(ledger_conn, set(source_email_by_lead_id))
+        astra_lane_contacted_lead_ids = astra_contacted_lead_ids | astra_warm_contacted_lead_ids
         ignored_history_emails = {
             source_email_by_lead_id[lead_id]
             for lead_id in ignored_contact_history_lead_ids
@@ -3057,13 +3105,13 @@ def _build_dispatch_plan(
                 exclusion_reason_counts["bad_sendgrid_event"] += 1
                 continue
 
-            if lead_id in contacted_lead_ids and not allow_previously_sent:
-                already_contacted_skipped += 1
-                exclusion_reason_counts["already_contacted"] += 1
+            if lead_id in global_bad_contact_lead_ids:
+                bad_event_skipped += 1
+                exclusion_reason_counts["bad_contact_history"] += 1
                 if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
                     already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 continue
-            if lead_id in contacted_lead_ids and allow_previously_sent:
+            if lead_id in (astra_lane_contacted_lead_ids | sendgrid_contacted_lead_ids) and allow_previously_sent:
                 already_contacted_allowed += 1
 
             # Do not globally suppress cross-lane sent history here.
@@ -3095,6 +3143,9 @@ def _build_dispatch_plan(
                 if email in jc_sent and not allow_previously_sent:
                     route_failure_reasons.append("astra_already_sent")
                     return False
+                if lead_id in astra_lane_contacted_lead_ids and not allow_previously_sent:
+                    route_failure_reasons.append("astra_already_contacted")
+                    return False
                 if email in jc_queue_block_emails:
                     route_failure_reasons.append("astra_already_queued")
                     return False
@@ -3120,6 +3171,9 @@ def _build_dispatch_plan(
                 if email in sendgrid_sent and not allow_previously_sent:
                     route_sendgrid_already_sent += 1
                     route_failure_reasons.append("sendgrid_already_sent")
+                    return False
+                if lead_id in sendgrid_contacted_lead_ids and not allow_previously_sent:
+                    route_failure_reasons.append("sendgrid_already_contacted")
                     return False
                 if email in sendgrid_queue_block_emails:
                     route_sendgrid_already_queued += 1
@@ -3176,6 +3230,11 @@ def _build_dispatch_plan(
                     exclusion_reason_counts["already_sent"] += 1
                 elif any(reason.endswith("_already_queued") for reason in reason_set):
                     exclusion_reason_counts["already_queued"] += 1
+                elif any(reason.endswith("_already_contacted") for reason in reason_set):
+                    already_contacted_skipped += 1
+                    exclusion_reason_counts["already_contacted"] += 1
+                    if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
+                        already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 else:
                     exclusion_reason_counts["not_routed"] += 1
 
