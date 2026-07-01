@@ -982,33 +982,33 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["dispatch_source_row_count"], 9)
             self.assertEqual(report["dispatch_eligible_row_count"], 9)
             self.assertFalse(report["verification_required"])
-            self.assertEqual(report["added_astra"], 2)
-            self.assertEqual(report["skipped_astra_already_sent"], 2)
+            self.assertEqual(report["added_astra"], 3)
+            self.assertEqual(report["skipped_astra_already_sent"], 1)
             self.assertEqual(report["skipped_astra_already_queued"], 1)
-            self.assertEqual(report["added_sendgrid"], 1)
+            self.assertEqual(report["added_sendgrid"], 2)
             self.assertEqual(report["skipped_sendgrid_already_sent"], 1)
             self.assertEqual(report["skipped_sendgrid_already_queued"], 1)
             self.assertEqual(report["suppressed_skipped"], 1)
             self.assertEqual(report["duplicate_master_skipped"], 1)
             self.assertEqual(report["assigned_sg1"], 1)
-            self.assertEqual(report["assigned_sg2"], 0)
+            self.assertEqual(report["assigned_sg2"], 1)
             self.assertEqual(report["assigned_sg3"], 0)
             self.assertEqual(report["assigned_sg4"], 0)
             self.assertEqual(report["assigned_sg5"], 0)
-            self.assertEqual(report["skipped_both"], 1)
+            self.assertEqual(report["skipped_both"], 2)
 
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
                 jc_rows = list(reader)
-            self.assertEqual(len(jc_rows), 2)
+            self.assertEqual(len(jc_rows), 3)
             self.assertIn("Source", reader.fieldnames or [])
             self.assertIn("FirstName", reader.fieldnames or [])
             self.assertIn("AuthorName", reader.fieldnames or [])
             jc_emails = {row["Email"] for row in jc_rows}
             self.assertIn("fresh-both@example.com", jc_emails)
+            self.assertIn("sg-sent@example.com", jc_emails)
             self.assertIn("queued-sg@example.com", jc_emails)
             self.assertNotIn("astra-sent@example.com", jc_emails)
-            self.assertNotIn("sg-sent@example.com", jc_emails)
             self.assertNotIn("queued-astra@example.com", jc_emails)
 
             all_sg_emails: list[str] = []
@@ -1023,7 +1023,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             self.assertEqual(len(all_sg_emails), len(set(all_sg_emails)))
             self.assertNotIn("fresh-both@example.com", all_sg_emails)
-            self.assertNotIn("astra-sent@example.com", all_sg_emails)
+            self.assertIn("astra-sent@example.com", all_sg_emails)
             self.assertIn("queued-astra@example.com", all_sg_emails)
             self.assertNotIn("sg-sent@example.com", all_sg_emails)
             self.assertNotIn("queued-sg@example.com", all_sg_emails)
@@ -1433,22 +1433,22 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(5, preview["source_row_count"])
             self.assertEqual(5, preview["total_source_rows"])
             self.assertEqual(5, preview["eligible_rows"])
-            self.assertEqual(1, preview["skipped_already_sent"])
+            self.assertEqual(0, preview["skipped_already_sent"])
             self.assertEqual(0, preview["skipped_already_queued"])
             self.assertEqual(1, preview["skipped_suppressed"])
             self.assertEqual(1, preview["skipped_invalid_malformed"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(
-                {"sendgrid_1": 1, "sendgrid_2": 0, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
+                {"sendgrid_1": 1, "sendgrid_2": 1, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
                 preview["rows_to_add_sendgrid_shards"],
             )
             self.assertEqual("cold", preview["campaign_type"])
             self.assertEqual("triaged_keep", preview["dispatch_source_mode"])
             self.assertEqual(1, preview["private_jc_planned_count"])
-            self.assertEqual(1, preview["sendgrid_planned_count"])
-            self.assertEqual(2, preview["total_planned_unique_count"])
+            self.assertEqual(2, preview["sendgrid_planned_count"])
+            self.assertEqual(3, preview["total_planned_unique_count"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
-            self.assertEqual(2, preview["total_rows_that_would_be_written"])
+            self.assertEqual(3, preview["total_rows_that_would_be_written"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             self.assertTrue((preview_dir / f"{preview['preview_id']}.json").exists())
             self.assertEqual(jc_before, jc_queue.read_text(encoding="utf-8"))
@@ -1781,10 +1781,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=preview_dir,
             )
             self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(0, preview["rows_to_add_private_jc"])
-            self.assertEqual(2, preview["skipped_already_sent"])
-            self.assertEqual(2, preview["skipped_rows"])
-            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
+            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(0, preview["skipped_already_sent"])
+            self.assertEqual(0, preview["skipped_rows"])
+            self.assertEqual({}, preview["exclusion_reason_counts"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             sendgrid_emails: list[str] = []
             for path in sg_queues:
@@ -2902,15 +2902,29 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 for row in rows_by_queue
             }
             authoritative_sent = _sent_email_set([jc_log, *sg_logs, domain_log])
+            sendgrid_planned_emails = {
+                row["Email"].lower()
+                for queue_name, rows_by_queue in preview["plan_rows_by_queue"].items()
+                if queue_name.startswith("sendgrid_")
+                for row in rows_by_queue
+            }
 
-            self.assertEqual({"fresh-one@example.com", "fresh-two@example.com"}, planned_emails)
-            self.assertFalse(planned_emails & authoritative_sent)
-            self.assertEqual(2, preview["skipped_already_sent"])
-            self.assertEqual(2, preview["skipped_rows"])
-            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
+            self.assertEqual(
+                {
+                    "profile-sent@example.com",
+                    "domain-sent@example.com",
+                    "fresh-one@example.com",
+                    "fresh-two@example.com",
+                },
+                planned_emails,
+            )
+            self.assertFalse(sendgrid_planned_emails & authoritative_sent)
+            self.assertEqual(0, preview["skipped_already_sent"])
+            self.assertEqual(0, preview["skipped_rows"])
+            self.assertEqual({}, preview["exclusion_reason_counts"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             self.assertEqual(
-                2,
+                0,
                 preview["history_audit_counts"]["already_sent_from_actual_send_log"],
             )
             self.assertIn(str(domain_log), preview["sendgrid_log_paths"])

@@ -2575,11 +2575,34 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
                 log_paths = [jc_log_path, *sendgrid_log_paths]
             except Exception:
                 log_paths = []
-        authoritative_sent = _sent_email_set(log_paths)
-        planned_overlap = _planned_preview_emails(preview) & authoritative_sent
+        private_log_paths = [
+            path for path in log_paths
+            if "private_jc" in path.name.lower()
+        ]
+        sendgrid_log_paths = [
+            path for path in log_paths
+            if "sendgrid" in path.name.lower()
+        ]
+        private_sent = _sent_email_set(private_log_paths)
+        sendgrid_sent = _sent_email_set(sendgrid_log_paths)
+
+        planned_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+        planned_private_overlap = {
+            norm_email(row.get("Email", ""))
+            for row in (planned_rows_by_queue.get("private_jc") or [])
+            if isinstance(row, dict) and norm_email(row.get("Email", "")) in private_sent
+        }
+        planned_sendgrid_overlap: set[str] = set()
+        for queue_key in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"):
+            planned_sendgrid_overlap |= {
+                norm_email(row.get("Email", ""))
+                for row in (planned_rows_by_queue.get(queue_key) or [])
+                if isinstance(row, dict) and norm_email(row.get("Email", "")) in sendgrid_sent
+            }
+        planned_overlap = planned_private_overlap | planned_sendgrid_overlap
         if planned_overlap:
             raise RuntimeError(
-                f"Dispatch preview overlaps authoritative sent/contact logs for {len(planned_overlap)} planned recipient(s). Re-run Preview Dispatch."
+                f"Dispatch preview overlaps same-lane authoritative sent/contact logs for {len(planned_overlap)} planned recipient(s). Re-run Preview Dispatch."
             )
 
 
@@ -2994,6 +3017,8 @@ def _build_dispatch_plan(
         skipped_astra_already_queued = 0
         skipped_sendgrid_already_sent = 0
         skipped_sendgrid_already_queued = 0
+        route_sendgrid_already_sent = 0
+        route_sendgrid_already_queued = 0
         skipped_both = 0
         outcome_counts: Counter[str] = Counter()
         exclusion_reason_counts: Counter[str] = Counter()
@@ -3041,15 +3066,10 @@ def _build_dispatch_plan(
             if lead_id in contacted_lead_ids and allow_previously_sent:
                 already_contacted_allowed += 1
 
-            authoritative_sent_emails = jc_sent | sendgrid_sent
-            if email in authoritative_sent_emails and not allow_previously_sent:
-                if email in jc_sent:
-                    skipped_astra_already_sent += 1
-                else:
-                    skipped_sendgrid_already_sent += 1
-                exclusion_reason_counts["already_sent"] += 1
-                continue
-
+            # Do not globally suppress cross-lane sent history here.
+            # Route-specific checks below decide whether Private JC or SendGrid
+            # can still accept the row. Example: if SendGrid already sent it,
+            # Astra may still accept it if Astra has not sent/queued it.
             normalized = {header: _strip_cell(row.get(header, "")) for header in source_headers}
             normalized["Email"] = email
             normalized["campaign_type"] = normalized_campaign_type
@@ -3071,14 +3091,12 @@ def _build_dispatch_plan(
                 prefer_sendgrid = added_astra > added_sendgrid and email not in jc_sent
 
             def add_to_astra() -> bool:
-                nonlocal added_astra, skipped_astra_already_queued, skipped_astra_already_sent
+                nonlocal added_astra
                 if email in jc_sent and not allow_previously_sent:
-                    skipped_astra_already_sent += 1
-                    route_failure_reasons.append("already_sent")
+                    route_failure_reasons.append("astra_already_sent")
                     return False
                 if email in jc_queue_block_emails:
-                    skipped_astra_already_queued += 1
-                    route_failure_reasons.append("already_queued")
+                    route_failure_reasons.append("astra_already_queued")
                     return False
                 added_astra_rows.append(normalized)
                 jc_queue_block_emails.add(email)
@@ -3098,14 +3116,14 @@ def _build_dispatch_plan(
                 return True
 
             def add_to_sendgrid() -> bool:
-                nonlocal added_sendgrid, sg_assign_cursor, skipped_sendgrid_already_queued, skipped_sendgrid_already_sent
+                nonlocal added_sendgrid, sg_assign_cursor, route_sendgrid_already_sent, route_sendgrid_already_queued
                 if email in sendgrid_sent and not allow_previously_sent:
-                    skipped_sendgrid_already_sent += 1
-                    route_failure_reasons.append("already_sent")
+                    route_sendgrid_already_sent += 1
+                    route_failure_reasons.append("sendgrid_already_sent")
                     return False
                 if email in sendgrid_queue_block_emails:
-                    skipped_sendgrid_already_queued += 1
-                    route_failure_reasons.append("already_queued")
+                    route_sendgrid_already_queued += 1
+                    route_failure_reasons.append("sendgrid_already_queued")
                     return False
                 bucket_index = sg_assign_cursor % len(sendgrid_paths)
                 sg_assign_cursor += 1
@@ -3145,7 +3163,21 @@ def _build_dispatch_plan(
             else:
                 outcome_counts["skipped_both"] += 1
                 skipped_both += 1
-                exclusion_reason_counts[route_failure_reasons[0] if route_failure_reasons else "not_routed"] += 1
+                reason_set = set(route_failure_reasons)
+                if "astra_already_sent" in reason_set:
+                    skipped_astra_already_sent += 1
+                if "sendgrid_already_sent" in reason_set:
+                    skipped_sendgrid_already_sent += 1
+                if "astra_already_queued" in reason_set:
+                    skipped_astra_already_queued += 1
+                if "sendgrid_already_queued" in reason_set:
+                    skipped_sendgrid_already_queued += 1
+                if any(reason.endswith("_already_sent") for reason in reason_set):
+                    exclusion_reason_counts["already_sent"] += 1
+                elif any(reason.endswith("_already_queued") for reason in reason_set):
+                    exclusion_reason_counts["already_queued"] += 1
+                else:
+                    exclusion_reason_counts["not_routed"] += 1
 
         total_dispatch_rows = selected_rows_scanned
 
@@ -3173,9 +3205,20 @@ def _build_dispatch_plan(
             "sendgrid_5": plan_rows_by_path[sendgrid_paths[4]],
         }
         planned_summary = _planned_queue_row_summary(plan_rows_by_queue)
+        planned_private_sent_overlap = {
+            norm_email(row.get("Email", ""))
+            for row in (plan_rows_by_queue.get("private_jc") or [])
+            if isinstance(row, dict) and norm_email(row.get("Email", "")) in jc_sent
+        }
+        planned_sendgrid_sent_overlap: set[str] = set()
+        for queue_key in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"):
+            planned_sendgrid_sent_overlap |= {
+                norm_email(row.get("Email", ""))
+                for row in (plan_rows_by_queue.get(queue_key) or [])
+                if isinstance(row, dict) and norm_email(row.get("Email", "")) in sendgrid_sent
+            }
         planned_authoritative_sent_overlap_count = len(
-            _planned_preview_emails({"plan_rows_by_queue": plan_rows_by_queue})
-            & authoritative_sent_emails
+            planned_private_sent_overlap | planned_sendgrid_sent_overlap
         )
         sendgrid_shard_planned_counts = {
             f"sendgrid_{index}": len(plan_rows_by_path[path])
@@ -3183,11 +3226,11 @@ def _build_dispatch_plan(
         }
         sendgrid_zero_reason = ""
         if added_sendgrid == 0 and int(planned_summary["total_planned_queue_rows"]):
-            if skipped_sendgrid_already_sent:
+            if route_sendgrid_already_sent:
                 sendgrid_zero_reason = (
                     "SendGrid received 0 rows because its candidate rows were already sent."
                 )
-            elif skipped_sendgrid_already_queued:
+            elif route_sendgrid_already_queued:
                 sendgrid_zero_reason = (
                     "SendGrid received 0 rows because its candidate rows were already queued."
                 )
@@ -3201,7 +3244,7 @@ def _build_dispatch_plan(
             else _empty_recontact_recency_summary(int(planned_summary["total_planned_unique_count"]))
         )
         history_source_category_counts = {
-            "already_sent_from_actual_send_log": skipped_astra_already_sent + skipped_sendgrid_already_sent,
+            "already_sent_from_actual_send_log": int(exclusion_reason_counts.get("already_sent") or 0),
             "already_contacted_from_contact_history": already_contacted_skipped,
             "suppressed_unsubscribe": 0,
             "suppressed_bounce": 0,
@@ -3284,8 +3327,8 @@ def _build_dispatch_plan(
             "skipped_astra_already_queued": skipped_astra_already_queued,
             "skipped_sendgrid_already_sent": skipped_sendgrid_already_sent,
             "skipped_sendgrid_already_queued": skipped_sendgrid_already_queued,
-            "skipped_already_sent": skipped_astra_already_sent + skipped_sendgrid_already_sent,
-            "skipped_already_queued": skipped_astra_already_queued + skipped_sendgrid_already_queued,
+            "skipped_already_sent": int(exclusion_reason_counts.get("already_sent") or 0),
+            "skipped_already_queued": int(exclusion_reason_counts.get("already_queued") or 0),
             "skipped_rows": skipped_rows,
             "rows_to_add_private_jc": added_astra,
             "added_astra": added_astra,
