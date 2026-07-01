@@ -476,13 +476,15 @@ class DashboardCoreTests(unittest.TestCase):
                 private_paths = dashboard_core._provider_log_paths("private_jc")
                 sendgrid_paths = dashboard_core._provider_log_paths("sendgrid")
 
+        private_resolved = {path.resolve() for path in private_paths}
+        sendgrid_resolved = {path.resolve() for path in sendgrid_paths}
         self.assertEqual(
-            {logs / "private_jc_log.csv", logs / "private_jc_warm_log.csv"},
-            set(private_paths),
+            {(logs / "private_jc_log.csv").resolve(), (logs / "private_jc_warm_log.csv").resolve()},
+            private_resolved,
         )
-        self.assertNotIn(logs / "private_domain_log.csv", private_paths)
-        self.assertIn(logs / "sendgrid_annette_log.csv", sendgrid_paths)
-        self.assertIn(logs / "sendgrid_domain_log.csv", sendgrid_paths)
+        self.assertNotIn((logs / "private_domain_log.csv").resolve(), private_resolved)
+        self.assertIn((logs / "sendgrid_annette_log.csv").resolve(), sendgrid_resolved)
+        self.assertIn((logs / "sendgrid_domain_log.csv").resolve(), sendgrid_resolved)
 
     def test_sendgrid_queue_safety_allows_empty_completed_queue_when_accounted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1471,7 +1473,11 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_RUN_SETTINGS_PATH=settings_path,
                 ensure_sendgrid_session_layout=lambda session="sendgrid": (True, "ok"),
                 tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "bash", "dead": "0"}},
-                _load_env_value=lambda name: "SG.test-key",
+                resolve_sendgrid_api_key=lambda **kwargs: SimpleNamespace(
+                    ok=True,
+                    key="SG.test-key",
+                    error="",
+                ),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, _ = dashboard_core.start_sendgrid_profile("sendgrid_alpha", 0)
 

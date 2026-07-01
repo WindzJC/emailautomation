@@ -276,6 +276,8 @@ class SendShardTests(unittest.TestCase):
                 send_shard, "SENDGRID_COUNTERS_PATH", counters
             ), patch.dict(
                 send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False
+            ), patch.dict(
+                send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False
             ), patch.object(
                 sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette", "--preflight"]
             ), redirect_stdout(stdout):
@@ -463,10 +465,10 @@ class SendShardTests(unittest.TestCase):
             events = [json.loads(line) for line in worker_log.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual("REFRESH", events[0]["event_type"])
             self.assertEqual("START", events[1]["event_type"])
-            self.assertEqual("DONE", events[-1]["event_type"])
+            self.assertEqual("STOP", events[-1]["event_type"])
             self.assertEqual("queue_refreshed_after_empty_start", events[0]["reason"])
             self.assertEqual("worker_start", events[1]["reason"])
-            self.assertEqual("queue_exhausted", events[-1]["reason"])
+            self.assertEqual("max_total", events[-1]["reason"])
             self.assertIn("SENT fresh@example.com", stdout.getvalue())
 
     def test_worker_logs_top_level_exception_traceback(self) -> None:
@@ -1032,6 +1034,8 @@ class SendShardTests(unittest.TestCase):
                 send_shard, "SENDGRID_COUNTERS_PATH", counters
             ), patch.dict(
                 send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False
+            ), patch.dict(
+                send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False
             ), patch.object(
                 sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette", "--preflight"]
             ), redirect_stdout(stdout):

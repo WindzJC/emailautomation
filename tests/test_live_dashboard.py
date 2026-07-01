@@ -3861,6 +3861,10 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard.runtime_control,
                 "list_active_sender_snapshots",
                 return_value=[],
+            ), patch.object(
+                live_dashboard,
+                "_dispatch_source_readiness_block",
+                return_value=None,
             ), patch.object(live_dashboard, "save_state") as save_state, patch.object(
                 live_dashboard,
                 "preview_dispatch_master_leads",
