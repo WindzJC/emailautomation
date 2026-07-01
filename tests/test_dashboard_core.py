@@ -438,6 +438,52 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("Queue partially consumed — remaining recipients verified safe.", report["message"])
         self.assertIsNone(dashboard_core.queue_safety_alert(report))
 
+    def test_private_provider_history_uses_cold_and_warm_logs_not_shared_domain_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs = Path(tmpdir)
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "log": "private_jc_log.csv",
+                    "domain_log": "private_domain_log.csv",
+                },
+                "private_jc_warm": {
+                    "provider": "private",
+                    "log": "private_jc_warm_log.csv",
+                    "domain_log": "private_domain_log.csv",
+                },
+                "sendgrid_annette": {
+                    "provider": "sendgrid",
+                    "log": "sendgrid_annette_log.csv",
+                    "domain_log": "sendgrid_domain_log.csv",
+                },
+            }
+            for name in (
+                "private_jc_log.csv",
+                "private_jc_warm_log.csv",
+                "private_domain_log.csv",
+                "sendgrid_annette_log.csv",
+                "sendgrid_domain_log.csv",
+            ):
+                (logs / name).write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+
+            with patch.multiple(
+                dashboard_core,
+                PROFILES=profiles,
+                DASHBOARD_PROFILES=list(profiles),
+                SENDGRID_PROFILES=["sendgrid_annette"],
+            ), patch.object(settings, "LOGS_DIR", logs):
+                private_paths = dashboard_core._provider_log_paths("private_jc")
+                sendgrid_paths = dashboard_core._provider_log_paths("sendgrid")
+
+        self.assertEqual(
+            {logs / "private_jc_log.csv", logs / "private_jc_warm_log.csv"},
+            set(private_paths),
+        )
+        self.assertNotIn(logs / "private_domain_log.csv", private_paths)
+        self.assertIn(logs / "sendgrid_annette_log.csv", sendgrid_paths)
+        self.assertIn(logs / "sendgrid_domain_log.csv", sendgrid_paths)
+
     def test_sendgrid_queue_safety_allows_empty_completed_queue_when_accounted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

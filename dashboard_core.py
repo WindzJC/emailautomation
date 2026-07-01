@@ -2972,7 +2972,7 @@ def _authoritative_sent_log_row(row: Dict[str, str]) -> bool:
 def _provider_profile_names(provider: str) -> list[str]:
     normalized = str(provider or "").strip().lower()
     if normalized == "private_jc":
-        return ["private_jc"] if "private_jc" in PROFILES else []
+        return [name for name in ("private_jc", "private_jc_warm") if name in PROFILES]
     if normalized == "sendgrid":
         return list(SENDGRID_PROFILES)
     return list(DASHBOARD_PROFILES)
@@ -2983,7 +2983,8 @@ def _provider_log_paths(provider: str) -> list[Path]:
     seen: set[str] = set()
     for profile_name in _provider_profile_names(provider):
         cfg = PROFILES.get(profile_name, {})
-        for key in ("log", "domain_log"):
+        keys = ("log", "domain_log") if str(cfg.get("provider") or "").strip().lower() == "sendgrid" else ("log",)
+        for key in keys:
             value = str(cfg.get(key) or "").strip()
             if not value:
                 continue
