@@ -125,7 +125,7 @@
 }
 
 .react-sidebar-context {
-  margin-top: 28px;
+  margin-top: 22px;
   padding: 16px 7px 2px;
   border-top: 1px solid var(--ui-line);
 }
@@ -524,6 +524,45 @@
   background: rgba(16,21,29,.66);
 }
 
+.react-lead-canvas .dispatch-preview-empty {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-height: 0;
+  padding: 16px 16px 16px 46px;
+  border: 0;
+  background: rgba(255,255,255,.018);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.055);
+}
+
+.react-lead-canvas .dispatch-preview-empty::before {
+  position: absolute;
+  top: 17px;
+  left: 16px;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(229,185,94,.25);
+  border-radius: 50%;
+  background: rgba(229,185,94,.06);
+  content: "";
+}
+
+.react-lead-canvas .dispatch-preview-empty strong {
+  color: #e7ebf0;
+  font-size: .82rem;
+}
+
+.react-lead-canvas .dispatch-preview-empty > span {
+  color: var(--ui-muted);
+  font-size: .76rem;
+}
+
+.react-lead-canvas .dispatch-preview-empty .dispatch-preview-source-count {
+  margin-top: 3px;
+  color: #6f7c8e;
+  font-size: .68rem;
+}
+
 .react-lead-canvas .leads-advanced-diagnostics {
   border-color: var(--ui-line);
   background: rgba(255,255,255,.015);
@@ -545,9 +584,10 @@
 .react-leads-page.warm-research-mode .leads-control-results,
 .react-leads-page.warm-research-mode .current-run-card {
   padding: 16px;
-  border: 1px solid var(--ui-line);
+  border: 0;
   border-radius: 8px;
   background: var(--ui-surface);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.055);
 }
 
 .react-leads-page.warm-research-mode .leads-current-run-panel {
@@ -559,8 +599,13 @@
 .react-leads-page.warm-research-mode .warm-private-lane-group,
 .react-leads-page.warm-research-mode .warm-run-timeline,
 .react-leads-page.warm-research-mode .warm-research-output-group {
-  border-color: rgba(190,202,219,.06);
+  border-color: transparent;
   background: rgba(255,255,255,.022);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.045);
+}
+
+.react-leads-page.warm-research-mode .warm-private-action-panel > .warm-private-lane-group {
+  box-shadow: none;
 }
 
 .react-leads-page.warm-research-mode .warm-lane-metrics > div,
@@ -637,6 +682,37 @@
   .react-warm-surface .leads-control-bar { grid-template-columns: 1fr 1fr; }
   .react-warm-surface .leads-control-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .react-lead-workspace.leads-command-main { grid-template-columns: 1fr !important; }
+  .react-lead-workspace .leads-command-column-left { order: 1 !important; }
+  .react-lead-workspace .leads-command-column-right { order: 2 !important; }
+
+  .react-leads-page.warm-research-mode .react-warm-surface .leads-control-bar {
+    display: grid;
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-leads-page.warm-research-mode .leads-control-source {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    order: 1;
+  }
+
+  .react-leads-page.warm-research-mode .leads-control-results {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    order: 2;
+  }
+
+  .react-leads-page.warm-research-mode .leads-control-actions {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    order: 3;
+  }
+
+  .react-leads-page.warm-research-mode .leads-current-run-panel {
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    order: 4;
+  }
 }
 
 @media (max-width: 900px) {
@@ -670,22 +746,57 @@
 }
 
 @media (max-width: 640px) {
-  .react-sidebar.app-rail { grid-template-columns: 1fr; gap: 10px; padding: 11px; }
+  .react-sidebar.app-rail { grid-template-columns: 1fr auto; gap: 6px 8px; padding: 7px 10px; }
   .react-sidebar-brand { display: none; }
-  .react-sidebar-nav .app-rail-tabs { width: 100%; }
-  .react-sidebar-nav .tab-btn { flex: 1 1 0; min-width: 0 !important; }
-  .react-sidebar-context { margin: 0; padding-top: 8px; }
-  .react-sidebar-context .app-rail-status { flex-wrap: wrap; }
-  .react-sidebar-context .toolbar-status { width: 100%; margin-left: 0; }
+  .react-sidebar-nav { grid-column: 1 / -1; }
+  .react-sidebar-nav .app-rail-tabs { width: 100%; gap: 4px; }
+  .react-sidebar-nav .tab-btn { flex: 1 1 0; min-width: 0 !important; height: 34px; }
+  .react-sidebar-context { grid-column: 1 / -1; margin: 0; padding-top: 5px; }
+  .react-sidebar-context .app-rail-status { flex-wrap: nowrap; gap: 5px; }
+  .react-sidebar-context .connection,
+  .react-sidebar-context .auth-chip { min-height: 27px; padding: 3px 7px; font-size: .65rem; }
+  .react-sidebar-context .toolbar-status { display: none; }
   .react-main.app-main { padding: 20px 10px 34px; }
   .react-page-heading { align-items: flex-start; flex-direction: column; min-height: 0; }
   .react-page-heading h2 { font-size: 1.5rem; }
   .react-command-bar { padding: 10px; }
+  .react-command-bar .workspace-controls.toolbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr !important;
+    grid-template-areas: none !important;
+    gap: 8px !important;
+    width: 100%;
+    min-width: 0;
+  }
+  .react-command-bar .toolbar-field-window { grid-area: 1 / 1 !important; }
+  .react-command-bar .toolbar-field-cap { grid-area: 1 / 2 !important; }
+  .react-command-bar .toolbar-field-note {
+    grid-area: 2 / 1 / auto / -1 !important;
+    max-width: 100%;
+    overflow: visible;
+    white-space: normal;
+  }
+  .react-command-bar .toolbar-actions {
+    display: grid !important;
+    grid-area: 3 / 1 / auto / -1 !important;
+    grid-template-columns: repeat(2,minmax(0,1fr));
+    gap: 7px;
+    width: 100%;
+  }
+  .react-command-bar .toolbar-actions .btn {
+    width: 100%;
+    min-width: 0;
+  }
   .react-metric-region .workspace-summary-strip.summary-grid { grid-template-columns: 1fr; }
   .react-metric-region .summary-card { min-height: 110px; }
   .react-lead-canvas { padding: 10px; }
   .react-warm-surface .leads-control-bar { grid-template-columns: 1fr; padding: 12px; }
   .react-stepper-shell .workflow-tracker-row { grid-template-columns: 1fr; }
+
+  .react-leads-page.warm-research-mode .leads-control-source { order: 1; }
+  .react-leads-page.warm-research-mode .leads-control-results { order: 2; }
+  .react-leads-page.warm-research-mode .leads-control-actions { order: 3; }
+  .react-leads-page.warm-research-mode .leads-current-run-panel { order: 4; }
 }
 
 @media (prefers-reduced-motion: reduce) {
