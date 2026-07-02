@@ -1187,6 +1187,29 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, source)
 
+    def test_local_dev_auth_bypass_hides_login_without_removing_controls(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+
+        for expected in [
+            "authDisabled",
+            "data.auth_disabled",
+            '? "Local dev"',
+            'els.authLogoutBtn.classList.toggle("hidden", authDisabled)',
+            "authState.authDisabled || !authState.authEnabled || authState.authenticated",
+            "Local dev auth disabled.",
+        ]:
+            self.assertIn(expected, source)
+
+        for control_id in [
+            'id="start-btn"',
+            'id="stop-btn"',
+            'id="ops-tab-btn"',
+            'id="leads-tab-btn"',
+            'id="leads-important-dispatch-preview-btn"',
+        ]:
+            self.assertIn(control_id, markup)
+
     def test_warm_lane_requires_explicit_confirm_and_separate_start(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 

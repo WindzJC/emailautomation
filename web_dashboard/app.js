@@ -197,6 +197,7 @@ const tabPanelMounts = {
 };
 let authState = {
   authEnabled: true,
+  authDisabled: false,
   authenticated: false,
   username: "",
 };
@@ -272,10 +273,13 @@ function showMessage(message, kind = "success") {
 function renderAuthUi() {
   const authenticated = Boolean(authState.authenticated);
   const authEnabled = Boolean(authState.authEnabled);
+  const authDisabled = Boolean(authState.authDisabled);
   if (els.authStatusLabel) {
     setNodeText(
       els.authStatusLabel,
-      authenticated
+      authDisabled
+        ? "Local dev"
+        : authenticated
         ? `Signed in as ${authState.username || "admin"}`
         : authEnabled
           ? "Signed out"
@@ -283,16 +287,18 @@ function renderAuthUi() {
     );
   }
   if (els.authLogoutBtn) {
-    els.authLogoutBtn.disabled = !authenticated;
+    els.authLogoutBtn.disabled = authDisabled || !authenticated;
+    els.authLogoutBtn.classList.toggle("hidden", authDisabled);
+    els.authLogoutBtn.setAttribute("aria-hidden", authDisabled ? "true" : "false");
   }
   if (els.page) {
     els.page.classList.toggle("is-authenticated", authenticated);
-    els.page.classList.toggle("is-auth-disabled", !authEnabled);
+    els.page.classList.toggle("is-auth-disabled", authDisabled || !authEnabled);
   }
 }
 
 function showAuthOverlay(message = "") {
-  if (!authState.authEnabled || authState.authenticated) {
+  if (authState.authDisabled || !authState.authEnabled || authState.authenticated) {
     if (els.page) els.page.classList.add("is-authenticated");
     if (els.authOverlay) els.authOverlay.hidden = true;
     if (els.authPanel) els.authPanel.hidden = true;
@@ -330,10 +336,12 @@ function hideAuthOverlay() {
 }
 
 function setAuthState(nextState = {}) {
-  const authEnabled = nextState.authEnabled ?? authState.authEnabled;
+  const authDisabled = nextState.authDisabled ?? authState.authDisabled;
+  const authEnabled = authDisabled ? false : (nextState.authEnabled ?? authState.authEnabled);
   authState = {
     authEnabled,
-    authenticated: !authEnabled || Boolean(nextState.authenticated),
+    authDisabled,
+    authenticated: authDisabled || !authEnabled || Boolean(nextState.authenticated),
     username: String(nextState.username || ""),
   };
   renderAuthUi();
@@ -352,6 +360,7 @@ async function fetchAuthStatus() {
   }
   setAuthState({
     authEnabled: Boolean(data.auth_enabled),
+    authDisabled: Boolean(data.auth_disabled),
     authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
     username: data.username || "",
   });
@@ -378,13 +387,14 @@ async function submitAuthLogin() {
     });
     setAuthState({
       authEnabled: Boolean(data.auth_enabled),
+      authDisabled: Boolean(data.auth_disabled),
       authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
       username: data.username || username,
     });
-    showMessage("Signed in.", "success");
+    showMessage(data.auth_disabled ? "Local dev auth disabled." : "Signed in.", "success");
     await bootstrapAuthenticatedDashboard();
   } catch (err) {
-    setAuthState({ authEnabled: authState.authEnabled, authenticated: false, username: "", message: String(err) });
+    setAuthState({ authEnabled: authState.authEnabled, authDisabled: authState.authDisabled, authenticated: false, username: "", message: String(err) });
     showMessage(`Sign in failed: ${err}`, "error");
   } finally {
     if (els.authLoginBtn) {
@@ -406,8 +416,13 @@ async function submitAuthLogout() {
   } catch (err) {
     // Fall through to local state reset even if the server session is already gone.
   }
+  if (authState.authDisabled) {
+    setAuthState({ authEnabled: false, authDisabled: true, authenticated: true, username: "admin" });
+    showMessage("Local dev auth disabled.", "success");
+    return;
+  }
   stopSocket();
-  setAuthState({ authEnabled: authState.authEnabled, authenticated: false, username: "" });
+  setAuthState({ authEnabled: authState.authEnabled, authDisabled: false, authenticated: false, username: "" });
   showMessage("Signed out.", "success");
 }
 
@@ -8917,6 +8932,7 @@ async function bootstrapDashboard() {
     stopSocket();
     setAuthState({
       authEnabled: authState.authEnabled,
+      authDisabled: authState.authDisabled,
       authenticated: false,
       username: "",
       message: String(err),

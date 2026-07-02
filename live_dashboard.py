@@ -199,6 +199,8 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS" or path in _AUTH_PUBLIC_PATHS or any(path.startswith(prefix) for prefix in _AUTH_PUBLIC_PREFIXES):
             return await call_next(request)
         if path in _AUTH_PROTECTED_DOC_PATHS or path.startswith("/api/") or path == "/ws":
+            if _dashboard_auth_disabled():
+                return await call_next(request)
             if not settings.DASHBOARD_AUTH_PASSWORD:
                 return await call_next(request)
             if not bool(request.session.get(_AUTH_SESSION_KEY)):
@@ -3226,11 +3228,21 @@ def _verify_sendgrid_signature(raw_body: bytes, signature_b64: str, timestamp: s
         return False
 
 
+def _dashboard_env_flag(name: str) -> bool:
+    return str(os.environ.get(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dashboard_auth_disabled() -> bool:
+    return _dashboard_env_flag("DASHBOARD_AUTH_DISABLED") or _dashboard_env_flag("LOCAL_DASHBOARD_NO_AUTH")
+
+
 def _dashboard_auth_enabled() -> bool:
-    return bool(settings.DASHBOARD_AUTH_PASSWORD)
+    return bool(settings.DASHBOARD_AUTH_PASSWORD) and not _dashboard_auth_disabled()
 
 
 def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
+    if _dashboard_auth_disabled() or not _dashboard_auth_enabled():
+        return True
     session = getattr(scope, "session", None)
     if not isinstance(session, dict):
         session = {}
@@ -3238,10 +3250,14 @@ def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
 
 
 def _dashboard_auth_response() -> dict[str, object]:
+    auth_disabled = _dashboard_auth_disabled()
+    auth_enabled = _dashboard_auth_enabled()
     return {
-        "auth_enabled": _dashboard_auth_enabled(),
-        "authenticated": True if not _dashboard_auth_enabled() else False,
+        "auth_enabled": auth_enabled,
+        "auth_disabled": auth_disabled,
+        "authenticated": True if auth_disabled or not auth_enabled else False,
         "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
+        "local_mode": not auth_enabled,
     }
 
 
@@ -3272,11 +3288,12 @@ def health() -> dict[str, str]:
 @app.get("/api/auth/status")
 def auth_status(request: Request) -> JSONResponse:
     authenticated = bool(request.session.get(_AUTH_SESSION_KEY))
+    auth_response = _dashboard_auth_response()
     return JSONResponse(
         {
             "ok": True,
-            **_dashboard_auth_response(),
-            "authenticated": True if not _dashboard_auth_enabled() else authenticated,
+            **auth_response,
+            "authenticated": bool(auth_response["authenticated"]) or authenticated,
             "username": str(request.session.get("dashboard_username") or settings.DASHBOARD_AUTH_USERNAME or "admin"),
         }
     )
@@ -3284,6 +3301,14 @@ def auth_status(request: Request) -> JSONResponse:
 
 @app.post("/api/auth/login")
 def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
+    if _dashboard_auth_disabled():
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": "Local dev auth disabled.",
+                **_dashboard_auth_response(),
+            }
+        )
     if not _dashboard_auth_enabled():
         return JSONResponse(
             {"ok": False, "message": "Dashboard auth is not configured."},
@@ -3303,7 +3328,8 @@ def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
 @app.post("/api/auth/logout")
 def auth_logout(request: Request) -> JSONResponse:
     request.session.clear()
-    return JSONResponse({"ok": True, "message": "Signed out.", **_dashboard_auth_response()})
+    message = "Local dev auth disabled." if _dashboard_auth_disabled() else "Signed out."
+    return JSONResponse({"ok": True, "message": message, **_dashboard_auth_response()})
 
 
 @app.get("/api/snapshot")
@@ -5249,7 +5275,9 @@ async def websocket_snapshot_stream(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> None:
-    if not _dashboard_auth_enabled() or not _dashboard_is_authenticated(websocket):
+    if not _dashboard_auth_disabled() and (
+        not _dashboard_auth_enabled() or not _dashboard_is_authenticated(websocket)
+    ):
         await websocket.close(code=4401)
         return
     await websocket.accept()
@@ -5259,25 +5287,3 @@ async def websocket_snapshot_stream(
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         return
-
-# --- LOCAL DASHBOARD NO-AUTH OVERRIDE ---
-# When DASHBOARD_AUTH_PASSWORD is empty, this local dashboard should behave as
-# already authenticated instead of showing the Sign in / Auth unavailable panel.
-def _dashboard_auth_response():
-    auth_enabled = _dashboard_auth_enabled()
-    return {
-        "ok": True,
-        "auth_enabled": auth_enabled,
-        "authenticated": True if not auth_enabled else False,
-        "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
-        "local_mode": True if not auth_enabled else False,
-    }
-
-
-def _dashboard_is_authenticated(scope):
-    if not _dashboard_auth_enabled():
-        return True
-    session = getattr(scope, "session", None)
-    if not isinstance(session, dict):
-        session = {}
-    return bool(session.get(_AUTH_SESSION_KEY))
