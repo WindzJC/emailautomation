@@ -3,445 +3,695 @@
 @tailwind utilities;
 
 @layer base {
-  html {
-    color-scheme: dark;
-  }
-
-  body {
-    @apply m-0 min-h-screen bg-canvas text-ink antialiased;
-  }
-
-  button,
-  input,
-  select {
-    font: inherit;
-  }
+  html { color-scheme: dark; }
+  body { @apply m-0 min-h-screen bg-[#080a0e] text-slate-100 antialiased; }
+  button, input, select { font: inherit; }
 }
 
-@layer utilities {
-  @media (prefers-reduced-motion: reduce) {
-    .motion-safe\:transition {
-      transition: none;
-    }
-  }
+:root {
+  --ui-canvas: #080a0e;
+  --ui-sidebar: #0c1016;
+  --ui-surface: #10151d;
+  --ui-raised: #151c26;
+  --ui-soft: #0d1219;
+  --ui-line: rgba(190, 202, 219, 0.09);
+  --ui-line-strong: rgba(190, 202, 219, 0.16);
+  --ui-text: #f4f6f9;
+  --ui-muted: #8e9aaa;
+  --ui-blue: #81aef2;
+  --ui-green: #5fd3a0;
+  --ui-amber: #e5b95e;
+  --ui-red: #ef8995;
 }
 
-/* React-owned product shell. Loaded after the legacy controller stylesheet. */
-#dashboard-root {
-  min-height: 100vh;
-}
+#dashboard-root { min-height: 100vh; }
 
 .react-dashboard.page {
   width: 100%;
   max-width: none;
-  padding: 16px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 240px), #070a0f;
+  min-height: 100vh;
+  padding: 0;
+  background: var(--ui-canvas);
 }
 
-.react-dashboard .app-shell,
-.react-dashboard .app-shell.warm-research-shell {
+.react-app-shell.app-shell,
+.react-app-shell.app-shell.warm-research-shell {
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr) !important;
-  gap: 16px !important;
-  width: min(100%, 1580px) !important;
-  max-width: 1580px !important;
-  margin-inline: auto;
+  grid-template-columns: 208px minmax(0, 1fr) !important;
+  gap: 0 !important;
+  width: min(100%, 1680px) !important;
+  max-width: 1680px !important;
+  min-height: 100vh;
+  margin: 0 auto;
 }
 
-.react-dashboard .app-rail {
+.react-sidebar.app-rail {
   position: sticky !important;
-  top: 16px;
-  z-index: 20;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) !important;
-  grid-template-rows: auto auto 1fr !important;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
   align-self: start;
-  align-items: start !important;
-  min-height: calc(100vh - 32px);
-  padding: 22px 16px !important;
-  overflow: hidden;
-  border: 1px solid rgba(190, 202, 219, 0.09);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(118, 151, 199, 0.055), transparent 32%), #0d131c;
-  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.3);
+  min-height: 100vh;
+  padding: 22px 14px;
+  border: 0;
+  border-right: 1px solid var(--ui-line);
+  border-radius: 0;
+  background: var(--ui-sidebar);
+  box-shadow: none;
 }
 
-.react-dashboard .app-rail-top {
+.react-sidebar-brand {
+  padding: 0 8px 24px;
+}
+
+.react-sidebar-brand .app-rail-top {
   display: grid;
   gap: 7px;
-  width: 100%;
-  padding: 0 8px 22px;
-  border-bottom: 1px solid rgba(190, 202, 219, 0.08);
-  grid-column: 1;
-  grid-row: 1;
+  padding: 0;
+  border: 0;
 }
 
-.react-dashboard .app-rail-top .eyebrow {
-  color: #758398;
-  font-size: 0.64rem;
-  line-height: 1;
+.react-sidebar-brand .eyebrow {
+  color: #687588;
+  font-size: 0.62rem;
+  letter-spacing: 0 !important;
 }
 
-.react-dashboard .app-rail-title {
-  max-width: 180px;
-  color: #f5f7fa;
-  font-size: 1.36rem !important;
-  line-height: 1.2;
+.react-sidebar-brand .app-rail-title {
+  max-width: 150px;
+  color: var(--ui-text);
+  font-size: 1.22rem !important;
+  line-height: 1.22;
 }
 
-.react-dashboard .app-rail-tabs {
+.react-sidebar-nav {
+  padding-top: 16px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.react-sidebar-nav .app-rail-tabs {
   display: grid;
-  grid-column: 1;
-  grid-row: 2;
-  gap: 6px;
-  width: 100%;
-  margin-top: 18px;
+  gap: 5px;
   padding: 0;
   background: transparent;
 }
 
-.react-dashboard .app-rail-tabs .tab-btn {
+.react-sidebar-nav .tab-btn {
   justify-content: flex-start;
   width: 100%;
   min-width: 0 !important;
-  height: 42px;
-  padding: 0 12px;
-  color: #929fb0;
+  height: 40px;
+  padding: 0 11px;
+  color: #8995a5;
   text-align: left;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  transition: color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.react-sidebar-nav .tab-btn:hover {
+  color: #e9edf3;
+  background: rgba(255,255,255,.035);
+  transform: translateX(2px);
+}
+
+.react-sidebar-nav .tab-btn.is-active {
+  color: #f7f9fc;
+  background: rgba(125, 169, 230, .11);
+  box-shadow: inset 2px 0 0 var(--ui-blue);
+}
+
+.react-sidebar-context {
+  margin-top: 28px;
+  padding: 16px 7px 2px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.react-sidebar-label,
+.react-section-label,
+.react-kicker {
+  margin: 0;
+  color: #697689;
+  font-size: .64rem;
+  font-weight: 700;
+  letter-spacing: 0 !important;
+  text-transform: uppercase;
+}
+
+.react-sidebar-context .app-rail-status {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  max-width: none;
+  margin-top: 10px;
+  padding: 0 !important;
+  border: 0;
+  background: transparent;
+}
+
+.react-sidebar-context .connection,
+.react-sidebar-context .auth-chip {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-color: var(--ui-line);
+  background: rgba(255,255,255,.022);
+}
+
+.react-sidebar-context .auth-chip {
+  color: #dfc37f;
+  border-color: rgba(229,185,94,.18);
+  background: rgba(229,185,94,.055);
+}
+
+.react-sidebar-context .toolbar-status {
+  margin: 1px 0 0;
+  color: #687588;
+  text-align: left;
+  font-size: .66rem !important;
+}
+
+.react-main.app-main {
+  min-width: 0;
+  padding: 34px clamp(24px, 3vw, 48px) 54px;
+  background:
+    radial-gradient(circle at 82% -10%, rgba(72, 105, 151, .1), transparent 30%),
+    var(--ui-canvas);
+}
+
+.react-workspace.workspace-view {
+  gap: 20px;
+  max-width: 1380px;
+  margin-inline: auto;
+  animation: workspace-enter 260ms ease both;
+}
+
+.react-page-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 62px;
+}
+
+.react-page-heading h2 {
+  margin: 7px 0 5px;
+  color: var(--ui-text);
+  font-size: clamp(1.65rem, 2.1vw, 2.15rem);
+  line-height: 1.08;
+  letter-spacing: 0 !important;
+}
+
+.react-page-heading > div > p:last-child {
+  margin: 0;
+  color: var(--ui-muted);
+  font-size: .88rem;
+}
+
+.react-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 29px;
+  padding: 5px 10px;
+  border: 1px solid var(--ui-line);
+  border-radius: 999px;
+  color: #b4bfcd;
+  background: rgba(255,255,255,.025);
+  font-size: .7rem;
+  font-weight: 700;
+}
+
+.react-status-pill-live::before,
+.react-status-pill-safe::before {
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--ui-green);
+  box-shadow: 0 0 0 4px rgba(95,211,160,.09);
+  content: "";
+}
+
+.react-command-bar {
+  position: relative;
+  z-index: 2;
+  padding: 12px 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: rgba(16,21,29,.86);
+  box-shadow: 0 14px 34px rgba(0,0,0,.16);
+}
+
+.react-command-bar .workspace-status-row,
+.react-command-bar .workspace-controls-card {
+  margin: 0;
+  border: 0;
   background: transparent;
   box-shadow: none;
 }
 
-.react-dashboard .app-rail-tabs .tab-btn:hover {
-  color: #eef2f7;
-  background: rgba(255, 255, 255, 0.035);
+.react-command-bar .workspace-controls.toolbar {
+  min-height: 40px;
+  padding: 0 !important;
 }
 
-.react-dashboard .app-rail-tabs .tab-btn.is-active {
-  color: #f7f9fc;
-  border-color: rgba(132, 170, 223, 0.2);
-  background: rgba(111, 151, 206, 0.12);
-  box-shadow: inset 3px 0 0 #78aef8;
+.react-command-bar select,
+.react-command-bar input {
+  min-height: 38px;
+  border-color: var(--ui-line);
+  background: #171e28;
 }
 
-.react-dashboard .app-rail .app-rail-status {
-  display: flex;
-  grid-column: 1;
-  grid-row: 3;
-  align-self: end;
-  align-content: flex-start;
-  justify-content: flex-start !important;
-  width: 100%;
-  max-width: 100%;
-  margin-top: 24px;
-  padding: 14px 8px 0 !important;
+.react-metric-region .queue-health-section { margin: 0; }
+.react-metric-region .queue-health-head { display: none; }
+
+.react-metric-region .workspace-summary-strip.summary-grid {
+  grid-template-columns: 1.25fr 1fr 1fr 1fr 1.15fr;
+  gap: 10px;
+}
+
+.react-metric-region .summary-card {
+  position: relative;
+  min-height: 128px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(255,255,255,.025), transparent 60%), var(--ui-surface);
+  box-shadow: 0 14px 34px rgba(0,0,0,.14);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.react-metric-region .summary-card:hover {
+  border-color: var(--ui-line-strong);
+  box-shadow: 0 18px 42px rgba(0,0,0,.2);
+  transform: translateY(-2px);
+}
+
+.react-metric-region .summary-card-private_jc {
+  background: linear-gradient(145deg, rgba(95,211,160,.075), transparent 62%), var(--ui-surface);
+}
+
+.react-metric-region .summary-card-alerts {
+  background: linear-gradient(145deg, rgba(229,185,94,.075), transparent 62%), var(--ui-surface);
+}
+
+.react-metric-region .summary-label {
+  color: #7d8999;
+  font-size: .64rem;
+  letter-spacing: 0 !important;
+}
+
+.react-metric-region .summary-value {
+  margin-block: 5px;
+  color: var(--ui-text);
+  font-size: 1.65rem;
+}
+
+.react-sender-console {
+  display: grid;
+  gap: 12px;
+}
+
+.react-sender-console .ops-progress-strip {
+  min-height: 46px;
+  padding: 8px 12px;
+  border-color: var(--ui-line);
+  background: rgba(16,21,29,.72);
+}
+
+.react-sender-console .sender-status-panel {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-soft);
+  box-shadow: 0 20px 48px rgba(0,0,0,.19);
+}
+
+.react-sender-console .sender-status-head {
+  padding: 18px 20px 15px;
+}
+
+.react-sender-console .sender-status-table-wrap {
+  overflow: auto;
   border: 0;
-  border-top: 1px solid rgba(190, 202, 219, 0.08);
+  border-top: 1px solid rgba(190,202,219,.06);
   border-radius: 0;
   background: transparent;
 }
 
-.react-dashboard .app-rail-status .connection,
-.react-dashboard .app-rail-status .auth-chip {
-  width: 100%;
+.react-sender-console .sender-status-table {
+  min-width: 850px;
+  border-collapse: collapse;
+}
+
+.react-sender-console .sender-status-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 40px;
+  padding: 9px 16px;
+  color: #758296;
+  border-bottom: 1px solid rgba(190,202,219,.06);
+  background: #111823;
+  font-size: .64rem;
+  letter-spacing: 0 !important;
+}
+
+.react-sender-console .sender-status-table td {
+  height: 58px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(190,202,219,.045);
+  background: transparent;
+}
+
+.react-sender-console .sender-status-table tbody tr:hover td {
+  background: rgba(129,174,242,.045);
+}
+
+.react-sender-console .sender-status-table tbody tr:last-child td { border-bottom: 0; }
+
+.react-sender-console .sender-status-pill {
+  min-width: 76px;
+  border-width: 1px;
+  border-radius: 999px;
+}
+
+.react-sender-console .sender-status-action-btn {
   min-height: 32px;
-  justify-content: flex-start;
+  padding: 5px 10px;
+  border-radius: 6px;
+  box-shadow: none;
 }
 
-.react-dashboard .app-rail-status .auth-chip {
-  order: 2;
+.react-supporting-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
-.react-dashboard .app-rail-status .toolbar-status {
-  order: 3;
-  width: 100%;
-  margin: 2px 0 0;
-  text-align: left;
+.react-supporting-panels .workspace-primary,
+.react-supporting-panels .campaign-history-panel { min-width: 0; }
+
+.react-supporting-panels .advanced-details {
+  min-height: 48px;
+  border-color: var(--ui-line);
+  background: rgba(16,21,29,.65);
 }
 
-.react-dashboard .app-main {
-  min-width: 0;
-  padding-block: 4px 32px;
+.react-lead-canvas {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: rgba(13,18,25,.72);
+  box-shadow: 0 22px 54px rgba(0,0,0,.18);
 }
 
-.react-dashboard .workspace-view {
+.react-lead-canvas > .panel-header {
+  min-height: 0;
+  padding: 0 2px 3px;
+}
+
+.react-lead-canvas > .panel-header .eyebrow { display: none; }
+.react-lead-canvas > .panel-header h2 { font-size: 1.08rem; }
+
+.react-warm-surface .leads-control-bar {
+  grid-template-columns: minmax(320px,1fr) minmax(260px,.72fr) auto;
+  gap: 14px;
+  padding: 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ui-raised);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.055);
+}
+
+.react-warm-surface .leads-control-results {
+  border: 0;
+  background: rgba(6,9,13,.25);
+}
+
+.react-lead-canvas .leads-workflow-status-banner {
+  min-height: 39px;
+  padding: 8px 10px;
+  border-color: rgba(190,202,219,.07);
+  background: rgba(255,255,255,.018);
+}
+
+.react-stepper-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.react-stepper-shell .workflow-tracker-row {
+  gap: 7px;
+}
+
+.react-stepper-shell .workflow-track-step {
+  min-height: 62px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255,255,255,.026);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.05);
+}
+
+.react-stepper-shell .workflow-track-step-good {
+  background: rgba(95,211,160,.055);
+  box-shadow: inset 0 0 0 1px rgba(95,211,160,.12);
+}
+
+.react-stepper-shell .workflow-track-step-warn {
+  background: rgba(229,185,94,.055);
+  box-shadow: inset 0 0 0 1px rgba(229,185,94,.13);
+}
+
+.react-lead-workspace.leads-command-main {
+  grid-template-columns: minmax(300px,.72fr) minmax(0,1.28fr) !important;
   gap: 14px;
 }
 
-.react-dashboard #ops-view .workspace-controls-card {
+.react-lead-workspace .leads-command-column { gap: 10px; }
+
+.react-lead-workspace .current-run-card,
+.react-lead-workspace .leads-command-section {
+  border-color: rgba(190,202,219,.065);
+  border-radius: 8px;
+  background: var(--ui-surface);
+  box-shadow: none;
+}
+
+.react-lead-workspace .current-run-metrics > div,
+.react-lead-workspace .operator-metric {
+  border: 0;
+  background: rgba(255,255,255,.027);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.045);
+}
+
+.react-lead-workspace .dispatch-mode-card {
+  min-height: 90px;
+  border: 0;
+  background: rgba(255,255,255,.025);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.055);
+  transition: transform 170ms ease, background 170ms ease, box-shadow 170ms ease;
+}
+
+.react-lead-workspace .dispatch-mode-card:hover {
+  background: rgba(255,255,255,.045);
+  transform: translateY(-1px);
+}
+
+.react-lead-workspace .dispatch-mode-card.is-selected {
+  background: rgba(129,174,242,.11);
+  box-shadow: inset 3px 0 0 var(--ui-blue), inset 0 0 0 1px rgba(129,174,242,.15);
+}
+
+.react-lead-workspace .leads-preview-command {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(145deg, rgba(229,185,94,.04), transparent 42%), var(--ui-surface);
+}
+
+.react-lead-workspace .leads-confirm-command,
+.react-lead-workspace .leads-start-command {
+  min-height: 74px;
+  background: rgba(16,21,29,.66);
+}
+
+.react-lead-canvas .leads-advanced-diagnostics {
+  border-color: var(--ui-line);
+  background: rgba(255,255,255,.015);
+}
+
+.react-leads-page.warm-research-mode .react-lead-canvas {
+  background: rgba(13,18,25,.68);
+}
+
+.react-leads-page.warm-research-mode .react-warm-surface .leads-control-bar {
+  grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr);
+  padding: 0;
   border: 0;
   background: transparent;
   box-shadow: none;
 }
 
-.react-dashboard #ops-view .workspace-controls.toolbar {
-  min-height: 44px;
-  padding: 0 !important;
+.react-leads-page.warm-research-mode .leads-control-source,
+.react-leads-page.warm-research-mode .leads-control-results,
+.react-leads-page.warm-research-mode .current-run-card {
+  padding: 16px;
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  background: var(--ui-surface);
 }
 
-.react-dashboard #ops-view .workspace-summary-strip.summary-grid {
-  gap: 10px;
+.react-leads-page.warm-research-mode .leads-current-run-panel {
+  grid-column: 2;
+  grid-row: 1 / span 3;
 }
 
-.react-dashboard #ops-view .summary-card {
-  min-height: 122px;
-  padding: 17px;
-  border-color: rgba(190, 202, 219, 0.075);
-  background: #0f1620;
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.16);
+.react-leads-page.warm-research-mode .warm-private-action-panel,
+.react-leads-page.warm-research-mode .warm-private-lane-group,
+.react-leads-page.warm-research-mode .warm-run-timeline,
+.react-leads-page.warm-research-mode .warm-research-output-group {
+  border-color: rgba(190,202,219,.06);
+  background: rgba(255,255,255,.022);
 }
 
-.react-dashboard #ops-view .summary-card-private_jc,
-.react-dashboard #ops-view .summary-card-good {
-  background: linear-gradient(145deg, rgba(79, 190, 139, 0.08), transparent 58%), #0f1620;
+.react-leads-page.warm-research-mode .warm-lane-metrics > div,
+.react-leads-page.warm-research-mode .operator-metric {
+  border: 0;
+  background: rgba(255,255,255,.032);
+  box-shadow: inset 0 0 0 1px rgba(190,202,219,.045);
 }
 
-.react-dashboard #ops-view .summary-card-warn {
-  background: linear-gradient(145deg, rgba(223, 186, 105, 0.085), transparent 58%), #0f1620;
+.react-leads-page.warm-research-mode .warm-safety-card {
+  border: 0;
+  border-left: 1px solid rgba(95,211,160,.17);
+  border-radius: 0;
+  background: transparent;
 }
 
-.react-dashboard #ops-view .ops-progress-strip {
-  border-color: rgba(190, 202, 219, 0.07);
-  background: rgba(15, 22, 32, 0.78);
+.react-empty-state {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 28px;
+  color: var(--ui-muted);
+  text-align: center;
 }
 
-.react-dashboard #ops-view .sender-status-panel {
-  padding-top: 0;
-  border-color: rgba(190, 202, 219, 0.075);
-  background: #0d141d;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.2);
+.react-empty-state > span {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: 50%;
+  background: rgba(255,255,255,.02);
 }
 
-.react-dashboard #ops-view .sender-status-head {
-  padding: 18px 20px 16px;
-}
-
-.react-dashboard #ops-view .sender-status-table th {
-  height: 40px;
-  padding-inline: 16px;
-  background: rgba(255, 255, 255, 0.018);
-}
-
-.react-dashboard #ops-view .sender-status-table td {
-  height: 56px;
-  padding-inline: 16px;
-  border-bottom-color: rgba(190, 202, 219, 0.045);
-}
-
-.react-dashboard #ops-view .sender-status-table tbody tr:hover td {
-  background: rgba(120, 174, 248, 0.045);
-}
-
-.react-dashboard #ops-view .workspace-metric-details,
-.react-dashboard #ops-view .campaign-history-panel {
-  border-color: rgba(190, 202, 219, 0.07);
-  background: rgba(13, 20, 29, 0.72);
-}
-
-.react-dashboard #leads-view.leads-workspace:not([hidden]) {
-  width: 100%;
-  max-width: none;
-}
-
-.react-dashboard #leads-view .leads-page-title {
-  min-height: 58px;
-  padding: 2px 4px 8px;
-}
-
-.react-dashboard #leads-view .leads-command-center {
-  padding: 18px;
-  border-color: rgba(190, 202, 219, 0.075);
-  background: #0d141d;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.22);
-}
-
-.react-dashboard #leads-view .leads-control-bar {
-  padding: 15px;
-  background: #111a25;
-  box-shadow: inset 0 0 0 1px rgba(190, 202, 219, 0.045);
-}
-
-.react-dashboard #leads-view .leads-workflow-status-banner {
-  background: rgba(17, 26, 37, 0.7);
-}
-
-.react-dashboard #leads-view .workflow-track-step {
-  min-height: 58px;
-  padding: 9px;
-  background: rgba(255, 255, 255, 0.024);
-}
-
-.react-dashboard #leads-view:not(.warm-research-mode) .leads-command-main {
-  grid-template-columns: minmax(310px, 0.72fr) minmax(0, 1.28fr) !important;
-  gap: 12px;
-}
-
-.react-dashboard #leads-view .leads-command-section,
-.react-dashboard #leads-view .current-run-card,
-.react-dashboard #leads-view .dispatch-preview-card {
-  border-color: rgba(190, 202, 219, 0.065);
-  background: #101822;
-}
-
-.react-dashboard #leads-view .leads-preview-command {
-  background: linear-gradient(145deg, rgba(223, 186, 105, 0.045), transparent 45%), #101822;
-}
-
-.react-dashboard #leads-view.warm-research-mode .leads-control-source,
-.react-dashboard #leads-view.warm-research-mode .leads-control-results,
-.react-dashboard #leads-view.warm-research-mode .current-run-card {
-  border-color: rgba(190, 202, 219, 0.065);
-  background: #101822;
-}
-
-.react-dashboard #leads-view.warm-research-mode .warm-research-output-group,
-.react-dashboard #leads-view.warm-research-mode .warm-private-action-panel,
-.react-dashboard #leads-view.warm-research-mode .warm-private-lane-group,
-.react-dashboard #leads-view.warm-research-mode .warm-run-timeline,
-.react-dashboard #leads-view.warm-research-mode .leads-workflow-task-list {
-  border-color: rgba(190, 202, 219, 0.06);
-  background: rgba(255, 255, 255, 0.02);
-}
+.react-empty-state strong { color: #dce2ea; }
+.react-empty-state p { max-width: 360px; margin: 0; }
 
 .react-dashboard .btn {
-  min-height: 38px;
   border-radius: 7px;
+  box-shadow: none;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
 }
+
+.react-dashboard .btn:hover:not(:disabled) {
+  box-shadow: 0 8px 18px rgba(0,0,0,.18);
+  transform: translateY(-1px);
+}
+
+.react-dashboard .btn:active:not(:disabled) { transform: translateY(0); }
 
 .react-dashboard .btn-primary,
 .react-dashboard #leads-view .btn.is-next-action:not(:disabled) {
-  background: linear-gradient(180deg, #ebca79, #d9b35f);
-  box-shadow: 0 10px 22px rgba(111, 78, 20, 0.2);
+  color: #18140c;
+  border-color: rgba(246,216,149,.55);
+  background: linear-gradient(180deg,#eac879,#dcb45d);
+}
+
+.react-dashboard .dot-on { animation: live-pulse 2.4s ease-in-out infinite; }
+
+@keyframes workspace-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(95,211,160,.08); }
+  50% { box-shadow: 0 0 0 6px rgba(95,211,160,.02); }
 }
 
 @media (max-width: 1180px) {
-  .react-dashboard .app-shell,
-  .react-dashboard .app-shell.warm-research-shell {
-    grid-template-columns: 204px minmax(0, 1fr) !important;
-  }
-
-  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    overflow: visible;
-  }
-
-  .react-dashboard #leads-view:not(.warm-research-mode) .leads-command-main {
-    grid-template-columns: 1fr !important;
-  }
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell { grid-template-columns: 188px minmax(0,1fr) !important; }
+  .react-main.app-main { padding-inline: 22px; }
+  .react-metric-region .workspace-summary-strip.summary-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .react-warm-surface .leads-control-bar { grid-template-columns: 1fr 1fr; }
+  .react-warm-surface .leads-control-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .react-lead-workspace.leads-command-main { grid-template-columns: 1fr !important; }
 }
 
 @media (max-width: 900px) {
-  .react-dashboard.page {
-    padding: 10px;
-  }
-
-  .react-dashboard .app-shell,
-  .react-dashboard .app-shell.warm-research-shell {
-    grid-template-columns: minmax(0, 1fr) !important;
-    gap: 10px !important;
-  }
-
-  .react-dashboard .app-rail {
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell { grid-template-columns: 1fr !important; }
+  .react-sidebar.app-rail {
     position: static !important;
-    grid-template-columns: minmax(210px, 1fr) auto !important;
-    grid-template-rows: auto auto !important;
+    display: grid;
+    grid-template-columns: minmax(190px,1fr) auto;
     min-height: 0;
-    padding: 12px !important;
+    padding: 12px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-line);
   }
-
-  .react-dashboard .app-rail-top {
-    align-self: center;
-    padding: 0;
-    border: 0;
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .react-dashboard .app-rail-tabs {
-    display: flex;
-    width: auto;
-    margin: 0;
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .react-dashboard .app-rail-tabs .tab-btn {
-    width: auto;
-    min-width: 96px !important;
-    justify-content: center;
-    text-align: center;
-  }
-
-  .react-dashboard .app-rail .app-rail-status {
-    align-items: center;
-    align-content: center;
-    width: 100%;
-    margin-top: 10px;
-    padding: 10px 0 0 !important;
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .react-dashboard .app-rail-status .connection,
-  .react-dashboard .app-rail-status .auth-chip {
-    width: auto;
-  }
-
-  .react-dashboard .app-rail-status .toolbar-status {
-    width: auto;
-    margin-left: auto;
-    text-align: right;
-  }
+  .react-sidebar-brand { align-self: center; padding: 0; }
+  .react-sidebar-brand .app-rail-top { gap: 2px; }
+  .react-sidebar-brand .eyebrow { display: none; }
+  .react-sidebar-brand .app-rail-title { max-width: none; font-size: 1.08rem !important; }
+  .react-sidebar-nav { align-self: center; padding: 0; border: 0; }
+  .react-sidebar-nav .app-rail-tabs { display: flex; }
+  .react-sidebar-nav .tab-btn { width: auto; min-width: 92px !important; justify-content: center; text-align: center; }
+  .react-sidebar-context { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 9px 0 0; }
+  .react-sidebar-label { display: none; }
+  .react-sidebar-context .app-rail-status { display: flex; align-items: center; gap: 7px; margin: 0; }
+  .react-sidebar-context .connection, .react-sidebar-context .auth-chip { width: auto; }
+  .react-sidebar-context .toolbar-status { margin-left: auto; }
+  .react-main.app-main { padding: 24px 18px 42px; }
+  .react-supporting-panels { grid-template-columns: 1fr; }
+  .react-leads-page.warm-research-mode .react-warm-surface .leads-control-bar { grid-template-columns: 1fr; }
+  .react-leads-page.warm-research-mode .leads-current-run-panel { grid-column: 1; grid-row: auto; }
 }
 
 @media (max-width: 640px) {
-  .react-dashboard.page {
-    padding: 7px;
-  }
+  .react-sidebar.app-rail { grid-template-columns: 1fr; gap: 10px; padding: 11px; }
+  .react-sidebar-brand { display: none; }
+  .react-sidebar-nav .app-rail-tabs { width: 100%; }
+  .react-sidebar-nav .tab-btn { flex: 1 1 0; min-width: 0 !important; }
+  .react-sidebar-context { margin: 0; padding-top: 8px; }
+  .react-sidebar-context .app-rail-status { flex-wrap: wrap; }
+  .react-sidebar-context .toolbar-status { width: 100%; margin-left: 0; }
+  .react-main.app-main { padding: 20px 10px 34px; }
+  .react-page-heading { align-items: flex-start; flex-direction: column; min-height: 0; }
+  .react-page-heading h2 { font-size: 1.5rem; }
+  .react-command-bar { padding: 10px; }
+  .react-metric-region .workspace-summary-strip.summary-grid { grid-template-columns: 1fr; }
+  .react-metric-region .summary-card { min-height: 110px; }
+  .react-lead-canvas { padding: 10px; }
+  .react-warm-surface .leads-control-bar { grid-template-columns: 1fr; padding: 12px; }
+  .react-stepper-shell .workflow-tracker-row { grid-template-columns: 1fr; }
+}
 
-  .react-dashboard .app-rail {
-    grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: auto auto auto !important;
-  }
-
-  .react-dashboard .app-rail-top {
-    padding-bottom: 10px;
-    border-bottom: 1px solid rgba(190, 202, 219, 0.07);
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .react-dashboard .app-rail-tabs {
-    width: 100%;
-    margin-top: 3px;
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .react-dashboard .app-rail-tabs .tab-btn {
-    flex: 1 1 0;
-    min-width: 0 !important;
-  }
-
-  .react-dashboard .app-rail .app-rail-status {
-    align-items: flex-start;
-    grid-column: 1;
-    grid-row: 3;
-  }
-
-  .react-dashboard .app-rail-status .toolbar-status {
-    width: 100%;
-    margin-left: 0;
-    text-align: left;
-  }
-
-  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .react-dashboard #leads-view .leads-command-center {
-    padding: 10px;
+@media (prefers-reduced-motion: reduce) {
+  .react-workspace, .react-dashboard .dot-on { animation: none; }
+  .react-dashboard *, .react-dashboard *::before, .react-dashboard *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
   }
 }

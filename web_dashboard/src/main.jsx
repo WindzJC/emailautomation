@@ -1,31 +1,156 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
+import parse from "html-react-parser";
 import "./tailwind.css";
 
-function StaticSurface({ html }) {
-  return <div className="contents" dangerouslySetInnerHTML={{ __html: html }} />;
+function LegacyNode({ html }) {
+  return parse(html);
 }
 
-function AppHeader({ html }) {
-  return <StaticSurface html={html} />;
+export function StatusPill({ children, tone = "neutral" }) {
+  return <span className={`react-status-pill react-status-pill-${tone}`}>{children}</span>;
 }
 
-function SendersDashboard({ html }) {
-  return <StaticSurface html={html} />;
+export function Sidebar({ brand, navigation, status }) {
+  return (
+    <aside className="app-rail react-sidebar" aria-label="Primary navigation">
+      <div className="react-sidebar-brand"><LegacyNode html={brand} /></div>
+      <nav className="react-sidebar-nav" aria-label="Workspace"><LegacyNode html={navigation} /></nav>
+      <div className="react-sidebar-context">
+        <p className="react-sidebar-label">Environment</p>
+        <LegacyNode html={status} />
+      </div>
+    </aside>
+  );
 }
 
-function LeadOpsDashboard({ html }) {
-  return <StaticSurface html={html} />;
+export function PageHeading({ eyebrow, title, description, aside = null }) {
+  return (
+    <header className="react-page-heading">
+      <div>
+        <p className="react-kicker">{eyebrow}</p>
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </div>
+      {aside}
+    </header>
+  );
 }
 
-function AuthOverlay({ html }) {
-  return <StaticSurface html={html} />;
+export function CommandBar({ html }) {
+  return <div className="react-command-bar"><LegacyNode html={html} /></div>;
+}
+
+export function MetricCard({ children }) {
+  return <div className="react-metric-region">{children}</div>;
+}
+
+export function SenderTable({ progress, details }) {
+  return (
+    <section className="react-sender-console" aria-label="Sender operations">
+      <LegacyNode html={progress} />
+      <LegacyNode html={details} />
+    </section>
+  );
+}
+
+export function EmptyState({ title, description }) {
+  return (
+    <div className="react-empty-state">
+      <span aria-hidden="true" />
+      <strong>{title}</strong>
+      <p>{description}</p>
+    </div>
+  );
+}
+
+export function SendersDashboard({ view }) {
+  return (
+    <section id="ops-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="ops-tab-btn">
+      <PageHeading
+        eyebrow="Delivery operations"
+        title="Sender command center"
+        description="Monitor queues, delivery state, and the next safe action."
+        aside={<StatusPill tone="live">Live operations</StatusPill>}
+      />
+      <CommandBar html={view.commandBar} />
+      <MetricCard><LegacyNode html={view.metrics} /></MetricCard>
+      <SenderTable progress={view.progress} details={view.progressDetails} />
+      <section className="react-supporting-panels">
+        <LegacyNode html={view.profileDetail} />
+        <LegacyNode html={view.history} />
+      </section>
+    </section>
+  );
+}
+
+export function LeadStepper({ status, steps }) {
+  return (
+    <>
+      <LegacyNode html={status} />
+      <div className="react-stepper-shell">
+        <p className="react-section-label">Dispatch workflow</p>
+        <LegacyNode html={steps} />
+      </div>
+    </>
+  );
+}
+
+export function SourcePanel({ html }) {
+  return <LegacyNode html={html} />;
+}
+
+export function CommandRail({ left, right }) {
+  return (
+    <div className="leads-command-main react-lead-workspace">
+      <LegacyNode html={left} />
+      <LegacyNode html={right} />
+    </div>
+  );
+}
+
+export function WarmResearchPanel({ children }) {
+  return <div className="react-warm-surface">{children}</div>;
+}
+
+export function LeadOpsDashboard({ view }) {
+  return (
+    <section id="leads-view" className="dashboard-view workspace-view leads-workspace react-workspace react-leads-page hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
+      <PageHeading
+        eyebrow="Lead operations"
+        title="Prepare the next campaign"
+        description="Check source quality, choose a campaign, preview the write set, then confirm."
+        aside={<StatusPill tone="safe">Safety gated</StatusPill>}
+      />
+      <section className="leads-command-center operator-workflow-section react-lead-canvas">
+        <LegacyNode html={view.heading} />
+        <WarmResearchPanel><SourcePanel html={view.source} /></WarmResearchPanel>
+        <LeadStepper status={view.workflowStatus} steps={view.workflowSteps} />
+        <CommandRail left={view.commandLeft} right={view.commandRight} />
+        <LegacyNode html={view.diagnostics} />
+      </section>
+    </section>
+  );
+}
+
+export function AppShell({ template }) {
+  return (
+    <div className="page booting react-dashboard min-h-screen bg-canvas text-ink" data-dashboard-ui="react-tailwind-components">
+      <div className="app-shell react-app-shell">
+        <Sidebar {...template.sidebar} />
+        <main className="app-main react-main">
+          <SendersDashboard view={template.senders} />
+          <LeadOpsDashboard view={template.leadOps} />
+        </main>
+      </div>
+    </div>
+  );
 }
 
 function DashboardControllerBridge() {
   useEffect(() => {
     const script = document.createElement("script");
-    script.src = "/static/app.js?v=react-shell-20260702";
+    script.src = "/static/app.js?v=react-components-20260702";
     script.dataset.dashboardController = "true";
     document.body.append(script);
     return () => script.remove();
@@ -33,45 +158,55 @@ function DashboardControllerBridge() {
   return null;
 }
 
+function outer(root, selector) {
+  const node = root.querySelector(selector);
+  if (!node) throw new Error(`Dashboard template is missing ${selector}.`);
+  return node.outerHTML;
+}
+
 function readDashboardTemplate() {
   const template = document.getElementById("dashboard-template");
-  if (!(template instanceof HTMLTemplateElement)) {
-    throw new Error("Dashboard template is missing.");
-  }
-
+  if (!(template instanceof HTMLTemplateElement)) throw new Error("Dashboard template is missing.");
   const content = template.content.cloneNode(true);
   const header = content.querySelector(".app-rail");
   const senders = content.querySelector("#ops-view");
   const leadOps = content.querySelector("#leads-view");
-  const auth = content.querySelector("#auth-overlay");
-  if (!header || !senders || !leadOps || !auth) {
-    throw new Error("Dashboard template is incomplete.");
-  }
+  const command = leadOps?.querySelector(".leads-command-center");
+  const commandMain = command?.querySelector(".leads-command-main");
+  if (!header || !senders || !leadOps || !command || !commandMain) throw new Error("Dashboard template is incomplete.");
 
   return {
-    header: header.outerHTML,
-    senders: senders.outerHTML,
-    leadOps: leadOps.outerHTML,
-    auth: auth.outerHTML,
+    sidebar: {
+      brand: outer(header, ".app-rail-top"),
+      navigation: outer(header, ".app-rail-tabs"),
+      status: outer(header, ".app-rail-status"),
+    },
+    senders: {
+      commandBar: outer(senders, ".workspace-status-row"),
+      metrics: outer(senders, ".queue-health-section"),
+      progress: outer(senders, ".ops-progress-strip"),
+      progressDetails: outer(senders, "#ops-progress-details"),
+      profileDetail: outer(senders, ".workspace-primary"),
+      history: outer(senders, ".campaign-history-panel"),
+    },
+    leadOps: {
+      heading: outer(command, ":scope > .panel-header"),
+      source: outer(command, ":scope > .leads-control-bar"),
+      workflowStatus: outer(command, ":scope > .leads-workflow-status-banner"),
+      workflowSteps: outer(command, ":scope > .leads-workflow-task-list"),
+      commandLeft: outer(commandMain, ":scope > .leads-command-column-left"),
+      commandRight: outer(commandMain, ":scope > .leads-command-column-right"),
+      diagnostics: outer(command, ":scope > .leads-advanced-diagnostics"),
+    },
+    auth: outer(content, "#auth-overlay"),
   };
 }
 
 export function DashboardApp({ template = readDashboardTemplate() }) {
   return (
     <>
-      <div
-        className="page booting react-dashboard min-h-screen bg-canvas text-ink"
-        data-dashboard-ui="react-tailwind"
-      >
-        <div className="app-shell">
-          <AppHeader html={template.header} />
-          <main className="app-main">
-            <SendersDashboard html={template.senders} />
-            <LeadOpsDashboard html={template.leadOps} />
-          </main>
-        </div>
-      </div>
-      <AuthOverlay html={template.auth} />
+      <AppShell template={template} />
+      <LegacyNode html={template.auth} />
       <DashboardControllerBridge />
     </>
   );
