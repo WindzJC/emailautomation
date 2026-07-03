@@ -80,7 +80,12 @@ class LiveDashboardAuthTests(unittest.TestCase):
 
         with patch.dict(
             live_dashboard.os.environ,
-            {"DASHBOARD_AUTH_DISABLED": "1", "LOCAL_DASHBOARD_NO_AUTH": "0", "DASHBOARD_ALLOW_AUTO_START": "0"},
+            {
+                "DASHBOARD_AUTH_DISABLED": "1",
+                "LOCAL_DASHBOARD_NO_AUTH": "0",
+                "DASHBOARD_ALLOW_AUTO_START": "0",
+                "DASHBOARD_ENABLE_LIVE_ACTIONS": "0",
+            },
             clear=False,
         ), patch.object(live_dashboard.settings, "DASHBOARD_AUTH_USERNAME", "admin"), patch.object(
             live_dashboard.settings,
@@ -109,9 +114,30 @@ class LiveDashboardAuthTests(unittest.TestCase):
                         "dashboard_mode": "local_dev",
                         "auto_start_allowed": False,
                         "auto_start_env_var": "DASHBOARD_ALLOW_AUTO_START",
+                        "live_actions_enabled": False,
+                        "live_actions_env_var": "DASHBOARD_ENABLE_LIVE_ACTIONS",
                     },
                     status.json(),
                 )
+                self.assertEqual(200, client.get("/api/snapshot").status_code)
+
+                with patch.object(live_dashboard.runtime_control, "start_all_senders") as start_all_senders:
+                    blocked_start = client.post("/api/start")
+                self.assertEqual(403, blocked_start.status_code)
+                self.assertEqual("live_actions_disabled", blocked_start.json()["error"])
+                self.assertIn("DASHBOARD_ENABLE_LIVE_ACTIONS=1", blocked_start.json()["message"])
+                start_all_senders.assert_not_called()
+
+                with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+                    live_dashboard.runtime_control,
+                    "start_sender",
+                ) as start_sender:
+                    blocked_profile_start = client.post("/api/start/sendgrid_annette")
+                self.assertEqual(403, blocked_profile_start.status_code)
+                self.assertEqual("live_actions_disabled", blocked_profile_start.json()["error"])
+                self.assertEqual("sendgrid_annette", blocked_profile_start.json()["profile"])
+                start_sender.assert_not_called()
+
                 self.assertEqual(200, client.get("/api/snapshot").status_code)
 
                 login = client.post(
@@ -143,7 +169,12 @@ class LiveDashboardAuthTests(unittest.TestCase):
     def test_missing_auth_configuration_is_reported_as_local_dev(self) -> None:
         with patch.dict(
             live_dashboard.os.environ,
-            {"DASHBOARD_AUTH_DISABLED": "0", "LOCAL_DASHBOARD_NO_AUTH": "0", "DASHBOARD_ALLOW_AUTO_START": "0"},
+            {
+                "DASHBOARD_AUTH_DISABLED": "0",
+                "LOCAL_DASHBOARD_NO_AUTH": "0",
+                "DASHBOARD_ALLOW_AUTO_START": "0",
+                "DASHBOARD_ENABLE_LIVE_ACTIONS": "0",
+            },
             clear=False,
         ), patch.object(live_dashboard.settings, "DASHBOARD_AUTH_PASSWORD", ""):
             status = live_dashboard._dashboard_auth_response()
@@ -152,6 +183,7 @@ class LiveDashboardAuthTests(unittest.TestCase):
         self.assertFalse(status["auth_disabled"])
         self.assertEqual("local_dev", status["dashboard_mode"])
         self.assertFalse(status["auto_start_allowed"])
+        self.assertFalse(status["live_actions_enabled"])
 
 
 if __name__ == "__main__":

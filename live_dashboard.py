@@ -229,11 +229,16 @@ DASHBOARD_AUTO_START_STATE_PATH = settings.STATE_DIR / "dashboard_auto_start_sta
 DASHBOARD_TIMER_STATE_PATH = settings.STATE_DIR / "dashboard_timer_state.json"
 AUTO_START_RETRY_MINUTES = 10
 DASHBOARD_AUTO_START_ENV_VAR = "DASHBOARD_ALLOW_AUTO_START"
+DASHBOARD_LIVE_ACTIONS_ENV_VAR = "DASHBOARD_ENABLE_LIVE_ACTIONS"
 _PARSER_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
 def _dashboard_auto_start_allowed() -> bool:
     return os.environ.get(DASHBOARD_AUTO_START_ENV_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dashboard_live_actions_enabled() -> bool:
+    return os.environ.get(DASHBOARD_LIVE_ACTIONS_ENV_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _automatic_start_sender(profile_name: str) -> tuple[bool, str]:
@@ -3298,6 +3303,8 @@ def _dashboard_auth_response() -> dict[str, object]:
         "dashboard_mode": "local_dev" if not auth_enabled else "live",
         "auto_start_allowed": _dashboard_auto_start_allowed(),
         "auto_start_env_var": DASHBOARD_AUTO_START_ENV_VAR,
+        "live_actions_enabled": _dashboard_live_actions_enabled(),
+        "live_actions_env_var": DASHBOARD_LIVE_ACTIONS_ENV_VAR,
     }
 
 
@@ -3378,6 +3385,24 @@ def snapshot(
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> dict[str, object]:
     return _build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
+
+
+def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
+    if _dashboard_auth_enabled() or _dashboard_live_actions_enabled():
+        return None
+    return JSONResponse(
+        {
+            "ok": False,
+            "blocked": True,
+            "error": "live_actions_disabled",
+            "profile": str(profile_name or ""),
+            "message": (
+                "Live sender Start/Resume actions are disabled in local dev or auth-disabled mode. "
+                f"Set {DASHBOARD_LIVE_ACTIONS_ENV_VAR}=1 only on the intended live Windows/WSL machine."
+            ),
+        },
+        status_code=403,
+    )
 
 
 def _queue_safety_start_block_response(profile_name: str = "") -> JSONResponse | None:
@@ -3963,6 +3988,9 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
 
 @app.post("/api/start")
 def start() -> JSONResponse:
+    live_action_block = _manual_live_action_block_response()
+    if live_action_block is not None:
+        return live_action_block
     _append_campaign_history("start_all_requested", profile="all", snapshot=_build_live_snapshot())
     preconditions = _build_start_preconditions_report()
     blocked = _start_preconditions_block_response(preconditions)
@@ -3992,6 +4020,9 @@ def start() -> JSONResponse:
 def start_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
+    live_action_block = _manual_live_action_block_response(profile_name)
+    if live_action_block is not None:
+        return live_action_block
     _append_campaign_history("start_profile_requested", profile=profile_name, snapshot=_build_live_snapshot())
     if profile_name == "private_jc_warm":
         lane = warm_private_jc_lane_status()

@@ -223,6 +223,42 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(status["auto_start_allowed"])
         self.assertIn("DASHBOARD_ALLOW_AUTO_START=1", status["auto_start_note"])
 
+    def test_manual_start_is_allowed_in_local_dev_when_live_actions_explicitly_enabled(self) -> None:
+        preconditions = {"ok": True, "blocked": False, "warning_reasons": []}
+        with patch.dict(
+            os.environ,
+            {
+                "DASHBOARD_AUTH_DISABLED": "1",
+                "LOCAL_DASHBOARD_NO_AUTH": "0",
+                "DASHBOARD_ENABLE_LIVE_ACTIONS": "1",
+            },
+            clear=False,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ), patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "append_campaign_run_history",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_all_senders",
+            return_value=(True, "Started."),
+        ) as start_all_senders, patch.object(live_dashboard.time, "sleep"):
+            response = live_dashboard.start()
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(json.loads(response.body)["ok"])
+        start_all_senders.assert_called_once()
+
     def test_preview_validate_profile_blocks_active_sender(self) -> None:
         with (
             patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
