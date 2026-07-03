@@ -16,6 +16,7 @@ import send_shard
 import settings
 import dashboard_core
 import live_dashboard
+from tools.diagnose_private_jc_auth import run_diagnostic
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
@@ -36,10 +37,47 @@ from send_shard import (
     prioritize_always_send_rows,
     prune_sent_from_csv,
     render_message_parts,
+    worker_stop_category,
 )
 
 
 class SendShardTests(unittest.TestCase):
+    def test_private_jc_auth_diagnostic_logs_in_without_sending_or_printing_secret(self) -> None:
+        calls: list[str] = []
+
+        class FakeSMTP:
+            def quit(self) -> None:
+                calls.append("smtp_quit")
+
+        class FakeIMAP:
+            def login(self, _user: str, password: str) -> None:
+                self.password = password
+                calls.append("imap_login")
+
+            def logout(self) -> None:
+                calls.append("imap_logout")
+
+        output = io.StringIO()
+        with patch.dict(send_shard.os.environ, {"PRIVATE_JC_PASSWORD": "synthetic-secret"}, clear=False):
+            with redirect_stdout(output):
+                result = run_diagnostic(
+                    check_smtp=True,
+                    check_imap=True,
+                    smtp_login_func=lambda *_args: FakeSMTP(),
+                    imap_factory=lambda *_args, **_kwargs: FakeIMAP(),
+                )
+
+        self.assertEqual(0, result)
+        self.assertEqual(["smtp_quit", "imap_login", "imap_logout"], calls)
+        self.assertIn("key=PRIVATE_JC_PASSWORD", output.getvalue())
+        self.assertNotIn("synthetic-secret", output.getvalue())
+
+    def test_worker_stop_categories_distinguish_operator_failure_modes(self) -> None:
+        self.assertEqual("manual_interruption", worker_stop_category("interrupted"))
+        self.assertEqual("smtp_auth_failure", worker_stop_category("auth_error"))
+        self.assertEqual("smtp_reconnect_failure", worker_stop_category("reconnect_failed"))
+        self.assertEqual("queue_exhausted", worker_stop_category("queue_exhausted"))
+
     def test_personalization_name_blocks_raw_fallbacks_when_not_allowed(self) -> None:
         row = {
             "FirstName": "",

@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import imaplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from private_bounce_hygiene import (
     append_unique_suppressed_emails,
+    classify_private_bounce_error,
     extract_bounced_recipients_from_message,
     is_probable_bounce_message,
     run_private_bounce_monitor_cycle,
@@ -20,6 +22,14 @@ from private_bounce_hygiene import (
 
 
 class PrivateBounceHygieneTests(unittest.TestCase):
+    def test_classifies_imap_auth_failure_without_raw_provider_error(self) -> None:
+        kind, message = classify_private_bounce_error(
+            imaplib.IMAP4.error(b"[AUTHENTICATIONFAILED] Authentication failed.")
+        )
+        self.assertEqual("imap_auth_failure", kind)
+        self.assertEqual("Private JC IMAP bounce sync authentication failed.", message)
+        self.assertNotIn("AUTHENTICATIONFAILED", message)
+
     def test_extracts_final_recipient_from_bounce_message(self) -> None:
         msg = EmailMessage()
         msg["From"] = "Mail Delivery System <MAILER-DAEMON@example.com>"

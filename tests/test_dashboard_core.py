@@ -849,6 +849,12 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("Scheduled Stop", label)
         self.assertIn("schedule", note.lower())
 
+    def test_infer_runtime_state_distinguishes_smtp_auth_and_reconnect_failures(self) -> None:
+        auth = dashboard_core.infer_runtime_state("bash", False, "STOP: auth_error\n")
+        reconnect = dashboard_core.infer_runtime_state("bash", False, "STOP: reconnect_failed\n")
+        self.assertEqual(("error", "Error", "SMTP authentication failed."), auth)
+        self.assertEqual(("error", "Error", "SMTP reconnect failed."), reconnect)
+
     def test_private_recovered_dns_error_maps_to_recovered_ready(self) -> None:
         health = dashboard_core.build_profile_health_status(
             {

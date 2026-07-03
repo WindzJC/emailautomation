@@ -865,8 +865,10 @@ def infer_runtime_state(current_cmd: str, pane_dead: bool, tail: str) -> Tuple[s
             return "finished", "Finished", stop_line
         if "provider_throttle_cooldown" in stop_lower:
             return "paused", "Paused", "Provider cooldown is active before the next safe restart."
-        if "auth_error" in stop_lower or "account_error" in stop_lower or "reconnect_failed" in stop_lower:
-            return "error", "Error", stop_line
+        if "auth_error" in stop_lower or "account_error" in stop_lower:
+            return "error", "Error", "SMTP authentication failed."
+        if "reconnect_failed" in stop_lower:
+            return "error", "Error", "SMTP reconnect failed."
         return "stopped", "Stopped", stop_line
     if done_line:
         return "finished", "Finished", done_line
@@ -2512,12 +2514,14 @@ def build_profile_health_status(
         }
 
     if name == "private_jc" and bool(private_bounce_guard.get("sync_error_active")):
+        bounce_error_kind = str(private_bounce_guard.get("last_error_kind") or "imap_sync_failure")
+        bounce_error_note = str(private_bounce_guard.get("last_error") or "Private JC IMAP bounce sync failed.")
         return {
             "label": "Watch",
             "tone": "bad",
-            "note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
-            "reason_code": "BOUNCE_SYNC_ERROR",
-            "reason_note": str(private_bounce_guard.get("last_error") or "Private bounce sync error detected."),
+            "note": bounce_error_note,
+            "reason_code": bounce_error_kind.upper(),
+            "reason_note": bounce_error_note,
             "readiness_label": "Blocked",
             "readiness_tone": "bad",
             "readiness_note": "Private JC is blocked until private bounce sync succeeds.",

@@ -88,6 +88,16 @@ PRIVATE_BOUNCE_EVENT_HISTORY_LIMIT = _env_int("PRIVATE_BOUNCE_EVENT_HISTORY_LIMI
 PRIVATE_BOUNCE_FOLDERS = _env_csv("PRIVATE_BOUNCE_FOLDERS", ("INBOX", "Spam"))
 
 
+def classify_private_bounce_error(exc: BaseException) -> Tuple[str, str]:
+    """Return a stable category and secret-free operator message for IMAP failures."""
+    text = str(exc or "").lower()
+    if "authenticationfailed" in text or "authentication failed" in text or "login failed" in text:
+        return "imap_auth_failure", "Private JC IMAP bounce sync authentication failed."
+    if isinstance(exc, (OSError, TimeoutError, imaplib.IMAP4.abort)):
+        return "imap_connection_failure", "Private JC IMAP bounce sync connection failed."
+    return "imap_sync_failure", "Private JC IMAP bounce sync failed."
+
+
 def iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -729,6 +739,9 @@ def private_bounce_guard_status(
     last_sync = parse_iso_utc(str(profile_state.get("last_sync_utc") or ""))
     last_success = parse_iso_utc(str(profile_state.get("last_success_utc") or ""))
     last_error = str(profile_state.get("last_error") or "").strip()
+    last_error_kind = str(profile_state.get("last_error_kind") or "").strip()
+    if last_error and not last_error_kind:
+        last_error_kind, last_error = classify_private_bounce_error(imaplib.IMAP4.error(last_error))
     last_error_utc = parse_iso_utc(str(profile_state.get("last_error_utc") or ""))
     cooldown_until = parse_iso_utc(str(profile_state.get("cooldown_until_utc") or ""))
     cooldown_active = bool(profile_state.get("cooldown_active")) and bool(cooldown_until and cooldown_until > now_dt)
@@ -779,6 +792,7 @@ def private_bounce_guard_status(
         "last_success_utc": iso_utc(last_success) if last_success else "",
         "last_sync_age_seconds": last_sync_age_seconds,
         "last_error": last_error,
+        "last_error_kind": last_error_kind,
         "last_error_utc": iso_utc(last_error_utc) if last_error_utc else "",
         "sync_error_active": sync_error_active,
         "sync_stale": sync_stale,
@@ -848,6 +862,7 @@ def run_private_bounce_monitor_cycle(
             profile_state["last_sync_utc"] = str(report.get("generated_at_utc") or iso_utc(now_dt))
             profile_state["last_success_utc"] = profile_state["last_sync_utc"]
             profile_state["last_error"] = ""
+            profile_state["last_error_kind"] = ""
             profile_state["last_error_utc"] = ""
             profile_state["last_report_path"] = str(report.get("report_path") or "")
             profile_state["last_scanned_messages"] = int(report.get("scanned_messages", 0) or 0)
@@ -883,8 +898,10 @@ def run_private_bounce_monitor_cycle(
                     report_path=str(report.get("report_path") or ""),
                 )
         except Exception as exc:
+            error_kind, error_message = classify_private_bounce_error(exc)
             profile_state["last_sync_utc"] = iso_utc(now_dt)
-            profile_state["last_error"] = str(exc)
+            profile_state["last_error"] = error_message
+            profile_state["last_error_kind"] = error_kind
             profile_state["last_error_utc"] = iso_utc(now_dt)
             profile_state["last_scanned_messages"] = 0
             profile_state["last_probable_bounce_messages"] = 0
@@ -896,7 +913,7 @@ def run_private_bounce_monitor_cycle(
                 profile_state,
                 event_type="sync_error",
                 title="Sync error",
-                message=str(exc),
+                message=error_message,
                 severity="error",
                 occurred_at=now_dt,
             )

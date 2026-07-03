@@ -150,6 +150,20 @@ def normalize_campaign_type(value: object) -> str:
     return CAMPAIGN_TYPE_COLD
 
 
+def worker_stop_category(reason: object) -> str:
+    """Normalize terminal reasons for operator-facing status without changing control flow."""
+    value = str(reason or "").strip().lower()
+    if value in {"interrupted", "keyboard_interrupt", "manual_interrupt"}:
+        return "manual_interruption"
+    if value in {"auth_error", "auth_retry_failed", "temporary_auth_failure"}:
+        return "smtp_auth_failure"
+    if value == "reconnect_failed":
+        return "smtp_reconnect_failure"
+    if value in {"queue_exhausted", "queue_exhausted_no_eligible_rows"}:
+        return "queue_exhausted"
+    return value or "unknown"
+
+
 def is_recontact_cold_campaign(value: object) -> bool:
     return normalize_campaign_type(value) == CAMPAIGN_TYPE_RECONTACT_COLD
 
@@ -5173,6 +5187,7 @@ def main():
         emit_worker_event(
             "STOP" if stop_reason else "DONE",
             final_reason,
+            stop_category=worker_stop_category(final_reason),
             sent_this_run=sent_this_run,
             invalid_count=invalid_count,
             error_count=error_count,
@@ -5211,6 +5226,7 @@ def main():
         emit_worker_event(
             "STOP",
             "interrupted",
+            stop_category=worker_stop_category("interrupted"),
             pending_index=locals().get("pending_index", 0),
             pending_count=len(pending),
             sent_this_run=sent_this_run,
