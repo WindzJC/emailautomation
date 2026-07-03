@@ -228,7 +228,18 @@ AUTOMATION_LOOP_SECONDS = max(15, min(60, max(30, int(PRIVATE_BOUNCE_SYNC_INTERV
 DASHBOARD_AUTO_START_STATE_PATH = settings.STATE_DIR / "dashboard_auto_start_state.json"
 DASHBOARD_TIMER_STATE_PATH = settings.STATE_DIR / "dashboard_timer_state.json"
 AUTO_START_RETRY_MINUTES = 10
+DASHBOARD_AUTO_START_ENV_VAR = "DASHBOARD_ALLOW_AUTO_START"
 _PARSER_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+
+def _dashboard_auto_start_allowed() -> bool:
+    return os.environ.get(DASHBOARD_AUTO_START_ENV_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _automatic_start_sender(profile_name: str) -> tuple[bool, str]:
+    if not _dashboard_auto_start_allowed():
+        return False, f"Automatic sender startup disabled; set {DASHBOARD_AUTO_START_ENV_VAR}=1 to enable it."
+    return runtime_control.start_sender(profile_name)
 
 
 class SendCapPayload(BaseModel):
@@ -2850,7 +2861,15 @@ def _build_automation_status() -> dict[str, object]:
         recovery_active = True
         recovery_remaining_seconds = max(0, int((recovery_target_utc - now_utc).total_seconds()))
 
+    auto_start_allowed = _dashboard_auto_start_allowed()
     return {
+        "auto_start_allowed": auto_start_allowed,
+        "auto_start_env_var": DASHBOARD_AUTO_START_ENV_VAR,
+        "auto_start_note": (
+            "Automatic sender startup is enabled."
+            if auto_start_allowed
+            else f"Automatic sender startup is disabled. Set {DASHBOARD_AUTO_START_ENV_VAR}=1 to enable scheduled startup and recovery."
+        ),
         "local_timezone_offset": _format_local_offset(now_local),
         "sendgrid_daily": {
             "enabled": bool(run_settings.get("auto_start_sendgrid_enabled")),
@@ -2889,6 +2908,20 @@ def _build_automation_status() -> dict[str, object]:
 def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
     snapshot = build_dashboard_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
     snapshot["automation"] = _build_automation_status()
+    if not bool(snapshot["automation"].get("auto_start_allowed")):
+        alerts = snapshot.setdefault("alerts", [])
+        if not isinstance(alerts, list):
+            alerts = []
+            snapshot["alerts"] = alerts
+        alerts.append(
+            {
+                "severity": "info",
+                "title": "Automatic sender startup disabled",
+                "message": f"Set {DASHBOARD_AUTO_START_ENV_VAR}=1 to enable scheduled startup and recovery. Manual Start and Resume controls remain available.",
+                "blocks_sending": False,
+                "blocking_label": "Info",
+            }
+        )
     warm_status = build_warm_private_jc_live_status()
     snapshot["warm_private_jc_status"] = warm_status
     snapshot["warm_private_jc_lane"] = warm_status
@@ -3039,6 +3072,8 @@ def _active_dashboard_profiles() -> set[str]:
 
 
 def _run_dashboard_daily_auto_start_once() -> None:
+    if not _dashboard_auto_start_allowed():
+        return
     settings_payload = load_dashboard_run_settings()
     now_local = datetime.now().astimezone()
     today = now_local.date().isoformat()
@@ -3059,7 +3094,7 @@ def _run_dashboard_daily_auto_start_once() -> None:
                 for profile_name in SENDGRID_PROFILES:
                     if profile_name in active_profiles:
                         continue
-                    ok, _message = runtime_control.start_sender(profile_name)
+                    ok, _message = _automatic_start_sender(profile_name)
                     if ok:
                         active_profiles.add(profile_name)
                         continue
@@ -3076,7 +3111,7 @@ def _run_dashboard_daily_auto_start_once() -> None:
             elif _retry_due(state.get("private_jc_last_attempt_utc", "")):
                 state["private_jc_last_attempt_utc"] = now_utc_iso
                 dirty = True
-                ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+                ok, _message = _automatic_start_sender(PRIVATE_BOUNCE_PROFILE)
                 if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
                     state["private_jc_last_started_local_date"] = today
                     dirty = True
@@ -3086,6 +3121,8 @@ def _run_dashboard_daily_auto_start_once() -> None:
 
 
 def _run_private_jc_recovery_auto_start_once() -> None:
+    if not _dashboard_auto_start_allowed():
+        return
     now_utc = datetime.now(timezone.utc)
     state = _load_dashboard_auto_start_state()
     pacing = provider_pacing_status(
@@ -3105,7 +3142,7 @@ def _run_private_jc_recovery_auto_start_once() -> None:
             return
         state["private_jc_recovery_last_attempt_utc"] = now_utc.isoformat()
         _save_dashboard_auto_start_state(state)
-        ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+        ok, _message = _automatic_start_sender(PRIVATE_BOUNCE_PROFILE)
         if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
             mark_recovery_started(PRIVATE_BOUNCE_PROFILE, now=now_utc)
         return
@@ -3129,7 +3166,7 @@ def _run_private_jc_recovery_auto_start_once() -> None:
         return
     state["private_jc_recovery_last_attempt_utc"] = now_utc.isoformat()
     _save_dashboard_auto_start_state(state)
-    ok, _message = runtime_control.start_sender(PRIVATE_BOUNCE_PROFILE)
+    ok, _message = _automatic_start_sender(PRIVATE_BOUNCE_PROFILE)
     if ok or _profile_runtime_active(PRIVATE_BOUNCE_PROFILE):
         _clear_dashboard_recovery_timer()
 
@@ -3155,7 +3192,7 @@ def _run_background_automation_once() -> None:
             profile_name=PRIVATE_BOUNCE_PROFILE,
             profile_active=profile_active,
             stop_profile=runtime_control.stop_sender,
-            start_profile=runtime_control.start_sender,
+            start_profile=_automatic_start_sender,
         )
     except Exception:
         return

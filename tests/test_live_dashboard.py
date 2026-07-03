@@ -84,6 +84,145 @@ class LiveDashboardTests(unittest.TestCase):
             [call.args[0]["event_type"] for call in history_mock.call_args_list],
         )
 
+    def test_background_automation_does_not_auto_start_senders_by_default(self) -> None:
+        def exercise_monitor_start(**kwargs):
+            ok, message = kwargs["start_profile"]("private_jc")
+            self.assertFalse(ok)
+            self.assertIn("Automatic sender startup disabled", message)
+
+        with patch.dict(os.environ, {}, clear=False), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender, patch.object(
+            live_dashboard.runtime_control,
+            "apply_delivery_guards",
+        ), patch.object(
+            live_dashboard,
+            "PRIVATE_BOUNCE_MONITOR_ENABLED",
+            True,
+        ), patch.object(
+            live_dashboard,
+            "_profile_runtime_active",
+            return_value=False,
+        ), patch.object(
+            live_dashboard,
+            "run_private_bounce_monitor_cycle",
+            side_effect=exercise_monitor_start,
+        ):
+            os.environ.pop(live_dashboard.DASHBOARD_AUTO_START_ENV_VAR, None)
+            live_dashboard._run_background_automation_once()
+
+        start_sender.assert_not_called()
+
+    def test_daily_auto_start_runs_when_explicitly_enabled(self) -> None:
+        run_settings = {
+            "auto_start_sendgrid_enabled": True,
+            "auto_start_sendgrid_local_time": "00:00",
+            "auto_start_private_jc_enabled": False,
+            "auto_start_private_jc_local_time": "00:00",
+        }
+        with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "1"}), patch.object(
+            live_dashboard,
+            "load_dashboard_run_settings",
+            return_value=run_settings,
+        ), patch.object(
+            live_dashboard,
+            "_load_dashboard_auto_start_state",
+            return_value={
+                "sendgrid_last_started_local_date": "",
+                "sendgrid_last_attempt_utc": "",
+                "private_jc_last_started_local_date": "",
+                "private_jc_last_attempt_utc": "",
+                "private_jc_recovery_last_attempt_utc": "",
+            },
+        ), patch.object(
+            live_dashboard,
+            "_active_dashboard_profiles",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_retry_due",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_save_dashboard_auto_start_state",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "Started."),
+        ) as start_sender:
+            live_dashboard._run_dashboard_daily_auto_start_once()
+
+        self.assertEqual(
+            list(live_dashboard.SENDGRID_PROFILES),
+            [call.args[0] for call in start_sender.call_args_list],
+        )
+
+    def test_private_recovery_auto_start_runs_when_explicitly_enabled(self) -> None:
+        with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "1"}), patch.object(
+            live_dashboard,
+            "_load_dashboard_auto_start_state",
+            return_value={"private_jc_recovery_last_attempt_utc": ""},
+        ), patch.object(
+            live_dashboard,
+            "provider_pacing_status",
+            return_value={"recovery_pending": True, "cooldown_active": False},
+        ), patch.object(
+            live_dashboard,
+            "_profile_runtime_active",
+            return_value=False,
+        ), patch.object(
+            live_dashboard,
+            "_retry_due",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_save_dashboard_auto_start_state",
+        ), patch.object(
+            live_dashboard,
+            "mark_recovery_started",
+        ) as mark_recovery_started, patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "Started."),
+        ) as start_sender:
+            live_dashboard._run_private_jc_recovery_auto_start_once()
+
+        start_sender.assert_called_once_with(live_dashboard.PRIVATE_BOUNCE_PROFILE)
+        mark_recovery_started.assert_called_once()
+
+    def test_automation_status_reports_disabled_gate(self) -> None:
+        with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "0"}), patch.object(
+            live_dashboard,
+            "load_dashboard_run_settings",
+            return_value={
+                "auto_start_sendgrid_enabled": True,
+                "auto_start_sendgrid_local_time": "18:00",
+                "auto_start_private_jc_enabled": True,
+                "auto_start_private_jc_local_time": "18:00",
+            },
+        ), patch.object(
+            live_dashboard,
+            "_load_dashboard_auto_start_state",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "_load_dashboard_timer_state",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "provider_pacing_status",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "_profile_runtime_active",
+            return_value=False,
+        ):
+            status = live_dashboard._build_automation_status()
+
+        self.assertFalse(status["auto_start_allowed"])
+        self.assertIn("DASHBOARD_ALLOW_AUTO_START=1", status["auto_start_note"])
+
     def test_preview_validate_profile_blocks_active_sender(self) -> None:
         with (
             patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
@@ -5558,7 +5697,11 @@ class LiveDashboardTests(unittest.TestCase):
 
     def test_start_warm_private_jc_calls_runtime_only_when_confirmed(self) -> None:
         lane = {"confirmed": True, "ready": True, "remaining": 1, "message": "Ready."}
-        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+        with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "0"}), patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
             live_dashboard,
             "warm_private_jc_lane_status",
             return_value=lane,
