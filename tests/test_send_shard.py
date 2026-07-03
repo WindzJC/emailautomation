@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import imaplib
 import io
 import json
+import smtplib
 import sys
 import tempfile
 import unittest
@@ -71,6 +73,51 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(["smtp_quit", "imap_login", "imap_logout"], calls)
         self.assertIn("key=PRIVATE_JC_PASSWORD", output.getvalue())
         self.assertNotIn("synthetic-secret", output.getvalue())
+
+    def test_private_jc_auth_diagnostic_distinguishes_missing_dev_credential(self) -> None:
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_files = [Path(tmpdir) / ".env.local", Path(tmpdir) / ".env"]
+            with patch.dict(send_shard.os.environ, {"PRIVATE_JC_PASSWORD": ""}, clear=False):
+                with redirect_stdout(output):
+                    result = run_diagnostic(check_smtp=True, check_imap=True, env_files=env_files)
+
+        text = output.getvalue()
+        self.assertEqual(2, result)
+        self.assertIn("ENV FILE STATUS: .env.local=missing .env=missing", text)
+        self.assertIn("PRIVATE_JC_PASSWORD is not configured in this repo/environment", text)
+        self.assertIn("If this is Mac/dev, test on the Windows/WSL live repo instead", text)
+        self.assertIn("missing credential is not proof that the password is wrong", text)
+        self.assertIn("category=credential_missing", text)
+
+    def test_private_jc_auth_diagnostic_distinguishes_rejected_credentials(self) -> None:
+        class RejectingIMAP:
+            def login(self, _user: str, _password: str) -> None:
+                raise imaplib.IMAP4.error("synthetic rejection")
+
+            def logout(self) -> None:
+                pass
+
+        def reject_smtp(*_args: object) -> object:
+            raise smtplib.SMTPAuthenticationError(535, b"synthetic rejection")
+
+        output = io.StringIO()
+        with patch.dict(send_shard.os.environ, {"PRIVATE_JC_PASSWORD": "synthetic-secret"}, clear=False):
+            with redirect_stdout(output):
+                result = run_diagnostic(
+                    check_smtp=True,
+                    check_imap=True,
+                    smtp_login_func=reject_smtp,
+                    imap_factory=lambda *_args, **_kwargs: RejectingIMAP(),
+                    env_files=[],
+                )
+
+        text = output.getvalue()
+        self.assertEqual(1, result)
+        self.assertIn("category=smtp_auth_failure", text)
+        self.assertIn("category=imap_auth_failure", text)
+        self.assertNotIn("category=credential_missing", text)
+        self.assertNotIn("synthetic-secret", text)
 
     def test_worker_stop_categories_distinguish_operator_failure_modes(self) -> None:
         self.assertEqual("manual_interruption", worker_stop_category("interrupted"))

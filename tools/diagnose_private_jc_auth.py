@@ -9,7 +9,7 @@ import os
 import smtplib
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -24,18 +24,31 @@ def _result(label: str, key_name: str, ok: bool, category: str) -> None:
     print(f"{label}: {'SUCCESS' if ok else 'FAILURE'} key={key_name} category={category}")
 
 
+def _print_credential_context(key_name: str, password: str, env_files: Iterable[Path]) -> None:
+    paths = tuple(env_files)
+    file_status = " ".join(f"{path.name}={'present' if path.is_file() else 'missing'}" for path in paths)
+    print(f"ENV FILE STATUS: {file_status or 'no environment files configured'}")
+    if password:
+        return
+    print(f"CREDENTIAL STATUS: {key_name} is not configured in this repo/environment.")
+    print("DEV NOTE: If this is Mac/dev, test on the Windows/WSL live repo instead.")
+    print("INTERPRETATION: A missing credential is not proof that the password is wrong.")
+
+
 def run_diagnostic(
     *,
     check_smtp: bool,
     check_imap: bool,
     smtp_login_func: Callable[..., object] = smtp_login,
     imap_factory: Callable[..., object] = imaplib.IMAP4_SSL,
+    env_files: Iterable[Path] = settings.ENV_FILES,
 ) -> int:
     profile = PROFILES["private_jc"]
     key_name = str(profile["password_env"])
     password = os.environ.get(key_name, "")
     mailbox = str(profile["from_email"])
     print(f"PROFILE: private_jc credential_key={key_name} configured={'yes' if bool(password) else 'no'}")
+    _print_credential_context(key_name, password, env_files)
     if not password:
         if check_smtp:
             _result("SMTP", key_name, False, "credential_missing")
@@ -91,7 +104,9 @@ def main() -> int:
     if not check_smtp and not check_imap:
         profile = PROFILES["private_jc"]
         key_name = str(profile["password_env"])
-        print(f"PROFILE: private_jc credential_key={key_name} configured={'yes' if bool(os.environ.get(key_name, '')) else 'no'}")
+        password = os.environ.get(key_name, "")
+        print(f"PROFILE: private_jc credential_key={key_name} configured={'yes' if bool(password) else 'no'}")
+        _print_credential_context(key_name, password, settings.ENV_FILES)
         print("NO NETWORK CHECKS: pass --smtp, --imap, or --all explicitly.")
         return 0
     return run_diagnostic(check_smtp=check_smtp, check_imap=check_imap)
