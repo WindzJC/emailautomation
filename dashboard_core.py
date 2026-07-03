@@ -2774,21 +2774,34 @@ def build_threshold_alerts(
 
     last_received_iso = str(webhook_health.get("last_received_iso") or "").strip()
     last_received = parse_iso_utc(last_received_iso)
+    active_sendgrid_profiles = sum(
+        1
+        for profile in profile_dicts
+        if _profile_uses_sendgrid(profile)
+        and str(profile.get("runtime_state") or "").strip() in ACTIVE_RUNTIME_STATES
+    )
     if (
         session_label == "running"
         and active_profiles > 0
+        and active_sendgrid_profiles > 0
         and ALERT_WEBHOOK_STALE_MINUTES > 0
     ):
         stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=ALERT_WEBHOOK_STALE_MINUTES)
         if not last_received or last_received < stale_cutoff:
             last_seen = str(webhook_health.get("last_received_age") or "never")
+            last_seen_timestamp = last_received_iso or "no timestamp recorded"
             alerts.append(
                 {
                     "severity": "warn",
                     "title": "Webhook intake stale",
                     "message": (
-                        f"No webhook received within the last {ALERT_WEBHOOK_STALE_MINUTES} minute(s) while "
-                        f"{active_profiles} profile(s) are active. Last seen: {last_seen}."
+                        f"Last webhook seen: {last_seen} ({last_seen_timestamp}). "
+                        f"Active SendGrid profiles: {active_sendgrid_profiles} (yes). "
+                        f"Awaiting outcomes: {total_awaiting_outcome} "
+                        f"(backlog alert threshold {ALERT_TOTAL_AWAITING_THRESHOLD}). "
+                        "Likely impact: accepted recipients may not receive final delivery or bounce outcomes in the dashboard. "
+                        "Check the SendGrid Event Webhook URL, public tunnel/receiver, endpoint reachability, "
+                        "and webhook signing/secrets if configured."
                     ),
                 }
             )

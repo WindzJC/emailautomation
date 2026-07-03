@@ -2298,6 +2298,32 @@ class DashboardCoreTests(unittest.TestCase):
             self.assertEqual("Non-blocking", alert["blocking_label"])
             self.assertEqual("dashboard_core.build_threshold_alerts", alert["source_function"])
 
+        stale_alert = next(alert for alert in alerts if alert["title"] == "Webhook intake stale")
+        self.assertIn("Last webhook seen: 50m ago (2026-03-13T11:40:00+00:00)", stale_alert["message"])
+        self.assertIn("Active SendGrid profiles: 1 (yes)", stale_alert["message"])
+        self.assertIn("Awaiting outcomes: 11 (backlog alert threshold 10)", stale_alert["message"])
+        self.assertIn("accepted recipients may not receive final delivery or bounce outcomes", stale_alert["message"])
+        self.assertIn("SendGrid Event Webhook URL", stale_alert["message"])
+        self.assertIn("public tunnel/receiver", stale_alert["message"])
+        self.assertIn("endpoint reachability", stale_alert["message"])
+        self.assertIn("webhook signing/secrets", stale_alert["message"])
+
+    def test_build_threshold_alerts_does_not_report_sendgrid_stale_for_private_only_activity(self) -> None:
+        alerts = dashboard_core.build_threshold_alerts(
+            session_label="running",
+            active_profiles=1,
+            recent_failures=0,
+            recent_unmapped=0,
+            total_awaiting_outcome=0,
+            webhook_health={"last_received_age": "never"},
+            profile_dicts=[
+                {"name": "private_jc", "runtime_state": "running", "awaiting_outcome": 0},
+                {"name": "sendgrid_alpha", "runtime_state": "stopped", "awaiting_outcome": 0},
+            ],
+        )
+
+        self.assertNotIn("Webhook intake stale", {alert["title"] for alert in alerts})
+
     def test_build_threshold_alerts_ignores_finished_run_errors_for_sender_api_alert(self) -> None:
         alerts = dashboard_core.build_threshold_alerts(
             session_label="stopped",
