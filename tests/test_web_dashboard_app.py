@@ -982,6 +982,18 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn('return { label: "Blocked", tone: "bad" };', body)
         self.assertLess(body.index('return { label: "Complete", tone: "good" };'), body.index("queueSafetyBlockedForProfile(profile)"))
 
+    def test_manual_sender_start_warns_and_requires_confirmation(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+
+        self.assertIn('path === "/api/start" || path.startsWith("/api/start/")', source)
+        self.assertIn("LIVE SENDER ACTION", source)
+        self.assertIn("This starts or resumes real sender workers and can consume pending queue rows", source)
+        self.assertIn("Use only on the live Windows/WSL machine", source)
+        self.assertIn("Dashboard auto-start may be disabled", source)
+        self.assertIn("Manual Start/Resume cancelled. No sender workers were started.", source)
+        self.assertIn("Disabling dashboard auto-start does not disable these manual controls.", html)
+
     def test_zero_queue_sender_buttons_show_no_queue(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn("Start unavailable — no pending leads.", source)

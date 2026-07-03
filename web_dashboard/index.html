@@ -442,12 +442,15 @@
                   </label>
                   <div id="send-cap-note" class="toolbar-field-note muted">6 PM-12 PM window</div>
                   <div class="toolbar-actions">
-                    <button id="start-btn" class="btn btn-primary" type="button">Start All</button>
+                    <button id="start-btn" class="btn btn-primary" type="button" title="Starts or resumes real sender workers on the live Windows/WSL machine.">Start All</button>
                     <button id="stop-btn" class="btn btn-danger" type="button">Stop All</button>
                     <button id="refresh-btn" class="btn btn-secondary" type="button">Refresh</button>
                     <button id="send-cap-save-btn" class="btn btn-secondary btn-quiet" type="button">Save</button>
                   </div>
                 </section>
+                <p class="manual-start-warning">
+                  <strong>Live sender action:</strong> Manual Start/Resume launches real workers and can consume pending queue rows. Use only on the live Windows/WSL machine. Disabling dashboard auto-start does not disable these manual controls.
+                </p>
                 <section id="message-bar" class="message-bar hidden"></section>
               </header>
             </section>

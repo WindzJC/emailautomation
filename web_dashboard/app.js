@@ -8601,11 +8601,23 @@ async function handleSenderStatusClick(event) {
 
 async function postAction(path, options = {}) {
   const { profileName = "", action = "", body = null } = options;
+  const manualSenderStart = path === "/api/start" || path.startsWith("/api/start/");
+  if (manualSenderStart && !window.confirm(
+    "LIVE SENDER ACTION\n\n"
+    + "This starts or resumes real sender workers and can consume pending queue rows. "
+    + "Use only on the live Windows/WSL machine. Dashboard auto-start may be disabled, "
+    + "but this manual Start/Resume action still works.\n\nContinue?",
+  )) {
+    showMessage("Manual Start/Resume cancelled. No sender workers were started.", "info");
+    return;
+  }
   try {
     if (profileName && action) {
       pendingProfileActions.set(profileName, action);
-      setProfileActionFeedback(profileName, "info", action === "start" ? "Starting profile..." : "Stopping profile...");
+      setProfileActionFeedback(profileName, "info", action === "start" ? "Starting or resuming real sender worker..." : "Stopping profile...");
       rerenderCurrentSelection();
+    } else if (manualSenderStart) {
+      showMessage("Starting or resuming real sender workers on the live machine...", "info");
     }
     const fetchOptions = { method: "POST" };
     if (body !== null) {
