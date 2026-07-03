@@ -3295,6 +3295,9 @@ def _dashboard_auth_response() -> dict[str, object]:
         "authenticated": True if auth_disabled or not auth_enabled else False,
         "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
         "local_mode": not auth_enabled,
+        "dashboard_mode": "local_dev" if not auth_enabled else "live",
+        "auto_start_allowed": _dashboard_auto_start_allowed(),
+        "auto_start_env_var": DASHBOARD_AUTO_START_ENV_VAR,
     }
 
 

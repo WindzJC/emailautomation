@@ -1222,6 +1222,21 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(control_id, markup)
 
+    def test_environment_banner_reports_auth_auto_start_and_live_sender_safety(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        component = (APP_JS.parent / "src" / "main.jsx").read_text(encoding="utf-8")
+
+        for expected in [
+            "dashboard-environment-banner",
+            "Local / dev mode (Mac-safe)",
+            "Live mode (Windows/WSL expected)",
+            "Auth disabled",
+            "Auto-start disabled",
+            "DASHBOARD_ALLOW_AUTO_START=1",
+            "Manual Start/Resume can still launch real workers",
+        ]:
+            self.assertIn(expected, source + component)
+
     def test_warm_lane_requires_explicit_confirm_and_separate_start(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 

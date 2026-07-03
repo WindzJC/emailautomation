@@ -140,6 +140,11 @@ const els = {
   authLoginBtn: document.getElementById("auth-login-btn"),
   authStatusLabel: document.getElementById("auth-status-label"),
   authLogoutBtn: document.getElementById("logout-btn"),
+  environmentBanner: document.getElementById("dashboard-environment-banner"),
+  environmentMode: document.getElementById("dashboard-environment-mode"),
+  environmentAuthMode: document.getElementById("dashboard-auth-mode"),
+  environmentAutoStartMode: document.getElementById("dashboard-auto-start-mode"),
+  environmentNote: document.getElementById("dashboard-environment-note"),
   messageBar: document.getElementById("message-bar"),
 };
 
@@ -200,6 +205,8 @@ let authState = {
   authDisabled: false,
   authenticated: false,
   username: "",
+  dashboardMode: "live",
+  autoStartAllowed: false,
 };
 const profileActionState = new Map();
 const IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY = "emailautomation.activeImportantCheckJobId";
@@ -295,6 +302,27 @@ function renderAuthUi() {
     els.page.classList.toggle("is-authenticated", authenticated);
     els.page.classList.toggle("is-auth-disabled", authDisabled || !authEnabled);
   }
+  renderEnvironmentStatus();
+}
+
+function renderEnvironmentStatus(overrides = {}) {
+  const dashboardMode = String(overrides.dashboardMode ?? authState.dashboardMode ?? "live");
+  const localDev = dashboardMode === "local_dev";
+  const authEnabled = Boolean(overrides.authEnabled ?? authState.authEnabled);
+  const authDisabled = Boolean(overrides.authDisabled ?? authState.authDisabled);
+  const autoStartAllowed = Boolean(overrides.autoStartAllowed ?? authState.autoStartAllowed);
+  if (els.environmentBanner) {
+    els.environmentBanner.className = `react-environment-banner react-environment-banner-${localDev ? "local" : "live"}`;
+  }
+  setNodeText(els.environmentMode, localDev ? "Local / dev mode (Mac-safe)" : "Live mode (Windows/WSL expected)");
+  setNodeText(els.environmentAuthMode, authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured");
+  setNodeText(els.environmentAutoStartMode, autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled");
+  setNodeText(
+    els.environmentNote,
+    localDev
+      ? "Mac/dev is not for live sending. Manual Start/Resume can still launch real workers if this repo is connected to a live runtime."
+      : "Live sending mode. Manual Start/Resume launches real workers and can consume pending queue rows; auto-start is controlled separately by DASHBOARD_ALLOW_AUTO_START=1.",
+  );
 }
 
 function showAuthOverlay(message = "") {
@@ -343,6 +371,8 @@ function setAuthState(nextState = {}) {
     authDisabled,
     authenticated: authDisabled || !authEnabled || Boolean(nextState.authenticated),
     username: String(nextState.username || ""),
+    dashboardMode: String(nextState.dashboardMode ?? authState.dashboardMode ?? "live"),
+    autoStartAllowed: Boolean(nextState.autoStartAllowed ?? authState.autoStartAllowed),
   };
   renderAuthUi();
   if (authState.authenticated) {
@@ -363,6 +393,8 @@ async function fetchAuthStatus() {
     authDisabled: Boolean(data.auth_disabled),
     authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
     username: data.username || "",
+    dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
+    autoStartAllowed: Boolean(data.auto_start_allowed),
   });
   return data;
 }
@@ -390,6 +422,8 @@ async function submitAuthLogin() {
       authDisabled: Boolean(data.auth_disabled),
       authenticated: Boolean(data.authenticated) || data.auth_enabled === false,
       username: data.username || username,
+      dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
+      autoStartAllowed: Boolean(data.auto_start_allowed),
     });
     showMessage(data.auth_disabled ? "Local dev auth disabled." : "Signed in.", "success");
     await bootstrapAuthenticatedDashboard();
@@ -8419,6 +8453,10 @@ function renderProfileDetail(snapshot, profile) {
 
 function renderSnapshot(snapshot) {
   lastSnapshot = snapshot;
+  const snapshotAutoStart = snapshot?.automation?.auto_start_allowed;
+  renderEnvironmentStatus(
+    typeof snapshotAutoStart === "boolean" ? { autoStartAllowed: snapshotAutoStart } : {},
+  );
   displayTimeZone = snapshot.display_timezone || displayTimeZone;
   const selectedProfile = resolveSelectedProfile(snapshot);
   renderControls(snapshot);

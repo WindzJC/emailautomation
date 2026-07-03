@@ -75,6 +75,25 @@ export function EmptyState({ title, description }) {
   );
 }
 
+export function EnvironmentBanner() {
+  return (
+    <section id="dashboard-environment-banner" className="react-environment-banner react-environment-banner-checking" aria-label="Dashboard environment and sender safety">
+      <div className="react-environment-primary">
+        <span className="react-environment-dot" aria-hidden="true" />
+        <div>
+          <p>Environment &amp; sender safety</p>
+          <strong id="dashboard-environment-mode">Checking dashboard mode...</strong>
+        </div>
+      </div>
+      <div className="react-environment-flags">
+        <span id="dashboard-auth-mode">Auth: checking</span>
+        <span id="dashboard-auto-start-mode">Auto-start: checking</span>
+      </div>
+      <p id="dashboard-environment-note">Mac/dev is not for live sending. Manual Start/Resume can still launch real workers on the live machine.</p>
+    </section>
+  );
+}
+
 export function SendersDashboard({ view }) {
   return (
     <section id="ops-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="ops-tab-btn">
@@ -169,6 +188,7 @@ export function AppShell({ template }) {
       <div className="app-shell react-app-shell">
         <Sidebar {...template.sidebar} />
         <main className="app-main react-main">
+          <EnvironmentBanner />
           <SendersDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
         </main>

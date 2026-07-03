@@ -214,6 +214,29 @@
     var(--ui-canvas);
 }
 
+.react-environment-banner {
+  display: grid;
+  grid-template-columns: minmax(230px, .8fr) auto minmax(360px, 1.4fr);
+  align-items: center;
+  gap: 14px;
+  max-width: 1380px;
+  margin: 0 auto 18px;
+  padding: 11px 14px;
+  border: 1px solid rgba(129,174,242,.12);
+  border-radius: 8px;
+  background: rgba(14,20,29,.88);
+  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 12px 30px rgba(0,0,0,.16);
+}
+
+.react-environment-primary { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.react-environment-primary p { margin: 0 0 2px; color: #748297; font-size: .6rem; font-weight: 800; text-transform: uppercase; }
+.react-environment-primary strong { color: var(--ui-text); font-size: .8rem; }
+.react-environment-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--ui-amber); box-shadow: 0 0 0 5px rgba(238,190,103,.08); }
+.react-environment-banner-live .react-environment-dot { background: var(--ui-green); box-shadow: 0 0 0 5px rgba(95,211,160,.08); }
+.react-environment-flags { display: flex; gap: 6px; }
+.react-environment-flags span { padding: 5px 8px; border: 1px solid var(--ui-line); border-radius: 999px; color: #aeb9c8; background: rgba(255,255,255,.025); font-size: .65rem; font-weight: 700; white-space: nowrap; }
+.react-environment-banner > p { margin: 0; color: #8f9caf; font-size: .68rem; line-height: 1.45; }
+
 .react-workspace.workspace-view {
   gap: 20px;
   max-width: 1380px;
@@ -854,6 +877,8 @@
   .react-app-shell.app-shell,
   .react-app-shell.app-shell.warm-research-shell { grid-template-columns: 188px minmax(0,1fr) !important; }
   .react-main.app-main { padding-inline: 22px; }
+  .react-environment-banner { grid-template-columns: minmax(220px,1fr) auto; }
+  .react-environment-banner > p { grid-column: 1 / -1; }
   .react-metric-region .workspace-summary-strip.summary-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .react-warm-surface .leads-control-bar { grid-template-columns: 1fr 1fr; }
   .react-warm-surface .leads-control-actions { grid-column: 1 / -1; justify-content: flex-start; }
@@ -933,6 +958,8 @@
   .react-sidebar-context .auth-chip { min-height: 27px; padding: 3px 7px; font-size: .65rem; }
   .react-sidebar-context .toolbar-status { display: none; }
   .react-main.app-main { padding: 20px 10px 34px; }
+  .react-environment-banner { grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; padding: 10px; }
+  .react-environment-flags { flex-wrap: wrap; }
   .react-page-heading { align-items: flex-start; flex-direction: column; min-height: 0; }
   .react-page-heading h2 { font-size: 1.5rem; }
   .react-command-bar { padding: 10px; }

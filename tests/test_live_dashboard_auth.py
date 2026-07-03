@@ -15,7 +15,7 @@ class LiveDashboardAuthTests(unittest.TestCase):
 
         with patch.dict(
             live_dashboard.os.environ,
-            {"DASHBOARD_AUTH_DISABLED": "0", "LOCAL_DASHBOARD_NO_AUTH": "0"},
+            {"DASHBOARD_AUTH_DISABLED": "0", "LOCAL_DASHBOARD_NO_AUTH": "0", "DASHBOARD_ALLOW_AUTO_START": "1"},
             clear=False,
         ), patch.object(live_dashboard.settings, "DASHBOARD_AUTH_USERNAME", "admin"), patch.object(
             live_dashboard.settings,
@@ -39,6 +39,8 @@ class LiveDashboardAuthTests(unittest.TestCase):
                 self.assertTrue(auth_status["auth_enabled"])
                 self.assertFalse(auth_status["auth_disabled"])
                 self.assertFalse(auth_status["authenticated"])
+                self.assertEqual("live", auth_status["dashboard_mode"])
+                self.assertTrue(auth_status["auto_start_allowed"])
                 self.assertEqual(401, client.get("/api/snapshot").status_code)
                 self.assertEqual(401, client.post("/api/leads/verify-important", json={}).status_code)
                 self.assertEqual(401, client.post("/api/leads/dispatch-important", json={}).status_code)
@@ -78,7 +80,7 @@ class LiveDashboardAuthTests(unittest.TestCase):
 
         with patch.dict(
             live_dashboard.os.environ,
-            {"DASHBOARD_AUTH_DISABLED": "1", "LOCAL_DASHBOARD_NO_AUTH": "0"},
+            {"DASHBOARD_AUTH_DISABLED": "1", "LOCAL_DASHBOARD_NO_AUTH": "0", "DASHBOARD_ALLOW_AUTO_START": "0"},
             clear=False,
         ), patch.object(live_dashboard.settings, "DASHBOARD_AUTH_USERNAME", "admin"), patch.object(
             live_dashboard.settings,
@@ -104,6 +106,9 @@ class LiveDashboardAuthTests(unittest.TestCase):
                         "authenticated": True,
                         "username": "admin",
                         "local_mode": True,
+                        "dashboard_mode": "local_dev",
+                        "auto_start_allowed": False,
+                        "auto_start_env_var": "DASHBOARD_ALLOW_AUTO_START",
                     },
                     status.json(),
                 )
@@ -134,6 +139,19 @@ class LiveDashboardAuthTests(unittest.TestCase):
         ):
             self.assertTrue(live_dashboard._dashboard_auth_disabled())
             self.assertFalse(live_dashboard._dashboard_auth_enabled())
+
+    def test_missing_auth_configuration_is_reported_as_local_dev(self) -> None:
+        with patch.dict(
+            live_dashboard.os.environ,
+            {"DASHBOARD_AUTH_DISABLED": "0", "LOCAL_DASHBOARD_NO_AUTH": "0", "DASHBOARD_ALLOW_AUTO_START": "0"},
+            clear=False,
+        ), patch.object(live_dashboard.settings, "DASHBOARD_AUTH_PASSWORD", ""):
+            status = live_dashboard._dashboard_auth_response()
+
+        self.assertFalse(status["auth_enabled"])
+        self.assertFalse(status["auth_disabled"])
+        self.assertEqual("local_dev", status["dashboard_mode"])
+        self.assertFalse(status["auto_start_allowed"])
 
 
 if __name__ == "__main__":
