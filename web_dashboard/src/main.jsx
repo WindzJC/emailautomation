@@ -14,8 +14,14 @@ export function StatusPill({ children, tone = "neutral" }) {
 export function Sidebar({ brand, navigation, status }) {
   return (
     <aside className="app-rail react-sidebar" aria-label="Primary navigation">
-      <div className="react-sidebar-brand"><LegacyNode html={brand} /></div>
-      <nav className="react-sidebar-nav" aria-label="Workspace"><LegacyNode html={navigation} /></nav>
+      <div className="react-sidebar-brand">
+        <span className="react-brand-mark" aria-hidden="true">EA</span>
+        <LegacyNode html={brand} />
+      </div>
+      <nav className="react-sidebar-nav" aria-label="Workspace">
+        <p className="react-sidebar-label">Workspace</p>
+        <LegacyNode html={navigation} />
+      </nav>
       <div className="react-sidebar-context">
         <p className="react-sidebar-label">Environment</p>
         <LegacyNode html={status} />
@@ -38,7 +44,12 @@ export function PageHeading({ eyebrow, title, description, aside = null }) {
 }
 
 export function CommandBar({ html }) {
-  return <div className="react-command-bar"><LegacyNode html={html} /></div>;
+  return (
+    <div className="react-command-bar">
+      <p className="react-command-label">Run controls</p>
+      <LegacyNode html={html} />
+    </div>
+  );
 }
 
 export function MetricCard({ children }) {
@@ -104,7 +115,16 @@ export function CommandRail({ left, right }) {
   return (
     <div className="leads-command-main react-lead-workspace">
       <LegacyNode html={left} />
-      <LegacyNode html={right} />
+      <div className="react-command-rail-shell">
+        <div className="react-command-sequence" aria-label="Dispatch command sequence">
+          <span><b>1</b> Preview</span>
+          <i aria-hidden="true" />
+          <span><b>2</b> Confirm</span>
+          <i aria-hidden="true" />
+          <span><b>3</b> Start</span>
+        </div>
+        <LegacyNode html={right} />
+      </div>
     </div>
   );
 }
@@ -118,8 +138,18 @@ export function LeadOpsDashboard({ view }) {
     <section id="leads-view" className="dashboard-view workspace-view leads-workspace react-workspace react-leads-page hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
       <PageHeading
         eyebrow="Lead operations"
-        title="Prepare the next campaign"
-        description="Check source quality, choose a campaign, preview the write set, then confirm."
+        title={(
+          <>
+            <span className="react-cold-copy">Prepare the next campaign</span>
+            <span className="react-warm-copy">Warm research workspace</span>
+          </>
+        )}
+        description={(
+          <>
+            <span className="react-cold-copy">Check source quality, choose a campaign, preview the write set, then confirm.</span>
+            <span className="react-warm-copy">Turn qualified research into reviewed, explicitly confirmed outreach.</span>
+          </>
+        )}
         aside={<StatusPill tone="safe">Safety gated</StatusPill>}
       />
       <section className="leads-command-center operator-workflow-section react-lead-canvas">
