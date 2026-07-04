@@ -314,14 +314,12 @@ function renderEnvironmentStatus(overrides = {}) {
   if (els.environmentBanner) {
     els.environmentBanner.className = `react-environment-banner react-environment-banner-${localDev ? "local" : "live"}`;
   }
-  setNodeText(els.environmentMode, localDev ? "Local / dev mode (Mac-safe)" : "Live mode (Windows/WSL expected)");
+  setNodeText(els.environmentMode, localDev ? "Local / dev mode" : "Live mode");
   setNodeText(els.environmentAuthMode, authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured");
   setNodeText(els.environmentAutoStartMode, autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled");
   setNodeText(
     els.environmentNote,
-    localDev
-      ? "Mac/dev is not for live sending. Manual Start/Resume can still launch real workers if this repo is connected to a live runtime."
-      : "Live sending mode. Manual Start/Resume launches real workers and can consume pending queue rows; auto-start is controlled separately by DASHBOARD_ALLOW_AUTO_START=1.",
+    "Manual Start/Resume can launch real workers and consume queues.",
   );
 }
 
@@ -7493,6 +7491,11 @@ function renderControls(snapshot) {
   const hasActiveSender = profiles.some((profile) => isProfileActive(profile))
     || Number(controls.active_sendgrid_sender_count || 0) > 0
     || Number(controls.active_profile_count || controls.active_profiles || 0) > 0;
+  const summaryPending = Number(snapshot?.summary?.total_pending);
+  const totalPending = Number.isFinite(summaryPending)
+    ? Math.max(0, summaryPending)
+    : profiles.reduce((sum, profile) => sum + Math.max(0, profilePendingCount(profile)), 0);
+  const runComplete = totalPending <= 0;
   const blockedByQueueSafety = queueSafetyBlocked(snapshot);
   const splitQueueSafety = sendgridReadyPrivateBlocked(snapshot);
   const queueSafetyMessage = splitQueueSafety
@@ -7502,21 +7505,27 @@ function renderControls(snapshot) {
     els.sendCapInput.value = String(sendTarget);
   }
   if (els.startBtn) {
-    els.startBtn.disabled = hasActiveSender || blockedByQueueSafety;
-    els.startBtn.classList.toggle("btn-start-muted", hasActiveSender || blockedByQueueSafety);
-    els.startBtn.title = blockedByQueueSafety
+    const startUnavailable = hasActiveSender || blockedByQueueSafety || runComplete;
+    els.startBtn.disabled = startUnavailable;
+    els.startBtn.classList.toggle("btn-start-muted", startUnavailable);
+    els.startBtn.classList.toggle("btn-start-complete", runComplete);
+    els.startBtn.title = runComplete
+      ? "Run complete — no pending queues."
+      : blockedByQueueSafety
       ? queueSafetyMessage
       : hasActiveSender
       ? "Some senders are already running. Use per-sender controls or Stop All first."
       : "Start all available senders.";
-    els.startBtn.setAttribute("aria-describedby", (hasActiveSender || blockedByQueueSafety) ? "send-cap-note" : "");
+    els.startBtn.setAttribute("aria-describedby", startUnavailable ? "send-cap-note" : "");
   }
   if (els.stopBtn) {
     els.stopBtn.classList.toggle("btn-danger-active", hasActiveSender);
   }
   if (els.sendCapNote) {
     const lines = [];
-    if (hasActiveSender) {
+    if (runComplete) {
+      lines.push("Run complete. No pending queues.");
+    } else if (hasActiveSender) {
       lines.push("Some senders are already running. Use per-sender controls or Stop All first.");
     }
     const hasBlockingAlert = Array.isArray(snapshot?.alerts)

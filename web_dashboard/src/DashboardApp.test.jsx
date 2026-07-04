@@ -35,7 +35,7 @@ describe("DashboardApp", () => {
     render(<DashboardApp template={template} />);
     expect(screen.getByText("Start All")).toBeInTheDocument();
     expect(screen.getByText("Checking dashboard mode...")).toBeInTheDocument();
-    expect(screen.getByText(/Mac\/dev is not for live sending/)).toBeInTheDocument();
+    expect(screen.getByText("Manual Start/Resume can launch real workers and consume queues.")).toBeInTheDocument();
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
     expect(document.getElementById("auth-overlay")).toBeInTheDocument();
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();

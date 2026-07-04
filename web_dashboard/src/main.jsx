@@ -89,7 +89,7 @@ export function EnvironmentBanner() {
         <span id="dashboard-auth-mode">Auth: checking</span>
         <span id="dashboard-auto-start-mode">Auto-start: checking</span>
       </div>
-      <p id="dashboard-environment-note">Mac/dev is not for live sending. Manual Start/Resume can still launch real workers on the live machine.</p>
+      <p id="dashboard-environment-note">Manual Start/Resume can launch real workers and consume queues.</p>
     </section>
   );
 }

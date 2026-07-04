@@ -992,7 +992,8 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("Use only on the live Windows/WSL machine", source)
         self.assertIn("Dashboard auto-start may be disabled", source)
         self.assertIn("Manual Start/Resume cancelled. No sender workers were started.", source)
-        self.assertIn("Disabling dashboard auto-start does not disable these manual controls.", html)
+        self.assertIn("Manual Start/Resume can launch real workers and consume queues.", html)
+        self.assertIn("Auto-start remains separate.", html)
 
     def test_zero_queue_sender_buttons_show_no_queue(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1002,6 +1003,19 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("|| (!warmProfile && !stopAvailable && !startAvailable)", source)
         self.assertIn("profilePendingCount(profile) > 0", source)
         self.assertIn("pendingCount <= 0", source)
+
+    def test_start_all_is_muted_only_when_run_has_no_pending_queues(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function renderControls(snapshot)")
+        end = source.index("function renderDetailSwitcher", start)
+        body = source[start:end]
+
+        self.assertIn("const summaryPending = Number(snapshot?.summary?.total_pending)", body)
+        self.assertIn("const runComplete = totalPending <= 0", body)
+        self.assertIn("hasActiveSender || blockedByQueueSafety || runComplete", body)
+        self.assertIn('classList.toggle("btn-start-complete", runComplete)', body)
+        self.assertIn('"Run complete — no pending queues."', body)
+        self.assertIn(': "Start all available senders."', body)
 
     def test_dashboard_next_action_prefers_active_private_jc_monitoring(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1228,12 +1242,11 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             "dashboard-environment-banner",
-            "Local / dev mode (Mac-safe)",
-            "Live mode (Windows/WSL expected)",
+            "Local / dev mode",
+            "Live mode",
             "Auth disabled",
             "Auto-start disabled",
-            "DASHBOARD_ALLOW_AUTO_START=1",
-            "Manual Start/Resume can still launch real workers",
+            "Manual Start/Resume can launch real workers and consume queues.",
         ]:
             self.assertIn(expected, source + component)
 
