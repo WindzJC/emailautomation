@@ -53,7 +53,18 @@ export function CommandBar({ html }) {
 }
 
 export function MetricCard({ children }) {
-  return <div className="react-metric-region">{children}</div>;
+  return (
+    <section className="react-metric-region" aria-label="Current run summary">
+      <header className="react-section-heading">
+        <div>
+          <p className="react-section-label">Current run</p>
+          <span>Queue and delivery state</span>
+        </div>
+        <span className="react-section-state">Live snapshot</span>
+      </header>
+      {children}
+    </section>
+  );
 }
 
 export function SenderTable({ progress, details }) {
