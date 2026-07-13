@@ -2677,9 +2677,60 @@ class LiveDashboardTests(unittest.TestCase):
             result = live_dashboard._build_lead_check_status(status, state)
 
             self.assertEqual("stale", result["state"])
-            self.assertEqual("Stale — marked running but no recent progress/output", result["label"])
+            self.assertEqual("Failed/Stale — check did not produce outputs", result["label"])
             self.assertIn("No cleaned/rejected output files were produced", result["message"])
+            self.assertEqual(
+                "Do not preview. Re-upload a clean lead CSV and run Upload & Check again.",
+                result["guidance"],
+            )
             self.assertIn("Check failed or stale", result["preview_block_reason"])
+
+    def test_lead_check_status_running_missing_outputs_overrides_old_latest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            run_dir = tmp / "check_20260713_161206_1d857689"
+            old_run = tmp / "check_20260704_synthetic"
+            input_path = tmp / "leadschecker_20260713_161206.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            old_output = old_run / "leads.csv"
+            old_rejected = old_run / "leads_rejected.csv"
+            run_dir.mkdir(parents=True)
+            self._write_csv(input_path, ["Email"], [{"Email": "bad-combined@example.test"}])
+            self._write_csv(old_output, ["Email"], [{"Email": "old@example.test"}])
+            self._write_csv(old_rejected, ["Email"], [])
+            status = {
+                "active_important_check_job": {
+                    "job_id": "check_20260713_161206_1d857689",
+                    "status": "running",
+                    "stage": "checking",
+                    "created_at_utc": "2026-07-13T16:12:06+00:00",
+                    "updated_at_utc": "2020-01-01T00:00:00+00:00",
+                },
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {
+                    "generated_at_utc": "2026-07-04T12:00:00+00:00",
+                    "output_label": str(old_output),
+                    "rejected_label": str(old_rejected),
+                    "cleaned_rows": 1,
+                },
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("stale", result["state"])
+            self.assertNotEqual("not_started", result["state"])
+            self.assertEqual("Failed/Stale — check did not produce outputs", result["label"])
+            self.assertFalse(result["preview_ready"])
+            self.assertFalse(result["confirm_ready"])
+            self.assertEqual(
+                "Do not preview. Re-upload a clean lead CSV and run Upload & Check again.",
+                result["guidance"],
+            )
+            self.assertIn("No cleaned/rejected output files were produced", result["preview_block_reason"])
 
     def test_lead_check_status_mismatch_when_latest_check_points_to_old_run(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -2737,7 +2788,10 @@ class LiveDashboardTests(unittest.TestCase):
 
             self.assertEqual("failed", result["state"])
             self.assertFalse(result["preview_ready"])
-            self.assertEqual("Failed/Stale: do not preview; re-upload clean source.", result["guidance"])
+            self.assertEqual(
+                "Do not preview. Re-upload a clean lead CSV and run Upload & Check again.",
+                result["guidance"],
+            )
             self.assertIn("No cleaned/rejected output files were produced", result["preview_block_reason"])
 
     def test_combined_leads_status_clears_stale_confirmed_dispatch_for_newer_staged_triage(self) -> None:

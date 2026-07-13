@@ -2002,6 +2002,14 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
     input_path = paths["input"]
     output_path = paths["output"]
     rejected_path = paths["rejected"]
+    current_paths = [path for path in (input_path, output_path, rejected_path) if path is not None]
+    default_paths = {IMPORTANT_LEADS_INPUT, IMPORTANT_LEADS_OUTPUT, IMPORTANT_LEADS_REJECTED}
+    non_default_current_run = any(path not in default_paths for path in current_paths)
+    current_run_exists = bool(
+        (input_path and input_path.exists())
+        or (non_default_current_run and output_path and output_path.parent.exists())
+        or (non_default_current_run and rejected_path and rejected_path.parent.exists())
+    )
     output_exists = bool(output_path and output_path.exists())
     rejected_exists = bool(rejected_path and rejected_path.exists())
     outputs_exist = output_exists and rejected_exists
@@ -2016,7 +2024,12 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
     stale_seconds = _seconds_since_timestamp(active_updated_at) if active_check else None
     stale_threshold_seconds = 15 * 60
     active_running = bool(active_check and active_status not in {"completed", "done", "failed", "canceled", "cancelled"})
-    active_stale = bool(active_running and not outputs_exist and stale_seconds is not None and stale_seconds >= stale_threshold_seconds)
+    active_stale = bool(
+        active_running
+        and not outputs_exist
+        and current_run_exists
+        and (stale_seconds is None or stale_seconds >= stale_threshold_seconds)
+    )
     current_run_id = active_job_id or str(latest_check.get("check_job_id") or latest_check.get("job_id") or "").strip()
     current_run_label = _dashboard_path_label(output_path) if output_path else ""
     latest_output_label = str(latest_check.get("output_label") or latest_check.get("output_path") or "").strip()
@@ -2038,15 +2051,21 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
         tone = "active"
     elif active_stale:
         state_key = "stale"
-        label = "Stale — marked running but no recent progress/output"
+        label = "Failed/Stale — check did not produce outputs"
         message = "Check failed or stale. No cleaned/rejected output files were produced."
-        guidance = "Failed/Stale: do not preview; re-upload clean source."
+        guidance = "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
         tone = "bad"
     elif active_check and active_status in {"failed", "canceled", "cancelled"}:
         state_key = "failed"
-        label = "Failed — check did not produce outputs"
+        label = "Failed/Stale — check did not produce outputs"
         message = str(active_check.get("error") or active_check.get("message") or "Check failed or stale. No cleaned/rejected output files were produced.")
-        guidance = "Failed/Stale: do not preview; re-upload clean source."
+        guidance = "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
+        tone = "bad"
+    elif current_run_exists and not outputs_exist:
+        state_key = "failed"
+        label = "Failed/Stale — check did not produce outputs"
+        message = "Check failed or stale. No cleaned/rejected output files were produced."
+        guidance = "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
         tone = "bad"
     elif latest_generated_at and not latest_matches:
         state_key = "mismatch"
@@ -2068,13 +2087,6 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
         message = "Output files exist, but no cleaned/valid rows are available."
         guidance = "Not ready for preview: re-upload clean source."
         tone = "warn"
-    elif output_path and current_run_label and not outputs_exist:
-        state_key = "failed"
-        label = "Failed — check did not produce outputs"
-        message = "Check failed or stale. No cleaned/rejected output files were produced."
-        guidance = "Failed/Stale: do not preview; re-upload clean source."
-        tone = "bad"
-
     preview_ready = preview_state == "ready"
     preview_block_reason = "" if preview_ready else message
     if state_key in {"failed", "stale"}:

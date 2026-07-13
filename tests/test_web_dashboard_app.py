@@ -226,7 +226,8 @@ class WebDashboardAppTests(unittest.TestCase):
         for expected in [
             "Processing / checking",
             "Success — ready for Preview Dispatch",
-            "Failed/Stale: do not preview; re-upload clean source.",
+            "Failed/Stale — check did not produce outputs",
+            "Do not preview. Re-upload a clean lead CSV and run Upload & Check again.",
             "Check failed or stale",
             "No cleaned/rejected output files were produced.",
             "Check state mismatch",
