@@ -1945,6 +1945,181 @@ def _dashboard_paths_match(left: object, right: object) -> bool:
         return left_text == right_text
 
 
+def _path_mtime_iso(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return ""
+
+
+def _seconds_since_timestamp(value: object) -> int | None:
+    parsed = _parse_iso_timestamp(value)
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
+def _lead_check_state_paths(status: dict[str, object], state: dict[str, object]) -> dict[str, Path | None]:
+    raw_paths = state.get("important_leads_paths") if isinstance(state.get("important_leads_paths"), dict) else {}
+
+    def path_for(raw_key: str, status_key: str, default_path: Path) -> Path:
+        raw_value = raw_paths.get(raw_key) if isinstance(raw_paths, dict) else ""
+        status_value = status.get(status_key)
+        return _state_label_path(raw_value or status_value) or default_path
+
+    return {
+        "input": path_for("input_path", "important_input_label", IMPORTANT_LEADS_INPUT),
+        "output": path_for("output_path", "important_output_label", IMPORTANT_LEADS_OUTPUT),
+        "rejected": path_for("rejected_path", "important_rejected_label", IMPORTANT_LEADS_REJECTED),
+    }
+
+
+def _check_output_row_count(path: Path | None) -> int:
+    if path is None or not path.exists():
+        return 0
+    try:
+        return _count_csv_rows(path)
+    except Exception:
+        return 0
+
+
+def _latest_check_matches_paths(latest_check: dict[str, object], output_path: Path | None, rejected_path: Path | None) -> bool:
+    if not latest_check:
+        return False
+    output_label = latest_check.get("output_label") or latest_check.get("output_path") or ""
+    rejected_label = latest_check.get("rejected_label") or latest_check.get("rejected_path") or ""
+    if not output_label or not rejected_label:
+        return False
+    return _dashboard_paths_match(output_label, output_path or "") and _dashboard_paths_match(rejected_label, rejected_path or "")
+
+
+def _build_lead_check_status(status: dict[str, object], state: dict[str, object]) -> dict[str, object]:
+    active_check = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
+    paths = _lead_check_state_paths(status, state)
+    input_path = paths["input"]
+    output_path = paths["output"]
+    rejected_path = paths["rejected"]
+    output_exists = bool(output_path and output_path.exists())
+    rejected_exists = bool(rejected_path and rejected_path.exists())
+    outputs_exist = output_exists and rejected_exists
+    cleaned_rows = _check_output_row_count(output_path)
+    rejected_rows = _check_output_row_count(rejected_path)
+    latest_generated_at = str(latest_check.get("generated_at_utc") or latest_check.get("generated_at") or "").strip()
+    latest_matches = _latest_check_matches_paths(latest_check, output_path, rejected_path)
+    active_status = str(active_check.get("status") if active_check else "").strip().lower()
+    active_stage = str(active_check.get("stage") if active_check else "").strip().lower()
+    active_job_id = str(active_check.get("job_id") if active_check else "").strip()
+    active_updated_at = str(active_check.get("updated_at_utc") if active_check else "").strip()
+    stale_seconds = _seconds_since_timestamp(active_updated_at) if active_check else None
+    stale_threshold_seconds = 15 * 60
+    active_running = bool(active_check and active_status not in {"completed", "done", "failed", "canceled", "cancelled"})
+    active_stale = bool(active_running and not outputs_exist and stale_seconds is not None and stale_seconds >= stale_threshold_seconds)
+    current_run_id = active_job_id or str(latest_check.get("check_job_id") or latest_check.get("job_id") or "").strip()
+    current_run_label = _dashboard_path_label(output_path) if output_path else ""
+    latest_output_label = str(latest_check.get("output_label") or latest_check.get("output_path") or "").strip()
+
+    state_key = "not_started"
+    label = "Not started"
+    message = "Lead check not started"
+    guidance = "Not ready for preview: upload a lead CSV and run Upload & Check."
+    preview_state = "not_ready"
+    preview_label = "Not ready for preview"
+    tone = "wait"
+
+    if active_running and not active_stale:
+        queued_like = active_status in {"queued", "pending", "uploaded", "upload_received"} or active_stage in {"queued", "uploaded", "upload_received"}
+        state_key = "upload_received" if queued_like else "processing"
+        label = "Upload received" if queued_like else "Processing / checking"
+        message = "Dashboard has the upload and is waiting to run the check." if queued_like else "Lead check is processing."
+        guidance = "Processing: wait."
+        tone = "active"
+    elif active_stale:
+        state_key = "stale"
+        label = "Stale — marked running but no recent progress/output"
+        message = "Check failed or stale. No cleaned/rejected output files were produced."
+        guidance = "Failed/Stale: do not preview; re-upload clean source."
+        tone = "bad"
+    elif active_check and active_status in {"failed", "canceled", "cancelled"}:
+        state_key = "failed"
+        label = "Failed — check did not produce outputs"
+        message = str(active_check.get("error") or active_check.get("message") or "Check failed or stale. No cleaned/rejected output files were produced.")
+        guidance = "Failed/Stale: do not preview; re-upload clean source."
+        tone = "bad"
+    elif latest_generated_at and not latest_matches:
+        state_key = "mismatch"
+        label = "Check state mismatch"
+        message = "Latest check result does not match the current upload."
+        guidance = "Mismatch: do not preview; rerun Upload & Check."
+        tone = "warn"
+    elif outputs_exist and latest_matches and cleaned_rows > 0:
+        state_key = "success"
+        label = "Success — ready for Preview Dispatch"
+        message = "Cleaned and rejected output files exist for the current upload."
+        guidance = "Success: review counts, then Preview Dispatch."
+        preview_state = "ready"
+        preview_label = "Ready for preview"
+        tone = "good"
+    elif outputs_exist and latest_matches:
+        state_key = "not_ready"
+        label = "Not ready for preview"
+        message = "Output files exist, but no cleaned/valid rows are available."
+        guidance = "Not ready for preview: re-upload clean source."
+        tone = "warn"
+    elif output_path and current_run_label and not outputs_exist:
+        state_key = "failed"
+        label = "Failed — check did not produce outputs"
+        message = "Check failed or stale. No cleaned/rejected output files were produced."
+        guidance = "Failed/Stale: do not preview; re-upload clean source."
+        tone = "bad"
+
+    preview_ready = preview_state == "ready"
+    preview_block_reason = "" if preview_ready else message
+    if state_key in {"failed", "stale"}:
+        preview_block_reason = "Check failed or stale: No cleaned/rejected output files were produced."
+    elif state_key == "mismatch":
+        preview_block_reason = "Check state mismatch: Latest check result does not match the current upload."
+    elif state_key == "processing":
+        preview_block_reason = "Lead check is still processing."
+    elif state_key == "upload_received":
+        preview_block_reason = "Upload received; lead check has not completed."
+
+    return {
+        "state": state_key,
+        "label": label,
+        "message": message,
+        "guidance": guidance,
+        "current_run_id": current_run_id,
+        "input_path": str(input_path or ""),
+        "output_path": str(output_path or ""),
+        "rejected_path": str(rejected_path or ""),
+        "output_exists": output_exists,
+        "rejected_exists": rejected_exists,
+        "outputs_exist": outputs_exist,
+        "latest_master_check_matches_current_run": latest_matches,
+        "latest_matches_current_run": latest_matches,
+        "cleaned_rows": cleaned_rows,
+        "rejected_rows": rejected_rows,
+        "generated_at_utc": latest_generated_at or _path_mtime_iso(output_path),
+        "upload_received_at": str((active_check or {}).get("created_at_utc") or latest_check.get("input_received_at_utc") or ""),
+        "upload_received_at_utc": str((active_check or {}).get("created_at_utc") or latest_check.get("input_received_at_utc") or ""),
+        "stale_age_seconds": stale_seconds,
+        "stale_seconds": stale_seconds,
+        "stale_threshold_seconds": stale_threshold_seconds,
+        "preview_ready": preview_ready,
+        "preview_state": preview_state,
+        "preview_label": preview_label,
+        "preview_block_reason": preview_block_reason,
+        "confirm_ready": False,
+        "tone": tone,
+        "current_run_label": current_run_label,
+        "latest_output_label": latest_output_label,
+        "active_job_status": active_status,
+    }
+
+
 def _dispatch_summary_timestamp(summary: dict[str, object]) -> datetime | None:
     for key in ("generated_at_utc", "confirmed_at", "confirmed_at_utc", "completed_at_utc", "completed_at"):
         parsed = _parse_iso_timestamp(summary.get(key))
@@ -2566,6 +2741,7 @@ def _combined_leads_status() -> dict[str, object]:
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
     status = _apply_latest_staged_run_status(status)
+    status["lead_check_status"] = _build_lead_check_status(status, state)
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
     status["current_send_safety"] = _build_current_send_safety_status(status)

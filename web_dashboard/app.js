@@ -54,6 +54,7 @@ const els = {
   leadsImportantUploadCheckBtn: document.getElementById("leads-important-upload-check-btn"),
   leadsImportantCheckBtn: document.getElementById("leads-important-check-btn"),
   leadsImportantCheckMeta: document.getElementById("leads-important-check-meta"),
+  leadCheckStatusCard: document.getElementById("lead-check-status-card"),
   leadsControlCheckResult: document.getElementById("leads-control-check-result"),
   leadsImportantCheckResults: document.getElementById("leads-important-check-results"),
   leadsImportantVerifyInputPath: document.getElementById("leads-verify-input-path"),
@@ -1189,8 +1190,85 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   };
 }
 
+function currentLeadCheckStatus(status = lastLeadsStatus) {
+  const check = status?.lead_check_status;
+  return check && typeof check === "object" ? check : {};
+}
+
+function leadCheckWorkflowStatus(check = currentLeadCheckStatus()) {
+  const state = String(check?.state || "").toLowerCase();
+  if (state === "success") return "completed";
+  if (state === "processing" || state === "upload_received") return "running";
+  if (["failed", "stale", "mismatch"].includes(state)) return "failed";
+  return "pending";
+}
+
+function leadCheckBlocksPreview(check = currentLeadCheckStatus()) {
+  if (!check || !check.state) return "";
+  if (check.preview_ready === true || String(check.preview_state || "").toLowerCase() === "ready") return "";
+  return String(check.preview_block_reason || check.message || "Lead check is not ready for preview.");
+}
+
+function leadCheckStatusTone(check = currentLeadCheckStatus()) {
+  const tone = String(check?.tone || "").toLowerCase();
+  if (["good", "bad", "warn", "active", "wait"].includes(tone)) return tone;
+  const state = String(check?.state || "").toLowerCase();
+  if (state === "success") return "good";
+  if (["failed", "stale"].includes(state)) return "bad";
+  if (state === "mismatch" || state === "not_ready") return "warn";
+  if (state === "processing" || state === "upload_received") return "active";
+  return "wait";
+}
+
+function renderLeadCheckStatusCard(status = lastLeadsStatus) {
+  if (!els.leadCheckStatusCard) return;
+  const check = currentLeadCheckStatus(status);
+  const state = String(check.state || "not_started");
+  const tone = leadCheckStatusTone(check);
+  const label = check.label || "Not started";
+  const message = check.message || "No upload/check output is ready yet.";
+  const guidance = check.guidance || "Not ready for preview: upload a lead CSV and run Upload & Check.";
+  const uploadTime = check.upload_received_at_utc || check.upload_received_at ? formatGeneratedAt(check.upload_received_at_utc || check.upload_received_at) : "Not recorded";
+  const generatedTime = check.generated_at_utc ? formatGeneratedAt(check.generated_at_utc) : "Not generated";
+  const staleSeconds = Number(check.stale_age_seconds ?? check.stale_seconds);
+  const staleCopy = Number.isFinite(staleSeconds) && staleSeconds >= 0 ? humanizeDurationCompact(staleSeconds) : "";
+  const cleanedRows = Number(check.cleaned_rows || 0);
+  const rejectedRows = Number(check.rejected_rows || 0);
+  const previewLabel = check.preview_label || (check.preview_ready ? "Ready for preview" : "Not ready for preview");
+  const outputStatus = check.output_exists ? "exists" : "missing";
+  const rejectedStatus = check.rejected_exists ? "exists" : "missing";
+  const matchStatus = check.latest_master_check_matches_current_run ? "yes" : "no";
+  els.leadCheckStatusCard.className = `lead-check-status-card lead-check-status-card-${tone}`;
+  setNodeHtml(
+    els.leadCheckStatusCard,
+    `
+      <div class="lead-check-status-head">
+        <div>
+          <p class="eyebrow">Lead Check Status</p>
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(message)}</span>
+        </div>
+        <span class="mini-pill">${escapeHtml(previewLabel)}</span>
+      </div>
+      <div class="lead-check-status-grid">
+        <div><span>leads.csv</span><strong>${escapeHtml(outputStatus)}</strong></div>
+        <div><span>leads_rejected.csv</span><strong>${escapeHtml(rejectedStatus)}</strong></div>
+        <div><span>Latest matches current upload</span><strong>${escapeHtml(matchStatus)}</strong></div>
+        <div><span>Cleaned rows</span><strong>${cleanedRows.toLocaleString()}</strong></div>
+        <div><span>Rejected rows</span><strong>${rejectedRows.toLocaleString()}</strong></div>
+        <div><span>Upload received</span><strong>${escapeHtml(uploadTime)}</strong></div>
+        <div><span>Check generated</span><strong>${escapeHtml(generatedTime)}</strong></div>
+        ${staleCopy ? `<div><span>Stale age</span><strong>${escapeHtml(staleCopy)}</strong></div>` : ""}
+      </div>
+      <div class="lead-check-guidance lead-check-guidance-${escapeHtml(state)}">${escapeHtml(guidance)}</div>
+    `,
+  );
+}
+
 function dispatchActionBlockReason() {
   const safety = leadsRunSafety();
+  const checkBlock = leadCheckBlocksPreview();
+  if (checkBlock) return checkBlock;
   if (safety.checkRunning) {
     return `Check Leads is running for job ${safety.checkJobId}. Wait until leads.csv, triage, and preview are fresh.`;
   }
@@ -1951,7 +2029,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   if (previewButtons.length) {
     const previewBusy = Boolean((importantLeadDispatchPreviewLoading && !previewReady) || activeDispatch);
     previewButtons.forEach((button) => {
-      button.disabled = previewBusy || warmUploadSelected;
+      button.disabled = previewBusy || Boolean(previewBlockReason) || warmUploadSelected;
       button.title = warmUploadSelected
         ? "Warm Research uses its own draft, confirmation, and Private JC lane. Cold Dispatch Preview is disabled."
         : (previewBlockReason || "");
@@ -1967,7 +2045,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
   }
   if (els.leadsImportantDispatchConfirmBtn) {
     const confirmBusy = Boolean(importantLeadDispatchConfirmLoading || activeDispatch);
-    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || !safety.ready || warmUploadSelected;
+    els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || Boolean(previewBlockReason) || !safety.ready || warmUploadSelected;
     els.leadsImportantDispatchConfirmBtn.title = safety.buttonTitle || previewBlockReason || (previewBlocked ? "Run Preview Dispatch for the current source and cap first." : "");
     if (!confirmBusy) {
       els.leadsImportantDispatchConfirmBtn.classList.remove("is-loading");
@@ -4196,7 +4274,8 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
   const latestCheck = status?.latest_master_check || lastImportantLeadCheck || {};
   const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || lastImportantVerify || {};
   const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
-  const checkStatus = workflowStepStatus(activeCheck, latestCheck);
+  const leadCheck = currentLeadCheckStatus(status);
+  const checkStatus = leadCheck.state ? leadCheckWorkflowStatus(leadCheck) : workflowStepStatus(activeCheck, latestCheck);
   const triageStatus = workflowStepStatus(activeVerify, latestTriage);
   const currentPreviewReady = dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
   const previewStatus = currentPreviewReady
@@ -5124,6 +5203,7 @@ function renderLeadsStatus(status) {
   renderLeadsPreview(latestUpload);
   renderLeadsCleanResults(latestCleaned);
   renderLeadsShardResults(previewMatchesCurrentSelection() ? lastShardPreview : latestShardReport);
+  renderLeadCheckStatusCard(lastLeadsStatus);
   renderLeadsWorkflowTaskList(lastLeadsStatus);
   renderLeadsCurrentRunPanel(lastLeadsStatus);
   renderLeadsCurrentQueueNote(lastLeadsStatus);

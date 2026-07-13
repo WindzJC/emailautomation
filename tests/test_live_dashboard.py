@@ -2594,6 +2594,152 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
 
+    def test_lead_check_status_running_state_when_job_is_active(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_active"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            status = {
+                "active_important_check_job": {
+                    "job_id": "check_active",
+                    "status": "running",
+                    "stage": "checking",
+                    "created_at_utc": "2026-05-21T16:00:00+00:00",
+                    "updated_at_utc": live_dashboard.iso_utc(),
+                },
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {},
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("processing", result["state"])
+            self.assertEqual("Processing / checking", result["label"])
+            self.assertFalse(result["preview_ready"])
+            self.assertIn("processing", result["preview_block_reason"].lower())
+
+    def test_lead_check_status_success_ready_requires_matching_outputs(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_ready"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(output_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(rejected_path, ["Email"], [])
+            status = {
+                "active_important_check_job": None,
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {
+                    "generated_at_utc": "2026-05-21T16:12:19+00:00",
+                    "output_label": str(output_path),
+                    "rejected_label": str(rejected_path),
+                    "cleaned_rows": 1,
+                },
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("success", result["state"])
+            self.assertEqual("Success — ready for Preview Dispatch", result["label"])
+            self.assertTrue(result["preview_ready"])
+            self.assertEqual(1, result["cleaned_rows"])
+
+    def test_lead_check_status_stale_when_running_without_outputs(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_stale"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            status = {
+                "active_important_check_job": {
+                    "job_id": "check_stale",
+                    "status": "running",
+                    "stage": "checking",
+                    "updated_at_utc": "2020-01-01T00:00:00+00:00",
+                },
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {},
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("stale", result["state"])
+            self.assertEqual("Stale — marked running but no recent progress/output", result["label"])
+            self.assertIn("No cleaned/rejected output files were produced", result["message"])
+            self.assertIn("Check failed or stale", result["preview_block_reason"])
+
+    def test_lead_check_status_mismatch_when_latest_check_points_to_old_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            current_run = tmp / "check_current"
+            old_run = tmp / "check_old"
+            input_path = current_run / "leadschecker.csv"
+            output_path = current_run / "leads.csv"
+            rejected_path = current_run / "leads_rejected.csv"
+            old_output = old_run / "leads.csv"
+            old_rejected = old_run / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "new@example.test"}])
+            self._write_csv(output_path, ["Email"], [{"Email": "new@example.test"}])
+            self._write_csv(rejected_path, ["Email"], [])
+            self._write_csv(old_output, ["Email"], [{"Email": "old@example.test"}])
+            self._write_csv(old_rejected, ["Email"], [])
+            status = {
+                "active_important_check_job": None,
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {
+                    "generated_at_utc": "2026-05-20T16:12:19+00:00",
+                    "output_label": str(old_output),
+                    "rejected_label": str(old_rejected),
+                    "cleaned_rows": 1,
+                },
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("mismatch", result["state"])
+            self.assertEqual("Check state mismatch", result["label"])
+            self.assertEqual("Latest check result does not match the current upload.", result["message"])
+            self.assertFalse(result["preview_ready"])
+
+    def test_lead_check_status_failed_blocks_preview_when_outputs_missing(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_failed"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            status = {
+                "active_important_check_job": None,
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {},
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("failed", result["state"])
+            self.assertFalse(result["preview_ready"])
+            self.assertEqual("Failed/Stale: do not preview; re-upload clean source.", result["guidance"])
+            self.assertIn("No cleaned/rejected output files were produced", result["preview_block_reason"])
+
     def test_combined_leads_status_clears_stale_confirmed_dispatch_for_newer_staged_triage(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)

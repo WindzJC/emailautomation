@@ -501,6 +501,105 @@ h3 {
   border-color: rgba(245, 158, 11, 0.34);
 }
 
+.lead-check-status-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid rgba(182, 203, 232, 0.16);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(15, 27, 47, 0.9), rgba(8, 15, 28, 0.9));
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
+}
+
+.lead-check-status-card-good {
+  border-color: rgba(72, 187, 120, 0.36);
+}
+
+.lead-check-status-card-bad {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.lead-check-status-card-warn,
+.lead-check-status-card-active {
+  border-color: rgba(245, 158, 11, 0.38);
+}
+
+.lead-check-status-card-wait {
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
+.lead-check-status-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.lead-check-status-head strong {
+  display: block;
+  margin: 2px 0;
+  color: #f7fbff;
+  font-size: 1.08rem;
+}
+
+.lead-check-status-head span:not(.mini-pill) {
+  display: block;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.lead-check-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.lead-check-status-grid div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(182, 203, 232, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.lead-check-status-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.lead-check-status-grid strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: #edf5ff;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lead-check-guidance {
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #dbeafe;
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.lead-check-guidance-failed,
+.lead-check-guidance-stale {
+  color: #fee2e2;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.lead-check-guidance-success {
+  color: #dcfce7;
+  background: rgba(34, 197, 94, 0.1);
+}
+
 .current-run-head,
 .current-run-hero,
 .current-run-source {

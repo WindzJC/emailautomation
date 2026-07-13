@@ -197,6 +197,55 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
+    def test_lead_check_status_card_and_preview_lock_states_are_rendered(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "lead-check-status-card",
+            "Lead Check Status",
+            "Not ready for preview",
+        ]:
+            self.assertIn(expected, markup)
+
+        for expected in [
+            "lead_check_status",
+            "renderLeadCheckStatusCard",
+            "currentLeadCheckStatus",
+            "leadCheckBlocksPreview",
+            "leadCheckWorkflowStatus",
+            "Ready for preview",
+            "Not ready for preview",
+            "button.disabled = previewBusy || Boolean(previewBlockReason) || warmUploadSelected",
+            "els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || Boolean(previewBlockReason)",
+        ]:
+            self.assertIn(expected, source)
+
+        for expected in [
+            "Processing / checking",
+            "Success — ready for Preview Dispatch",
+            "Failed/Stale: do not preview; re-upload clean source.",
+            "Check failed or stale",
+            "No cleaned/rejected output files were produced.",
+            "Check state mismatch",
+            "Latest check result does not match the current upload.",
+            "latest_master_check_matches_current_run",
+            "preview_ready",
+        ]:
+            self.assertIn(expected, backend)
+
+        for expected in [
+            ".lead-check-status-card",
+            ".lead-check-status-card-good",
+            ".lead-check-status-card-bad",
+            ".lead-check-status-card-warn",
+            ".lead-check-status-grid",
+            ".lead-check-guidance",
+        ]:
+            self.assertIn(expected, styles)
+
     def test_dispatch_preview_renders_backend_blocked_response(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
