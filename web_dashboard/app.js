@@ -1065,8 +1065,26 @@ function safeTimestampMs(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function currentImportantCheckJob(status = lastLeadsStatus) {
-  return status?.active_important_check_job || lastImportantLeadCheckJob || null;
+function selectedLeadUploadType() {
+  return els.leadsImportantUploadType?.value === "warm_research" ? "warm_research" : "cold";
+}
+
+function reportUploadType(report = {}) {
+  return String(report?.upload_type || report?.check?.upload_type || "cold").trim().toLowerCase() === "warm_research" ? "warm_research" : "cold";
+}
+
+function uploadTypeLabel(uploadType = selectedLeadUploadType()) {
+  return uploadType === "warm_research" ? "Warm Research" : "Cold Leads";
+}
+
+function reportMatchesUploadType(report = {}, uploadType = selectedLeadUploadType()) {
+  if (!report || typeof report !== "object") return false;
+  return reportUploadType(report) === uploadType;
+}
+
+function currentImportantCheckJob(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
+  const job = status?.active_important_check_job || lastImportantLeadCheckJob || null;
+  return reportMatchesUploadType(job, uploadType) ? job : null;
 }
 
 function importantCheckJobProgress(job) {
@@ -1119,9 +1137,10 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   const activeCheckJob = currentImportantCheckJob(status);
   const checkRunning = isActiveImportantLeadCheckJob(activeCheckJob);
   const activeSenders = activeSenderProfiles(snapshot);
-  const latestCheck = status?.latest_master_check || {};
-  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || {};
-  const latestPreview = status?.latest_auto_dispatch_preview || {};
+  const leadCheck = currentLeadCheckStatus(status);
+  const latestCheck = selectedLeadCheckReport(status);
+  const latestTriage = selectedLeadTriageReport(status, leadCheck);
+  const latestPreview = selectedLeadUploadType() === "cold" ? (status?.latest_auto_dispatch_preview || {}) : {};
   const latestCheckTime = safeTimestampMs(latestCheck.generated_at_utc);
   const latestTriageTime = safeTimestampMs(latestTriage.generated_at_utc);
   const previewTime = safeTimestampMs(latestPreview.generated_at_utc || latestPreview.completed_at_utc || latestPreview.created_at_utc);
@@ -1191,8 +1210,118 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
 }
 
 function currentLeadCheckStatus(status = lastLeadsStatus) {
+  const uploadType = selectedLeadUploadType();
   const check = status?.lead_check_status;
-  return check && typeof check === "object" ? check : {};
+  if (uploadType === "cold" && check && typeof check === "object") {
+    const selectedReport = selectedLeadCheckReport(status, uploadType);
+    const warmReport = status?.latest_warm_check;
+    if (!selectedReport?.generated_at_utc && warmReport?.generated_at_utc) {
+      return selectedModeLeadCheckStatus(status, uploadType);
+    }
+    return check;
+  }
+  return selectedModeLeadCheckStatus(status, uploadType);
+}
+
+function selectedLeadCheckReport(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
+  const report = uploadType === "warm_research" ? status?.latest_warm_check : status?.latest_master_check;
+  if (report?.generated_at_utc && reportMatchesUploadType(report, uploadType)) return report;
+  return {};
+}
+
+function selectedLeadTriageReport(status = lastLeadsStatus, check = currentLeadCheckStatus(status)) {
+  if (selectedLeadUploadType() === "warm_research") return {};
+  if (leadCheckWorkflowStatus(check) !== "completed") return {};
+  const triage = status?.latest_lead_triage || status?.latest_lead_verify || {};
+  const selectedCheck = selectedLeadCheckReport(status);
+  const checkTime = safeTimestampMs(selectedCheck.generated_at_utc);
+  const triageTime = safeTimestampMs(triage.generated_at_utc);
+  if (checkTime && (!triageTime || triageTime < checkTime)) return {};
+  return triage;
+}
+
+function selectedModeLeadCheckStatus(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
+  const selectedReport = selectedLeadCheckReport(status, uploadType);
+  const activeJob = currentImportantCheckJob(status, uploadType);
+  const otherReport = uploadType === "warm_research" ? status?.latest_master_check : status?.latest_warm_check;
+  if (activeJob?.job_id) {
+    const state = isActiveImportantLeadCheckJob(activeJob) ? "processing" : "not_started";
+    return {
+      state,
+      label: state === "processing" ? "Processing / checking" : "Not started",
+      message: state === "processing" ? `${uploadTypeLabel(uploadType)} check is processing.` : `${uploadTypeLabel(uploadType)} check has not started.`,
+      guidance: state === "processing" ? "Processing: wait." : "Not ready for preview: run Upload & Check for the selected upload type.",
+      preview_ready: false,
+      preview_state: "not_ready",
+      preview_label: "Not ready for preview",
+      preview_block_reason: state === "processing" ? "Lead check is still processing." : "No current check is ready for the selected upload type.",
+      cleaned_rows: 0,
+      rejected_rows: 0,
+      output_exists: false,
+      rejected_exists: false,
+      latest_master_check_matches_current_run: false,
+      confirm_ready: false,
+      tone: state === "processing" ? "active" : "wait",
+    };
+  }
+  if (selectedReport?.generated_at_utc) {
+    const cleanedRows = Number(selectedReport.cleaned_rows || selectedReport.output_rows || selectedReport.warm_email_ready_rows || 0);
+    const rejectedRows = Number(selectedReport.rejected_rows || selectedReport.warm_rejected_rows || Math.max(0, Number(selectedReport.input_rows || 0) - cleanedRows) || 0);
+    return {
+      state: cleanedRows > 0 ? "success" : "not_ready",
+      label: cleanedRows > 0 ? "Success — ready for Preview Dispatch" : "Not ready for preview",
+      message: cleanedRows > 0 ? `${uploadTypeLabel(uploadType)} check is current for the selected upload type.` : `${uploadTypeLabel(uploadType)} check has no valid rows.`,
+      guidance: cleanedRows > 0 ? "Success: review counts, then Preview Dispatch." : "Not ready for preview: re-upload clean source.",
+      preview_ready: cleanedRows > 0 && uploadType === "cold",
+      preview_state: cleanedRows > 0 && uploadType === "cold" ? "ready" : "not_ready",
+      preview_label: cleanedRows > 0 && uploadType === "cold" ? "Ready for preview" : "Not ready for preview",
+      preview_block_reason: uploadType === "warm_research" ? "Warm Research does not use Cold Dispatch Preview." : "",
+      cleaned_rows: cleanedRows,
+      rejected_rows: rejectedRows,
+      output_exists: true,
+      rejected_exists: true,
+      latest_master_check_matches_current_run: true,
+      generated_at_utc: selectedReport.generated_at_utc,
+      confirm_ready: false,
+      tone: cleanedRows > 0 ? "good" : "warn",
+    };
+  }
+  if (otherReport?.generated_at_utc) {
+    return {
+      state: "mismatch",
+      label: "Check state mismatch",
+      message: "Latest check result does not match the selected upload type.",
+      guidance: "Do not preview. Rerun Upload & Check for the selected upload type.",
+      preview_ready: false,
+      preview_state: "not_ready",
+      preview_label: "Not ready for preview",
+      preview_block_reason: "Check state mismatch: rerun Upload & Check for the selected upload type.",
+      cleaned_rows: 0,
+      rejected_rows: 0,
+      output_exists: false,
+      rejected_exists: false,
+      latest_master_check_matches_current_run: false,
+      confirm_ready: false,
+      tone: "warn",
+    };
+  }
+  return {
+    state: "not_started",
+    label: "Not started",
+    message: `${uploadTypeLabel(uploadType)} check has not started.`,
+    guidance: "Not ready for preview: run Upload & Check for the selected upload type.",
+    preview_ready: false,
+    preview_state: "not_ready",
+    preview_label: "Not ready for preview",
+    preview_block_reason: "No current check is ready for the selected upload type.",
+    cleaned_rows: 0,
+    rejected_rows: 0,
+    output_exists: false,
+    rejected_exists: false,
+    latest_master_check_matches_current_run: false,
+    confirm_ready: false,
+    tone: "wait",
+  };
 }
 
 function leadCheckWorkflowStatus(check = currentLeadCheckStatus()) {
@@ -3654,7 +3783,7 @@ function warmResearchUploadMode() {
 function currentWarmResearchReport(status = lastLeadsStatus) {
   const statusReport = status?.latest_warm_check;
   if (statusReport?.upload_type === "warm_research") return statusReport;
-  return lastImportantLeadCheck?.upload_type === "warm_research" ? lastImportantLeadCheck : {};
+  return {};
 }
 
 function currentWarmPrivateJcStatus(status = lastLeadsStatus, snapshot = lastSnapshot) {
@@ -4271,13 +4400,13 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
   const activeCheck = currentImportantCheckJob(status);
   const activeVerify = status?.active_important_verify_job || lastImportantVerifyJob || null;
   const activeDispatch = status?.active_important_dispatch_job || lastImportantDispatchJob || null;
-  const latestCheck = status?.latest_master_check || lastImportantLeadCheck || {};
-  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || lastImportantVerify || {};
-  const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
   const leadCheck = currentLeadCheckStatus(status);
+  const latestCheck = selectedLeadCheckReport(status);
+  const latestTriage = selectedLeadTriageReport(status, leadCheck);
+  const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
   const checkStatus = leadCheck.state ? leadCheckWorkflowStatus(leadCheck) : workflowStepStatus(activeCheck, latestCheck);
-  const triageStatus = workflowStepStatus(activeVerify, latestTriage);
-  const currentPreviewReady = dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
+  const triageStatus = checkStatus === "completed" ? workflowStepStatus(activeVerify, latestTriage) : "pending";
+  const currentPreviewReady = checkStatus === "completed" && triageStatus === "completed" && dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
   const previewStatus = currentPreviewReady
       ? "ready"
       : importantLeadDispatchPreviewLoading
@@ -4307,6 +4436,8 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
 
 function currentRunPreviewBlockMessage(dispatchSource = {}, state = currentRunWorkflowState()) {
   if (state.checkStatus === "running") return "Preview blocked: Check Leads is still running";
+  if (state.checkStatus === "failed") return "Preview blocked: current check is not ready";
+  if (state.checkStatus !== "completed") return "Preview blocked: Upload & Check is required for the selected upload type";
   if (state.triageStatus === "running") return "Preview blocked: Fast Triage has not completed";
   if (state.triageStatus !== "completed") return "Preview blocked: Fast Triage has not completed";
   const rawReason = String(dispatchSource.dispatch_block_reason || dispatchPreviewBlockReason(dispatchSource) || "").trim();
@@ -4654,18 +4785,19 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     return;
   }
   const state = currentRunWorkflowState(status);
-  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const checkReadyForCounts = state.checkStatus === "completed";
+  const dispatchSource = checkReadyForCounts ? (dispatchSourceForSelectedMode().source || {}) : {};
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
   const pipeline = status?.pipeline || {};
-  const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0);
-  const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
-  const quarantineRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
-  const inputRows = Number(latestCheck.input_rows || pipeline.input_rows || 0);
-  const cleanedRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || pipeline.cleaned_rows || 0);
-  const rejectedRows = Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || pipeline.rejected_rows || 0);
+  const keepRows = checkReadyForCounts ? Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0) : 0;
+  const rejectRows = checkReadyForCounts ? Number(latestTriage.reject_count || latestTriage.rejected_count || 0) : 0;
+  const quarantineRows = checkReadyForCounts ? Number(latestTriage.quarantine_count || latestTriage.review_count || 0) : 0;
+  const inputRows = checkReadyForCounts ? Number(latestCheck.input_rows || pipeline.input_rows || 0) : 0;
+  const cleanedRows = checkReadyForCounts ? Number(latestCheck.cleaned_rows || latestCheck.output_rows || pipeline.cleaned_rows || 0) : 0;
+  const rejectedRows = checkReadyForCounts ? Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || pipeline.rejected_rows || 0) : 0;
   const sourceRows = Number(dispatchSource.dispatch_eligible_row_count || dispatchSource.dispatch_source_row_count || 0);
-  const checkedEligibleRows = Number(
+  const checkedEligibleRows = checkReadyForCounts ? Number(
     pipeline.dispatch_eligible_rows
     || latestCheck.dispatch_eligible_rows
     || latestCheck.eligible_rows
@@ -4673,7 +4805,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     || latestCheck.output_rows
     || sourceRows
     || 0,
-  );
+  ) : 0;
   if (els.leadsControlCheckResult) {
     setNodeHtml(
       els.leadsControlCheckResult,
@@ -4898,7 +5030,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
     ? "New staged run not ready — previous dispatch is queued."
     : "";
-  const triageCounts = latestTriage?.generated_at_utc
+  const triageCounts = state.checkStatus === "completed" && state.triageStatus === "completed" && latestTriage?.generated_at_utc
     ? `input ${formatOperatorCount(latestTriage.total_input_rows)} · keep ${formatOperatorCount(latestTriage.keep_count)} · reject ${formatOperatorCount(latestTriage.reject_count)} · review ${formatOperatorCount(latestTriage.quarantine_count)}`
     : "";
   const headline = dispatchSummary.sentLogOverlap > 0
@@ -4930,8 +5062,9 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
 function renderLeadsOperatorStatusStrip(status = lastLeadsStatus) {
   if (!els.leadsOperatorStatusStrip) return;
   const safety = leadsRunSafety(status);
-  const latestCheck = status?.latest_master_check || {};
-  const latestTriage = status?.latest_lead_triage || status?.latest_lead_verify || {};
+  const leadCheck = currentLeadCheckStatus(status);
+  const latestCheck = selectedLeadCheckReport(status);
+  const latestTriage = selectedLeadTriageReport(status, leadCheck);
   const blocker = safety.queueUnsafe
     ? (safety.reasons[0] || "Recipient queue unsafe.")
     : (safety.checkRunning ? "Next batch check is running." : "None");
@@ -5161,7 +5294,7 @@ function renderLeadsStatus(status) {
       setNodeText(els.toolbarGeneratedAt, "Local snapshot");
     }
   }
-  const activeCheckJob = lastLeadsStatus?.active_important_check_job || null;
+  const activeCheckJob = currentImportantCheckJob(lastLeadsStatus);
   const activeVerifyJob = lastLeadsStatus?.active_important_verify_job || null;
   const activeDispatchJob = lastLeadsStatus?.active_important_dispatch_job || null;
   const shouldResumeLeadJobs = isLeadsTabVisible();
@@ -5171,11 +5304,9 @@ function renderLeadsStatus(status) {
   updateImportantLeadPasteGuardrails();
   const warmUploadSelected = els.leadsImportantUploadType?.value === "warm_research";
   applyWarmResearchLayoutState(warmUploadSelected);
-  lastImportantLeadCheck = warmUploadSelected
-    ? (lastLeadsStatus?.latest_warm_check || lastImportantLeadCheck)
-    : (lastLeadsStatus?.latest_master_check || lastImportantLeadCheck);
-  lastImportantVerify = lastLeadsStatus?.latest_lead_triage || lastLeadsStatus?.latest_lead_verify || lastImportantVerify;
-  lastImportantDispatch = lastLeadsStatus?.latest_dispatch || lastImportantDispatch;
+  lastImportantLeadCheck = selectedLeadCheckReport(lastLeadsStatus);
+  lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus);
+  lastImportantDispatch = warmUploadSelected ? {} : (lastLeadsStatus?.latest_dispatch || {});
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
   if (lastLeadsStatus?.safer_recontact_source_summary && typeof lastLeadsStatus.safer_recontact_source_summary === "object") {
     lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary;
@@ -9148,10 +9279,9 @@ if (els.leadsImportantUploadType) {
         ? "Warm Research splits direct emails and contact forms. Cold dispatch is disabled; warm confirmation stays separate."
         : "Upload is file-only. Preview and confirm remain separate.",
     );
-    const selectedReport = warmSelected ? lastLeadsStatus?.latest_warm_check : lastLeadsStatus?.latest_master_check;
-    lastImportantLeadCheck = selectedReport?.generated_at_utc
-      ? selectedReport
-      : warmSelected ? { upload_type: "warm_research" } : null;
+    lastImportantLeadCheck = selectedLeadCheckReport(lastLeadsStatus || {});
+    lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus || {});
+    lastImportantDispatch = warmSelected ? {} : (lastLeadsStatus?.latest_dispatch || {});
     applyWarmResearchLayoutState(warmSelected);
     renderLeadsStatus(lastLeadsStatus || {});
   });
