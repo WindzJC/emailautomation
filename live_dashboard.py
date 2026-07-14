@@ -747,6 +747,25 @@ def _auto_dispatch_preview_summary(
     }
 
 
+def _compact_dispatch_preview(preview: dict[str, object], *, max_rows: int = 25) -> dict[str, object]:
+    if not isinstance(preview, dict):
+        return {}
+    if not any(preview.get(key) for key in ("preview_id", "preview_path", "status")):
+        return {}
+    compact = dict(preview)
+    rows = preview.get("assigned_preview_rows")
+    if isinstance(rows, list):
+        compact["assigned_preview_rows"] = rows[:max_rows]
+        compact["assigned_preview_rows_sample_count"] = min(len(rows), max_rows)
+        compact["assigned_preview_rows_total_count"] = len(rows)
+        compact["assigned_preview_rows_truncated"] = len(rows) > max_rows
+    planned = preview.get("rows_written_per_queue")
+    if isinstance(planned, dict):
+        compact["per_profile_planned_counts"] = {str(key): int(value or 0) for key, value in planned.items()}
+    compact.setdefault("status", "previewed" if preview.get("preview_id") else "")
+    return compact
+
+
 def _run_auto_dispatch_preview_after_triage(
     *,
     job: dict[str, object],
@@ -2042,7 +2061,21 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
     preview_label = "Not ready for preview"
     tone = "wait"
 
-    if active_running and not active_stale:
+    if outputs_exist and latest_matches and cleaned_rows > 0:
+        state_key = "success"
+        label = "Success — ready for Preview Dispatch"
+        message = "Cleaned and rejected output files exist for the current upload."
+        guidance = "Success: review counts, then Preview Dispatch."
+        preview_state = "ready"
+        preview_label = "Ready for preview"
+        tone = "good"
+    elif outputs_exist and latest_matches:
+        state_key = "not_ready"
+        label = "Not ready for preview"
+        message = "Output files exist, but no cleaned/valid rows are available."
+        guidance = "Not ready for preview: re-upload clean source."
+        tone = "warn"
+    elif active_running and not active_stale:
         queued_like = active_status in {"queued", "pending", "uploaded", "upload_received"} or active_stage in {"queued", "uploaded", "upload_received"}
         state_key = "upload_received" if queued_like else "processing"
         label = "Upload received" if queued_like else "Processing / checking"
@@ -2072,20 +2105,6 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
         label = "Check state mismatch"
         message = "Latest check result does not match the current upload."
         guidance = "Mismatch: do not preview; rerun Upload & Check."
-        tone = "warn"
-    elif outputs_exist and latest_matches and cleaned_rows > 0:
-        state_key = "success"
-        label = "Success — ready for Preview Dispatch"
-        message = "Cleaned and rejected output files exist for the current upload."
-        guidance = "Success: review counts, then Preview Dispatch."
-        preview_state = "ready"
-        preview_label = "Ready for preview"
-        tone = "good"
-    elif outputs_exist and latest_matches:
-        state_key = "not_ready"
-        label = "Not ready for preview"
-        message = "Output files exist, but no cleaned/valid rows are available."
-        guidance = "Not ready for preview: re-upload clean source."
         tone = "warn"
     preview_ready = preview_state == "ready"
     preview_block_reason = "" if preview_ready else message
@@ -2312,7 +2331,7 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     )
     source_options = dict(status.get("dispatch_source_options") or {})
     source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = source_status
-    latest_preview = dict(job.get("auto_dispatch_preview") or status.get("latest_auto_dispatch_preview") or {})
+    latest_preview = _compact_dispatch_preview(dict(job.get("auto_dispatch_preview") or status.get("latest_auto_dispatch_preview") or {}))
     latest_preview_current = _summary_current_for_staged_source(
         latest_preview,
         source_path=keep_path,
@@ -2337,7 +2356,8 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
             "important_triage_quarantine_label": _dashboard_path_label(triage_quarantine_path),
             "latest_master_check": latest_master_check,
             "latest_lead_triage": latest_triage,
-            "latest_auto_dispatch_preview": latest_preview if latest_preview_current else {},
+            "latest_auto_dispatch_preview": _compact_dispatch_preview(latest_preview) if latest_preview_current else {},
+            "stale_latest_auto_dispatch_preview": _compact_dispatch_preview(latest_preview) if latest_preview and not latest_preview_current else {},
             "latest_dispatch": latest_dispatch if latest_dispatch_current else {},
             "stale_latest_dispatch": latest_dispatch if latest_dispatch and not latest_dispatch_current else {},
             "latest_confirmed_dispatch_current": latest_dispatch_current,
@@ -2653,6 +2673,132 @@ def _build_next_batch_prep_status(status: dict[str, object]) -> dict[str, object
     }
 
 
+def _build_lead_ops_status(status: dict[str, object]) -> dict[str, object]:
+    lead_check = status.get("lead_check_status") if isinstance(status.get("lead_check_status"), dict) else {}
+    latest_check = status.get("latest_master_check") if isinstance(status.get("latest_master_check"), dict) else {}
+    latest_triage = status.get("latest_lead_triage") if isinstance(status.get("latest_lead_triage"), dict) else {}
+    latest_preview = _compact_dispatch_preview(status.get("latest_auto_dispatch_preview") if isinstance(status.get("latest_auto_dispatch_preview"), dict) else {})
+    stale_preview = _compact_dispatch_preview(status.get("stale_latest_auto_dispatch_preview") if isinstance(status.get("stale_latest_auto_dispatch_preview"), dict) else {})
+    latest_dispatch = status.get("latest_dispatch") if isinstance(status.get("latest_dispatch"), dict) else {}
+    current_safety = status.get("current_send_safety") if isinstance(status.get("current_send_safety"), dict) else {}
+    active_check = status.get("active_important_check_job") if isinstance(status.get("active_important_check_job"), dict) else None
+    active_verify = status.get("active_important_verify_job") if isinstance(status.get("active_important_verify_job"), dict) else None
+
+    current_run_id = str(
+        lead_check.get("current_run_id")
+        or latest_check.get("check_job_id")
+        or latest_check.get("job_id")
+        or (active_check or {}).get("job_id")
+        or ""
+    ).strip()
+    check_state = str(lead_check.get("state") or "not_started").strip().lower()
+    if check_state == "success":
+        check_state = "complete"
+    elif check_state in {"failed", "stale"}:
+        check_state = "failed_stale"
+    elif check_state in {"processing", "upload_received"}:
+        check_state = "running"
+
+    triage_state = "waiting"
+    if active_verify:
+        triage_state = "running"
+    elif check_state in {"failed_stale", "mismatch", "not_ready", "not_started"}:
+        triage_state = "locked"
+    elif latest_triage.get("generated_at_utc"):
+        triage_state = "complete"
+
+    visible_preview = latest_preview or stale_preview
+    preview_path_text = str(visible_preview.get("preview_path") or "").strip()
+    preview_path = _state_label_path(preview_path_text) if preview_path_text else None
+    preview_exists = bool(preview_path and preview_path.exists())
+    preview_status = str(visible_preview.get("status") or "").strip().lower()
+    preview_current = bool(status.get("latest_auto_dispatch_preview_current"))
+    preview_id = str(visible_preview.get("preview_id") or "").strip()
+    preview_planned_total = int(visible_preview.get("total_rows_would_write") or visible_preview.get("total_planned_unique_count") or 0)
+    preview_skipped_rows = int(visible_preview.get("skipped_both") or visible_preview.get("skipped_rows") or 0)
+    preview_eligible_rows = int(visible_preview.get("dispatch_eligible_row_count") or 0)
+    sent_overlap_count = int(visible_preview.get("planned_authoritative_sent_overlap_count") or visible_preview.get("planned_sent_log_overlap_count") or 0)
+    preview_ready = bool(preview_id and preview_current and preview_status in {"previewed", "ready", "completed", "complete"} and (preview_exists or not preview_path_text))
+    if preview_ready:
+        preview_state = "ready"
+    elif preview_id and not preview_current:
+        preview_state = "mismatch"
+    elif triage_state != "complete":
+        preview_state = "locked"
+    else:
+        preview_state = "not_ready"
+
+    safety_reasons = current_safety.get("reasons") if isinstance(current_safety.get("reasons"), list) else []
+    queue_safety_safe = not bool(current_safety.get("blocked"))
+    safety_warnings_count = len(safety_reasons)
+    confirm_ready = bool(preview_ready and queue_safety_safe and sent_overlap_count == 0 and preview_planned_total > 0)
+    if latest_dispatch.get("generated_at_utc") and bool(status.get("latest_confirmed_dispatch_current")):
+        confirm_state = "confirmed"
+    elif confirm_ready:
+        confirm_state = "ready"
+    else:
+        confirm_state = "locked"
+
+    if check_state == "running":
+        overall_state = "checking"
+        guidance = "Processing: wait."
+    elif check_state == "failed_stale":
+        overall_state = "failed_stale"
+        guidance = "Failed/Stale: do not preview; re-upload a clean source."
+    elif check_state == "mismatch":
+        overall_state = "mismatch"
+        guidance = "Mismatch: rerun Upload & Check for this selected upload type."
+    elif preview_ready and confirm_ready:
+        overall_state = "preview_ready"
+        guidance = "Preview ready: review planned counts, then Confirm only if safe."
+    elif triage_state == "complete":
+        overall_state = "triaged"
+        guidance = "Check complete: review counts, then Preview Dispatch."
+    elif check_state == "complete":
+        overall_state = "checked"
+        guidance = "Check complete: review counts, then Preview Dispatch."
+    else:
+        overall_state = "not_started"
+        guidance = "Not ready for preview: run Upload & Check for the selected upload type."
+
+    per_profile = visible_preview.get("per_profile_planned_counts")
+    if not isinstance(per_profile, dict):
+        per_profile = visible_preview.get("rows_written_per_queue") if isinstance(visible_preview.get("rows_written_per_queue"), dict) else {}
+
+    return {
+        "selected_upload_type": "cold",
+        "current_run_id": current_run_id,
+        "current_input_path": str(lead_check.get("input_path") or ""),
+        "cleaned_path": str(lead_check.get("output_path") or latest_check.get("output_label") or latest_check.get("output_path") or ""),
+        "rejected_path": str(lead_check.get("rejected_path") or latest_check.get("rejected_label") or latest_check.get("rejected_path") or ""),
+        "triaged_keep_path": str(latest_triage.get("keep_path") or status.get("important_triage_keep_label") or ""),
+        "triaged_reject_path": str(latest_triage.get("rejected_path") or status.get("important_triage_rejected_label") or ""),
+        "triaged_quarantine_path": str(latest_triage.get("quarantine_path") or status.get("important_triage_quarantine_label") or ""),
+        "preview_path": preview_path_text,
+        "current_preview_id": preview_id,
+        "check_state": check_state,
+        "triage_state": triage_state,
+        "preview_state": preview_state,
+        "confirm_state": confirm_state,
+        "overall_state": overall_state,
+        "cleaned_rows": int(lead_check.get("cleaned_rows") or latest_check.get("cleaned_rows") or latest_check.get("output_rows") or 0),
+        "rejected_rows": int(lead_check.get("rejected_rows") or latest_check.get("rejected_rows") or 0),
+        "triage_keep_rows": int(latest_triage.get("keep_count") or 0),
+        "triage_reject_rows": int(latest_triage.get("reject_count") or latest_triage.get("rejected_count") or 0),
+        "triage_quarantine_rows": int(latest_triage.get("quarantine_count") or latest_triage.get("review_count") or 0),
+        "preview_eligible_rows": preview_eligible_rows,
+        "preview_skipped_rows": preview_skipped_rows,
+        "preview_planned_total": preview_planned_total,
+        "per_profile_planned_counts": {str(key): int(value or 0) for key, value in per_profile.items()},
+        "sent_overlap_count": sent_overlap_count,
+        "queue_safety_safe": queue_safety_safe,
+        "safety_warnings_count": safety_warnings_count,
+        "preview_ready": preview_ready,
+        "confirm_ready": confirm_ready,
+        "guidance": guidance,
+    }
+
+
 def _load_latest_confirmed_dispatch_summary() -> dict[str, object]:
     confirmed_dir = settings.STATE_DIR / "dispatch_confirmed"
     if not confirmed_dir.exists():
@@ -2742,7 +2888,7 @@ def _combined_leads_status() -> dict[str, object]:
         "active_important_check_job": _find_active_important_check_job(),
         "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
         "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
-        "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
+        "latest_auto_dispatch_preview": _compact_dispatch_preview(state.get("latest_auto_dispatch_preview", {}) if isinstance(state.get("latest_auto_dispatch_preview"), dict) else {}),
         "latest_confirmed_dispatch": latest_confirmed_dispatch,
         "active_campaign_snapshot": active_campaign_snapshot,
         "safer_recontact_source_summary": _load_safer_recontact_source_summary(),
@@ -2757,6 +2903,7 @@ def _combined_leads_status() -> dict[str, object]:
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
     status["current_send_safety"] = _build_current_send_safety_status(status)
+    status["lead_ops_status"] = _build_lead_ops_status(status)
     status["next_batch_prep"] = _build_next_batch_prep_status(status)
     return status
 
@@ -4939,11 +5086,12 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"Lead dispatch preview failed: {exc}"}, status_code=500)
 
+    compact_preview = _compact_dispatch_preview(preview)
     return JSONResponse(
         {
             "ok": True,
             "message": f"Preview ready for {preview['dispatch_source_name']}.",
-            "preview": preview,
+            "preview": compact_preview,
             "status": _combined_leads_status(),
             "snapshot": _build_live_snapshot(),
         }

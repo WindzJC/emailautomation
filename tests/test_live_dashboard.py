@@ -2653,6 +2653,40 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertTrue(result["preview_ready"])
             self.assertEqual(1, result["cleaned_rows"])
 
+    def test_lead_check_status_reconciles_running_job_to_success_when_outputs_exist(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_finished_on_disk"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(output_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(rejected_path, ["Email"], [])
+            status = {
+                "active_important_check_job": {
+                    "job_id": "check_finished_on_disk",
+                    "status": "running",
+                    "stage": "checking",
+                    "updated_at_utc": live_dashboard.iso_utc(),
+                },
+                "important_input_label": str(input_path),
+                "important_output_label": str(output_path),
+                "important_rejected_label": str(rejected_path),
+                "latest_master_check": {
+                    "generated_at_utc": "2026-07-13T18:37:35+00:00",
+                    "output_label": str(output_path),
+                    "rejected_label": str(rejected_path),
+                    "cleaned_rows": 1,
+                },
+            }
+            state = {"important_leads_paths": {"input_path": str(input_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}}
+
+            result = live_dashboard._build_lead_check_status(status, state)
+
+            self.assertEqual("success", result["state"])
+            self.assertEqual("Success — ready for Preview Dispatch", result["label"])
+            self.assertTrue(result["preview_ready"])
+
     def test_lead_check_status_stale_when_running_without_outputs(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             run_dir = Path(tmpdir) / "check_stale"
@@ -2793,6 +2827,98 @@ class LiveDashboardTests(unittest.TestCase):
                 result["guidance"],
             )
             self.assertIn("No cleaned/rejected output files were produced", result["preview_block_reason"])
+
+    def test_lead_ops_status_marks_existing_current_preview_ready_without_full_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            preview_path = tmp / "dispatch_preview_current.json"
+            preview_path.write_text("{}", encoding="utf-8")
+            preview_rows = [{"Email": f"reader{index}@example.test"} for index in range(40)]
+            status = {
+                "lead_check_status": {
+                    "state": "success",
+                    "current_run_id": "check_20260713_183735_ac96deb3",
+                    "input_path": str(tmp / "leadschecker.csv"),
+                    "output_path": str(tmp / "leads.csv"),
+                    "rejected_path": str(tmp / "leads_rejected.csv"),
+                    "cleaned_rows": 12,
+                    "rejected_rows": 2,
+                },
+                "latest_master_check": {"generated_at_utc": "2026-07-13T18:37:35+00:00", "cleaned_rows": 12, "rejected_rows": 2},
+                "latest_lead_triage": {
+                    "generated_at_utc": "2026-07-13T18:40:00+00:00",
+                    "keep_count": 8,
+                    "reject_count": 3,
+                    "quarantine_count": 1,
+                    "keep_path": str(tmp / "leads_triaged_keep.csv"),
+                    "rejected_path": str(tmp / "leads_triaged_reject.csv"),
+                    "quarantine_path": str(tmp / "leads_triaged_quarantine.csv"),
+                },
+                "latest_auto_dispatch_preview_current": True,
+                "latest_auto_dispatch_preview": live_dashboard._compact_dispatch_preview(
+                    {
+                        "preview_id": "dispatch_preview_20260713_184814_8d87b2e3",
+                        "preview_path": str(preview_path),
+                        "status": "previewed",
+                        "dispatch_eligible_row_count": 8,
+                        "total_rows_would_write": 8,
+                        "skipped_both": 0,
+                        "planned_authoritative_sent_overlap_count": 0,
+                        "rows_written_per_queue": {"private_jc": 3, "sendgrid_1": 5},
+                        "assigned_preview_rows": preview_rows,
+                    }
+                ),
+                "current_send_safety": {"blocked": False, "reasons": []},
+                "latest_dispatch": {
+                    "generated_at_utc": "2026-07-01T12:00:00+00:00",
+                    "preview_id": "old_preview",
+                },
+                "latest_confirmed_dispatch_current": False,
+            }
+
+            result = live_dashboard._build_lead_ops_status(status)
+
+            self.assertEqual("preview_ready", result["overall_state"])
+            self.assertEqual("ready", result["preview_state"])
+            self.assertEqual("ready", result["confirm_state"])
+            self.assertTrue(result["preview_ready"])
+            self.assertTrue(result["confirm_ready"])
+            self.assertEqual("dispatch_preview_20260713_184814_8d87b2e3", result["current_preview_id"])
+            self.assertEqual(8, result["preview_planned_total"])
+            self.assertEqual({"private_jc": 3, "sendgrid_1": 5}, result["per_profile_planned_counts"])
+            self.assertEqual("Preview ready: review planned counts, then Confirm only if safe.", result["guidance"])
+            compact = status["latest_auto_dispatch_preview"]
+            self.assertEqual(25, len(compact["assigned_preview_rows"]))
+            self.assertTrue(compact["assigned_preview_rows_truncated"])
+
+    def test_lead_ops_status_locks_confirm_for_old_mismatched_preview_and_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            old_preview_path = tmp / "old_preview.json"
+            old_preview_path.write_text("{}", encoding="utf-8")
+            status = {
+                "lead_check_status": {"state": "success", "current_run_id": "current_run", "cleaned_rows": 5, "rejected_rows": 0},
+                "latest_master_check": {"generated_at_utc": "2026-07-13T18:37:35+00:00", "cleaned_rows": 5},
+                "latest_lead_triage": {"generated_at_utc": "2026-07-13T18:40:00+00:00", "keep_count": 5},
+                "latest_auto_dispatch_preview_current": False,
+                "stale_latest_auto_dispatch_preview": {
+                    "preview_id": "old_preview",
+                    "preview_path": str(old_preview_path),
+                    "status": "previewed",
+                    "total_rows_would_write": 5,
+                    "rows_written_per_queue": {"private_jc": 5},
+                },
+                "current_send_safety": {"blocked": False, "reasons": []},
+                "latest_dispatch": {"generated_at_utc": "2026-07-01T12:00:00+00:00", "preview_id": "old_preview"},
+                "latest_confirmed_dispatch_current": False,
+            }
+
+            result = live_dashboard._build_lead_ops_status(status)
+
+            self.assertEqual("mismatch", result["preview_state"])
+            self.assertEqual("locked", result["confirm_state"])
+            self.assertFalse(result["preview_ready"])
+            self.assertFalse(result["confirm_ready"])
 
     def test_combined_leads_status_clears_stale_confirmed_dispatch_for_newer_staged_triage(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
