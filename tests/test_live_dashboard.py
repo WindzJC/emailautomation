@@ -2732,6 +2732,79 @@ class LiveDashboardTests(unittest.TestCase):
             )
             self.assertIn("No cleaned/rejected output files were produced", result["preview_block_reason"])
 
+    def test_lead_ops_progress_reconciles_zombie_running_job_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir) / "check_zombie"
+            input_path = run_dir / "leadschecker.csv"
+            output_path = run_dir / "leads.csv"
+            rejected_path = run_dir / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            status = {
+                "active_important_check_job": {
+                    "job_id": "check_zombie",
+                    "status": "running",
+                    "stage": "checking",
+                    "created_at_utc": "2020-01-01T00:00:00+00:00",
+                    "updated_at_utc": "2020-01-01T00:05:00+00:00",
+                    "effective_input_path": str(input_path),
+                    "output_path": str(output_path),
+                    "rejected_path": str(rejected_path),
+                    "total_input_rows": 1,
+                },
+                "active_important_verify_job": None,
+                "active_important_dispatch_job": None,
+            }
+
+            progress = live_dashboard._current_lead_ops_progress(status)
+
+            self.assertEqual("stale", progress["phase"])
+            self.assertEqual("Stale — rerun check before preview", progress["current_message"])
+            self.assertFalse(progress["output_exists"])
+            self.assertFalse(progress["rejected_exists"])
+
+    def test_start_important_check_job_writes_upload_received_progress_without_touching_queues(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state_dir = tmp / "state"
+            jobs_dir = tmp / "jobs"
+            runs_dir = tmp / "runs"
+            input_path = tmp / "leadschecker.csv"
+            uploaded_path = tmp / "upload.csv"
+            self._write_csv(uploaded_path, ["Email"], [{"Email": "reader@example.test"}])
+
+            class FakeThread:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def start(self) -> None:
+                    pass
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs_dir), patch.object(
+                live_dashboard.threading,
+                "Thread",
+                FakeThread,
+            ):
+                job = live_dashboard._start_important_check_job(
+                    input_path=input_path,
+                    output_path=tmp / "leads.csv",
+                    rejected_path=tmp / "leads_rejected.csv",
+                    effective_input_path=uploaded_path,
+                    source_label="upload.csv",
+                    source_mode="uploaded_file",
+                    total_input_rows=1,
+                )
+                progress_path = state_dir / f"lead_ops_progress_{job['job_id']}.json"
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+
+            self.assertEqual("upload_received", progress["phase"])
+            self.assertEqual("Upload received", progress["current_message"])
+            self.assertEqual(1, progress["total_rows"])
+            self.assertEqual(str(uploaded_path), progress["input_path"])
+
     def test_lead_check_status_mismatch_when_latest_check_points_to_old_run(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -3789,10 +3862,15 @@ class LiveDashboardTests(unittest.TestCase):
                 "reason_counts": {},
             }
 
+            def fake_execute_check(**_kwargs):
+                self._write_csv(Path(job["output_path"]), ["Email"], [{"Email": "reader@example.test"}])
+                self._write_csv(Path(job["rejected_path"]), ["Email"], [])
+                return report
+
             with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
                 live_dashboard,
                 "_execute_important_check",
-                return_value=report,
+                side_effect=fake_execute_check,
             ) as execute_check:
                 live_dashboard._save_important_check_job(job)
                 live_dashboard._run_important_check_job(job_id)

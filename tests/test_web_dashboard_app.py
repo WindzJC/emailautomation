@@ -214,10 +214,18 @@ class WebDashboardAppTests(unittest.TestCase):
             "lead_check_status",
             "renderLeadCheckStatusCard",
             "currentLeadCheckStatus",
+            "currentLeadOpsProgress",
+            "leadOpsProgressCopy",
+            "lead_ops_progress",
+            "Lead Ops progress",
+            "Checking source rows…",
+            "Triaging leads…",
+            "Preview complete — review safety before Confirm",
             "leadCheckBlocksPreview",
             "leadCheckWorkflowStatus",
             "Ready for preview",
             "Not ready for preview",
+            "Preview queue safety is unknown.",
             "button.disabled = previewBusy || Boolean(previewBlockReason) || warmUploadSelected",
             "els.leadsImportantDispatchConfirmBtn.disabled = confirmBusy || Boolean(previewBlockReason)",
         ]:
@@ -233,6 +241,10 @@ class WebDashboardAppTests(unittest.TestCase):
             "Check state mismatch",
             "Latest check result does not match the current upload.",
             "latest_master_check_matches_current_run",
+            "lead_ops_progress",
+            "lead_ops_progress_",
+            "Check complete — ready for Preview Dispatch",
+            "Planning dispatch preview…",
             "preview_ready",
         ]:
             self.assertIn(expected, backend)
@@ -244,6 +256,8 @@ class WebDashboardAppTests(unittest.TestCase):
             ".lead-check-status-card-warn",
             ".lead-check-status-grid",
             ".lead-check-guidance",
+            ".lead-ops-progress-module",
+            ".lead-ops-progress-track",
         ]:
             self.assertIn(expected, styles)
 

@@ -1209,8 +1209,98 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   };
 }
 
+function currentLeadOpsProgress(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
+  const progress = status?.lead_ops_progress;
+  if (!progress || typeof progress !== "object") return {};
+  const selectedType = String(progress.selected_upload_type || "cold").toLowerCase();
+  const expectedType = uploadType === "warm_research" ? "warm_research" : "cold";
+  if (selectedType && selectedType !== expectedType) return {};
+  if (!String(progress.job_id || "").trim()) return {};
+  return progress;
+}
+
+function leadOpsProgressCopy(phase) {
+  const normalized = String(phase || "").toLowerCase();
+  const copy = {
+    upload_received: "Upload received",
+    checking: "Checking source rows…",
+    triaging: "Triaging leads…",
+    ready_for_preview: "Check complete — ready for Preview Dispatch",
+    previewing: "Planning dispatch preview…",
+    preview_complete: "Preview complete — review safety before Confirm",
+    failed: "Failed — do not preview",
+    stale: "Stale — rerun check before preview",
+  };
+  return copy[normalized] || "Upload received";
+}
+
+function leadOpsProgressAsCheckStatus(progress = {}) {
+  const phase = String(progress.phase || progress.status || "upload_received").toLowerCase();
+  const label = leadOpsProgressCopy(phase);
+  const rowCounts = progress.row_counts && typeof progress.row_counts === "object" ? progress.row_counts : {};
+  const cleanedRows = Number(rowCounts.cleaned_rows ?? progress.cleaned_rows ?? 0);
+  const rejectedRows = Number(rowCounts.rejected_rows ?? progress.rejected_rows ?? 0);
+  const outputExists = Object.prototype.hasOwnProperty.call(progress, "output_exists")
+    ? Boolean(progress.output_exists)
+    : Boolean(progress.output_path);
+  const rejectedExists = Object.prototype.hasOwnProperty.call(progress, "rejected_exists")
+    ? Boolean(progress.rejected_exists)
+    : Boolean(progress.rejected_path);
+  const failed = ["failed", "stale"].includes(phase);
+  const processing = ["upload_received", "checking", "triaging", "previewing"].includes(phase);
+  const previewReady = ["ready_for_preview", "preview_complete"].includes(phase) && cleanedRows > 0 && outputExists && rejectedExists;
+  const state = failed ? phase : previewReady ? "success" : processing ? "processing" : "not_ready";
+  const guidance = failed
+    ? "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
+    : phase === "ready_for_preview"
+      ? "Success: review counts, then Preview Dispatch."
+      : phase === "preview_complete"
+        ? "Preview complete: review safety before Confirm."
+        : "Processing: wait.";
+  return {
+    state,
+    label,
+    message: String(progress.current_message || label),
+    guidance,
+    preview_ready: previewReady,
+    preview_state: previewReady ? "ready" : "not_ready",
+    preview_label: previewReady ? "Ready for preview" : "Not ready for preview",
+    preview_block_reason: previewReady ? "" : failed ? "Check failed or stale: no cleaned/rejected output files were produced." : "Lead check is still processing.",
+    cleaned_rows: cleanedRows,
+    rejected_rows: rejectedRows,
+    output_exists: outputExists,
+    rejected_exists: rejectedExists,
+    latest_master_check_matches_current_run: Boolean(progress.latest_master_check_matches_current_run ?? previewReady),
+    generated_at_utc: progress.completed_at_utc || "",
+    upload_received_at_utc: progress.started_at_utc || "",
+    updated_at_utc: progress.updated_at_utc || "",
+    stale_age_seconds: progress.stale_age_seconds,
+    current_run_id: progress.current_run_id || "",
+    check_job_id: progress.job_id || "",
+    job_id: progress.job_id || "",
+    input_path: progress.input_path || "",
+    selected_filename: pathDisplayName(progress.input_path || ""),
+    progress_percent: progress.percent,
+    processed_rows: progress.processed_rows,
+    total_rows: progress.total_rows,
+    phase,
+    current_message: progress.current_message || label,
+    error_summary: progress.error_summary || "",
+    confirm_ready: false,
+    tone: failed ? "bad" : processing ? "active" : previewReady ? "good" : "wait",
+    lead_ops_progress: progress,
+  };
+}
+
 function currentLeadCheckStatus(status = lastLeadsStatus) {
   const uploadType = selectedLeadUploadType();
+  const progress = currentLeadOpsProgress(status, uploadType);
+  if (progress?.job_id) {
+    const progressStatus = leadOpsProgressAsCheckStatus(progress);
+    if (progressStatus.state !== "success" || !status?.lead_check_status?.preview_ready) {
+      return progressStatus;
+    }
+  }
   const check = status?.lead_check_status;
   if (uploadType === "cold" && check && typeof check === "object") {
     const selectedReport = selectedLeadCheckReport(status, uploadType);
@@ -1382,15 +1472,51 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   const jobId = check.check_job_id || check.job_id || "-";
   const currentRunId = check.current_run_id || check.run_id || "-";
   const selectedFile = check.selected_filename || pathDisplayName(check.input_path || check.current_input_path || check.input_label || "");
-  const progressValue = Number(check.progress_percent);
-  const hasRealProgress = Number.isFinite(progressValue) && progressValue > 0;
+  const progress = check.lead_ops_progress || currentLeadOpsProgress(status);
+  const progressValue = Number(check.progress_percent ?? progress?.percent);
+  const hasProgressPercent = Object.prototype.hasOwnProperty.call(progress || {}, "percent") && Number.isFinite(progressValue);
+  const safeProgressPercent = hasProgressPercent ? Math.min(100, Math.max(0, progressValue)) : 0;
+  const progressPhase = String(progress?.phase || check.phase || state || "").toLowerCase();
+  const progressPhaseLabel = leadOpsProgressCopy(progressPhase);
+  const processedRows = Number(check.processed_rows ?? progress?.processed_rows);
+  const totalRows = Number(check.total_rows ?? progress?.total_rows);
+  const progressRowsCopy = Number.isFinite(processedRows) && Number.isFinite(totalRows) && totalRows > 0
+    ? `${processedRows.toLocaleString()} / ${totalRows.toLocaleString()} rows`
+    : "";
+  const progressUpdated = progress?.updated_at_utc || check.updated_at_utc || "";
+  const hasProgressJob = Boolean(progress?.job_id || check.job_id || check.check_job_id);
   const processing = ["processing", "upload_received", "checking", "running", "queued"].includes(state.toLowerCase());
   const processingStrip = processing
     ? `
       <div class="lead-check-processing-strip" role="status">
-        <span>${hasRealProgress ? `${Math.min(100, Math.max(0, progressValue)).toFixed(0)}%` : "Checking source…"}</span>
-        <strong>${hasRealProgress ? "Processing uploaded rows." : "Waiting for output files…"}</strong>
+        <span>${hasProgressPercent ? `${safeProgressPercent.toFixed(0)}%` : "Checking source…"}</span>
+        <strong>${hasProgressPercent ? escapeHtml(progressPhaseLabel) : "Waiting for output files…"}</strong>
         <em>This may take a moment.</em>
+      </div>
+    `
+    : "";
+  const progressModule = hasProgressJob
+    ? `
+      <div class="lead-ops-progress-module lead-ops-progress-${escapeHtml(progressPhase || "idle")}" role="status">
+        <div class="lead-ops-progress-head">
+          <div>
+            <span>Lead Ops progress</span>
+            <strong>${escapeHtml(progressPhaseLabel)}</strong>
+          </div>
+          ${hasProgressPercent ? `<b>${safeProgressPercent.toFixed(0)}%</b>` : `<b>Active</b>`}
+        </div>
+        ${hasProgressPercent ? `
+          <div class="lead-ops-progress-track" aria-label="${escapeHtml(progressPhaseLabel)} progress">
+            <i style="width:${safeProgressPercent}%"></i>
+          </div>
+        ` : ""}
+        <div class="lead-ops-progress-meta">
+          ${progressRowsCopy ? `<span>${escapeHtml(progressRowsCopy)}</span>` : ""}
+          <span title="${escapeHtml(jobId)}">Job ${escapeHtml(jobId)}</span>
+          ${progressUpdated ? `<span>Updated ${escapeHtml(formatGeneratedAt(progressUpdated))}</span>` : ""}
+          ${selectedFile ? `<span title="${escapeHtml(selectedFile)}">${escapeHtml(selectedFile)}</span>` : ""}
+        </div>
+        ${(check.current_message || check.error_summary) ? `<p>${escapeHtml(check.current_message || check.error_summary)}</p>` : ""}
       </div>
     `
     : "";
@@ -1407,6 +1533,7 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
         <span class="mini-pill">${escapeHtml(previewLabel)}</span>
       </div>
       ${processingStrip}
+      ${progressModule}
       <div class="lead-check-status-grid">
         <div><span>Selected file</span><strong title="${escapeHtml(selectedFile || "-")}">${escapeHtml(selectedFile || "-")}</strong></div>
         <div><span>Current job</span><strong title="${escapeHtml(jobId)}">${escapeHtml(jobId)}</strong></div>
@@ -2615,6 +2742,23 @@ function selectedQueueConfirmLabel(preview = lastImportantDispatchPreview, dispa
   return "Confirm Fresh Cold Queue";
 }
 
+const REQUIRED_DISPATCH_FIELDS = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"];
+
+function previewPlannedRows(preview = null) {
+  const queues = preview?.plan_rows_by_queue && typeof preview.plan_rows_by_queue === "object"
+    ? preview.plan_rows_by_queue
+    : {};
+  return Object.values(queues).flatMap((rows) => (Array.isArray(rows) ? rows : []));
+}
+
+function previewMissingRequiredDispatchFields(preview = null) {
+  return previewPlannedRows(preview).some((row) => (
+    !row
+    || typeof row !== "object"
+    || REQUIRED_DISPATCH_FIELDS.some((field) => !String(row[field] || "").trim())
+  ));
+}
+
 function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const summary = dispatchPreviewRouteSummary(preview, dispatchSource);
   const previewCurrent = Boolean(preview && dispatchPreviewMatchesCurrentSelection());
@@ -2628,6 +2772,22 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const malformedPreview = Boolean(preview) && (
     !String(preview.campaign_type || "").trim()
     || !String(preview.dispatch_source_mode || "").trim()
+  );
+  const queueSafety = preview?.queue_safety && typeof preview.queue_safety === "object" ? preview.queue_safety : null;
+  const hasQueueSafety = Object.prototype.hasOwnProperty.call(preview || {}, "queue_safety") && queueSafety !== null;
+  const missingRequiredDispatchFields = previewMissingRequiredDispatchFields(preview);
+  const derivedQueueSafety = Boolean(
+    preview
+    && previewCurrent
+    && !sendersActive
+    && !liveQueuesNotEmpty
+    && summary.duplicatePlanned === 0
+    && summary.sentLogOverlap === 0
+    && !missingRequiredDispatchFields
+  );
+  const queueSafetyBlockedByPreview = Boolean(preview) && (
+    (hasQueueSafety && queueSafety.safe !== true)
+    || (!hasQueueSafety && !derivedQueueSafety)
   );
   if (!preview) {
     return {
@@ -2651,7 +2811,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
       buttonTitle: "The stored preview does not match the current source, cap, or campaign.",
     };
   }
-  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || recencyOverrideRequired) {
+  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || missingRequiredDispatchFields || queueSafetyBlockedByPreview || recencyOverrideRequired) {
     const reason = activeDispatch
       ? "Dispatch job is already running."
       : sendersActive
@@ -2670,9 +2830,13 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
                     ? "SendGrid planned is 0 and no SendGrid zero reason was provided."
                     : malformedPreview
                       ? "Preview is missing campaign or source metadata."
-                      : recencyOverrideRequired
-                        ? "Full recontact has high recent-contact overlap and requires explicit override."
-                        : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
+                      : missingRequiredDispatchFields
+                        ? "Preview has planned rows missing required dispatch fields."
+                        : queueSafetyBlockedByPreview
+                          ? (hasQueueSafety ? "Preview queue safety is unsafe." : "Preview queue safety is unknown.")
+                          : recencyOverrideRequired
+                            ? "Full recontact has high recent-contact overlap and requires explicit override."
+                            : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
     return {
       state: "blocked",
       tone: "bad",

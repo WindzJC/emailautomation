@@ -761,6 +761,16 @@ def _run_auto_dispatch_preview_after_triage(
     job["auto_dispatch_preview_started_at_utc"] = iso_utc()
     job["message"] = "Auto triage complete. Building dispatch preview."
     _save_important_check_job(job)
+    target_preview_dir = preview_dir or IMPORTANT_LEADS_DISPATCH_PREVIEWS
+    _write_lead_ops_progress(
+        job,
+        phase="previewing",
+        status="running",
+        processed_rows=int(job.get("auto_triage_processed_rows") or 0),
+        total_rows=int(job.get("auto_triage_total_rows") or triage_report.get("processed_rows") or 0),
+        percent=95,
+        current_message="Planning dispatch preview…",
+    )
     try:
         preview = preview_dispatch_master_leads(
             master_path=master_path,
@@ -786,7 +796,7 @@ def _run_auto_dispatch_preview_after_triage(
                 settings.LOGS_DIR / "sendgrid_fiorela_log.csv",
                 settings.LOGS_DIR / "sendgrid_domain_log.csv",
             ],
-            preview_dir=preview_dir or IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+            preview_dir=target_preview_dir,
         )
         summary = _auto_dispatch_preview_summary(
             preview=preview,
@@ -799,12 +809,43 @@ def _run_auto_dispatch_preview_after_triage(
         job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
         job["auto_dispatch_preview_id"] = summary["preview_id"]
         job["auto_dispatch_preview"] = summary
+        job["auto_dispatch_preview_path"] = str(summary.get("preview_path") or "")
         save_state(latest_auto_dispatch_preview=summary)
+        _write_lead_ops_progress(
+            job,
+            phase="preview_complete",
+            status="preview_complete",
+            processed_rows=int(job.get("auto_triage_processed_rows") or 0),
+            total_rows=int(job.get("auto_triage_total_rows") or triage_report.get("processed_rows") or 0),
+            percent=100,
+            current_message="Preview complete — review safety before Confirm",
+            completed_at_utc=str(job.get("auto_dispatch_preview_completed_at_utc") or ""),
+            row_counts={
+                "keep_count": int(summary.get("total_keep_rows") or 0),
+                "rejected_rows": int(summary.get("rejected_rows") or 0),
+                "quarantine_rows": int(summary.get("quarantine_rows") or 0),
+                "planned_count": int(summary.get("total_rows_would_write") or 0),
+                "skipped_count": int(summary.get("skipped_rows") or 0),
+            },
+            safety_summary=dict(summary.get("queue_safety") or {}),
+            preview_path=str(summary.get("preview_path") or ""),
+        )
     except Exception as exc:
         job["auto_dispatch_preview_status"] = "failed"
         job["auto_dispatch_preview_error"] = str(exc)
         job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
         job["message"] = f"Auto triage complete. Dispatch preview failed: {exc}"
+        _write_lead_ops_progress(
+            job,
+            phase="failed",
+            status="failed",
+            processed_rows=int(job.get("auto_triage_processed_rows") or 0),
+            total_rows=int(job.get("auto_triage_total_rows") or triage_report.get("processed_rows") or 0),
+            percent=0,
+            current_message="Failed — do not preview",
+            completed_at_utc=str(job.get("auto_dispatch_preview_completed_at_utc") or ""),
+            error_summary=str(exc),
+        )
     return job
 
 
@@ -836,6 +877,16 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job["auto_triage_status"] = "skipped"
         job["auto_triage_skip_reason"] = "fresh_check_outputs_missing"
         job["message"] = "Check output is not ready. Auto triage requires finalized leads.csv and leads_rejected.csv."
+        _write_lead_ops_progress(
+            job,
+            phase="failed",
+            status="failed",
+            processed_rows=int(job.get("processed_rows") or 0),
+            total_rows=int(job.get("total_input_rows") or 0),
+            percent=0,
+            current_message="Failed — do not preview",
+            error_summary="Check did not produce leads.csv and leads_rejected.csv outputs.",
+        )
         return job
     try:
         checked_output_rows = _count_csv_rows(output_path)
@@ -883,6 +934,15 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
     job["staged_run_dir"] = str(staged_dir)
     job["message"] = "Check complete. Auto triage running."
     _save_important_check_job(job)
+    _write_lead_ops_progress(
+        job,
+        phase="triaging",
+        status="running",
+        processed_rows=0,
+        total_rows=checked_output_rows,
+        percent=55,
+        current_message="Triaging leads…",
+    )
 
     started_at = time.monotonic()
     last_progress_save_at = 0.0
@@ -904,6 +964,16 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job["auto_triage_progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
         job["auto_triage_eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
         _save_important_check_job(job)
+        scaled_percent = 55 + (job["auto_triage_progress_percent"] * 0.35)
+        _write_lead_ops_progress(
+            job,
+            phase="triaging",
+            status="running",
+            processed_rows=processed,
+            total_rows=total,
+            percent=scaled_percent,
+            current_message="Triaging leads…",
+        )
 
     def should_cancel_auto_triage() -> bool:
         try:
@@ -980,6 +1050,22 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job["auto_triage_processed_rows"] = int(final_report.get("processed_rows") or 0)
         job["auto_triage_remaining_rows"] = 0
         job["auto_triage_progress_percent"] = 100
+        _write_lead_ops_progress(
+            job,
+            phase="ready_for_preview",
+            status="ready_for_preview",
+            processed_rows=job["auto_triage_processed_rows"],
+            total_rows=job["auto_triage_total_rows"],
+            percent=90,
+            current_message="Check complete — ready for Preview Dispatch",
+            row_counts={
+                "cleaned_rows": int(job.get("processed_rows") or 0),
+                "rejected_rows": _count_csv_rows(rejected_path) if rejected_path.exists() else 0,
+                "keep_count": int(final_report.get("keep_count") or 0),
+                "triage_reject_count": int(final_report.get("reject_count") or 0),
+                "quarantine_count": int(final_report.get("quarantine_count") or 0),
+            },
+        )
         job = _run_auto_dispatch_preview_after_triage(
             job=job,
             triage_report=final_report,
@@ -1007,6 +1093,17 @@ def _run_auto_fast_triage_after_check(job: dict[str, object]) -> dict[str, objec
         job["auto_triage_error"] = str(exc)
         job["auto_triage_completed_at_utc"] = iso_utc()
         job["message"] = f"Check complete. Auto triage failed: {exc}"
+        _write_lead_ops_progress(
+            job,
+            phase="failed",
+            status="failed",
+            processed_rows=int(job.get("auto_triage_processed_rows") or 0),
+            total_rows=int(job.get("auto_triage_total_rows") or checked_output_rows),
+            percent=0,
+            current_message="Failed — do not preview",
+            completed_at_utc=str(job.get("auto_triage_completed_at_utc") or ""),
+            error_summary=str(exc),
+        )
     return job
 
 
@@ -1034,6 +1131,273 @@ def _save_dashboard_job(directory: Path, job: dict[str, object]) -> None:
     tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp_path.replace(write_path)
     settings.secure_private_file(write_path)
+
+
+LEAD_OPS_PROGRESS_STALE_SECONDS = 300
+LEAD_OPS_PROGRESS_RUNNING_PHASES = {
+    "upload_received",
+    "checking",
+    "triaging",
+    "previewing",
+}
+
+
+def _safe_progress_job_id(job_id: object) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(job_id or "").strip()).strip("._")
+    if not safe:
+        raise ValueError("Missing lead ops progress job id.")
+    return safe
+
+
+def _lead_ops_progress_path(job_id: object) -> Path:
+    return settings.STATE_DIR / f"lead_ops_progress_{_safe_progress_job_id(job_id)}.json"
+
+
+def _progress_path_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text
+
+
+def _lead_ops_progress_base(job: dict[str, object]) -> dict[str, object]:
+    return {
+        "job_id": str(job.get("job_id") or ""),
+        "selected_upload_type": str(job.get("upload_type") or job.get("selected_upload_type") or "cold"),
+        "input_path": _progress_path_text(job.get("effective_input_path") or job.get("saved_input_path") or job.get("input_path")),
+        "output_path": _progress_path_text(job.get("output_path")),
+        "rejected_path": _progress_path_text(job.get("rejected_path")),
+        "keep_path": _progress_path_text(job.get("auto_triage_keep_path") or job.get("keep_path") or job.get("verified_path")),
+        "triage_reject_path": _progress_path_text(job.get("auto_triage_rejected_path") or job.get("triage_reject_path")),
+        "quarantine_path": _progress_path_text(job.get("auto_triage_quarantine_path") or job.get("quarantine_path")),
+        "preview_path": _progress_path_text(job.get("auto_dispatch_preview_path") or job.get("preview_path")),
+        "started_at_utc": str(job.get("started_at_utc") or job.get("created_at_utc") or ""),
+    }
+
+
+def _write_lead_ops_progress(
+    job: dict[str, object],
+    *,
+    phase: str,
+    status: str | None = None,
+    processed_rows: int | None = None,
+    total_rows: int | None = None,
+    percent: float | int | None = None,
+    current_message: str = "",
+    completed_at_utc: str = "",
+    error_summary: str = "",
+    row_counts: dict[str, object] | None = None,
+    safety_summary: dict[str, object] | None = None,
+    preview_path: str | Path = "",
+) -> dict[str, object]:
+    payload = _lead_ops_progress_base(job)
+    now = iso_utc()
+    job_id = payload["job_id"]
+    total = max(0, int(total_rows if total_rows is not None else job.get("total_rows") or job.get("total_input_rows") or 0))
+    processed = max(0, int(processed_rows if processed_rows is not None else job.get("processed_rows") or 0))
+    if total:
+        processed = min(total, processed)
+    if percent is None:
+        pct = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
+    else:
+        pct = round(min(100.0, max(0.0, float(percent))), 1)
+    if preview_path:
+        payload["preview_path"] = str(preview_path)
+    output_path = payload.get("output_path")
+    rejected_path = payload.get("rejected_path")
+    keep_path = payload.get("keep_path")
+    triage_reject_path = payload.get("triage_reject_path")
+    quarantine_path = payload.get("quarantine_path")
+    payload.update(
+        {
+            "phase": str(phase or "upload_received"),
+            "status": str(status or phase or "upload_received"),
+            "current_run_id": str(job.get("job_id") or ""),
+            "processed_rows": processed,
+            "total_rows": total,
+            "percent": pct,
+            "current_message": str(current_message or ""),
+            "upload_received_at": str(job.get("created_at_utc") or ""),
+            "upload_received_at_utc": str(job.get("created_at_utc") or ""),
+            "updated_at_utc": now,
+            "completed_at_utc": str(completed_at_utc or ""),
+            "generated_at_utc": str(completed_at_utc or ""),
+            "error_summary": str(error_summary or ""),
+            "output_exists": Path(str(output_path or "")).exists() if output_path else False,
+            "rejected_exists": Path(str(rejected_path or "")).exists() if rejected_path else False,
+            "keep_exists": Path(str(keep_path or "")).exists() if keep_path else False,
+            "triage_reject_exists": Path(str(triage_reject_path or "")).exists() if triage_reject_path else False,
+            "quarantine_exists": Path(str(quarantine_path or "")).exists() if quarantine_path else False,
+            "latest_master_check_matches_current_run": str(phase or "") in {"ready_for_preview", "previewing", "preview_complete"},
+            "row_counts": row_counts or {},
+            "safety_summary": safety_summary or {},
+        }
+    )
+    settings.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    write_path = _lead_ops_progress_path(job_id)
+    tmp_path = write_path.with_suffix(f".{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(write_path)
+    settings.secure_private_file(write_path)
+    return payload
+
+
+def _load_lead_ops_progress(job_id: object) -> dict[str, object]:
+    try:
+        path = _lead_ops_progress_path(job_id)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _latest_lead_ops_progress() -> dict[str, object]:
+    try:
+        candidates = sorted(
+            settings.STATE_DIR.glob("lead_ops_progress_*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return {}
+    for path in candidates:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(raw, dict):
+            return raw
+    return {}
+
+
+def _path_has_rows(path_text: object) -> bool:
+    if not str(path_text or "").strip():
+        return False
+    path = Path(str(path_text or ""))
+    try:
+        return path.exists() and _count_csv_rows(path) > 0
+    except Exception:
+        return False
+
+
+def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: set[str] | None = None) -> dict[str, object]:
+    if not progress:
+        return {}
+    payload = dict(progress)
+    phase = str(payload.get("phase") or "").strip().lower()
+    job_id = str(payload.get("job_id") or "").strip()
+    active_job_ids = active_job_ids or set()
+    output_ready = _path_has_rows(payload.get("output_path"))
+    rejected_exists = Path(str(payload.get("rejected_path") or "")).exists() if payload.get("rejected_path") else False
+    keep_ready = _path_has_rows(payload.get("keep_path"))
+    triage_reject_exists = Path(str(payload.get("triage_reject_path") or "")).exists() if payload.get("triage_reject_path") else False
+    quarantine_exists = Path(str(payload.get("quarantine_path") or "")).exists() if payload.get("quarantine_path") else False
+    preview_exists = Path(str(payload.get("preview_path") or "")).exists() if payload.get("preview_path") else False
+    updated = _parse_iso_timestamp(payload.get("updated_at_utc"))
+    stale_age = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
+    if stale_age is not None:
+        payload["stale_age_seconds"] = int(max(0, stale_age))
+    if preview_exists and phase != "preview_complete":
+        payload["phase"] = "preview_complete"
+        payload["status"] = "preview_complete"
+        payload["percent"] = 100
+        payload["current_message"] = "Preview complete — review safety before Confirm"
+        payload["completed_at_utc"] = payload.get("completed_at_utc") or payload.get("updated_at_utc") or iso_utc()
+        payload["generated_at_utc"] = payload.get("generated_at_utc") or payload["completed_at_utc"]
+    elif output_ready and rejected_exists and keep_ready and triage_reject_exists and quarantine_exists and phase in LEAD_OPS_PROGRESS_RUNNING_PHASES:
+        payload["phase"] = "ready_for_preview"
+        payload["status"] = "ready_for_preview"
+        payload["percent"] = max(90, float(payload.get("percent") or 0))
+        payload["current_message"] = "Check complete — ready for Preview Dispatch"
+    elif phase in LEAD_OPS_PROGRESS_RUNNING_PHASES:
+        stale = job_id not in active_job_ids
+        if stale_age is not None and stale_age >= LEAD_OPS_PROGRESS_STALE_SECONDS:
+            stale = True
+        if stale:
+            payload["phase"] = "stale"
+            payload["status"] = "stale"
+            payload["current_message"] = "Stale — rerun check before preview"
+            payload["error_summary"] = payload.get("error_summary") or "Progress was marked running but no active worker/output was found."
+    phase = str(payload.get("phase") or phase).strip().lower()
+    payload["output_exists"] = output_ready
+    payload["rejected_exists"] = rejected_exists
+    payload["keep_exists"] = keep_ready
+    payload["triage_reject_exists"] = triage_reject_exists
+    payload["quarantine_exists"] = quarantine_exists
+    payload["preview_exists"] = preview_exists
+    payload["latest_master_check_matches_current_run"] = bool(output_ready and rejected_exists and phase not in {"failed", "stale"})
+    return payload
+
+
+def _current_lead_ops_progress(status: dict[str, object]) -> dict[str, object]:
+    active_jobs = [
+        status.get("active_important_check_job"),
+        status.get("active_important_verify_job"),
+        status.get("active_important_dispatch_job"),
+    ]
+    active_job_ids = {
+        str(job.get("job_id") or "")
+        for job in active_jobs
+        if isinstance(job, dict) and str(job.get("job_id") or "").strip()
+    }
+    for job in active_jobs:
+        if isinstance(job, dict) and job.get("job_id"):
+            progress = _load_lead_ops_progress(job.get("job_id"))
+            if progress:
+                return _reconcile_lead_ops_progress(progress, active_job_ids)
+            phase = "triaging" if str(job.get("status") or job.get("stage") or "").strip().lower() == "auto_triage_running" else "checking"
+            synthetic = _lead_ops_progress_base(job)
+            synthetic.update(
+                {
+                    "phase": phase,
+                    "status": str(job.get("status") or phase),
+                    "processed_rows": int(job.get("processed_rows") or job.get("auto_triage_processed_rows") or 0),
+                    "total_rows": int(job.get("total_input_rows") or job.get("auto_triage_total_rows") or 0),
+                    "percent": float(job.get("progress_percent") or job.get("auto_triage_progress_percent") or (55 if phase == "triaging" else 5)),
+                    "current_message": "Triaging leads…" if phase == "triaging" else "Checking source rows…",
+                    "started_at_utc": str(job.get("started_at_utc") or job.get("created_at_utc") or ""),
+                    "updated_at_utc": str(job.get("updated_at_utc") or job.get("created_at_utc") or ""),
+                    "row_counts": {},
+                    "safety_summary": {},
+                }
+            )
+            return _reconcile_lead_ops_progress(synthetic, active_job_ids)
+    progress = _latest_lead_ops_progress()
+    return _reconcile_lead_ops_progress(progress, active_job_ids)
+
+
+def _find_check_job_for_progress_source(source_path: Path | str) -> dict[str, object] | None:
+    source_text = _normalize_dashboard_path_text(source_path)
+    if not source_text or not IMPORTANT_LEADS_CHECK_JOBS.exists():
+        return None
+    matches: list[tuple[float, dict[str, object]]] = []
+    path_keys = {
+        "output_path",
+        "rejected_path",
+        "auto_triage_keep_path",
+        "auto_triage_rejected_path",
+        "auto_triage_quarantine_path",
+        "saved_input_path",
+        "effective_input_path",
+    }
+    for job_path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(job, dict):
+            continue
+        paths = [
+            job.get(key)
+            for key in path_keys
+            if str(job.get(key) or "").strip()
+        ]
+        if any(_dashboard_paths_match(path, source_text) for path in paths):
+            matches.append((_check_job_created_sort_key(job, job_path), job))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
 
 
 def _job_progress_payload(job: dict[str, object]) -> dict[str, object]:
@@ -1296,6 +1660,15 @@ def _run_important_check_job(job_id: str) -> None:
         job["eta_seconds"] = ""
         job["progress_percent"] = 0
         _save_important_check_job(job)
+        _write_lead_ops_progress(
+            job,
+            phase="checking",
+            status="running",
+            processed_rows=0,
+            total_rows=int(job.get("total_input_rows") or 0),
+            percent=5,
+            current_message="Checking source rows…",
+        )
         started_at = time.monotonic()
         last_progress_save_at = 0.0
 
@@ -1321,6 +1694,16 @@ def _run_important_check_job(job_id: str) -> None:
             job["progress_percent"] = round(min(100.0, max(0.0, (processed / total) * 100)), 1) if total else 0
             job["eta_seconds"] = int(remaining / rate) if rate > 0 and remaining > 0 else 0
             _save_important_check_job(job)
+            scaled_percent = 5 + (job["progress_percent"] * 0.5)
+            _write_lead_ops_progress(
+                job,
+                phase="checking",
+                status="running",
+                processed_rows=processed,
+                total_rows=total,
+                percent=scaled_percent,
+                current_message="Checking source rows…",
+            )
 
         is_warm_research = str(job.get("upload_type") or "").strip().lower() == "warm_research"
         if is_warm_research:
@@ -1340,6 +1723,8 @@ def _run_important_check_job(job_id: str) -> None:
                 intake_mode=str(job.get("intake_mode") or "STANDARD"),
                 progress_callback=save_progress,
             )
+            if not Path(str(job.get("output_path") or "")).exists() or not Path(str(job.get("rejected_path") or "")).exists():
+                raise RuntimeError("Check did not produce leads.csv and leads_rejected.csv outputs.")
         if job.get("cancel_requested"):
             job["status"] = "canceled"
             job["stage"] = "canceled"
@@ -1354,6 +1739,17 @@ def _run_important_check_job(job_id: str) -> None:
             job["auto_triage_skip_reason"] = "check_canceled"
             job["message"] = "Check completed after cancellation request. Auto triage skipped."
             _save_important_check_job(job)
+            _write_lead_ops_progress(
+                job,
+                phase="failed",
+                status="canceled",
+                processed_rows=job["processed_rows"],
+                total_rows=int(job.get("total_input_rows") or 0),
+                percent=0,
+                current_message="Failed — do not preview",
+                completed_at_utc=str(job.get("completed_at_utc") or ""),
+                error_summary="Check was canceled before triage/preview.",
+            )
             return
         job["status"] = "completed"
         job["stage"] = "done"
@@ -1385,6 +1781,17 @@ def _run_important_check_job(job_id: str) -> None:
         job["progress_percent"] = 0
         job["error"] = str(exc)
         _save_important_check_job(job)
+        _write_lead_ops_progress(
+            job,
+            phase="failed",
+            status="failed",
+            processed_rows=int(job.get("processed_rows") or 0),
+            total_rows=int(job.get("total_input_rows") or 0),
+            percent=0,
+            current_message="Failed — do not preview",
+            completed_at_utc=str(job.get("completed_at_utc") or ""),
+            error_summary=str(exc),
+        )
 
 
 def _start_important_check_job(
@@ -1453,6 +1860,15 @@ def _start_important_check_job(
         "progress_percent": 0,
     }
     _save_important_check_job(job)
+    _write_lead_ops_progress(
+        job,
+        phase="upload_received",
+        status="upload_received",
+        processed_rows=0,
+        total_rows=int(total_input_rows or 0),
+        percent=1 if int(total_input_rows or 0) > 0 else 0,
+        current_message="Upload received",
+    )
     thread = threading.Thread(target=_run_important_check_job, args=(job_id,), daemon=True)
     thread.start()
     return job
@@ -2753,6 +3169,7 @@ def _combined_leads_status() -> dict[str, object]:
     if latest_confirmed_dispatch:
         status["latest_dispatch"] = latest_confirmed_dispatch
     status = _apply_latest_staged_run_status(status)
+    status["lead_ops_progress"] = _current_lead_ops_progress(status)
     status["lead_check_status"] = _build_lead_check_status(status, state)
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
@@ -4843,6 +5260,7 @@ def cancel_verify_important_leads_job(job_id: str) -> JSONResponse:
 
 @app.post("/api/leads/dispatch-important/preview")
 def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
+    progress_job: dict[str, object] | None = None
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
         if preflight_block is not None:
@@ -4902,12 +5320,27 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             DISPATCH_SOURCE_STRICT_VERIFIED: verified_source_path,
             DISPATCH_SOURCE_CLEANED: output_path,
         }[dispatch_source_mode]
+        progress_job = _find_check_job_for_progress_source(source_path_for_mode)
+        preview_dir = IMPORTANT_LEADS_DISPATCH_PREVIEWS
+        if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP and fast_triage_source.get("source_resolution") == "latest_completed_staged_run":
+            preview_dir = source_path_for_mode.parent / "dispatch_previews"
         source_block = _dispatch_source_readiness_block(
             dispatch_source_mode,
             source_path_for_mode,
             source_resolution=triaged_keep_source_resolution if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP else "",
         )
         if source_block is not None:
+            if progress_job:
+                _write_lead_ops_progress(
+                    progress_job,
+                    phase="failed",
+                    status="failed",
+                    processed_rows=int(progress_job.get("processed_rows") or 0),
+                    total_rows=int(progress_job.get("total_input_rows") or 0),
+                    percent=0,
+                    current_message="Failed — do not preview",
+                    error_summary=str(source_block.get("message") or "Dispatch source is not ready."),
+                )
             return JSONResponse(
                 {
                     "ok": False,
@@ -4920,6 +5353,16 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 },
                 status_code=409,
             )
+        if progress_job:
+            _write_lead_ops_progress(
+                progress_job,
+                phase="previewing",
+                status="running",
+                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
+                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
+                percent=95,
+                current_message="Planning dispatch preview…",
+            )
         preview = preview_dispatch_master_leads(
             master_path=output_path,
             rejected_path=rejected_path,
@@ -4928,15 +5371,62 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             dispatch_source_mode=dispatch_source_mode,
             dispatch_cap=dispatch_cap,
             campaign_type=campaign_type,
-            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+            preview_dir=preview_dir,
         )
+        if progress_job:
+            preview_path = str(preview.get("preview_path") or "")
+            progress_job["auto_dispatch_preview_status"] = "completed"
+            progress_job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
+            progress_job["auto_dispatch_preview_id"] = str(preview.get("preview_id") or "")
+            progress_job["auto_dispatch_preview_path"] = preview_path
+            _save_important_check_job(progress_job)
+            _write_lead_ops_progress(
+                progress_job,
+                phase="preview_complete",
+                status="preview_complete",
+                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
+                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
+                percent=100,
+                current_message="Preview complete — review safety before Confirm",
+                completed_at_utc=str(progress_job.get("auto_dispatch_preview_completed_at_utc") or ""),
+                row_counts={
+                    "planned_count": int(preview.get("total_rows_would_write") or 0),
+                    "skipped_count": int(preview.get("skipped_rows") or 0),
+                    "dispatch_source_row_count": int(preview.get("dispatch_source_row_count") or 0),
+                    "dispatch_eligible_row_count": int(preview.get("dispatch_eligible_row_count") or 0),
+                },
+                safety_summary=dict(preview.get("queue_safety") or {}),
+                preview_path=preview_path,
+            )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": "invalid_dispatch_request", "message": str(exc)}, status_code=400)
     except RuntimeError as exc:
+        if progress_job:
+            _write_lead_ops_progress(
+                progress_job,
+                phase="failed",
+                status="failed",
+                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
+                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
+                percent=0,
+                current_message="Failed — do not preview",
+                error_summary=str(exc),
+            )
         return JSONResponse({"ok": False, "error": "dispatch_preview_blocked", "message": str(exc)}, status_code=409)
     except Exception as exc:
+        if progress_job:
+            _write_lead_ops_progress(
+                progress_job,
+                phase="failed",
+                status="failed",
+                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
+                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
+                percent=0,
+                current_message="Failed — do not preview",
+                error_summary=str(exc),
+            )
         return JSONResponse({"ok": False, "message": f"Lead dispatch preview failed: {exc}"}, status_code=500)
 
     return JSONResponse(

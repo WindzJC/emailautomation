@@ -29,16 +29,46 @@ from important_leads_workflow import (
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    source_like_names = {
+        "leads.csv",
+        "leads_triaged_keep.csv",
+        "leads_verified.csv",
+        "safer_recontact_pool.csv",
+    }
+    normalized_fieldnames = list(fieldnames)
+    normalized_rows = [dict(row) for row in rows]
+    if path.name in source_like_names and "Email" in normalized_fieldnames:
+        original_fieldnames = set(normalized_fieldnames)
+        for required in ["AuthorEmail", "AuthorName", "BookTitle"]:
+            if required not in normalized_fieldnames:
+                normalized_fieldnames.append(required)
+        for row in normalized_rows:
+            if "AuthorEmail" not in original_fieldnames and not str(row.get("AuthorEmail") or "").strip():
+                row["AuthorEmail"] = str(row.get("Email") or "")
+            if "AuthorName" not in original_fieldnames and not str(row.get("AuthorName") or "").strip():
+                row["AuthorName"] = str(row.get("FullName") or row.get("FirstName") or "")
+            if "BookTitle" not in original_fieldnames and not str(row.get("BookTitle") or "").strip():
+                row["BookTitle"] = f"{str(row.get('FirstName') or row.get('FullName') or 'Test').strip() or 'Test'} Book"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=normalized_fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(normalized_rows)
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
+
+
+def planned_row(email: str, first_name: str = "Fresh") -> dict[str, str]:
+    return {
+        "Email": email,
+        "FirstName": first_name,
+        "AuthorEmail": email,
+        "AuthorName": f"{first_name} Author",
+        "BookTitle": f"{first_name} Book",
+    }
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
@@ -1455,6 +1485,69 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(jc_before, jc_queue.read_text(encoding="utf-8"))
             self.assertEqual(sg_before, [path.read_text(encoding="utf-8") for path in sg_queues])
 
+    def test_preview_dispatch_master_leads_skips_rows_missing_required_dispatch_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            required_headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "Status"]
+            write_csv(master_path, required_headers, [])
+            write_csv(
+                triaged_keep_path,
+                required_headers,
+                [
+                    {
+                        "Email": "ready@example.com",
+                        "FirstName": "Ready",
+                        "AuthorEmail": "ready@example.com",
+                        "AuthorName": "Ready Author",
+                        "BookTitle": "Ready Book",
+                        "Status": "KEEP",
+                    },
+                    {
+                        "Email": "missing-first@example.com",
+                        "FirstName": "",
+                        "AuthorEmail": "missing-first@example.com",
+                        "AuthorName": "Missing Author",
+                        "BookTitle": "Missing Book",
+                        "Status": "KEEP",
+                    },
+                ],
+            )
+            write_csv(jc_queue, ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=tmp / "previews",
+            )
+
+            planned_emails = {
+                row["Email"]
+                for rows in preview["plan_rows_by_queue"].values()
+                for row in rows
+            }
+            self.assertEqual({"ready@example.com"}, planned_emails)
+            self.assertEqual(1, preview["exclusion_reason_counts"]["missing_required_dispatch_field"])
+            self.assertEqual(1, preview["total_planned_unique_count"])
+
     def test_fresh_cold_preview_allocates_to_sendgrid_without_writing_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -1935,11 +2028,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(6, preview["skipped_bad_sendgrid_event"])
             self.assertEqual(3, preview["skipped_suppressed"])
             self.assertEqual(1, preview["duplicate_master_skipped"])
-            self.assertEqual(1, preview["invalid_malformed_skipped"])
+            self.assertEqual(2, preview["invalid_malformed_skipped"])
+            self.assertEqual(1, preview["exclusion_reason_counts"]["missing_required_dispatch_field"])
             self.assertEqual(9, preview["bad_suppressed_removed_count"])
-            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(1, preview["rows_to_add_sendgrid"])
-            self.assertEqual(3, preview["total_rows_would_write"])
+            self.assertEqual(2, preview["total_rows_would_write"])
             self.assertIn("campaign_type", preview["queue_headers"])
             planned_emails = [
                 row["Email"]
@@ -1948,7 +2042,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             ]
             self.assertEqual(1, planned_emails.count("sent@example.com"))
             self.assertEqual(1, planned_emails.count("contacted@example.com"))
-            self.assertEqual(1, planned_emails.count("fresh@example.com"))
+            self.assertNotIn("fresh@example.com", planned_emails)
             self.assertNotIn("bounce@example.com", planned_emails)
             for rows_by_queue in preview["plan_rows_by_queue"].values():
                 for row in rows_by_queue:
@@ -3091,8 +3185,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "exclusion_reason_counts": {"already_sent": 2470},
             "planned_authoritative_sent_overlap_count": 0,
             "plan_rows_by_queue": {
-                "private_jc": [{"Email": f"fresh-private-{index}@example.com"} for index in range(621)],
-                "sendgrid_1": [{"Email": f"fresh-sg-{index}@example.com"} for index in range(621)],
+                "private_jc": [planned_row(f"fresh-private-{index}@example.com", f"Private{index}") for index in range(621)],
+                "sendgrid_1": [planned_row(f"fresh-sg-{index}@example.com", f"SendGrid{index}") for index in range(621)],
                 "sendgrid_2": [],
                 "sendgrid_3": [],
                 "sendgrid_4": [],
@@ -3117,8 +3211,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "exclusion_reason_counts": {},
             "planned_authoritative_sent_overlap_count": 1,
             "plan_rows_by_queue": {
-                "private_jc": [{"Email": "overlap-private@example.com"}],
-                "sendgrid_1": [{"Email": "overlap-sg@example.com"}],
+                "private_jc": [planned_row("overlap-private@example.com", "OverlapPrivate")],
+                "sendgrid_1": [planned_row("overlap-sg@example.com", "OverlapSg")],
                 "sendgrid_2": [],
                 "sendgrid_3": [],
                 "sendgrid_4": [],
@@ -3144,8 +3238,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "exclusion_reason_counts": {"already_sent": 1},
             "planned_authoritative_sent_overlap_count": 0,
             "plan_rows_by_queue": {
-                "private_jc": [{"Email": "fresh-private@example.com"}],
-                "sendgrid_1": [{"Email": "fresh-sg@example.com"}],
+                "private_jc": [planned_row("fresh-private@example.com", "FreshPrivate")],
+                "sendgrid_1": [planned_row("fresh-sg@example.com", "FreshSg")],
                 "sendgrid_2": [],
                 "sendgrid_3": [],
                 "sendgrid_4": [],

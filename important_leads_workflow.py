@@ -254,6 +254,7 @@ CHECK_PREVIEW_ROWS = 8
 DISPATCH_PREVIEW_ROWS = 8
 AUTHOR_NAME_COUNT_HEADERS = ("AuthorName", "FullName", "FirstName")
 BOOK_TITLE_COUNT_HEADERS = ("BookTitle", "Title", "booktitle", "book_title")
+REQUIRED_DISPATCH_FIELDS = ("Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle")
 AUDIT_OUTPUT_HEADERS = ("normalized_email", "correction_applied", "correction_reason")
 ROLE_ACCOUNT_BLOCKLIST = set(ROLE_LOCALPART_BLOCKLIST) | {
     "admin",
@@ -2571,6 +2572,14 @@ def load_dispatch_preview(preview_id: str, preview_dir: Path = DISPATCH_PREVIEWS
     return raw
 
 
+def _missing_required_dispatch_fields(row: Dict[str, object]) -> List[str]:
+    return [
+        field
+        for field in REQUIRED_DISPATCH_FIELDS
+        if not str(row.get(field) or "").strip()
+    ]
+
+
 def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
     required_text_fields = {
         "campaign_type": "campaign type",
@@ -2604,6 +2613,19 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
         raise RuntimeError("Dispatch preview unique planned recipient count does not match stored queue rows. Re-run Preview Dispatch.")
     if expected_total != int(planned_summary["total_planned_queue_rows"]):
         raise RuntimeError("Dispatch preview total planned count does not match stored queue rows. Re-run Preview Dispatch.")
+    planned_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+    for queue_name, planned_rows in planned_rows_by_queue.items():
+        if not isinstance(planned_rows, list):
+            continue
+        for index, row in enumerate(planned_rows, start=1):
+            if not isinstance(row, dict):
+                raise RuntimeError(f"Dispatch preview has invalid planned row {index} in {queue_name}. Re-run Preview Dispatch.")
+            missing_required = _missing_required_dispatch_fields(row)
+            if missing_required:
+                missing_label = ", ".join(missing_required)
+                raise RuntimeError(
+                    f"Dispatch preview planned row {index} in {queue_name} is missing required field(s): {missing_label}. Re-run Preview Dispatch."
+                )
     reasons = preview.get("exclusion_reason_counts") if isinstance(preview.get("exclusion_reason_counts"), dict) else {}
     if "skipped_rows" in preview:
         skipped_rows = int(preview.get("skipped_rows") or 0)
@@ -3121,6 +3143,11 @@ def _build_dispatch_plan(
             normalized = {header: _strip_cell(row.get(header, "")) for header in source_headers}
             normalized["Email"] = email
             normalized["campaign_type"] = normalized_campaign_type
+            missing_required = _missing_required_dispatch_fields(normalized)
+            if missing_required:
+                invalid_malformed_skipped += 1
+                exclusion_reason_counts["missing_required_dispatch_field"] += 1
+                continue
 
             added_to_astra = False
             added_to_sendgrid = False
@@ -4254,6 +4281,9 @@ def _queue_output_headers(existing_headers: Iterable[Sequence[str]], master_head
     for headers in existing_headers:
         for header in headers:
             maybe_add(str(header or "").strip())
+
+    for header in REQUIRED_DISPATCH_FIELDS:
+        maybe_add(str(header or "").strip())
 
     for header in SENDGRID_REQUIRED_HEADERS:
         maybe_add(str(header or "").strip())
