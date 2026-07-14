@@ -1492,48 +1492,6 @@ function dispatchPreviewMatchesCurrentSelection() {
   return Boolean(lastImportantDispatchPreview && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey());
 }
 
-function currentLeadOpsStatus(status = lastLeadsStatus) {
-  const ops = status?.lead_ops_status;
-  return ops && typeof ops === "object" ? ops : {};
-}
-
-function syncLeadOpsPreviewState(status = lastLeadsStatus) {
-  if (warmResearchUploadMode()) return;
-  const ops = currentLeadOpsStatus(status);
-  const preview = status?.latest_auto_dispatch_preview || {};
-  const previewId = String(ops.current_preview_id || preview.preview_id || "").trim();
-  if (ops.preview_state === "ready" && previewId) {
-    const perProfile = ops.per_profile_planned_counts || {};
-    lastImportantDispatchPreview = {
-      ...(preview || {}),
-      preview_id: previewId,
-      preview_path: ops.preview_path || preview.preview_path || "",
-      status: "previewed",
-      dispatch_eligible_row_count: Number(ops.preview_eligible_rows || preview.dispatch_eligible_row_count || 0),
-      total_rows_would_write: Number(ops.preview_planned_total || preview.total_rows_would_write || 0),
-      total_planned_unique_count: Number(ops.preview_planned_total || preview.total_planned_unique_count || preview.total_rows_would_write || 0),
-      skipped_both: Number(ops.preview_skipped_rows || preview.skipped_both || 0),
-      planned_authoritative_sent_overlap_count: Number(ops.sent_overlap_count || preview.planned_authoritative_sent_overlap_count || preview.planned_sent_log_overlap_count || 0),
-      rows_to_add_private_jc: Number(perProfile.private_jc || preview.rows_to_add_private_jc || 0),
-      rows_to_add_sendgrid_1: Number(perProfile.sendgrid_1 || preview.rows_to_add_sendgrid_1 || 0),
-      rows_to_add_sendgrid_2: Number(perProfile.sendgrid_2 || preview.rows_to_add_sendgrid_2 || 0),
-      rows_to_add_sendgrid_3: Number(perProfile.sendgrid_3 || preview.rows_to_add_sendgrid_3 || 0),
-      rows_to_add_sendgrid_4: Number(perProfile.sendgrid_4 || preview.rows_to_add_sendgrid_4 || 0),
-      rows_to_add_sendgrid_5: Number(perProfile.sendgrid_5 || preview.rows_to_add_sendgrid_5 || 0),
-      assigned_preview_rows: Array.isArray(preview.assigned_preview_rows) ? preview.assigned_preview_rows.slice(0, 25) : [],
-      assigned_preview_rows_truncated: Boolean(preview.assigned_preview_rows_truncated),
-      _preview_key: currentDispatchPlanKey(),
-    };
-    importantLeadDispatchPreviewLoading = false;
-    lastImportantDispatchPreviewState = "ready";
-    lastImportantDispatchPreviewFeedback = { state: "ready", message: "Preview ready." };
-  } else if (ops.preview_state === "mismatch") {
-    importantLeadDispatchPreviewLoading = false;
-    lastImportantDispatchPreviewState = "blocked";
-    lastImportantDispatchPreviewFeedback = { state: "blocked", message: "Preview/source mismatch. Rerun Preview Dispatch for the selected source." };
-  }
-}
-
 function dispatchSummaryMatchesCurrentSource(dispatch = lastImportantDispatch) {
   if (!dispatch?.generated_at_utc) return false;
   const selected = dispatchSourceForSelectedMode();
@@ -2206,7 +2164,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
         : (previewBlockReason || "");
       if (!previewBusy) {
         const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
-        setNodeText(button, previewReady ? "Preview Ready" : retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
+        setNodeText(button, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
       }
       button.classList.toggle(
         "is-next-action",
@@ -2638,8 +2596,6 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
     !String(preview.campaign_type || "").trim()
     || !String(preview.dispatch_source_mode || "").trim()
   );
-  const previewedStatus = ["previewed", "ready", "completed", "complete"].includes(String(preview?.status || "previewed").toLowerCase());
-  const hasPlannedRows = summary.uniquePlanned > 0;
   if (!preview) {
     return {
       state: "idle",
@@ -2662,7 +2618,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
       buttonTitle: "The stored preview does not match the current source, cap, or campaign.",
     };
   }
-  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || !previewedStatus || !hasPlannedRows || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || recencyOverrideRequired) {
+  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || recencyOverrideRequired) {
     const reason = activeDispatch
       ? "Dispatch job is already running."
       : sendersActive
@@ -2671,23 +2627,19 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
           ? "Check Leads is running."
           : liveQueuesNotEmpty
             ? "Recipient queues are not empty."
-            : !previewedStatus
-              ? "Preview is not marked previewed yet."
-              : !hasPlannedRows
-                ? "Preview has no planned queue rows."
-                : summary.duplicatePlanned > 0
-                  ? `Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`
-                  : summary.sentLogOverlap > 0
-                    ? `Planned recipients overlap authoritative sent/contact logs: ${summary.sentLogOverlap.toLocaleString()}.`
-                    : summary.skippedMathMismatch
-                      ? `Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons ${summary.skippedReasonTotal.toLocaleString()}.`
-                      : summary.hasMissingSendgridZeroReason
-                        ? "SendGrid planned is 0 and no SendGrid zero reason was provided."
-                        : malformedPreview
-                          ? "Preview is missing campaign or source metadata."
-                          : recencyOverrideRequired
-                            ? "Full recontact has high recent-contact overlap and requires explicit override."
-                            : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
+            : summary.duplicatePlanned > 0
+              ? `Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`
+              : summary.sentLogOverlap > 0
+                ? `Planned recipients overlap authoritative sent/contact logs: ${summary.sentLogOverlap.toLocaleString()}.`
+                : summary.skippedMathMismatch
+                  ? `Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons ${summary.skippedReasonTotal.toLocaleString()}.`
+                  : summary.hasMissingSendgridZeroReason
+                    ? "SendGrid planned is 0 and no SendGrid zero reason was provided."
+                    : malformedPreview
+                      ? "Preview is missing campaign or source metadata."
+                      : recencyOverrideRequired
+                        ? "Full recontact has high recent-contact overlap and requires explicit override."
+                        : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
     return {
       state: "blocked",
       tone: "bad",
@@ -4032,7 +3984,7 @@ function renderImportantDispatch(result) {
   }
 
   if (!result?.generated_at_utc) {
-    const previewRows = Array.isArray(dispatchPreview?.assigned_preview_rows) ? dispatchPreview.assigned_preview_rows.slice(0, 25) : [];
+    const previewRows = Array.isArray(dispatchPreview?.assigned_preview_rows) ? dispatchPreview.assigned_preview_rows : [];
     const previewFields = Array.isArray(dispatchPreview?.queue_headers) ? dispatchPreview.queue_headers : [];
     const selectedSourceRows = Number(dispatchPreview?.dispatch_source_row_count || dispatchSource.dispatch_source_row_count || 0);
     const previewMetricsMarkup = dispatchPreview
@@ -4110,7 +4062,7 @@ function renderImportantDispatch(result) {
     return;
   }
 
-  const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows.slice(0, 25) : [];
+  const previewRows = Array.isArray(result.assigned_preview_rows) ? result.assigned_preview_rows : [];
   const previewFields = Array.isArray(result.queue_headers) ? result.queue_headers : [];
   const confirmedZeroAdd = Number(result.total_rows_would_write || 0) === 0;
   const exclusionReasons = result.exclusion_reason_counts || {};
@@ -4962,7 +4914,6 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     return;
   }
   const state = currentRunWorkflowState(status);
-  const ops = currentLeadOpsStatus(status);
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
@@ -4979,13 +4930,13 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const tasks = [
     {
       step: "Check Leads",
-      status: ops.check_state === "running" ? "Running" : ops.check_state === "failed_stale" ? "Failed/Stale" : state.checkStatus === "completed" ? "Complete" : workflowStatusLabel(state.checkStatus),
+      status: state.checkStatus === "completed" ? "Complete" : workflowStatusLabel(state.checkStatus),
       detail: checkRows ? `${checkRows.toLocaleString()} cleaned, ${checkRejected.toLocaleString()} rejected` : "Upload and check a CSV/XLSX source.",
       tone: state.checkStatus === "completed" ? "good" : "warn",
     },
     {
       step: "Triage",
-      status: ops.triage_state === "running" ? "Running" : ops.triage_state === "complete" ? "Complete" : ops.triage_state === "locked" ? "Locked" : workflowStatusLabel(state.triageStatus),
+      status: state.triageStatus === "completed" ? "Complete" : workflowStatusLabel(state.triageStatus),
       detail: keepRows ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine` : "Run Fast Triage after Check Leads.",
       tone: state.triageStatus === "completed" ? "good" : "warn",
     },
@@ -4999,13 +4950,13 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     },
     {
       step: "Preview Dispatch",
-      status: ops.preview_state === "ready" ? "Ready" : ops.preview_state === "mismatch" ? "Failed/Stale" : previewCurrent ? "Complete" : "Needed",
+      status: previewCurrent ? "Complete" : "Needed",
       detail: previewCurrent ? "Preview matches selected source and cap." : "Run Preview Dispatch before confirming anything.",
       tone: previewCurrent ? "good" : "warn",
     },
     {
       step: "Confirm Queue",
-      status: ops.confirm_state === "confirmed" ? "Complete" : confirmReady ? "Ready" : "Locked until preview is current and safe",
+      status: confirmReady ? "Available" : "Locked until preview is current and safe",
       detail: "Confirm writes queues only after preview passes.",
       tone: confirmReady ? "good" : "warn",
     },
@@ -5357,7 +5308,6 @@ function renderLeadsStatus(status) {
   lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus);
   lastImportantDispatch = warmUploadSelected ? {} : (lastLeadsStatus?.latest_dispatch || {});
   lastImportantDispatchSource = lastLeadsStatus?.dispatch_source || lastImportantDispatchSource;
-  syncLeadOpsPreviewState(lastLeadsStatus);
   if (lastLeadsStatus?.safer_recontact_source_summary && typeof lastLeadsStatus.safer_recontact_source_summary === "object") {
     lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary;
   }
@@ -5773,15 +5723,6 @@ function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
 async function previewImportantLeadDispatch() {
   if (els.leadsImportantUploadType?.value === "warm_research") {
     showMessage("Warm Research does not use Cold Dispatch Preview. Generate drafts and confirm Warm Private JC instead.", "error");
-    return;
-  }
-  if (dispatchPreviewMatchesCurrentSelection() && lastImportantDispatchPreview?.preview_id) {
-    importantLeadDispatchPreviewLoading = false;
-    lastImportantDispatchPreviewState = "ready";
-    lastImportantDispatchPreviewFeedback = { state: "ready", message: "Preview already exists for the selected source and cap." };
-    renderImportantDispatch(lastImportantDispatch);
-    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
-    showMessage("Preview already exists for the selected source and cap.", "success");
     return;
   }
   const selectedDispatchSource = dispatchSourceForSelectedMode();
