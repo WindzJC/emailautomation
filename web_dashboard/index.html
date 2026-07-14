@@ -561,10 +561,10 @@
                   <span id="leads-pipeline-meta" class="muted">Current source, preview, and queue confirmation in one place.</span>
                 </div>
               </div>
-              <section class="leads-control-bar leads-ops-bar" aria-label="Lead source and check controls">
+              <section class="leads-control-bar leads-ops-bar" aria-label="Campaign Intake">
                 <div class="leads-control-source">
-                  <p class="eyebrow">Upload / Source / Check</p>
-                  <strong>Lead source</strong>
+                  <p class="eyebrow">Campaign Intake</p>
+                  <strong>Upload Source</strong>
                   <span id="leads-important-check-meta" class="muted">Choose a CSV/XLSX file or check the stored intake source.</span>
                   <label class="leads-upload-type-field">
                     <span>Upload type</span>
@@ -582,8 +582,8 @@
                   <span id="leads-important-upload-note" class="toolbar-field-note muted">Upload is file-only. Preview and confirm remain separate.</span>
                 </div>
                 <div class="leads-control-results">
-                  <span>Last check result</span>
-                  <div id="leads-control-check-result" class="leads-control-check-chips">Waiting for source status</div>
+                  <span>Check Result</span>
+                  <div id="leads-control-check-result" class="leads-control-check-chips">No completed check yet.</div>
                 </div>
                 <div id="lead-check-status-card" class="lead-check-status-card lead-check-status-card-wait" aria-live="polite">
                   <div class="lead-check-status-head">
@@ -596,7 +596,7 @@
                   </div>
                 </div>
                 <div class="leads-control-actions">
-                  <span class="leads-source-actions-label">Source actions</span>
+                  <span class="leads-source-actions-label">Next source action</span>
                   <button id="leads-important-check-btn" class="btn btn-secondary" type="button">Check Leads</button>
                   <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
                   <button id="leads-important-dispatch-preview-top-btn" class="btn btn-secondary leads-preview-duplicate" type="button">Preview Dispatch</button>
@@ -630,9 +630,9 @@
                         <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Changing source changes the eligible count. Fresh Cold Keep reads <strong>_important/leads_triaged_keep.csv</strong>. Strict reads <strong>_important/leads_verified.csv</strong>. Recontact uses checked output.</span>
                       </div>
                       <div class="leads-quick-file">
-                        <span class="label">Cap</span>
-                        <input id="leads-dispatch-cap" type="text" value="all" spellcheck="false" />
-                        <span class="toolbar-field-note muted">Use <strong>all</strong> or a number for this dispatch preview.</span>
+                        <span class="label">Preview cap</span>
+                        <input id="leads-dispatch-cap" type="text" value="all" placeholder="all" spellcheck="false" />
+                        <span class="toolbar-field-note muted">Use <strong>all</strong> or enter a number.</span>
                       </div>
                       <div class="leads-quick-file dispatch-technical-select">
                         <span class="label">Campaign Type</span>

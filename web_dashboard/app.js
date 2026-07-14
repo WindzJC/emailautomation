@@ -1244,26 +1244,6 @@ function selectedModeLeadCheckStatus(status = lastLeadsStatus, uploadType = sele
   const selectedReport = selectedLeadCheckReport(status, uploadType);
   const activeJob = currentImportantCheckJob(status, uploadType);
   const otherReport = uploadType === "warm_research" ? status?.latest_master_check : status?.latest_warm_check;
-  if (activeJob?.job_id) {
-    const state = isActiveImportantLeadCheckJob(activeJob) ? "processing" : "not_started";
-    return {
-      state,
-      label: state === "processing" ? "Processing / checking" : "Not started",
-      message: state === "processing" ? `${uploadTypeLabel(uploadType)} check is processing.` : `${uploadTypeLabel(uploadType)} check has not started.`,
-      guidance: state === "processing" ? "Processing: wait." : "Not ready for preview: run Upload & Check for the selected upload type.",
-      preview_ready: false,
-      preview_state: "not_ready",
-      preview_label: "Not ready for preview",
-      preview_block_reason: state === "processing" ? "Lead check is still processing." : "No current check is ready for the selected upload type.",
-      cleaned_rows: 0,
-      rejected_rows: 0,
-      output_exists: false,
-      rejected_exists: false,
-      latest_master_check_matches_current_run: false,
-      confirm_ready: false,
-      tone: state === "processing" ? "active" : "wait",
-    };
-  }
   if (selectedReport?.generated_at_utc) {
     const cleanedRows = Number(selectedReport.cleaned_rows || selectedReport.output_rows || selectedReport.warm_email_ready_rows || 0);
     const rejectedRows = Number(selectedReport.rejected_rows || selectedReport.warm_rejected_rows || Math.max(0, Number(selectedReport.input_rows || 0) - cleanedRows) || 0);
@@ -1282,8 +1262,40 @@ function selectedModeLeadCheckStatus(status = lastLeadsStatus, uploadType = sele
       rejected_exists: true,
       latest_master_check_matches_current_run: true,
       generated_at_utc: selectedReport.generated_at_utc,
+      current_run_id: selectedReport.current_run_id || selectedReport.run_id || selectedReport.check_run_id || "",
+      input_path: selectedReport.input_path || selectedReport.source_path || "",
+      check_job_id: selectedReport.check_job_id || selectedReport.job_id || "",
       confirm_ready: false,
       tone: cleanedRows > 0 ? "good" : "warn",
+    };
+  }
+  if (activeJob?.job_id) {
+    const terminal = isTerminalImportantLeadCheckJob(activeJob);
+    const failed = ["failed", "canceled", "cancelled"].includes(importantLeadCheckJobStatus(activeJob));
+    const state = failed || terminal ? "stale" : "processing";
+    const selectedFilename = activeJob.selected_filename || activeJob.original_uploaded_filename || activeJob.server_received_filename || activeJob.source_label || "";
+    return {
+      state,
+      label: state === "processing" ? "Checking…" : "Failed/Stale — check did not produce outputs",
+      message: state === "processing" ? "Waiting for check output files." : "No completed check output is available for this job.",
+      guidance: state === "processing" ? "Processing: wait. This may take a moment." : "Do not preview. Re-upload a clean lead CSV and run Upload & Check again.",
+      preview_ready: false,
+      preview_state: "not_ready",
+      preview_label: "Not ready for preview",
+      preview_block_reason: state === "processing" ? "Lead check is still processing." : "Check failed or stale: no cleaned/rejected output files were produced.",
+      cleaned_rows: 0,
+      rejected_rows: 0,
+      output_exists: false,
+      rejected_exists: false,
+      latest_master_check_matches_current_run: false,
+      check_job_id: activeJob.job_id,
+      current_run_id: activeJob.current_run_id || activeJob.run_id || activeJob.check_run_id || "",
+      input_path: activeJob.input_path || activeJob.source_path || activeJob.server_path || "",
+      selected_filename: selectedFilename,
+      updated_at_utc: activeJob.updated_at_utc || activeJob.started_at_utc || activeJob.created_at_utc || "",
+      progress_percent: activeJob.progress_percent,
+      confirm_ready: false,
+      tone: state === "processing" ? "active" : "bad",
     };
   }
   if (otherReport?.generated_at_utc) {
@@ -1367,6 +1379,21 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   const outputStatus = check.output_exists ? "exists" : "missing";
   const rejectedStatus = check.rejected_exists ? "exists" : "missing";
   const matchStatus = check.latest_master_check_matches_current_run ? "yes" : "no";
+  const jobId = check.check_job_id || check.job_id || "-";
+  const currentRunId = check.current_run_id || check.run_id || "-";
+  const selectedFile = check.selected_filename || pathDisplayName(check.input_path || check.current_input_path || check.input_label || "");
+  const progressValue = Number(check.progress_percent);
+  const hasRealProgress = Number.isFinite(progressValue) && progressValue > 0;
+  const processing = ["processing", "upload_received", "checking", "running", "queued"].includes(state.toLowerCase());
+  const processingStrip = processing
+    ? `
+      <div class="lead-check-processing-strip" role="status">
+        <span>${hasRealProgress ? `${Math.min(100, Math.max(0, progressValue)).toFixed(0)}%` : "Checking source…"}</span>
+        <strong>${hasRealProgress ? "Processing uploaded rows." : "Waiting for output files…"}</strong>
+        <em>This may take a moment.</em>
+      </div>
+    `
+    : "";
   els.leadCheckStatusCard.className = `lead-check-status-card lead-check-status-card-${tone}`;
   setNodeHtml(
     els.leadCheckStatusCard,
@@ -1379,7 +1406,11 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
         </div>
         <span class="mini-pill">${escapeHtml(previewLabel)}</span>
       </div>
+      ${processingStrip}
       <div class="lead-check-status-grid">
+        <div><span>Selected file</span><strong title="${escapeHtml(selectedFile || "-")}">${escapeHtml(selectedFile || "-")}</strong></div>
+        <div><span>Current job</span><strong title="${escapeHtml(jobId)}">${escapeHtml(jobId)}</strong></div>
+        <div><span>Current run</span><strong title="${escapeHtml(currentRunId)}">${escapeHtml(currentRunId)}</strong></div>
         <div><span>leads.csv</span><strong>${escapeHtml(outputStatus)}</strong></div>
         <div><span>leads_rejected.csv</span><strong>${escapeHtml(rejectedStatus)}</strong></div>
         <div><span>Latest matches current upload</span><strong>${escapeHtml(matchStatus)}</strong></div>
@@ -2164,12 +2195,13 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
         : (previewBlockReason || "");
       if (!previewBusy) {
         const retryState = lastImportantDispatchPreviewFeedback?.state === "failed" && previewBlocked;
-        setNodeText(button, retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
+        setNodeText(button, previewBlockReason ? "Preview locked" : retryState ? "Retry Preview Dispatch" : "Preview Dispatch");
       }
       button.classList.toggle(
         "is-next-action",
         previewBlocked && !button.disabled,
       );
+      button.classList.toggle("is-locked", Boolean(button.disabled || previewBlockReason || warmUploadSelected));
     });
   }
   if (els.leadsImportantDispatchConfirmBtn) {
@@ -2186,6 +2218,7 @@ function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
           : safety.buttonLabel,
       );
     }
+    els.leadsImportantDispatchConfirmBtn.classList.toggle("is-locked", Boolean(els.leadsImportantDispatchConfirmBtn.disabled));
   }
 }
 
@@ -3898,17 +3931,20 @@ function renderImportantDispatch(result) {
   const stalePreviewMismatch = !dispatchPreview && Boolean(lastImportantDispatchPreview?.preview_id);
   const previewFeedbackState = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.state || "") : "";
   const previewFeedbackMessage = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.message || "") : "";
-  const noPreviewTitle = previewFeedbackState === "blocked"
+  const noPreviewTitle = dispatchBlockReason
+    ? "Preview locked."
+    : previewFeedbackState === "blocked"
     ? "Preview blocked."
     : previewFeedbackState === "failed"
       ? "Preview failed. Retry Preview Dispatch."
       : stalePreviewMismatch
         ? "Preview/source/cap mismatch. Retry Preview Dispatch."
         : "No preview yet.";
-  const noPreviewMessage = previewFeedbackMessage
+  const noPreviewMessage = dispatchBlockReason
+    || previewFeedbackMessage
     || (stalePreviewMismatch
       ? "The stored preview does not match the selected source or cap. Click Preview Dispatch to calculate queue assignments."
-      : "Run Preview Dispatch to calculate writable recipients.");
+      : "Locked until Check/Triage completes.");
   const previewPrivateJc = Number(dispatchPreview?.rows_to_add_private_jc || 0);
   const previewSg1 = Number(dispatchPreview?.rows_to_add_sendgrid_1 || 0);
   const previewSg2 = Number(dispatchPreview?.rows_to_add_sendgrid_2 || 0);
@@ -4806,6 +4842,11 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     || sourceRows
     || 0,
   ) : 0;
+  const lastCheckCopy = state.checkStatus === "running"
+    ? `<span class="leads-check-waiting">Waiting for check output.</span>`
+    : state.checkStatus === "failed"
+      ? `<span class="leads-check-failed">Check failed or stale.</span>`
+      : "No completed check yet.";
   if (els.leadsControlCheckResult) {
     setNodeHtml(
       els.leadsControlCheckResult,
@@ -4818,7 +4859,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
           ["Reject", rejectRows],
           ["Quarantine", quarantineRows],
         ].map(([label, value]) => `<span>${escapeHtml(label)} <strong>${Number(value || 0).toLocaleString()}</strong></span>`).join("")
-        : "<span>No checked source loaded yet</span>",
+        : `<span>${lastCheckCopy}</span>`,
     );
   }
   const processingReady = state.checkStatus === "completed" && state.triageStatus === "completed";
@@ -4840,7 +4881,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
           <div>
             <p class="eyebrow">Source Summary</p>
             <h3>${processingReady ? "Source ready for preview" : "Source not ready"}</h3>
-            <p class="current-run-subtitle">Counts below describe the current checked and triaged source only.</p>
+            <p class="current-run-subtitle">${checkReadyForCounts ? "Counts below describe the current checked and triaged source only." : "Source rows 0 · Not ready for preview until Upload & Check completes."}</p>
           </div>
           <span class="mini-pill">${processingReady ? "Ready" : "Waiting"}</span>
         </div>
@@ -4853,6 +4894,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
           <div><span>Quarantine</span><strong>${quarantineRows.toLocaleString()}</strong></div>
           <div><span>Eligible checked output</span><strong>${checkedEligibleRows.toLocaleString()}</strong></div>
         </div>
+        ${checkReadyForCounts ? "" : `<div class="operator-empty-state operator-empty-state-inline source-summary-empty"><strong>Source rows 0</strong><span>Upload and check the selected source before previewing dispatch.</span></div>`}
         ${authIssue ? `<div class="current-run-auth-warning">${escapeHtml(authIssue)}</div>` : ""}
         ${currentBlocker ? `<div class="current-run-summary-line current-run-blocker"><span>${escapeHtml(currentBlocker)}</span></div>` : ""}
       </article>
@@ -4927,42 +4969,44 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
   const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
   const liveQueueExists = liveRecipientQueueTotal(status) > 0;
+  const hasUpload = Boolean(state.activeCheck?.job_id || latestCheck?.generated_at_utc);
+  const checkFailed = state.checkStatus === "failed";
+  const triageLocked = state.checkStatus !== "completed";
+  const previewBlocked = currentRunPreviewBlockMessage(dispatchSource, state);
   const tasks = [
     {
-      step: "Check Leads",
-      status: state.checkStatus === "completed" ? "Complete" : workflowStatusLabel(state.checkStatus),
-      detail: checkRows ? `${checkRows.toLocaleString()} cleaned, ${checkRejected.toLocaleString()} rejected` : "Upload and check a CSV/XLSX source.",
-      tone: state.checkStatus === "completed" ? "good" : "warn",
+      step: "Upload",
+      status: hasUpload ? "Complete" : "Waiting",
+      detail: hasUpload ? "A source is staged for the selected upload type." : "Choose a CSV/XLSX source.",
+      tone: hasUpload ? "good" : "neutral",
+    },
+    {
+      step: "Check",
+      status: state.checkStatus === "completed" ? "Complete" : checkFailed ? "Failed/Stale" : state.checkStatus === "running" ? "Running" : "Waiting",
+      detail: checkRows ? `${checkRows.toLocaleString()} cleaned, ${checkRejected.toLocaleString()} rejected` : state.checkStatus === "running" ? "Waiting for leads.csv and leads_rejected.csv." : "Run Upload & Check.",
+      tone: state.checkStatus === "completed" ? "good" : checkFailed ? "bad" : state.checkStatus === "running" ? "warn" : "neutral",
     },
     {
       step: "Triage",
-      status: state.triageStatus === "completed" ? "Complete" : workflowStatusLabel(state.triageStatus),
-      detail: keepRows ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine` : "Run Fast Triage after Check Leads.",
-      tone: state.triageStatus === "completed" ? "good" : "warn",
+      status: state.triageStatus === "completed" ? "Complete" : triageLocked ? "Locked" : state.triageStatus === "running" ? "Running" : "Waiting",
+      detail: keepRows ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine` : triageLocked ? "Locked until check completes." : "Run Fast Triage after Check.",
+      tone: state.triageStatus === "completed" ? "good" : state.triageStatus === "running" ? "warn" : "neutral",
     },
     {
-      step: "Choose Campaign",
-      status: isCurrentSaferRecontactSource(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null)
-        ? "Current: Safer Recontact"
-        : selectedCampaign === "cold" ? "Current: Fresh Cold" : "Current: Recontact",
-      detail: `${selectedSource}. Changing source changes the count.`,
-      tone: "neutral",
+      step: "Preview",
+      status: previewCurrent ? "Complete" : previewBlocked ? "Locked" : "Ready",
+      detail: previewCurrent ? "Preview matches selected source and cap." : previewBlocked || `${selectedSource}. ${selectedCampaign === "cold" ? "Fresh Cold" : "Recontact"} mode ready to preview.`,
+      tone: previewCurrent ? "good" : previewBlocked ? "neutral" : "warn",
     },
     {
-      step: "Preview Dispatch",
-      status: previewCurrent ? "Complete" : "Needed",
-      detail: previewCurrent ? "Preview matches selected source and cap." : "Run Preview Dispatch before confirming anything.",
-      tone: previewCurrent ? "good" : "warn",
-    },
-    {
-      step: "Confirm Queue",
-      status: confirmReady ? "Available" : "Locked until preview is current and safe",
+      step: "Confirm",
+      status: confirmReady ? "Ready" : "Locked",
       detail: "Confirm writes queues only after preview passes.",
-      tone: confirmReady ? "good" : "warn",
+      tone: confirmReady ? "good" : "neutral",
     },
     {
-      step: "Start Senders",
-      status: liveQueueExists ? "Queues exist" : "Locked until queues exist",
+      step: "Start",
+      status: liveQueueExists ? "Ready" : "Locked",
       detail: liveQueueExists ? "Start senders from the Dashboard sender table." : "No live recipient queues are ready to start.",
       tone: liveQueueExists ? "good" : "neutral",
     },
@@ -4972,6 +5016,7 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     `
       <div class="workflow-tracker-head">
         <p class="eyebrow">Workflow Tracker</p>
+        <span>${escapeHtml(isCurrentSaferRecontactSource(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null) ? "Safer Recontact" : selectedCampaign === "cold" ? "Fresh Cold" : "Recontact")}</span>
       </div>
       <ol class="workflow-tracker-row" aria-label="Lead dispatch workflow">
         ${tasks.map((task, index) => `

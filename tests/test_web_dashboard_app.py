@@ -247,6 +247,57 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
+    def test_lead_ops_campaign_intake_polish_and_locked_states_are_rendered(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+
+        for expected in [
+            "Campaign Intake",
+            "Upload Source",
+            "Check Result",
+            "No completed check yet.",
+            "Next source action",
+            "Preview cap",
+            "Use <strong>all</strong> or enter a number.",
+        ]:
+            self.assertIn(expected, markup)
+
+        for expected in [
+            'label: state === "processing" ? "Checking…" : "Failed/Stale — check did not produce outputs"',
+            "Waiting for check output files.",
+            "Checking source…",
+            "Waiting for output files…",
+            "This may take a moment.",
+            "Selected file",
+            "Current job",
+            "Current run",
+            "Waiting for check output.",
+            "Check failed or stale.",
+            "Source rows 0",
+            "Preview locked",
+            "button.classList.toggle(\"is-locked\"",
+            "Locked until Check/Triage completes.",
+            "step: \"Upload\"",
+            "step: \"Check\"",
+            "step: \"Triage\"",
+            "step: \"Preview\"",
+            "step: \"Confirm\"",
+            "step: \"Start\"",
+        ]:
+            self.assertIn(expected, source)
+        self.assertNotIn('state === "processing" ? "Processing / checking" : "Not started"', source)
+
+        for expected in [
+            "Lead Ops campaign-intake polish",
+            "grid-template-areas: \"source result status\" \"source result actions\"",
+            ".lead-check-processing-strip",
+            ".leads-check-waiting",
+            ".source-summary-empty",
+            ".btn.is-locked",
+        ]:
+            self.assertIn(expected, styles)
+
     def test_dispatch_preview_renders_backend_blocked_response(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
@@ -626,8 +677,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "Prepare Dispatch",
             "leads-control-bar",
             "leads-ops-bar",
-            "Upload / Source / Check",
-            "Source actions",
+            "Campaign Intake",
+            "Upload Source",
+            "Next source action",
             "leads-important-upload-file",
             "leads-important-upload-type",
             "Warm Research",
@@ -747,12 +799,13 @@ class WebDashboardAppTests(unittest.TestCase):
             "Eligible checked output",
             "Check Leads",
             "Triage",
-            "Choose Campaign",
-            "Preview Dispatch",
-            "Confirm Queue",
-            "Start Senders",
-            "Locked until preview is current and safe",
-            "Locked until queues exist",
+            "Upload",
+            "Check",
+            "Preview",
+            "Confirm",
+            "Start",
+            "Locked until Check/Triage completes.",
+            "No live recipient queues are ready to start.",
             "safer_recontact_source_summary",
             "lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary",
             "active history ·",
@@ -762,6 +815,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "selectedDispatchSourceLabel",
             "leads-dispatch-section-deferred",
             "Counts below describe the current checked and triaged source only.",
+            "Source rows 0 · Not ready for preview until Upload & Check completes.",
             "leadsControlCheckResult",
             "Current queue exists: Private JC",
             "Sender controls are on Dashboard.",
@@ -782,7 +836,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Fast Triage running...",
             "Fast Triage complete. Preview Dispatch is ready.",
             "No preview yet.",
-            "Run Preview Dispatch to calculate writable recipients.",
+            "Locked until Check/Triage completes.",
             "Preview failed. Retry Preview Dispatch.",
             "Preview blocked.",
             "Preview/source/cap mismatch. Retry Preview Dispatch.",

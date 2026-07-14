@@ -24,7 +24,6 @@
   --success: #7ce0b7;
   --shadow: 0 14px 40px rgba(2, 8, 18, 0.28);
 }
-
 /* Global resets */
 * {
   box-sizing: border-box;
@@ -12627,4 +12626,53 @@ h3,
   #leads-view.warm-research-mode .leads-command-center {
     padding: 10px;
   }
+}
+/* Lead Ops campaign-intake polish mirrors the active Vite CSS hooks. */
+#leads-view:not(.warm-research-mode) .leads-control-bar {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(250px, .75fr) minmax(330px, 1.08fr);
+  grid-template-areas: "source result status" "source result actions";
+  align-items: start;
+  gap: 12px;
+}
+#leads-view:not(.warm-research-mode) .leads-control-source { grid-area: source; }
+#leads-view:not(.warm-research-mode) .leads-control-results { grid-area: result; }
+#leads-view:not(.warm-research-mode) .lead-check-status-card { grid-area: status; }
+#leads-view:not(.warm-research-mode) .leads-control-actions { grid-area: actions; }
+#leads-view .lead-check-processing-strip,
+#leads-view .source-summary-empty,
+#leads-view .leads-check-waiting,
+#leads-view .leads-check-failed { border-radius: 12px; }
+#leads-view .lead-check-processing-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(96,165,250,.18);
+  background: rgba(96,165,250,.075);
+}
+#leads-view .lead-check-processing-strip span { font-weight: 800; text-transform: uppercase; }
+#leads-view .lead-check-processing-strip em { font-style: normal; color: var(--muted); }
+#leads-view .workflow-tracker-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+#leads-view .workflow-tracker-row { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+#leads-view .btn.is-locked,
+#leads-view .btn:disabled { box-shadow: none; opacity: .72; }
+#leads-view #leads-dispatch-cap { border-radius: 9px; font-weight: 750; }
+@media (max-width: 1180px) {
+  #leads-view:not(.warm-research-mode) .leads-control-bar {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas: "source status" "result actions";
+  }
+  #leads-view .workflow-tracker-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  #leads-view:not(.warm-research-mode) .leads-control-bar {
+    grid-template-columns: 1fr;
+    grid-template-areas: "source" "result" "status" "actions";
+  }
+  #leads-view .lead-check-status-grid,
+  #leads-view .workflow-tracker-row,
+  #leads-view .lead-check-processing-strip { grid-template-columns: 1fr; }
 }

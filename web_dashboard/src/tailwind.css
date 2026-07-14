@@ -1083,3 +1083,275 @@
     transition-duration: .01ms !important;
   }
 }
+
+/* Lead Ops campaign-intake polish: frontend-only layout refinement. */
+.react-leads-page:not(.warm-research-mode) .react-warm-surface .leads-control-bar {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(250px, .75fr) minmax(330px, 1.08fr);
+  grid-template-areas:
+    "source result status"
+    "source result actions";
+  align-items: start;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 15px;
+  background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.015));
+}
+
+.react-leads-page:not(.warm-research-mode) .leads-control-source { grid-area: source; }
+.react-leads-page:not(.warm-research-mode) .leads-control-results { grid-area: result; }
+.react-leads-page:not(.warm-research-mode) .lead-check-status-card { grid-area: status; }
+.react-leads-page:not(.warm-research-mode) .leads-control-actions { grid-area: actions; }
+
+.react-leads-page .leads-control-source,
+.react-leads-page .leads-control-results,
+.react-leads-page .lead-check-status-card {
+  min-height: 0;
+  border-radius: 13px;
+  border: 1px solid rgba(148,163,184,.14);
+  background: rgba(7,12,20,.64);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+}
+
+.react-leads-page .leads-control-source,
+.react-leads-page .leads-control-results {
+  padding: 13px;
+}
+
+.react-leads-page .leads-control-source > strong,
+.react-leads-page .leads-control-results > span:first-child {
+  font-size: .96rem;
+  color: #edf3fb;
+}
+
+.react-leads-page .leads-control-check-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  color: #b8c5d6;
+}
+
+.react-leads-page .leads-control-check-chips > span {
+  border: 1px solid rgba(148,163,184,.16);
+  border-radius: 999px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,.035);
+  font-size: .73rem;
+}
+
+.react-leads-page .leads-check-waiting,
+.react-leads-page .leads-check-failed {
+  border-radius: 10px !important;
+  width: 100%;
+  padding: 8px 9px !important;
+}
+
+.react-leads-page .leads-check-waiting {
+  color: #d8e7ff;
+  background: rgba(96,165,250,.10) !important;
+  border-color: rgba(96,165,250,.20) !important;
+}
+
+.react-leads-page .leads-check-failed {
+  color: #ffd1c7;
+  background: rgba(248,113,113,.10) !important;
+  border-color: rgba(248,113,113,.20) !important;
+}
+
+.react-leads-page .lead-check-status-card {
+  padding: 13px;
+}
+
+.react-leads-page .lead-check-status-head {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.react-leads-page .lead-check-status-head strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 1.22rem;
+  letter-spacing: -.02em;
+  color: #f1f6fd;
+}
+
+.react-leads-page .lead-check-status-head span:not(.mini-pill) {
+  color: #aebbd0;
+  line-height: 1.35;
+}
+
+.react-leads-page .lead-check-processing-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(96,165,250,.18);
+  border-radius: 12px;
+  background: rgba(96,165,250,.075);
+  color: #cfe3ff;
+}
+
+.react-leads-page .lead-check-processing-strip span {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: rgba(96,165,250,.16);
+  font-size: .68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.react-leads-page .lead-check-processing-strip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .82rem;
+}
+
+.react-leads-page .lead-check-processing-strip em {
+  color: #8fa3bd;
+  font-size: .72rem;
+  font-style: normal;
+}
+
+.react-leads-page .lead-check-status-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.react-leads-page .lead-check-status-grid div {
+  min-width: 0;
+  padding: 8px;
+}
+
+.react-leads-page .lead-check-status-grid strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.react-leads-page .lead-check-guidance {
+  margin-top: 10px;
+  border-radius: 11px;
+  padding: 9px 10px;
+  color: #d6dfeb;
+  background: rgba(255,255,255,.035);
+}
+
+.react-leads-page .leads-control-actions {
+  align-self: stretch;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0;
+}
+
+.react-leads-page .leads-source-actions-label {
+  flex-basis: 100%;
+  color: #7f90a8;
+  font-size: .66rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.react-leads-page .workflow-tracker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.react-leads-page .workflow-tracker-head > span {
+  color: #8ea1bb;
+  font-size: .72rem;
+}
+
+.react-leads-page .workflow-tracker-row {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.react-leads-page .workflow-track-step {
+  min-height: 86px;
+  padding: 10px;
+  border-radius: 13px;
+}
+
+.react-leads-page .workflow-track-number {
+  width: 22px;
+  height: 22px;
+}
+
+.react-leads-page .workflow-track-copy em {
+  text-transform: uppercase;
+  letter-spacing: .07em;
+}
+
+.react-leads-page .source-summary-empty {
+  margin-top: 10px;
+}
+
+.react-leads-page .leads-command-controls .leads-quick-file:not(.dispatch-technical-select) {
+  max-width: 150px;
+  padding: 10px;
+  border-radius: 12px;
+}
+
+.react-leads-page .leads-command-controls .leads-quick-file:not(.dispatch-technical-select) .label {
+  color: #c8d4e5;
+  font-size: .72rem;
+  font-weight: 800;
+  text-transform: none;
+}
+
+.react-leads-page #leads-dispatch-cap {
+  height: 34px;
+  border-radius: 9px;
+  font-weight: 750;
+}
+
+.react-leads-page .btn.is-locked,
+.react-leads-page .btn:disabled {
+  color: #8090a7 !important;
+  border-color: rgba(148,163,184,.13) !important;
+  background: rgba(148,163,184,.075) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.react-leads-page .leads-preview-command:has(.btn.is-locked),
+.react-leads-page .leads-confirm-command:has(.btn.is-locked) {
+  background: rgba(7,12,20,.54);
+}
+
+@media (max-width: 1180px) {
+  .react-leads-page:not(.warm-research-mode) .react-warm-surface .leads-control-bar {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "source status"
+      "result actions";
+  }
+
+  .react-leads-page .workflow-tracker-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .react-leads-page:not(.warm-research-mode) .react-warm-surface .leads-control-bar {
+    grid-template-columns: 1fr;
+    grid-template-areas: "source" "result" "status" "actions";
+  }
+
+  .react-leads-page .lead-check-status-grid,
+  .react-leads-page .workflow-tracker-row {
+    grid-template-columns: 1fr;
+  }
+
+  .react-leads-page .lead-check-processing-strip {
+    grid-template-columns: 1fr;
+  }
+}
