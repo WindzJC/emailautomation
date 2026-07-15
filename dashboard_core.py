@@ -125,6 +125,11 @@ AWAITING_BUCKET_LABELS = {
     "h1_to_24": "1-24h",
     "gt_24h": ">24h",
 }
+SENDGRID_OUTCOME_STALE_HOURS = 24
+SENDGRID_OUTCOME_STALE_WARNING_TEXT = (
+    "SendGrid outcome feed is stale. Emails may have been accepted by SendGrid, "
+    "but delivery/bounce/spam outcomes are not currently being received."
+)
 AUTO_STOP_EVENT_LOCK = threading.Lock()
 AUTO_STOP_EVENTS: Dict[str, Dict[str, object]] = {}
 _WEBHOOK_RECEIVER_CACHE_LOCK = threading.Lock()
@@ -2010,6 +2015,47 @@ def build_webhook_health(
         "duplicate_hits_1h": int(dedupe_stats.get("duplicate_hits_1h", 0) or 0),
         "duplicate_hits_selected_window": int(dedupe_stats.get("duplicate_hits_selected_window", 0) or 0),
         "duplicate_hits_total": int(dedupe_stats.get("duplicate_hits_total", 0) or 0),
+    }
+
+
+def build_sendgrid_outcome_health(
+    webhook_health: Dict[str, object],
+    total_awaiting_outcome: int,
+) -> Dict[str, object]:
+    latest_iso = str(webhook_health.get("last_received_iso") or "").strip()
+    latest_event = parse_iso_utc(latest_iso)
+    now = datetime.now(timezone.utc)
+    latest_age_seconds = int((now - latest_event).total_seconds()) if latest_event else None
+    stale_cutoff = now - timedelta(hours=SENDGRID_OUTCOME_STALE_HOURS)
+    awaiting = max(0, int(total_awaiting_outcome or 0))
+    event_stale = latest_event is None or latest_event < stale_cutoff
+    warning = awaiting > 0 and event_stale
+    receiver_url_configured = bool(str(SENDGRID_WEBHOOK_RECEIVER_URL or "").strip())
+    if warning:
+        state = "stale"
+        message = SENDGRID_OUTCOME_STALE_WARNING_TEXT
+    elif not receiver_url_configured:
+        state = "missing_receiver_url"
+        message = "SendGrid webhook receiver URL is not configured."
+    elif latest_event:
+        state = "healthy"
+        message = "SendGrid outcome feed is receiving events."
+    else:
+        state = "no_events"
+        message = "No SendGrid webhook events have been received yet."
+    return {
+        "state": state,
+        "warning": warning,
+        "message": message,
+        "webhook_route_exists": True,
+        "sendgrid_event_public_key_configured": WEBHOOK_SIGNATURE_ENABLED,
+        "sendgrid_webhook_receiver_url_configured": receiver_url_configured,
+        "latest_sendgrid_event_timestamp": latest_iso,
+        "latest_sendgrid_event_age": str(webhook_health.get("last_received_age") or "never"),
+        "latest_sendgrid_event_age_seconds": latest_age_seconds,
+        "awaiting_outcome": awaiting,
+        "stale_after_hours": SENDGRID_OUTCOME_STALE_HOURS,
+        "warning_text": SENDGRID_OUTCOME_STALE_WARNING_TEXT if warning else "",
     }
 
 
@@ -3899,6 +3945,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         reference_utc=datetime.now(timezone.utc),
     )
     webhook_health = build_webhook_health(webhook_events, activity_hours, dedupe_stats=webhook_dedupe_stats)
+    local_webhook_health = dict(webhook_health)
     receiver_summary = fetch_sendgrid_receiver_summary(activity_hours)
     if receiver_summary:
         receiver_panels = build_profile_webhook_panels_from_receiver(receiver_summary, SENDGRID_PROFILES)
@@ -3922,6 +3969,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
     total_run_errors = sum(s.run_errors for s in snapshots)
     total_run_skipped = sum(s.run_skipped for s in snapshots)
     total_awaiting_outcome = sum(int(awaiting_metrics.get(s.name, {}).get("awaiting_outcome", 0) or 0) for s in snapshots)
+    sendgrid_outcome_health = build_sendgrid_outcome_health(local_webhook_health, total_awaiting_outcome)
     historical_errors_today = sum(max(0, s.errors_today - s.run_errors) for s in snapshots)
     recent_failures = recent_failure_count(activity)
     recent_unmapped = int(activity.get("unmapped_count", 0) or 0)
@@ -4014,6 +4062,19 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         auto_stop_events=auto_stop_events,
         private_bounce_guard=private_bounce_guard,
     )
+    if bool(sendgrid_outcome_health.get("warning")):
+        alerts.insert(
+            0,
+            {
+                "severity": "warn",
+                "title": "SendGrid outcome feed stale",
+                "message": str(sendgrid_outcome_health.get("warning_text") or SENDGRID_OUTCOME_STALE_WARNING_TEXT),
+                "source_function": "dashboard_core.build_sendgrid_outcome_health",
+                "blocks_sending": False,
+                "blocking_label": "Warning",
+                "affected_provider": "sendgrid",
+            },
+        )
     for provider_report in (private_queue_safety, sendgrid_queue_safety):
         if bool(provider_report.get("safe")) and bool(provider_report.get("partial_consumption_verified")):
             provider_label = str(provider_report.get("affected_provider") or provider_report.get("provider") or "queue").replace("_", " ").title()
@@ -4092,6 +4153,7 @@ def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> 
         "sendgrid_queue_safety": sendgrid_queue_safety,
         "private_queue_safety": private_queue_safety,
         "webhook_health": webhook_health,
+        "sendgrid_outcome_health": sendgrid_outcome_health,
         "awaiting_age_buckets": {
             "labels": dict(AWAITING_BUCKET_LABELS),
             "total": dict(awaiting_age_buckets.get("__total__", empty_awaiting_buckets())),

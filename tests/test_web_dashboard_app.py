@@ -1057,6 +1057,13 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
             "total_awaiting_outcome",
+            "sendgridOutcomeHealthSummaryHtml",
+            "sendgrid_outcome_health",
+            "Route yes",
+            "Public key yes",
+            "Receiver URL no",
+            "Latest outcome event",
+            "SendGrid outcome feed is stale. Emails may have been accepted by SendGrid, but delivery/bounce/spam outcomes are not currently being received.",
             "Alerts",
             "Next Action",
             "summary-alert-counts",

@@ -2742,7 +2742,27 @@ function selectedQueueConfirmLabel(preview = lastImportantDispatchPreview, dispa
   return "Confirm Fresh Cold Queue";
 }
 
+function sendgridOutcomeHealthSummaryHtml(snapshot = lastSnapshot) {
+  const health = snapshot?.sendgrid_outcome_health || {};
+  if (!health || typeof health !== "object") return "";
+  const route = health.webhook_route_exists ? "Route yes" : "Route no";
+  const key = health.sendgrid_event_public_key_configured ? "Public key yes" : "Public key no";
+  const receiver = health.sendgrid_webhook_receiver_url_configured ? "Receiver URL yes" : "Receiver URL no";
+  const latest = health.latest_sendgrid_event_timestamp
+    ? formatGeneratedAt(health.latest_sendgrid_event_timestamp)
+    : "No SendGrid events";
+  const warning = health.warning_text || (health.warning ? (health.message || SENDGRID_OUTCOME_STALE_WARNING) : "");
+  return `
+    <div class="summary-small-note sendgrid-outcome-health sendgrid-outcome-health-${escapeHtml(health.state || "unknown")}">
+      <span>${escapeHtml(route)} · ${escapeHtml(key)} · ${escapeHtml(receiver)}</span>
+      <span>Latest outcome event: ${escapeHtml(latest)}</span>
+      ${warning ? `<strong>${escapeHtml(warning)}</strong>` : ""}
+    </div>
+  `;
+}
+
 const REQUIRED_DISPATCH_FIELDS = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"];
+const SENDGRID_OUTCOME_STALE_WARNING = "SendGrid outcome feed is stale. Emails may have been accepted by SendGrid, but delivery/bounce/spam outcomes are not currently being received.";
 
 function previewPlannedRows(preview = null) {
   const queues = preview?.plan_rows_by_queue && typeof preview.plan_rows_by_queue === "object"
@@ -6543,7 +6563,10 @@ function renderSummary(snapshot) {
       value: sendgridPending > 0 ? `${sendgridPending.toLocaleString()} pending` : "Complete",
       note: `${sendgridPending.toLocaleString()} pending · ${Number(sendgridProgress.sent || 0).toLocaleString()} sent`,
       tone: sendgridRunning > 0 ? "good" : sendgridPending > 0 ? "warn" : "neutral",
-      detailsHtml: `<div class="summary-small-note">Daily ${escapeHtml(sendgridDailyTime || "manual")} · ${targetWindowHours.toLocaleString()}h window</div>`,
+      detailsHtml: `
+        <div class="summary-small-note">Daily ${escapeHtml(sendgridDailyTime || "manual")} · ${targetWindowHours.toLocaleString()}h window</div>
+        ${sendgridOutcomeHealthSummaryHtml(snapshot)}
+      `,
     },
     {
       key: "alerts",

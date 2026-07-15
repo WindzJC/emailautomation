@@ -2641,6 +2641,96 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(3, snapshot["webhook_health"]["unmapped_selected_window"])
         self.assertEqual(1, snapshot["webhook_health"]["bounces_with_bounce_classification"])
         self.assertEqual(1, snapshot["webhook_health"]["bounces_missing_bounce_classification"])
+        self.assertIn("sendgrid_outcome_health", snapshot)
+        self.assertTrue(snapshot["sendgrid_outcome_health"]["webhook_route_exists"])
+
+    def test_sendgrid_outcome_health_warns_when_events_stale_with_awaiting_outcomes(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
+            dashboard_core,
+            "SENDGRID_WEBHOOK_RECEIVER_URL",
+            "",
+        ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", True):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {
+                    "last_received_iso": "2026-07-13T11:00:00+00:00",
+                    "last_received_age": "2d ago",
+                },
+                total_awaiting_outcome=814,
+            )
+
+        self.assertEqual("stale", health["state"])
+        self.assertTrue(health["warning"])
+        self.assertTrue(health["webhook_route_exists"])
+        self.assertTrue(health["sendgrid_event_public_key_configured"])
+        self.assertFalse(health["sendgrid_webhook_receiver_url_configured"])
+        self.assertEqual("2026-07-13T11:00:00+00:00", health["latest_sendgrid_event_timestamp"])
+        self.assertEqual(dashboard_core.SENDGRID_OUTCOME_STALE_WARNING_TEXT, health["warning_text"])
+
+    def test_sendgrid_outcome_health_healthy_when_events_recent(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
+            dashboard_core,
+            "SENDGRID_WEBHOOK_RECEIVER_URL",
+            "https://receiver.example.com",
+        ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", True):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {
+                    "last_received_iso": "2026-07-15T11:55:00+00:00",
+                    "last_received_age": "5m ago",
+                },
+                total_awaiting_outcome=3,
+            )
+
+        self.assertEqual("healthy", health["state"])
+        self.assertFalse(health["warning"])
+        self.assertTrue(health["sendgrid_webhook_receiver_url_configured"])
+        self.assertTrue(health["sendgrid_event_public_key_configured"])
+        self.assertEqual("", health["warning_text"])
+
+    def test_sendgrid_outcome_health_reports_missing_receiver_url_without_stale_warning(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
+            dashboard_core,
+            "SENDGRID_WEBHOOK_RECEIVER_URL",
+            "",
+        ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", False):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {
+                    "last_received_iso": "2026-07-15T11:55:00+00:00",
+                    "last_received_age": "5m ago",
+                },
+                total_awaiting_outcome=0,
+            )
+
+        self.assertEqual("missing_receiver_url", health["state"])
+        self.assertFalse(health["warning"])
+        self.assertFalse(health["sendgrid_webhook_receiver_url_configured"])
+        self.assertFalse(health["sendgrid_event_public_key_configured"])
 
     def _patched_dashboard_context(self, base: Path, profiles: dict[str, dict[str, object]]):
         return patch.multiple(
