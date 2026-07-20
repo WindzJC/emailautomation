@@ -12693,12 +12693,20 @@ h3,
 }
 #leads-view .lead-ops-progress-head b {
   flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
   border: 1px solid rgba(129,174,242,.25);
   border-radius: 999px;
   padding: 4px 8px;
   color: #d8e8ff;
   background: rgba(129,174,242,.12);
   font-size: .72rem;
+}
+#leads-view .lead-ops-progress-head b span {
+  display: inline;
+  color: rgba(216,232,255,.72);
+  font-size: .58rem;
 }
 #leads-view .lead-ops-progress-track {
   height: 8px;
@@ -12734,6 +12742,15 @@ h3,
   margin: 0;
   color: #c8d6e8;
   font-size: .76rem;
+  line-height: 1.35;
+}
+#leads-view .lead-ops-progress-warning {
+  border: 1px solid rgba(251,191,36,.22);
+  border-radius: 10px;
+  padding: 7px 9px;
+  color: #ffe8a6;
+  background: rgba(251,191,36,.08);
+  font-size: .74rem;
   line-height: 1.35;
 }
 #leads-view .workflow-tracker-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

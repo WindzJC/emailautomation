@@ -218,9 +218,17 @@ class WebDashboardAppTests(unittest.TestCase):
             "leadOpsProgressCopy",
             "lead_ops_progress",
             "Lead Ops progress",
-            "Checking source rows…",
-            "Triaging leads…",
-            "Preview complete — review safety before Confirm",
+            "Checking leads",
+            "Fast triage",
+            "Previewing dispatch",
+            "Preview complete",
+            "Confirming dispatch",
+            "Confirm complete",
+            "Percent complete",
+            "role=\"progressbar\"",
+            "Elapsed",
+            "ETA",
+            "Lead Ops progress appears stale. The job may have stopped or the dashboard may need inspection.",
             "leadCheckBlocksPreview",
             "leadCheckWorkflowStatus",
             "Ready for preview",
@@ -243,8 +251,12 @@ class WebDashboardAppTests(unittest.TestCase):
             "latest_master_check_matches_current_run",
             "lead_ops_progress",
             "lead_ops_progress_",
-            "Check complete — ready for Preview Dispatch",
-            "Planning dispatch preview…",
+            "Ready for preview",
+            "Previewing dispatch",
+            "Confirming dispatch",
+            "Confirm complete",
+            "LEAD_OPS_PROGRESS_STALE_SECONDS = 120",
+            "Lead Ops progress appears stale. The job may have stopped or the dashboard may need inspection.",
             "preview_ready",
         ]:
             self.assertIn(expected, backend)
@@ -258,6 +270,7 @@ class WebDashboardAppTests(unittest.TestCase):
             ".lead-check-guidance",
             ".lead-ops-progress-module",
             ".lead-ops-progress-track",
+            ".lead-ops-progress-warning",
         ]:
             self.assertIn(expected, styles)
 

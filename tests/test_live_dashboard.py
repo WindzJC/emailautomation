@@ -2805,6 +2805,129 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(1, progress["total_rows"])
             self.assertEqual(str(uploaded_path), progress["input_path"])
 
+    def test_lead_ops_progress_checking_percent_uses_actual_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state_dir = tmp / "state"
+            input_path = tmp / "leadschecker.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            job = {
+                "job_id": "check_progress_percent",
+                "created_at_utc": "2026-07-14T09:29:50+00:00",
+                "effective_input_path": str(input_path),
+                "total_input_rows": 100,
+                "eta_seconds": 30,
+            }
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir):
+                progress = live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="checking",
+                    status="running",
+                    processed_rows=25,
+                    total_rows=100,
+                    current_message="Checking leads",
+                )
+
+            self.assertEqual("checking", progress["phase"])
+            self.assertEqual(25, progress["processed_rows"])
+            self.assertEqual(100, progress["total_rows"])
+            self.assertEqual(25.0, progress["percent"])
+            self.assertEqual("Checking leads", progress["current_message"])
+            self.assertEqual(30, progress["eta_seconds"])
+            self.assertIn("elapsed_seconds", progress)
+
+    def test_lead_ops_progress_triage_percent_uses_actual_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state_dir = tmp / "state"
+            input_path = tmp / "leads.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            job = {
+                "job_id": "triage_progress_percent",
+                "created_at_utc": "2026-07-14T09:30:00+00:00",
+                "effective_input_path": str(input_path),
+                "auto_triage_total_rows": 80,
+                "auto_triage_eta_seconds": 45,
+            }
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir):
+                progress = live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="triaging",
+                    status="running",
+                    processed_rows=40,
+                    total_rows=80,
+                    current_message="Fast triage",
+                )
+
+            self.assertEqual("triaging", progress["phase"])
+            self.assertEqual(40, progress["processed_rows"])
+            self.assertEqual(80, progress["total_rows"])
+            self.assertEqual(50.0, progress["percent"])
+            self.assertEqual("Fast triage", progress["current_message"])
+            self.assertEqual(45, progress["eta_seconds"])
+
+    def test_lead_ops_progress_complete_failed_and_stale_payloads_are_clear(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            state_dir = tmp / "state"
+            input_path = tmp / "leads.csv"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(output_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(rejected_path, ["Email"], [])
+            job = {
+                "job_id": "complete_progress",
+                "created_at_utc": "2026-07-14T09:31:00+00:00",
+                "effective_input_path": str(input_path),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+            }
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir):
+                complete = live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="preview_complete",
+                    status="preview_complete",
+                    processed_rows=10,
+                    total_rows=10,
+                    percent=100,
+                    current_message="Preview complete",
+                )
+                failed = live_dashboard._write_lead_ops_progress(
+                    {**job, "job_id": "failed_progress"},
+                    phase="failed",
+                    status="failed",
+                    processed_rows=0,
+                    total_rows=10,
+                    percent=0,
+                    current_message="Failed",
+                    error_summary="Checker crashed.",
+                )
+
+            stale = live_dashboard._reconcile_lead_ops_progress(
+                {
+                    **job,
+                    "job_id": "stale_progress",
+                    "phase": "checking",
+                    "status": "running",
+                    "updated_at_utc": "2020-01-01T00:00:00+00:00",
+                    "output_path": str(tmp / "missing_leads.csv"),
+                    "rejected_path": str(tmp / "missing_rejected.csv"),
+                },
+                active_job_ids={"stale_progress"},
+            )
+
+            self.assertEqual("preview_complete", complete["phase"])
+            self.assertEqual(100, complete["percent"])
+            self.assertEqual("Preview complete", complete["current_message"])
+            self.assertEqual("failed", failed["phase"])
+            self.assertEqual("Checker crashed.", failed["error_summary"])
+            self.assertEqual("stale", stale["phase"])
+            self.assertEqual(live_dashboard.LEAD_OPS_PROGRESS_STALE_WARNING, stale["stale_warning"])
+
     def test_lead_check_status_mismatch_when_latest_check_points_to_old_run(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)

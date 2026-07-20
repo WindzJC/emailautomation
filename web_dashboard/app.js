@@ -237,6 +237,8 @@ const LEADS_RUN_SAFETY_COPY = [
   "Confirm Dispatch blocked",
   "Check Leads is running for job",
 ];
+const LEAD_OPS_PROGRESS_STALE_WARNING =
+  "Lead Ops progress appears stale. The job may have stopped or the dashboard may need inspection.";
 const pendingProfileActions = new Map();
 const profilePreviewValidationState = new Map();
 const privateJcQueueRepairState = { kind: "", message: "", summary: null };
@@ -1223,13 +1225,15 @@ function leadOpsProgressCopy(phase) {
   const normalized = String(phase || "").toLowerCase();
   const copy = {
     upload_received: "Upload received",
-    checking: "Checking source rows…",
-    triaging: "Triaging leads…",
-    ready_for_preview: "Check complete — ready for Preview Dispatch",
-    previewing: "Planning dispatch preview…",
-    preview_complete: "Preview complete — review safety before Confirm",
-    failed: "Failed — do not preview",
-    stale: "Stale — rerun check before preview",
+    checking: "Checking leads",
+    triaging: "Fast triage",
+    ready_for_preview: "Ready for preview",
+    previewing: "Previewing dispatch",
+    preview_complete: "Preview complete",
+    confirming: "Confirming dispatch",
+    confirm_complete: "Confirm complete",
+    failed: "Failed",
+    stale: "Stale",
   };
   return copy[normalized] || "Upload received";
 }
@@ -1238,7 +1242,9 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   const phase = String(progress.phase || progress.status || "upload_received").toLowerCase();
   const label = leadOpsProgressCopy(phase);
   const rowCounts = progress.row_counts && typeof progress.row_counts === "object" ? progress.row_counts : {};
-  const cleanedRows = Number(rowCounts.cleaned_rows ?? progress.cleaned_rows ?? 0);
+  const progressRows = Number(progress.processed_rows || 0);
+  const completedCheckPhase = ["ready_for_preview", "previewing", "preview_complete"].includes(phase);
+  const cleanedRows = Number(rowCounts.cleaned_rows ?? progress.cleaned_rows ?? (completedCheckPhase ? progressRows : 0));
   const rejectedRows = Number(rowCounts.rejected_rows ?? progress.rejected_rows ?? 0);
   const outputExists = Object.prototype.hasOwnProperty.call(progress, "output_exists")
     ? Boolean(progress.output_exists)
@@ -1247,15 +1253,17 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
     ? Boolean(progress.rejected_exists)
     : Boolean(progress.rejected_path);
   const failed = ["failed", "stale"].includes(phase);
-  const processing = ["upload_received", "checking", "triaging", "previewing"].includes(phase);
+  const processing = ["upload_received", "checking", "triaging", "previewing", "confirming"].includes(phase);
   const previewReady = ["ready_for_preview", "preview_complete"].includes(phase) && cleanedRows > 0 && outputExists && rejectedExists;
   const state = failed ? phase : previewReady ? "success" : processing ? "processing" : "not_ready";
   const guidance = failed
     ? "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
-    : phase === "ready_for_preview"
+      : phase === "ready_for_preview"
       ? "Success: review counts, then Preview Dispatch."
       : phase === "preview_complete"
         ? "Preview complete: review safety before Confirm."
+        : phase === "confirm_complete"
+          ? "Confirm complete."
         : "Processing: wait.";
   return {
     state,
@@ -1283,6 +1291,9 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
     progress_percent: progress.percent,
     processed_rows: progress.processed_rows,
     total_rows: progress.total_rows,
+    elapsed_seconds: progress.elapsed_seconds,
+    eta_seconds: progress.eta_seconds,
+    stale_warning: progress.stale_warning,
     phase,
     current_message: progress.current_message || label,
     error_summary: progress.error_summary || "",
@@ -1296,6 +1307,15 @@ function currentLeadCheckStatus(status = lastLeadsStatus) {
   const uploadType = selectedLeadUploadType();
   const progress = currentLeadOpsProgress(status, uploadType);
   if (progress?.job_id) {
+    const progressPhase = String(progress.phase || progress.status || "").toLowerCase();
+    if (["confirming", "confirm_complete"].includes(progressPhase) && status?.lead_check_status) {
+      return {
+        ...status.lead_check_status,
+        lead_ops_progress: progress,
+        phase: progressPhase,
+        current_message: progress.current_message || leadOpsProgressCopy(progressPhase),
+      };
+    }
     const progressStatus = leadOpsProgressAsCheckStatus(progress);
     if (progressStatus.state !== "success" || !status?.lead_check_status?.preview_ready) {
       return progressStatus;
@@ -1484,6 +1504,13 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
     ? `${processedRows.toLocaleString()} / ${totalRows.toLocaleString()} rows`
     : "";
   const progressUpdated = progress?.updated_at_utc || check.updated_at_utc || "";
+  const elapsedSeconds = Number(check.elapsed_seconds ?? progress?.elapsed_seconds);
+  const etaSeconds = Number(check.eta_seconds ?? progress?.eta_seconds);
+  const elapsedCopy = Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0 ? humanizeDurationCompact(elapsedSeconds) : "";
+  const etaCopy = Number.isFinite(etaSeconds) && etaSeconds > 0 ? humanizeDurationCompact(etaSeconds) : "";
+  const staleWarning = String(
+    check.stale_warning || progress?.stale_warning || (progressPhase === "stale" ? LEAD_OPS_PROGRESS_STALE_WARNING : ""),
+  ).trim();
   const hasProgressJob = Boolean(progress?.job_id || check.job_id || check.check_job_id);
   const processing = ["processing", "upload_received", "checking", "running", "queued"].includes(state.toLowerCase());
   const processingStrip = processing
@@ -1503,10 +1530,10 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
             <span>Lead Ops progress</span>
             <strong>${escapeHtml(progressPhaseLabel)}</strong>
           </div>
-          ${hasProgressPercent ? `<b>${safeProgressPercent.toFixed(0)}%</b>` : `<b>Active</b>`}
+          ${hasProgressPercent ? `<b><span>Percent complete</span>${safeProgressPercent.toFixed(0)}%</b>` : `<b>Active</b>`}
         </div>
         ${hasProgressPercent ? `
-          <div class="lead-ops-progress-track" aria-label="${escapeHtml(progressPhaseLabel)} progress">
+          <div class="lead-ops-progress-track" role="progressbar" aria-label="${escapeHtml(progressPhaseLabel)} progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${safeProgressPercent.toFixed(0)}">
             <i style="width:${safeProgressPercent}%"></i>
           </div>
         ` : ""}
@@ -1514,8 +1541,11 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
           ${progressRowsCopy ? `<span>${escapeHtml(progressRowsCopy)}</span>` : ""}
           <span title="${escapeHtml(jobId)}">Job ${escapeHtml(jobId)}</span>
           ${progressUpdated ? `<span>Updated ${escapeHtml(formatGeneratedAt(progressUpdated))}</span>` : ""}
+          ${elapsedCopy ? `<span>Elapsed ${escapeHtml(elapsedCopy)}</span>` : ""}
+          ${etaCopy ? `<span>ETA ${escapeHtml(etaCopy)}</span>` : ""}
           ${selectedFile ? `<span title="${escapeHtml(selectedFile)}">${escapeHtml(selectedFile)}</span>` : ""}
         </div>
+        ${staleWarning ? `<div class="lead-ops-progress-warning">${escapeHtml(staleWarning)}</div>` : ""}
         ${(check.current_message || check.error_summary) ? `<p>${escapeHtml(check.current_message || check.error_summary)}</p>` : ""}
       </div>
     `
