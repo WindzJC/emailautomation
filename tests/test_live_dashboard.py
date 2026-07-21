@@ -2015,12 +2015,133 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(original, queue_path.read_text(encoding="utf-8"))
             self.assertFalse(backups.exists())
 
+    def test_confirmed_dispatch_preview_resolves_explicit_nested_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_explicit_1234"
+            preview_path = runs / "check_explicit" / "dispatch_previews" / f"{preview_id}.json"
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_text(
+                json.dumps(
+                    {
+                        "preview_id": preview_id,
+                        "status": "confirmed",
+                        "confirmed_run_id": "dispatch_run_explicit",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            latest_dispatch = {
+                "run_id": "dispatch_run_explicit",
+                "preview_path": str(preview_path.relative_to(app_root)),
+            }
+
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical):
+                preview = live_dashboard._resolve_confirmed_dispatch_preview(latest_dispatch, preview_id)
+
+            self.assertEqual(preview_id, preview["preview_id"])
+            self.assertEqual("dispatch_run_explicit", preview["confirmed_run_id"])
+
+    def test_confirmed_dispatch_preview_fallback_uses_exact_nested_id_not_newer_preview(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_target_1234"
+            target_path = runs / "check_target" / "dispatch_previews" / f"{preview_id}.json"
+            unrelated_path = runs / "check_newer" / "dispatch_previews" / "dispatch_preview_unrelated_9999.json"
+            target_path.parent.mkdir(parents=True)
+            unrelated_path.parent.mkdir(parents=True)
+            target_path.write_text(
+                json.dumps(
+                    {
+                        "preview_id": preview_id,
+                        "status": "confirmed",
+                        "confirmed_run_id": "dispatch_run_target",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            unrelated_path.write_text(
+                json.dumps(
+                    {
+                        "preview_id": "dispatch_preview_unrelated_9999",
+                        "status": "confirmed",
+                        "confirmed_run_id": "dispatch_run_unrelated",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            newer = target_path.stat().st_mtime + 60
+            os.utime(unrelated_path, (newer, newer))
+
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical):
+                preview = live_dashboard._resolve_confirmed_dispatch_preview(
+                    {"run_id": "dispatch_run_target"},
+                    preview_id,
+                )
+
+            self.assertEqual(preview_id, preview["preview_id"])
+            self.assertEqual("dispatch_run_target", preview["confirmed_run_id"])
+
+    def test_confirmed_dispatch_preview_missing_returns_clear_failure(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_missing_1234"
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical):
+                with self.assertRaisesRegex(FileNotFoundError, f"Dispatch preview not found: {preview_id}"):
+                    live_dashboard._resolve_confirmed_dispatch_preview({"run_id": "dispatch_run_missing"}, preview_id)
+
+    def test_repair_private_jc_queue_missing_confirmed_preview_returns_clear_failure(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_missing_repair_1234"
+            latest_dispatch = {
+                "status": "completed",
+                "run_id": "dispatch_run_missing_repair",
+                "preview_id": preview_id,
+                "generated_at_utc": "2026-07-20T00:00:00+00:00",
+            }
+
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical), patch.object(
+                live_dashboard, "_build_live_snapshot", return_value={}
+            ), patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": True, "shard_row_count_total": 0},
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
+            ):
+                response = live_dashboard.repair_private_jc_queue()
+
+            body = json.loads(response.body)
+            self.assertEqual(500, response.status_code)
+            self.assertEqual("private_jc_repair_failed", body["error"])
+            self.assertIn(f"Dispatch preview not found: {preview_id}", body["message"])
+
     def test_repair_private_jc_queue_archives_and_rebuilds_from_confirmed_preview_only(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
             shards = tmp / "shards"
             backups = tmp / "backups"
-            previews = tmp / "previews"
+            runs = tmp / "_important" / "runs"
+            previews = tmp / "_important" / "dispatch_jobs" / "previews"
             queue_path = shards / "recipients_private_jc.csv"
             self._write_csv(
                 queue_path,
@@ -2034,6 +2155,7 @@ class LiveDashboardTests(unittest.TestCase):
                 "status": "completed",
                 "run_id": "dispatch_run_1",
                 "preview_id": "preview_1",
+                "preview_path": "_important/runs/check_run_1/dispatch_previews/preview_1.json",
                 "generated_at_utc": "2026-05-20T00:00:00+00:00",
             }
             preview = {
@@ -2059,6 +2181,9 @@ class LiveDashboardTests(unittest.TestCase):
                     ]
                 },
             }
+            nested_preview_path = runs / "check_run_1" / "dispatch_previews" / "preview_1.json"
+            nested_preview_path.parent.mkdir(parents=True)
+            nested_preview_path.write_text(json.dumps(preview), encoding="utf-8")
             before = {
                 "safe": False,
                 "shard_row_count_total": 2,
@@ -2068,9 +2193,13 @@ class LiveDashboardTests(unittest.TestCase):
             }
             after = {"safe": True, "shard_row_count_total": 2}
 
-            with patch.object(live_dashboard.settings, "SHARDS_DIR", shards), patch.object(
+            with patch.object(live_dashboard.settings, "APP_ROOT", tmp), patch.object(
+                live_dashboard.settings, "SHARDS_DIR", shards
+            ), patch.object(
                 live_dashboard.settings, "BACKUPS_DIR", backups
-            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", previews), patch.object(
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", previews
+            ), patch.object(
                 live_dashboard, "_build_live_snapshot", return_value={}
             ), patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None), patch.object(
                 live_dashboard,
@@ -2080,10 +2209,6 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "load_state",
                 return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
-            ), patch.object(
-                live_dashboard,
-                "load_dispatch_preview",
-                return_value=preview,
             ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
                 response = live_dashboard.repair_private_jc_queue()
 
@@ -2192,7 +2317,7 @@ class LiveDashboardTests(unittest.TestCase):
                 return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
             ), patch.object(
                 live_dashboard,
-                "load_dispatch_preview",
+                "_resolve_confirmed_dispatch_preview",
                 return_value=preview,
             ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
                 response = live_dashboard.repair_private_jc_queue()
@@ -2281,7 +2406,7 @@ class LiveDashboardTests(unittest.TestCase):
                 return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
             ), patch.object(
                 live_dashboard,
-                "load_dispatch_preview",
+                "_resolve_confirmed_dispatch_preview",
                 return_value=preview,
             ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
                 response = live_dashboard.repair_private_jc_queue()
@@ -2427,8 +2552,11 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(0, confirmed["sg2_added"])
             self.assertEqual(0, confirmed["sg3_added"])
             self.assertEqual(str(preview["assigned_preview_archive_path"]), confirmed["assigned_preview_archive_path"])
+            self.assertEqual(str(preview["preview_path"]), confirmed["preview_path"])
+            self.assertEqual(str(preview["preview_path"]), confirmed["report"]["preview_path"])
             self.assertEqual(1, report["private_jc_added"])
             self.assertEqual(1, report["sendgrid_added"])
+            self.assertEqual(str(preview["preview_path"]), report["preview_path"])
             self.assertTrue(Path(str(report["assigned_preview_archive_path"])).exists())
             send_via_sendgrid.assert_not_called()
 

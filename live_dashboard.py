@@ -5788,6 +5788,93 @@ def _confirmed_dispatch_archived_path(latest_dispatch: dict[str, object], key: s
     return None
 
 
+def _confirmed_dispatch_explicit_preview_path(latest_dispatch: dict[str, object]) -> str:
+    containers = [latest_dispatch]
+    nested_report = latest_dispatch.get("report") if isinstance(latest_dispatch, dict) else None
+    if isinstance(nested_report, dict):
+        containers.append(nested_report)
+    for container in containers:
+        for key in ("preview_path", "dispatch_preview_path", "confirmed_preview_path"):
+            value = str(container.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Path:
+    candidate = Path(path_value)
+    if not candidate.is_absolute():
+        candidate = settings.APP_ROOT / candidate
+    resolved = candidate.resolve()
+    app_root = settings.APP_ROOT.resolve()
+    try:
+        resolved.relative_to(app_root)
+    except ValueError as exc:
+        raise RuntimeError("Confirmed dispatch preview path is outside the repository. Repair is blocked.") from exc
+    expected_name = f"{preview_id}.json"
+    if resolved == (IMPORTANT_LEADS_DISPATCH_PREVIEWS / expected_name).resolve():
+        return resolved
+    runs_root = IMPORTANT_LEADS_RUNS.resolve()
+    try:
+        relative = resolved.relative_to(runs_root)
+    except ValueError as exc:
+        raise RuntimeError("Confirmed dispatch preview path is outside an approved preview directory. Repair is blocked.") from exc
+    if (
+        len(relative.parts) != 3
+        or relative.parts[1] != "dispatch_previews"
+        or relative.parts[2] != expected_name
+    ):
+        raise RuntimeError("Confirmed dispatch preview path is invalid. Repair is blocked.")
+    return resolved
+
+
+def _load_confirmed_preview_candidate(path: Path, preview_id: str) -> dict[str, object]:
+    preview = load_dispatch_preview(preview_id, preview_dir=path.parent)
+    if str(preview.get("preview_id") or "").strip() != preview_id:
+        raise RuntimeError("Confirmed dispatch preview ID does not match its stored path. Repair is blocked.")
+    return preview
+
+
+def _resolve_confirmed_dispatch_preview(
+    latest_dispatch: dict[str, object],
+    preview_id: str,
+) -> dict[str, object]:
+    if not preview_id or Path(preview_id).name != preview_id or not re.fullmatch(r"[A-Za-z0-9_-]+", preview_id):
+        raise RuntimeError("Latest dispatch preview ID is invalid. Repair is blocked.")
+
+    explicit_path_text = _confirmed_dispatch_explicit_preview_path(latest_dispatch)
+    if explicit_path_text:
+        explicit_path = _safe_confirmed_preview_path(explicit_path_text, preview_id)
+        if explicit_path.exists():
+            return _load_confirmed_preview_candidate(explicit_path, preview_id)
+
+    candidates: list[tuple[Path, dict[str, object]]] = []
+    canonical_path = IMPORTANT_LEADS_DISPATCH_PREVIEWS / f"{preview_id}.json"
+    if canonical_path.exists():
+        candidates.append((canonical_path, _load_confirmed_preview_candidate(canonical_path, preview_id)))
+
+    runs_root = IMPORTANT_LEADS_RUNS.resolve()
+    if runs_root.exists():
+        for candidate in runs_root.glob(f"*/dispatch_previews/{preview_id}.json"):
+            safe_path = _safe_confirmed_preview_path(candidate, preview_id)
+            candidates.append((safe_path, _load_confirmed_preview_candidate(safe_path, preview_id)))
+
+    if not candidates:
+        raise FileNotFoundError(f"Dispatch preview not found: {preview_id}")
+
+    dispatch_run_id = str(latest_dispatch.get("run_id") or "").strip()
+    linked = [
+        item
+        for item in candidates
+        if dispatch_run_id and str(item[1].get("confirmed_run_id") or "").strip() == dispatch_run_id
+    ]
+    if len(linked) == 1:
+        return linked[0][1]
+    if len(linked) > 1 or len(candidates) > 1:
+        raise RuntimeError("Multiple dispatch previews match the latest confirmed dispatch. Repair is blocked.")
+    return candidates[0][1]
+
+
 def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, object]]:
     state = load_state()
     latest_dispatch = state.get(MASTER_DISPATCH_STATE_KEY) if isinstance(state, dict) else {}
@@ -5798,7 +5885,7 @@ def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, o
     preview_id = str(latest_dispatch.get("preview_id") or "").strip()
     if not preview_id:
         raise RuntimeError("Latest dispatch does not reference a preview. Re-run Preview Dispatch and Confirm Dispatch.")
-    preview = load_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+    preview = _resolve_confirmed_dispatch_preview(latest_dispatch, preview_id)
     if str(preview.get("status") or "").strip().lower() != "confirmed":
         raise RuntimeError("Latest dispatch preview is not confirmed. Run Confirm Dispatch before repairing the queue.")
     confirmed_run_id = str(preview.get("confirmed_run_id") or "").strip()
