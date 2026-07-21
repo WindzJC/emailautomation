@@ -3080,6 +3080,7 @@ def _build_dispatch_plan(
         bad_event_skipped = 0
         already_contacted_skipped = 0
         previously_sent_allowed = 0
+        other_family_sent_history_allowed = 0
         already_contacted_allowed = 0
         added_astra = 0
         added_sendgrid = 0
@@ -3166,7 +3167,7 @@ def _build_dispatch_plan(
                 prefer_sendgrid = added_astra > added_sendgrid and email not in jc_sent
 
             def add_to_astra() -> bool:
-                nonlocal added_astra
+                nonlocal added_astra, other_family_sent_history_allowed
                 if email in jc_sent and not allow_previously_sent:
                     route_failure_reasons.append("astra_already_sent")
                     return False
@@ -3176,6 +3177,8 @@ def _build_dispatch_plan(
                 if email in jc_queue_block_emails:
                     route_failure_reasons.append("astra_already_queued")
                     return False
+                if email in sendgrid_sent and email not in jc_sent:
+                    other_family_sent_history_allowed += 1
                 added_astra_rows.append(normalized)
                 jc_queue_block_emails.add(email)
                 added_astra += 1
@@ -3194,7 +3197,7 @@ def _build_dispatch_plan(
                 return True
 
             def add_to_sendgrid() -> bool:
-                nonlocal added_sendgrid, sg_assign_cursor, route_sendgrid_already_sent, route_sendgrid_already_queued
+                nonlocal added_sendgrid, sg_assign_cursor, route_sendgrid_already_sent, route_sendgrid_already_queued, other_family_sent_history_allowed
                 if email in sendgrid_sent and not allow_previously_sent:
                     route_sendgrid_already_sent += 1
                     route_failure_reasons.append("sendgrid_already_sent")
@@ -3206,6 +3209,8 @@ def _build_dispatch_plan(
                     route_sendgrid_already_queued += 1
                     route_failure_reasons.append("sendgrid_already_queued")
                     return False
+                if email in jc_sent and email not in sendgrid_sent:
+                    other_family_sent_history_allowed += 1
                 bucket_index = sg_assign_cursor % len(sendgrid_paths)
                 sg_assign_cursor += 1
                 added_sendgrid_rows_by_index[bucket_index].append(normalized)
@@ -3406,6 +3411,8 @@ def _build_dispatch_plan(
             "bad_suppressed_removed_count": bad_event_skipped + suppressed_skipped,
             "skipped_already_contacted": already_contacted_skipped,
             "previously_sent_allowed_count": previously_sent_allowed,
+            "already_sent_other_family_allowed": other_family_sent_history_allowed,
+            "skipped_already_sent_same_family": skipped_astra_already_sent + skipped_sendgrid_already_sent,
             "already_contacted_allowed_count": already_contacted_allowed,
             "already_contacted_evidence": already_contacted_evidence,
             "duplicate_master_skipped": duplicate_master_skipped,
@@ -3806,6 +3813,8 @@ def confirm_dispatch_preview(
         "confirm_filtered_sendgrid_already_sent": confirm_filtered_sendgrid_already_sent_count,
         "confirm_filtered_sendgrid_already_sent_by_queue": dict(confirm_filtered_sendgrid_already_sent),
         "skipped_already_sent": int(preview.get("skipped_already_sent") or 0) + confirm_filtered_sendgrid_already_sent_count,
+        "skipped_already_sent_same_family": int(preview.get("skipped_already_sent_same_family") or 0) + confirm_filtered_sendgrid_already_sent_count,
+        "already_sent_other_family_allowed": int(preview.get("already_sent_other_family_allowed") or 0),
         "skipped_already_queued": int(preview.get("skipped_already_queued") or 0),
         "suppressed_skipped": int(preview.get("suppressed_skipped") or 0),
         "skipped_suppressed": int(preview.get("skipped_suppressed") or 0),

@@ -44,6 +44,13 @@ from send_shard import (
 
 
 class SendShardTests(unittest.TestCase):
+    def _write_csv(self, path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+
     def test_private_jc_auth_diagnostic_logs_in_without_sending_or_printing_secret(self) -> None:
         calls: list[str] = []
 
@@ -200,6 +207,141 @@ class SendShardTests(unittest.TestCase):
             self.assertIn("author@example.test", send_shard.load_already_done(log_path))
             self.assertTrue(send_shard.email_logged_sent(log_path, "author@example.test"))
             self.assertTrue(send_shard.email_logged_authoritative_sent_any([log_path], "author@example.test"))
+
+    def test_authoritative_sent_history_is_scoped_by_sender_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs_dir = Path(tmpdir)
+            self._write_csv(
+                logs_dir / "private_jc_log.csv",
+                ["Email", "Status"],
+                [{"Email": "jc-sent@example.test", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs_dir / "private_jc_warm_log.csv",
+                ["Email", "Status"],
+                [{"Email": "warm-sent@example.test", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs_dir / "sendgrid_annette_log.csv",
+                ["Email", "Status"],
+                [{"Email": "sg-sent@example.test", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs_dir / "sendgrid_jordan_log.csv",
+                ["Email", "Status"],
+                [{"Email": "sg-jordan-sent@example.test", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs_dir / "sendgrid_domain_log.csv",
+                ["Email", "Status"],
+                [{"Email": "sg-domain-sent@example.test", "Status": "SENT"}],
+            )
+
+            with patch.object(send_shard, "LOGS_DIR", logs_dir):
+                private_paths = send_shard.authoritative_send_log_paths(
+                    logs_dir / "private_domain_log.csv",
+                    profile_name="private_jc",
+                    provider="private",
+                    current_csv=logs_dir / "recipients_private_jc.csv",
+                )
+                sendgrid_paths = send_shard.authoritative_send_log_paths(
+                    profile_name="sendgrid_annette",
+                    provider="sendgrid",
+                    current_csv=logs_dir / "recipients_sendgrid_1.csv",
+                )
+
+                self.assertEqual("private_jc", send_shard.get_sender_family("private_jc"))
+                self.assertEqual("private_jc", send_shard.get_sender_family("private_jc_warm"))
+                self.assertEqual("sendgrid", send_shard.get_sender_family("sendgrid_annette"))
+                self.assertEqual({"private_jc_log.csv", "private_jc_warm_log.csv"}, {path.name for path in private_paths})
+                self.assertIn("sendgrid_annette_log.csv", {path.name for path in sendgrid_paths})
+                self.assertIn("sendgrid_jordan_log.csv", {path.name for path in sendgrid_paths})
+                self.assertIn("sendgrid_domain_log.csv", {path.name for path in sendgrid_paths})
+                self.assertTrue(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "private_jc",
+                        "jc-sent@example.test",
+                        provider="private",
+                        current_csv=logs_dir / "recipients_private_jc.csv",
+                    )
+                )
+                self.assertTrue(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "private_jc",
+                        "warm-sent@example.test",
+                        provider="private",
+                        current_csv=logs_dir / "recipients_private_jc.csv",
+                    )
+                )
+                self.assertFalse(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "private_jc",
+                        "sg-sent@example.test",
+                        provider="private",
+                        current_csv=logs_dir / "recipients_private_jc.csv",
+                    )
+                )
+                self.assertTrue(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "sendgrid_jodi",
+                        "sg-jordan-sent@example.test",
+                        provider="sendgrid",
+                        current_csv=logs_dir / "recipients_sendgrid_3.csv",
+                    )
+                )
+                self.assertTrue(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "sendgrid_fiorela",
+                        "sg-domain-sent@example.test",
+                        provider="sendgrid",
+                        current_csv=logs_dir / "recipients_sendgrid_5.csv",
+                    )
+                )
+                self.assertFalse(
+                    send_shard.is_blocked_by_same_sender_family_history(
+                        "sendgrid_annette",
+                        "jc-sent@example.test",
+                        provider="sendgrid",
+                        current_csv=logs_dir / "recipients_sendgrid_1.csv",
+                    )
+                )
+
+    def test_global_bad_outcome_still_blocks_across_sender_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            log_path = tmp / "private_jc_log.csv"
+            events_path = tmp / "sendgrid_events.jsonl"
+            self._write_csv(
+                log_path,
+                ["Email", "Status"],
+                [{"Email": "invalid@example.test", "Status": "INVALID"}],
+            )
+            events_path.write_text(
+                json.dumps({"email": "bounce@example.test", "event": "bounce"}) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                send_shard.is_blocked_by_global_bad_outcome(
+                    "invalid@example.test",
+                    log_paths=[log_path],
+                    sendgrid_events_path=events_path,
+                )
+            )
+            self.assertTrue(
+                send_shard.is_blocked_by_global_bad_outcome(
+                    "bounce@example.test",
+                    log_paths=[log_path],
+                    sendgrid_events_path=events_path,
+                )
+            )
+            self.assertFalse(
+                send_shard.is_blocked_by_global_bad_outcome(
+                    "fresh@example.test",
+                    log_paths=[log_path],
+                    sendgrid_events_path=events_path,
+                )
+            )
 
     def test_send_idempotency_reservation_blocks_duplicate_campaign_provider_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

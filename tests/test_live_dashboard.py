@@ -19,6 +19,7 @@ import dashboard_core
 import important_leads_verify
 import important_leads_workflow
 import live_dashboard
+import send_shard
 from important_leads_workflow import ImportantLeadsCheckError
 
 
@@ -2099,7 +2100,120 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertIn("outside@example.com", backup_path.read_text(encoding="utf-8"))
             rebuilt_rows = self._read_csv_rows(queue_path)
             self.assertEqual(["safe1@example.com", "safe2@example.com"], [row["Email"] for row in rebuilt_rows])
-            self.assertEqual(["Email", "FirstName", "AuthorName", "BookTitle"], list(rebuilt_rows[0].keys()))
+            self.assertEqual(["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"], list(rebuilt_rows[0].keys()))
+            send_via_sendgrid.assert_not_called()
+
+    def test_repair_private_jc_queue_restores_rows_blocked_only_by_sendgrid_history(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            shards = tmp / "shards"
+            backups = tmp / "backups"
+            logs = tmp / "logs"
+            previews = tmp / "previews"
+            state = tmp / "state"
+            queue_path = shards / "recipients_private_jc.csv"
+            suppressed_path = tmp / "suppressed.csv"
+            unsubscribed_path = tmp / "unsubscribed.csv"
+            sendgrid_suppressions_path = tmp / "sendgrid_suppressions.csv"
+            events_path = tmp / "sendgrid_events.jsonl"
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            self._write_csv(queue_path, headers, [])
+            self._write_csv(
+                logs / "private_jc_log.csv",
+                ["Email", "Status"],
+                [{"Email": "private-sent@example.com", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs / "private_jc_warm_log.csv",
+                ["Email", "Status"],
+                [{"Email": "warm-sent@example.com", "Status": "SENT"}],
+            )
+            self._write_csv(
+                logs / "sendgrid_annette_log.csv",
+                ["Email", "Status"],
+                [
+                    {"Email": "sg-history-only@example.com", "Status": "SENT"},
+                    {"Email": "invalid-outcome@example.com", "Status": "INVALID"},
+                ],
+            )
+            for name in ["sendgrid_jordan_log.csv", "sendgrid_jodi_log.csv", "sendgrid_alison_log.csv", "sendgrid_fiorela_log.csv", "sendgrid_domain_log.csv"]:
+                self._write_csv(logs / name, ["Email", "Status"], [])
+            self._write_csv(suppressed_path, ["Email"], [{"Email": "suppressed@example.com"}])
+            self._write_csv(unsubscribed_path, ["Email"], [{"Email": "unsubscribed@example.com"}])
+            self._write_csv(sendgrid_suppressions_path, ["email", "state", "type"], [])
+            events_path.write_text(json.dumps({"email": "bad-event@example.com", "event": "bounce"}) + "\n", encoding="utf-8")
+            latest_dispatch = {
+                "status": "completed",
+                "run_id": "dispatch_run_repair",
+                "preview_id": "preview_repair",
+                "generated_at_utc": "2026-05-20T00:00:00+00:00",
+            }
+            preview = {
+                "status": "confirmed",
+                "preview_id": "preview_repair",
+                "confirmed_run_id": "dispatch_run_repair",
+                "queue_headers": headers,
+                "queue_paths": {"private_jc": str(queue_path)},
+                "plan_rows_by_queue": {
+                    "private_jc": [
+                        {"Email": "fresh@example.com", "FirstName": "Fresh", "AuthorEmail": "fresh@example.com", "AuthorName": "Fresh Author", "BookTitle": "Fresh Book"},
+                        {"Email": "sg-history-only@example.com", "FirstName": "SG", "AuthorEmail": "sg-history-only@example.com", "AuthorName": "SG Author", "BookTitle": "SG Book"},
+                        {"Email": "private-sent@example.com", "FirstName": "Private", "AuthorEmail": "private-sent@example.com", "AuthorName": "Private Author", "BookTitle": "Private Book"},
+                        {"Email": "warm-sent@example.com", "FirstName": "Warm", "AuthorEmail": "warm-sent@example.com", "AuthorName": "Warm Author", "BookTitle": "Warm Book"},
+                        {"Email": "suppressed@example.com", "FirstName": "Supp", "AuthorEmail": "suppressed@example.com", "AuthorName": "Supp Author", "BookTitle": "Supp Book"},
+                        {"Email": "unsubscribed@example.com", "FirstName": "Unsub", "AuthorEmail": "unsubscribed@example.com", "AuthorName": "Unsub Author", "BookTitle": "Unsub Book"},
+                        {"Email": "invalid-outcome@example.com", "FirstName": "Invalid", "AuthorEmail": "invalid-outcome@example.com", "AuthorName": "Invalid Author", "BookTitle": "Invalid Book"},
+                        {"Email": "bad-event@example.com", "FirstName": "Bad", "AuthorEmail": "bad-event@example.com", "AuthorName": "Bad Author", "BookTitle": "Bad Book"},
+                        {"Email": "not-an-email", "FirstName": "Bad", "AuthorEmail": "not-an-email", "AuthorName": "Bad Author", "BookTitle": "Bad Book"},
+                        {"Email": "fresh@example.com", "FirstName": "Dup", "AuthorEmail": "fresh@example.com", "AuthorName": "Dup Author", "BookTitle": "Dup Book"},
+                    ]
+                },
+            }
+            before = {"safe": True, "shard_row_count_total": 0}
+            after = {"safe": True, "shard_row_count_total": 2}
+
+            with patch.object(live_dashboard.settings, "SHARDS_DIR", shards), patch.object(
+                live_dashboard.settings, "BACKUPS_DIR", backups
+            ), patch.object(live_dashboard.settings, "STATE_DIR", state), patch.object(
+                live_dashboard.settings, "SUPPRESSED_PATH", suppressed_path
+            ), patch.object(live_dashboard.settings, "UNSUBSCRIBED_PATH", unsubscribed_path), patch.object(
+                live_dashboard.settings, "SENDGRID_SUPPRESSIONS_PATH", sendgrid_suppressions_path
+            ), patch.object(live_dashboard.settings, "WEBHOOK_EVENTS_PATH", events_path), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", previews), patch.object(
+                live_dashboard, "_build_live_snapshot", return_value={}
+            ), patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                side_effect=[before, after],
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
+            ), patch.object(
+                live_dashboard,
+                "load_dispatch_preview",
+                return_value=preview,
+            ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                response = live_dashboard.repair_private_jc_queue()
+
+            body = json.loads(response.body)
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["repaired"])
+            self.assertEqual(0, body["summary"]["before_queue_rows"])
+            self.assertEqual(2, body["summary"]["after_queue_rows"])
+            self.assertEqual(10, body["summary"]["planned_private_jc_rows"])
+            self.assertEqual(2, body["summary"]["already_sent_same_family_removed"])
+            self.assertEqual(4, body["summary"]["suppressed_or_bad_outcome_removed"])
+            self.assertEqual(1, body["summary"]["invalid_or_malformed_removed"])
+            self.assertEqual(1, body["summary"]["duplicate_removed"])
+            self.assertEqual(1, body["summary"]["other_family_sent_history_allowed"])
+            rebuilt_rows = self._read_csv_rows(queue_path)
+            self.assertEqual(["fresh@example.com", "sg-history-only@example.com"], [row["Email"] for row in rebuilt_rows])
+            self.assertEqual(headers, list(rebuilt_rows[0].keys()))
+            backup_path = Path(body["summary"]["backup_path"])
+            self.assertTrue(backup_path.exists())
             send_via_sendgrid.assert_not_called()
 
     def test_repair_private_jc_queue_zero_add_confirmed_preview_archives_and_clears(self) -> None:
@@ -2182,7 +2296,10 @@ class LiveDashboardTests(unittest.TestCase):
             backup_path = Path(body["summary"]["backup_path"])
             self.assertTrue(backup_path.exists())
             self.assertEqual([], self._read_csv_rows(queue_path))
-            self.assertEqual(",".join(headers), queue_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(
+                "Email,FirstName,AuthorEmail,AuthorName,BookTitle",
+                queue_path.read_text(encoding="utf-8").splitlines()[0],
+            )
             send_via_sendgrid.assert_not_called()
 
     def test_dispatch_preview_archives_assigned_plan_rows(self) -> None:

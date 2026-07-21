@@ -132,11 +132,22 @@ from private_bounce_hygiene import (
     run_private_bounce_monitor_cycle,
 )
 from provider_pacing import mark_recovery_started, provider_pacing_status
-from send_shard import CAMPAIGN_TYPE_COLD, PROFILES, is_recontact_cold_campaign, normalize_campaign_type
+from send_shard import (
+    CAMPAIGN_TYPE_COLD,
+    PROFILES,
+    authoritative_send_log_paths,
+    email_logged_authoritative_sent_any,
+    load_bad_sendgrid_event_emails,
+    load_done_statuses_from_logs,
+    norm_email,
+    is_recontact_cold_campaign,
+    normalize_campaign_type,
+)
 from sendgrid_hygiene import (
     WEBHOOK_EVENTS_JSONL,
     append_events_jsonl,
     dedupe_webhook_events,
+    load_active_suppressed_emails,
     normalize_webhook_events,
     update_suppressions_from_events,
 )
@@ -5683,6 +5694,87 @@ def _private_jc_repair_email_set(path: Path) -> set[str]:
     return emails
 
 
+PRIVATE_JC_REPAIR_REQUIRED_HEADERS = ("Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle")
+
+
+def _private_jc_repair_headers(queue_headers: list[str]) -> list[str]:
+    headers: list[str] = []
+    seen: set[str] = set()
+    for header in [*PRIVATE_JC_REPAIR_REQUIRED_HEADERS, *queue_headers]:
+        clean = str(header or "").strip()
+        if not clean or clean in seen:
+            continue
+        headers.append(clean)
+        seen.add(clean)
+    return headers
+
+
+def _private_jc_repair_global_blocked_emails() -> set[str]:
+    sendgrid_suppressed, _summary = load_active_suppressed_emails(settings.SENDGRID_SUPPRESSIONS_PATH)
+    blocked = set(sendgrid_suppressed)
+    blocked |= _private_jc_repair_email_set(settings.SUPPRESSED_PATH)
+    blocked |= _private_jc_repair_email_set(settings.UNSUBSCRIBED_PATH)
+    blocked |= load_bad_sendgrid_event_emails(settings.WEBHOOK_EVENTS_PATH)
+    blocked |= load_done_statuses_from_logs(authoritative_send_log_paths(), {"INVALID"})
+    return blocked
+
+
+def _private_jc_repair_rebuild_rows(
+    preview: dict[str, object],
+    queue_headers: list[str],
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    plan_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+    private_family_logs = authoritative_send_log_paths(
+        profile_name="private_jc",
+        provider="private",
+        current_csv=settings.SHARDS_DIR / "recipients_private_jc.csv",
+    )
+    sendgrid_family_logs = authoritative_send_log_paths(
+        profile_name="sendgrid_annette",
+        provider="sendgrid",
+        current_csv=settings.SHARDS_DIR / "recipients_sendgrid_1.csv",
+    )
+    blocked = _private_jc_repair_global_blocked_emails()
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    counts = {
+        "planned_private_jc_rows": 0,
+        "already_sent_same_family_removed": 0,
+        "suppressed_or_bad_outcome_removed": 0,
+        "invalid_or_malformed_removed": 0,
+        "duplicate_removed": 0,
+        "other_family_sent_history_allowed": 0,
+    }
+    for row in (plan_rows_by_queue.get("private_jc") or []):
+        if not isinstance(row, dict):
+            continue
+        counts["planned_private_jc_rows"] += 1
+        email = norm_email(row.get("Email") or "")
+        if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            counts["invalid_or_malformed_removed"] += 1
+            continue
+        if email in seen:
+            counts["duplicate_removed"] += 1
+            continue
+        if email in blocked:
+            counts["suppressed_or_bad_outcome_removed"] += 1
+            continue
+        if email_logged_authoritative_sent_any(private_family_logs, email):
+            counts["already_sent_same_family_removed"] += 1
+            continue
+        if email_logged_authoritative_sent_any(sendgrid_family_logs, email):
+            counts["other_family_sent_history_allowed"] += 1
+        normalized = {header: str(row.get(header, "") or "").strip() for header in queue_headers}
+        normalized["Email"] = email
+        if not normalized.get("AuthorEmail"):
+            normalized["AuthorEmail"] = email
+        if not normalized.get("AuthorName"):
+            normalized["AuthorName"] = normalized.get("FirstName", "")
+        rows.append(normalized)
+        seen.add(email)
+    return rows, counts
+
+
 def _confirmed_dispatch_archived_path(latest_dispatch: dict[str, object], key: str) -> Path | None:
     cleanup = latest_dispatch.get("staged_batch_cleanup") if isinstance(latest_dispatch, dict) else {}
     files = cleanup.get("files") if isinstance(cleanup, dict) else []
@@ -5724,39 +5816,39 @@ def repair_private_jc_queue() -> JSONResponse:
         return preflight_block
     try:
         before = build_dashboard_queue_safety_report("private_jc")
-        if bool(before.get("safe")):
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "repaired": False,
-                    "message": "Private JC queue is already safe.",
-                    "summary": {
-                        "unsafe_rows_archived": 0,
-                        "reject_overlap_rows_removed": 0,
-                        "outside_source_rows_removed": 0,
-                        "rebuilt_queue_rows": int(before.get("shard_row_count_total") or 0),
-                        "backup_path": "",
-                    },
-                    "queue_safety": before,
-                    "snapshot": snapshot,
-                }
-            )
         latest_dispatch, preview = _latest_confirmed_dispatch_preview()
-        queue_headers = [str(value or "").strip() for value in (preview.get("queue_headers") or []) if str(value or "").strip()]
-        if not queue_headers:
+        preview_headers = [str(value or "").strip() for value in (preview.get("queue_headers") or []) if str(value or "").strip()]
+        if not preview_headers:
             raise RuntimeError("Confirmed dispatch preview is missing queue headers. Re-run Preview Dispatch and Confirm Dispatch.")
+        queue_headers = _private_jc_repair_headers(preview_headers)
         queue_paths = preview.get("queue_paths") if isinstance(preview.get("queue_paths"), dict) else {}
         preview_private_path = Path(str(queue_paths.get("private_jc") or settings.SHARDS_DIR / "recipients_private_jc.csv"))
         private_queue_path = settings.SHARDS_DIR / "recipients_private_jc.csv"
         if preview_private_path.name != private_queue_path.name:
             raise RuntimeError("Confirmed dispatch preview does not target the Private JC queue. Re-run Preview Dispatch and Confirm Dispatch.")
-        plan_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
-        planned_rows = [
-            {header: str(row.get(header, "") or "").strip() for header in queue_headers}
-            for row in (plan_rows_by_queue.get("private_jc") or [])
-            if isinstance(row, dict)
-        ]
+        planned_rows, rebuild_counts = _private_jc_repair_rebuild_rows(preview, queue_headers)
         live_queue_emails = _private_jc_repair_email_set(private_queue_path)
+        planned_emails = {norm_email(row.get("Email") or "") for row in planned_rows if norm_email(row.get("Email") or "")}
+        if bool(before.get("safe")) and live_queue_emails == planned_emails:
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "repaired": False,
+                    "message": "Private JC queue is already safe and matches the latest confirmed Private JC plan.",
+                    "summary": {
+                        "before_queue_rows": int(before.get("shard_row_count_total") or len(live_queue_emails)),
+                        "after_queue_rows": int(before.get("shard_row_count_total") or len(live_queue_emails)),
+                        "unsafe_queue_rows_archived": 0,
+                        "reject_overlap_rows_removed": 0,
+                        "outside_source_rows_removed": 0,
+                        "rebuilt_queue_rows": int(before.get("shard_row_count_total") or len(live_queue_emails)),
+                        "backup_path": "",
+                        **rebuild_counts,
+                    },
+                    "queue_safety": before,
+                    "snapshot": snapshot,
+                }
+            )
         confirmed_source_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_keep")
         if confirmed_source_path is None:
             source_text = str(latest_dispatch.get("dispatch_source_path") or preview.get("dispatch_source_path") or "").strip()
@@ -5799,6 +5891,9 @@ def repair_private_jc_queue() -> JSONResponse:
             "outside_source_rows_removed": outside_current_source_removed,
             "matching_current_source_reviewed": matching_current_source_reviewed,
             "rebuilt_queue_rows": len(planned_rows),
+            "before_queue_rows": int(before.get("shard_row_count_total") or len(live_queue_emails)),
+            "after_queue_rows": len(planned_rows),
+            **rebuild_counts,
         }
         manifest_path = repair_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -5807,12 +5902,20 @@ def repair_private_jc_queue() -> JSONResponse:
         _write_private_jc_queue_repair_csv(private_queue_path, queue_headers, planned_rows)
         after = build_dashboard_queue_safety_report("private_jc")
         summary = {
+            "before_queue_rows": manifest["before_queue_rows"],
+            "after_queue_rows": manifest["after_queue_rows"],
             "unsafe_queue_rows_archived": manifest["unsafe_queue_rows_archived"],
             "reject_overlap_rows_removed": manifest["reject_overlap_rows_removed"],
             "quarantine_overlap_rows_removed": manifest["quarantine_overlap_rows_removed"],
             "outside_source_rows_removed": manifest["outside_source_rows_removed"],
             "matching_current_source_reviewed": manifest["matching_current_source_reviewed"],
             "rebuilt_queue_rows": manifest["rebuilt_queue_rows"],
+            "planned_private_jc_rows": manifest["planned_private_jc_rows"],
+            "already_sent_same_family_removed": manifest["already_sent_same_family_removed"],
+            "suppressed_or_bad_outcome_removed": manifest["suppressed_or_bad_outcome_removed"],
+            "invalid_or_malformed_removed": manifest["invalid_or_malformed_removed"],
+            "duplicate_removed": manifest["duplicate_removed"],
+            "other_family_sent_history_allowed": manifest["other_family_sent_history_allowed"],
             "backup_path": str(backup_path),
         }
         return JSONResponse(

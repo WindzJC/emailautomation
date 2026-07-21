@@ -683,11 +683,75 @@ def _log_row_is_authoritative_sent(row: Dict[str, str]) -> bool:
     return status == "ATTEMPT" and _log_info_marks_sent(row.get("Info") or "")
 
 
-def authoritative_send_log_paths(*extra_paths: Path) -> List[Path]:
+SENDER_FAMILY_PRIVATE_JC = "private_jc"
+SENDER_FAMILY_SENDGRID = "sendgrid"
+SKIPPED_ALREADY_SENT_SAME_FAMILY = "SKIPPED_ALREADY_SENT_SAME_FAMILY"
+SKIPPED_ALREADY_SENT_OTHER_FAMILY_ALLOWED = "SKIPPED_ALREADY_SENT_OTHER_FAMILY_ALLOWED"
+SKIPPED_SUPPRESSED_OR_BAD_OUTCOME = "SKIPPED_SUPPRESSED_OR_BAD_OUTCOME"
+SKIPPED_INVALID_OR_MALFORMED = "SKIPPED_INVALID_OR_MALFORMED"
+
+
+def get_sender_family(profile: str) -> str:
+    normalized = str(profile or "").strip().lower()
+    if normalized in {"private_jc", "private_jc_warm"}:
+        return SENDER_FAMILY_PRIVATE_JC
+    cfg = PROFILES.get(normalized, {})
+    provider = str(cfg.get("provider") or "").strip().lower()
+    if provider == "sendgrid" or normalized.startswith("sendgrid_"):
+        return SENDER_FAMILY_SENDGRID
+    return ""
+
+
+def sender_family_for_runtime(profile: str, provider: str, current_csv: Path | str | None = None) -> str:
+    family = get_sender_family(profile)
+    if family:
+        return family
+    normalized_provider = str(provider or "").strip().lower()
+    csv_name = Path(str(current_csv or "")).name.lower()
+    if normalized_provider == "sendgrid" or csv_name.startswith("recipients_sendgrid_"):
+        return SENDER_FAMILY_SENDGRID
+    if csv_name in {"recipients_private_jc.csv", "recipients_private_jc_warm.csv"}:
+        return SENDER_FAMILY_PRIVATE_JC
+    return ""
+
+
+def _profile_log_paths_for_sender_family(family: str) -> List[Path]:
+    family = str(family or "").strip().lower()
+    paths: List[Path] = []
+    for name, cfg in PROFILES.items():
+        if get_sender_family(name) != family:
+            continue
+        keys = ("log", "domain_log") if family == SENDER_FAMILY_SENDGRID else ("log",)
+        for key in keys:
+            raw = cfg.get(key) or ""
+            if not raw:
+                continue
+            path = _resolve_log_path(raw)
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
+def authoritative_send_log_paths(
+    *extra_paths: Path,
+    profile_name: str = "",
+    provider: str = "",
+    current_csv: Path | str | None = None,
+) -> List[Path]:
+    family = sender_family_for_runtime(profile_name, provider, current_csv)
     paths: List[Path] = []
     for path in extra_paths:
-        if path and path not in paths:
+        if not path:
+            continue
+        if family and path not in _profile_log_paths_for_sender_family(family):
+            continue
+        if path not in paths:
             paths.append(path)
+    if family:
+        for path in _profile_log_paths_for_sender_family(family):
+            if path not in paths:
+                paths.append(path)
+        return paths
     for cfg in PROFILES.values():
         provider = str(cfg.get("provider") or "").strip().lower()
         if provider not in {"private", "sendgrid"}:
@@ -718,6 +782,37 @@ def email_logged_authoritative_sent(log_path: Path, email_addr: str) -> bool:
 
 def email_logged_authoritative_sent_any(paths: Sequence[Path], email_addr: str) -> bool:
     return any(email_logged_authoritative_sent(path, email_addr) for path in paths)
+
+
+def is_blocked_by_same_sender_family_history(
+    profile: str,
+    email_addr: str,
+    *,
+    provider: str = "",
+    current_csv: Path | str | None = None,
+    extra_paths: Sequence[Path] = (),
+) -> bool:
+    paths = authoritative_send_log_paths(
+        *extra_paths,
+        profile_name=profile,
+        provider=provider,
+        current_csv=current_csv,
+    )
+    return email_logged_authoritative_sent_any(paths, email_addr)
+
+
+def is_blocked_by_global_bad_outcome(
+    email_addr: str,
+    *,
+    log_paths: Sequence[Path] = (),
+    sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
+) -> bool:
+    email = norm_email(email_addr)
+    if not email:
+        return True
+    bad_emails = load_bad_sendgrid_event_emails(sendgrid_events_path)
+    bad_emails |= load_done_statuses_from_logs(list(log_paths), {"INVALID"})
+    return email in bad_emails
 
 
 def send_idempotency_db_path() -> Path:
@@ -3532,6 +3627,7 @@ def main():
     always_send_set = parse_email_list(getattr(args, "always_send", ""))
     sendgrid_suppressed_active: Set[str] = set()
     sendgrid_bad_event_emails: Set[str] = set()
+    global_bad_outcome_log_paths = authoritative_send_log_paths()
     sendgrid_suppressed_perm = 0
     sendgrid_suppressed_temp_active = 0
     if args.provider in {"private", "sendgrid"}:
@@ -3539,6 +3635,7 @@ def main():
             sendgrid_suppression_csv_path
         )
         sendgrid_bad_event_emails = load_bad_sendgrid_event_emails(settings.WEBHOOK_EVENTS_PATH)
+        sendgrid_bad_event_emails |= load_done_statuses_from_logs(global_bad_outcome_log_paths, {"INVALID"})
         sendgrid_suppressed_perm = int(sendgrid_suppression_summary.get("total_perm", 0) or 0)
         sendgrid_suppressed_temp_active = int(
             sendgrid_suppression_summary.get("total_temp_active", 0) or 0
@@ -3652,12 +3749,28 @@ def main():
             if args.provider in {"private", "sendgrid"} and email_addr in current_sendgrid_suppressed_active:
                 snapshot_stats["skipped_sendgrid_suppressed"] += 1
                 if emit_suppressed_logs:
-                    log_row(log_path, email_addr, "SKIP", campaign_log_info("skip_reason=suppressed", get_row_value_ci(row, ["campaign_type", "CampaignType"]) or args.campaign_type))
+                    log_row(
+                        log_path,
+                        email_addr,
+                        "SKIP",
+                        campaign_log_info(
+                            f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} skip_reason=suppressed",
+                            get_row_value_ci(row, ["campaign_type", "CampaignType"]) or args.campaign_type,
+                        ),
+                    )
                 continue
             if args.provider in {"private", "sendgrid"} and email_addr in current_sendgrid_bad_event_emails:
                 snapshot_stats["skipped_bad_events"] += 1
                 if emit_suppressed_logs:
-                    log_row(log_path, email_addr, "SKIP", campaign_log_info("skip_reason=bad_sendgrid_event", get_row_value_ci(row, ["campaign_type", "CampaignType"]) or args.campaign_type))
+                    log_row(
+                        log_path,
+                        email_addr,
+                        "SKIP",
+                        campaign_log_info(
+                            f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} skip_reason=bad_outcome",
+                            get_row_value_ci(row, ["campaign_type", "CampaignType"]) or args.campaign_type,
+                        ),
+                    )
                 continue
             if email_addr in current_unsubbed or email_addr in current_suppressed:
                 continue
@@ -3787,7 +3900,13 @@ def main():
             return
 
     domain_log_path = _resolve_log_path(args.domain_log) if args.domain_log else log_path
-    authoritative_sent_paths = authoritative_send_log_paths(log_path, domain_log_path)
+    authoritative_sent_paths = authoritative_send_log_paths(
+        log_path,
+        domain_log_path,
+        profile_name=str(args.profile or ""),
+        provider=str(args.provider or ""),
+        current_csv=csv_path,
+    )
     if args.provider in ("private", "sendgrid") and args.max_messages_1h:
         print(
             f"{args.provider.upper()} 1H CAP: {args.max_messages_1h} "
@@ -4283,15 +4402,28 @@ def main():
                 )
                 if args.provider in {"private", "sendgrid"} and to_email in sendgrid_bad_event_emails:
                     if not args.preview_messages:
-                        log_row(log_path, to_email, "SKIP", campaign_log_info("event_type=SKIPPED_BAD_SENDGRID_EVENT", row_campaign_type))
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(
+                                f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} skip_reason=bad_outcome",
+                                row_campaign_type,
+                            ),
+                        )
                     next_index = idx + 1
                     continue
 
                 if not is_recontact_cold_campaign(row_campaign_type) and email_logged_sent(log_path, to_email):
                     if not args.preview_messages:
-                        log_row(log_path, to_email, "SKIP", campaign_log_info("event_type=SKIPPED_ALREADY_SENT", row_campaign_type))
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY}", row_campaign_type),
+                        )
                         runtime_audit.write_lifecycle_event(
-                            "SKIPPED_ALREADY_SENT",
+                            SKIPPED_ALREADY_SENT_SAME_FAMILY,
                             profile=str(args.profile or ""),
                             recipient=to_email,
                             queue_file=csv_path.name,
@@ -4306,7 +4438,10 @@ def main():
                             log_path,
                             to_email,
                             "SKIP",
-                            campaign_log_info("event_type=SKIPPED_ALREADY_SENT_AUTHORITATIVE", row_campaign_type),
+                            campaign_log_info(
+                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family",
+                                row_campaign_type,
+                            ),
                         )
                         if to_email not in always_send_set:
                             remove_email_from_csv(csv_path, to_email)
@@ -4326,7 +4461,10 @@ def main():
                             log_path,
                             to_email,
                             "SKIP",
-                            campaign_log_info("event_type=SKIPPED_ALREADY_SENT_AUTHORITATIVE_AFTER_CLAIM", row_campaign_type),
+                            campaign_log_info(
+                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family_after_claim",
+                                row_campaign_type,
+                            ),
                         )
                         next_index = idx + 1
                         continue

@@ -1018,6 +1018,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["added_sendgrid"], 2)
             self.assertEqual(report["skipped_sendgrid_already_sent"], 1)
             self.assertEqual(report["skipped_sendgrid_already_queued"], 1)
+            self.assertEqual(report["skipped_already_sent_same_family"], 2)
+            self.assertEqual(report["already_sent_other_family_allowed"], 2)
             self.assertEqual(report["skipped_already_queued"], 1)
             self.assertEqual(report["suppressed_skipped"], 1)
             self.assertEqual(report["duplicate_master_skipped"], 1)
