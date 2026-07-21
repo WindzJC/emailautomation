@@ -343,6 +343,39 @@ class SendShardTests(unittest.TestCase):
                 )
             )
 
+    def test_authoritative_history_loader_scans_each_log_once_for_sent_and_invalid_sets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "private_jc_log.csv"
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {"Email": "sent@example.test", "Status": "SENT", "Info": ""},
+                    {"Email": "attempt@example.test", "Status": "ATTEMPT", "Info": "outcome=sent"},
+                    {"Email": "invalid@example.test", "Status": "INVALID", "Info": ""},
+                ],
+            )
+
+            original_open = Path.open
+            open_calls = 0
+
+            def tracked_open(path: Path, *args, **kwargs):
+                nonlocal open_calls
+                if path == log_path:
+                    open_calls += 1
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", autospec=True, side_effect=tracked_open):
+                loaded = send_shard.load_authoritative_history_email_sets([log_path])
+
+            self.assertEqual(1, open_calls)
+            self.assertEqual(
+                {"sent@example.test", "attempt@example.test"},
+                loaded[log_path]["sent"],
+            )
+            self.assertEqual({"invalid@example.test"}, loaded[log_path]["invalid"])
+            self.assertEqual(3, loaded[log_path]["row_count"])
+
     def test_send_idempotency_reservation_blocks_duplicate_campaign_provider_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "send_idempotency.sqlite3"

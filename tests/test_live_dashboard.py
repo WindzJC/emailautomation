@@ -2254,6 +2254,11 @@ class LiveDashboardTests(unittest.TestCase):
                 [{"Email": "warm-sent@example.com", "Status": "SENT"}],
             )
             self._write_csv(
+                logs / "private_domain_log.csv",
+                ["Email", "Status"],
+                [{"Email": "private-invalid-outcome@example.com", "Status": "INVALID"}],
+            )
+            self._write_csv(
                 logs / "sendgrid_annette_log.csv",
                 ["Email", "Status"],
                 [
@@ -2288,6 +2293,7 @@ class LiveDashboardTests(unittest.TestCase):
                         {"Email": "suppressed@example.com", "FirstName": "Supp", "AuthorEmail": "suppressed@example.com", "AuthorName": "Supp Author", "BookTitle": "Supp Book"},
                         {"Email": "unsubscribed@example.com", "FirstName": "Unsub", "AuthorEmail": "unsubscribed@example.com", "AuthorName": "Unsub Author", "BookTitle": "Unsub Book"},
                         {"Email": "invalid-outcome@example.com", "FirstName": "Invalid", "AuthorEmail": "invalid-outcome@example.com", "AuthorName": "Invalid Author", "BookTitle": "Invalid Book"},
+                        {"Email": "private-invalid-outcome@example.com", "FirstName": "Private Invalid", "AuthorEmail": "private-invalid-outcome@example.com", "AuthorName": "Private Invalid Author", "BookTitle": "Private Invalid Book"},
                         {"Email": "bad-event@example.com", "FirstName": "Bad", "AuthorEmail": "bad-event@example.com", "AuthorName": "Bad Author", "BookTitle": "Bad Book"},
                         {"Email": "not-an-email", "FirstName": "Bad", "AuthorEmail": "not-an-email", "AuthorName": "Bad Author", "BookTitle": "Bad Book"},
                         {"Email": "fresh@example.com", "FirstName": "Dup", "AuthorEmail": "fresh@example.com", "AuthorName": "Dup Author", "BookTitle": "Dup Book"},
@@ -2328,17 +2334,181 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertTrue(body["repaired"])
             self.assertEqual(0, body["summary"]["before_queue_rows"])
             self.assertEqual(2, body["summary"]["after_queue_rows"])
-            self.assertEqual(10, body["summary"]["planned_private_jc_rows"])
+            self.assertEqual(11, body["summary"]["planned_private_jc_rows"])
             self.assertEqual(2, body["summary"]["already_sent_same_family_removed"])
-            self.assertEqual(4, body["summary"]["suppressed_or_bad_outcome_removed"])
+            self.assertEqual(5, body["summary"]["suppressed_or_bad_outcome_removed"])
             self.assertEqual(1, body["summary"]["invalid_or_malformed_removed"])
             self.assertEqual(1, body["summary"]["duplicate_removed"])
             self.assertEqual(1, body["summary"]["other_family_sent_history_allowed"])
+            self.assertEqual("complete", body["diagnostics"]["phase"])
+            self.assertEqual(11, body["diagnostics"]["planned_rows_processed"])
+            self.assertEqual(2, body["diagnostics"]["eligible_rows"])
             rebuilt_rows = self._read_csv_rows(queue_path)
             self.assertEqual(["fresh@example.com", "sg-history-only@example.com"], [row["Email"] for row in rebuilt_rows])
             self.assertEqual(headers, list(rebuilt_rows[0].keys()))
             backup_path = Path(body["summary"]["backup_path"])
             self.assertTrue(backup_path.exists())
+            self.assertEqual([], list(queue_path.parent.glob(f".{queue_path.name}.*.tmp")))
+            send_via_sendgrid.assert_not_called()
+
+    def test_private_jc_repair_precomputes_history_sets_once_for_thousands_of_rows(self) -> None:
+        headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+        fresh_rows = [
+            {
+                "Email": f"fresh-{index}@example.test",
+                "FirstName": f"Fresh{index}",
+                "AuthorEmail": f"fresh-{index}@example.test",
+                "AuthorName": f"Fresh Author {index}",
+                "BookTitle": f"Book {index}",
+            }
+            for index in range(4000)
+        ]
+        extra_rows = [
+            {"Email": "sendgrid-only@example.test", "FirstName": "SG"},
+            {"Email": "private-sent@example.test", "FirstName": "Private"},
+            {"Email": "blocked@example.test", "FirstName": "Blocked"},
+            {"Email": "not-an-email", "FirstName": "Invalid"},
+            dict(fresh_rows[0]),
+        ]
+        preview = {"plan_rows_by_queue": {"private_jc": [*fresh_rows, *extra_rows]}}
+        history = {
+            "private_sent": {"private-sent@example.test"},
+            "sendgrid_sent": {"sendgrid-only@example.test"},
+            "invalid_outcomes": {"invalid-outcome@example.test"},
+            "private_history_files": 2,
+            "sendgrid_history_files": 6,
+            "history_rows_loaded": 500000,
+        }
+        original_norm_email = live_dashboard.norm_email
+
+        with patch.object(
+            live_dashboard,
+            "_private_jc_repair_authoritative_history_sets",
+            return_value=history,
+        ) as load_history, patch.object(
+            live_dashboard,
+            "_private_jc_repair_global_blocked_emails",
+            return_value={"blocked@example.test", "invalid-outcome@example.test"},
+        ) as load_global_blocks, patch.object(
+            live_dashboard,
+            "norm_email",
+            wraps=original_norm_email,
+        ) as normalize_email:
+            rows, counts, diagnostics = live_dashboard._private_jc_repair_rebuild_rows(preview, headers)
+
+        load_history.assert_called_once_with()
+        load_global_blocks.assert_called_once_with(invalid_outcomes={"invalid-outcome@example.test"})
+        self.assertEqual(4005, normalize_email.call_count)
+        self.assertEqual(4001, len(rows))
+        self.assertEqual(4005, counts["planned_private_jc_rows"])
+        self.assertEqual(1, counts["already_sent_same_family_removed"])
+        self.assertEqual(1, counts["suppressed_or_bad_outcome_removed"])
+        self.assertEqual(1, counts["invalid_or_malformed_removed"])
+        self.assertEqual(1, counts["duplicate_removed"])
+        self.assertEqual(1, counts["other_family_sent_history_allowed"])
+        self.assertEqual(4001, diagnostics["eligible_rows"])
+        self.assertEqual(500000, diagnostics["source_counts"]["history_rows_loaded"])
+
+    def test_private_jc_repair_reports_authoritative_history_load_failure(self) -> None:
+        preview = {"plan_rows_by_queue": {"private_jc": []}}
+        with patch.object(
+            live_dashboard,
+            "_private_jc_repair_authoritative_history_sets",
+            side_effect=OSError("history unreadable"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "could not load authoritative history: history unreadable",
+            ):
+                live_dashboard._private_jc_repair_rebuild_rows(preview, ["Email"])
+
+    def test_private_jc_repair_failure_restores_original_queue_and_cleans_temp_files(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            shards = tmp / "shards"
+            backups = tmp / "backups"
+            queue_path = shards / "recipients_private_jc.csv"
+            headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
+            self._write_csv(
+                queue_path,
+                headers,
+                [
+                    {
+                        "Email": "original@example.test",
+                        "FirstName": "Original",
+                        "AuthorEmail": "original@example.test",
+                        "AuthorName": "Original Author",
+                        "BookTitle": "Original Book",
+                    }
+                ],
+            )
+            original = queue_path.read_bytes()
+            latest_dispatch = {
+                "status": "completed",
+                "run_id": "dispatch_run_rollback",
+                "preview_id": "preview_rollback",
+                "generated_at_utc": "2026-07-20T00:00:00+00:00",
+            }
+            preview = {
+                "status": "confirmed",
+                "preview_id": "preview_rollback",
+                "confirmed_run_id": "dispatch_run_rollback",
+                "queue_headers": headers,
+                "queue_paths": {"private_jc": str(queue_path)},
+                "plan_rows_by_queue": {
+                    "private_jc": [
+                        {
+                            "Email": "replacement@example.test",
+                            "FirstName": "Replacement",
+                            "AuthorEmail": "replacement@example.test",
+                            "AuthorName": "Replacement Author",
+                            "BookTitle": "Replacement Book",
+                        }
+                    ]
+                },
+            }
+            history = {
+                "private_sent": set(),
+                "sendgrid_sent": set(),
+                "invalid_outcomes": set(),
+                "private_history_files": 0,
+                "sendgrid_history_files": 0,
+                "history_rows_loaded": 0,
+            }
+
+            with patch.object(live_dashboard.settings, "SHARDS_DIR", shards), patch.object(
+                live_dashboard.settings, "BACKUPS_DIR", backups
+            ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+                live_dashboard, "_dispatch_preflight_block_response", return_value=None
+            ), patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                side_effect=[{"safe": False, "shard_row_count_total": 1}, RuntimeError("post-write check failed")],
+            ), patch.object(
+                live_dashboard,
+                "load_state",
+                return_value={live_dashboard.MASTER_DISPATCH_STATE_KEY: latest_dispatch},
+            ), patch.object(
+                live_dashboard,
+                "_resolve_confirmed_dispatch_preview",
+                return_value=preview,
+            ), patch.object(
+                live_dashboard,
+                "_private_jc_repair_authoritative_history_sets",
+                return_value=history,
+            ), patch.object(
+                live_dashboard,
+                "_private_jc_repair_global_blocked_emails",
+                return_value=set(),
+            ), patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
+                response = live_dashboard.repair_private_jc_queue()
+
+            body = json.loads(response.body)
+            self.assertEqual(409, response.status_code)
+            self.assertEqual("private_jc_repair_blocked", body["error"])
+            self.assertIn("original queue restored", body["message"])
+            self.assertEqual(original, queue_path.read_bytes())
+            self.assertEqual([], list(shards.glob(f".{queue_path.name}.*.tmp")))
             send_via_sendgrid.assert_not_called()
 
     def test_repair_private_jc_queue_zero_add_confirmed_preview_archives_and_clears(self) -> None:

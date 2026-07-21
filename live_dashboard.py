@@ -136,9 +136,8 @@ from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
     authoritative_send_log_paths,
-    email_logged_authoritative_sent_any,
+    load_authoritative_history_email_sets,
     load_bad_sendgrid_event_emails,
-    load_done_statuses_from_logs,
     norm_email,
     is_recontact_cold_campaign,
     normalize_campaign_type,
@@ -5667,13 +5666,36 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
 def _write_private_jc_queue_repair_csv(path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({header: str(row.get(header, "") or "").strip() for header in headers})
-    tmp_path.replace(path)
-    settings.secure_private_file(path)
+    try:
+        with tmp_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({header: str(row.get(header, "") or "").strip() for header in headers})
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+        settings.secure_private_file(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _restore_private_jc_queue_after_failed_repair(
+    path: Path,
+    backup_path: Path,
+    *,
+    existed_before: bool,
+) -> None:
+    rollback_tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.rollback.tmp")
+    try:
+        if existed_before:
+            shutil.copy2(backup_path, rollback_tmp)
+            rollback_tmp.replace(path)
+            settings.secure_private_file(path)
+        else:
+            path.unlink(missing_ok=True)
+    finally:
+        rollback_tmp.unlink(missing_ok=True)
 
 
 def _private_jc_repair_email_set(path: Path) -> set[str]:
@@ -5709,32 +5731,88 @@ def _private_jc_repair_headers(queue_headers: list[str]) -> list[str]:
     return headers
 
 
-def _private_jc_repair_global_blocked_emails() -> set[str]:
+def _private_jc_repair_global_blocked_emails(*, invalid_outcomes: set[str] | None = None) -> set[str]:
     sendgrid_suppressed, _summary = load_active_suppressed_emails(settings.SENDGRID_SUPPRESSIONS_PATH)
     blocked = set(sendgrid_suppressed)
     blocked |= _private_jc_repair_email_set(settings.SUPPRESSED_PATH)
     blocked |= _private_jc_repair_email_set(settings.UNSUBSCRIBED_PATH)
     blocked |= load_bad_sendgrid_event_emails(settings.WEBHOOK_EVENTS_PATH)
-    blocked |= load_done_statuses_from_logs(authoritative_send_log_paths(), {"INVALID"})
+    blocked |= set(invalid_outcomes or set())
     return blocked
+
+
+def _private_jc_repair_authoritative_history_sets() -> dict[str, object]:
+    private_family_logs = [
+        Path(path).resolve()
+        for path in authoritative_send_log_paths(
+            profile_name="private_jc",
+            provider="private",
+            current_csv=settings.SHARDS_DIR / "recipients_private_jc.csv",
+        )
+    ]
+    sendgrid_family_logs = [
+        Path(path).resolve()
+        for path in authoritative_send_log_paths(
+            profile_name="sendgrid_annette",
+            provider="sendgrid",
+            current_csv=settings.SHARDS_DIR / "recipients_sendgrid_1.csv",
+        )
+    ]
+    global_history_logs = [Path(path).resolve() for path in authoritative_send_log_paths()]
+    all_paths = list(dict.fromkeys([*private_family_logs, *sendgrid_family_logs, *global_history_logs]))
+    loaded = load_authoritative_history_email_sets(all_paths)
+
+    def union_for(paths: list[Path], key: str) -> set[str]:
+        combined: set[str] = set()
+        for path in paths:
+            combined |= set(loaded.get(path, {}).get(key) or set())
+        return combined
+
+    return {
+        "private_sent": union_for(private_family_logs, "sent"),
+        "sendgrid_sent": union_for(sendgrid_family_logs, "sent"),
+        "invalid_outcomes": union_for(global_history_logs, "invalid"),
+        "private_history_files": len(private_family_logs),
+        "sendgrid_history_files": len(sendgrid_family_logs),
+        "global_history_files": len(global_history_logs),
+        "history_rows_loaded": sum(int(item.get("row_count") or 0) for item in loaded.values()),
+    }
 
 
 def _private_jc_repair_rebuild_rows(
     preview: dict[str, object],
     queue_headers: list[str],
-) -> tuple[list[dict[str, str]], dict[str, int]]:
+) -> tuple[list[dict[str, str]], dict[str, int], dict[str, object]]:
+    started = time.perf_counter()
+    phase_timings: list[dict[str, object]] = []
     plan_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
-    private_family_logs = authoritative_send_log_paths(
-        profile_name="private_jc",
-        provider="private",
-        current_csv=settings.SHARDS_DIR / "recipients_private_jc.csv",
+    history_started = time.perf_counter()
+    try:
+        history = _private_jc_repair_authoritative_history_sets()
+    except Exception as exc:
+        raise RuntimeError(f"Private JC queue repair could not load authoritative history: {exc}") from exc
+    phase_timings.append(
+        {
+            "phase": "load_authoritative_history",
+            "elapsed_seconds": round(time.perf_counter() - history_started, 6),
+        }
     )
-    sendgrid_family_logs = authoritative_send_log_paths(
-        profile_name="sendgrid_annette",
-        provider="sendgrid",
-        current_csv=settings.SHARDS_DIR / "recipients_sendgrid_1.csv",
+    blocked_started = time.perf_counter()
+    try:
+        blocked = _private_jc_repair_global_blocked_emails(
+            invalid_outcomes=set(history.get("invalid_outcomes") or set())
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Private JC queue repair could not load global blocks: {exc}") from exc
+    phase_timings.append(
+        {
+            "phase": "load_global_blocks",
+            "elapsed_seconds": round(time.perf_counter() - blocked_started, 6),
+        }
     )
-    blocked = _private_jc_repair_global_blocked_emails()
+    filter_started = time.perf_counter()
+    private_sent = set(history.get("private_sent") or set())
+    sendgrid_sent = set(history.get("sendgrid_sent") or set())
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
     counts = {
@@ -5759,10 +5837,10 @@ def _private_jc_repair_rebuild_rows(
         if email in blocked:
             counts["suppressed_or_bad_outcome_removed"] += 1
             continue
-        if email_logged_authoritative_sent_any(private_family_logs, email):
+        if email in private_sent:
             counts["already_sent_same_family_removed"] += 1
             continue
-        if email_logged_authoritative_sent_any(sendgrid_family_logs, email):
+        if email in sendgrid_sent:
             counts["other_family_sent_history_allowed"] += 1
         normalized = {header: str(row.get(header, "") or "").strip() for header in queue_headers}
         normalized["Email"] = email
@@ -5772,7 +5850,36 @@ def _private_jc_repair_rebuild_rows(
             normalized["AuthorName"] = normalized.get("FirstName", "")
         rows.append(normalized)
         seen.add(email)
-    return rows, counts
+    phase_timings.append(
+        {
+            "phase": "filter_planned_rows",
+            "elapsed_seconds": round(time.perf_counter() - filter_started, 6),
+        }
+    )
+    diagnostics = {
+        "phase": "filter_complete",
+        "elapsed_seconds": round(time.perf_counter() - started, 6),
+        "phase_timings": phase_timings,
+        "source_counts": {
+            "private_history_files": int(history.get("private_history_files") or 0),
+            "sendgrid_history_files": int(history.get("sendgrid_history_files") or 0),
+            "global_history_files": int(history.get("global_history_files") or 0),
+            "history_rows_loaded": int(history.get("history_rows_loaded") or 0),
+            "private_sent_emails": len(private_sent),
+            "sendgrid_sent_emails": len(sendgrid_sent),
+            "invalid_outcome_emails": len(set(history.get("invalid_outcomes") or set())),
+            "global_blocked_emails": len(blocked),
+        },
+        "planned_rows_processed": counts["planned_private_jc_rows"],
+        "eligible_rows": len(rows),
+        "excluded_counts": {
+            "private_jc_history": counts["already_sent_same_family_removed"],
+            "global_blocked": counts["suppressed_or_bad_outcome_removed"],
+            "invalid_or_malformed": counts["invalid_or_malformed_removed"],
+            "duplicate": counts["duplicate_removed"],
+        },
+    }
+    return rows, counts, diagnostics
 
 
 def _confirmed_dispatch_archived_path(latest_dispatch: dict[str, object], key: str) -> Path | None:
@@ -5897,6 +6004,7 @@ def _latest_confirmed_dispatch_preview() -> tuple[dict[str, object], dict[str, o
 
 @app.post("/api/profiles/private_jc/repair-queue")
 def repair_private_jc_queue() -> JSONResponse:
+    repair_started = time.perf_counter()
     snapshot = _build_live_snapshot()
     preflight_block = _dispatch_preflight_block_response(snapshot=snapshot)
     if preflight_block is not None:
@@ -5913,10 +6021,20 @@ def repair_private_jc_queue() -> JSONResponse:
         private_queue_path = settings.SHARDS_DIR / "recipients_private_jc.csv"
         if preview_private_path.name != private_queue_path.name:
             raise RuntimeError("Confirmed dispatch preview does not target the Private JC queue. Re-run Preview Dispatch and Confirm Dispatch.")
-        planned_rows, rebuild_counts = _private_jc_repair_rebuild_rows(preview, queue_headers)
+        planned_rows, rebuild_counts, diagnostics = _private_jc_repair_rebuild_rows(preview, queue_headers)
+        live_queue_started = time.perf_counter()
         live_queue_emails = _private_jc_repair_email_set(private_queue_path)
-        planned_emails = {norm_email(row.get("Email") or "") for row in planned_rows if norm_email(row.get("Email") or "")}
+        planned_emails = {str(row.get("Email") or "") for row in planned_rows if str(row.get("Email") or "")}
+        diagnostics["phase_timings"].append(
+            {
+                "phase": "load_live_queue",
+                "elapsed_seconds": round(time.perf_counter() - live_queue_started, 6),
+            }
+        )
+        diagnostics["source_counts"]["live_queue_emails"] = len(live_queue_emails)
         if bool(before.get("safe")) and live_queue_emails == planned_emails:
+            diagnostics["phase"] = "already_safe"
+            diagnostics["elapsed_seconds"] = round(time.perf_counter() - repair_started, 6)
             return JSONResponse(
                 {
                     "ok": True,
@@ -5932,10 +6050,12 @@ def repair_private_jc_queue() -> JSONResponse:
                         "backup_path": "",
                         **rebuild_counts,
                     },
+                    "diagnostics": diagnostics,
                     "queue_safety": before,
                     "snapshot": snapshot,
                 }
             )
+        source_sets_started = time.perf_counter()
         confirmed_source_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_keep")
         if confirmed_source_path is None:
             source_text = str(latest_dispatch.get("dispatch_source_path") or preview.get("dispatch_source_path") or "").strip()
@@ -5952,13 +6072,29 @@ def repair_private_jc_queue() -> JSONResponse:
         )
         confirmed_reject_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_reject")
         confirmed_quarantine_path = _confirmed_dispatch_archived_path(latest_dispatch, "triaged_quarantine")
-        reject_overlap_removed = len(live_queue_emails & _private_jc_repair_email_set(confirmed_reject_path)) if confirmed_reject_path else int(before.get("overlap_with_triaged_reject") or 0)
-        quarantine_overlap_removed = len(live_queue_emails & _private_jc_repair_email_set(confirmed_quarantine_path)) if confirmed_quarantine_path else 0
+        confirmed_reject_emails = _private_jc_repair_email_set(confirmed_reject_path) if confirmed_reject_path else set()
+        confirmed_quarantine_emails = _private_jc_repair_email_set(confirmed_quarantine_path) if confirmed_quarantine_path else set()
+        reject_overlap_removed = len(live_queue_emails & confirmed_reject_emails) if confirmed_reject_path else int(before.get("overlap_with_triaged_reject") or 0)
+        quarantine_overlap_removed = len(live_queue_emails & confirmed_quarantine_emails) if confirmed_quarantine_path else 0
+        diagnostics["phase_timings"].append(
+            {
+                "phase": "load_queue_and_confirmed_sources",
+                "elapsed_seconds": round(time.perf_counter() - source_sets_started, 6),
+            }
+        )
+        diagnostics["source_counts"].update(
+            {
+                "confirmed_source_emails": len(confirmed_source_emails),
+                "confirmed_reject_emails": len(confirmed_reject_emails),
+                "confirmed_quarantine_emails": len(confirmed_quarantine_emails),
+            }
+        )
         repair_dir = settings.BACKUPS_DIR / "private_jc_queue_repair" / timestamp_slug()
         repair_dir.mkdir(parents=True, exist_ok=True)
         settings.secure_private_dir(repair_dir)
         backup_path = repair_dir / private_queue_path.name
-        if private_queue_path.exists():
+        queue_existed_before = private_queue_path.exists()
+        if queue_existed_before:
             shutil.copy2(private_queue_path, backup_path)
         else:
             backup_path.write_text("", encoding="utf-8")
@@ -5983,11 +6119,33 @@ def repair_private_jc_queue() -> JSONResponse:
             **rebuild_counts,
         }
         manifest_path = repair_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        settings.secure_private_file(manifest_path)
-
-        _write_private_jc_queue_repair_csv(private_queue_path, queue_headers, planned_rows)
-        after = build_dashboard_queue_safety_report("private_jc")
+        write_started = time.perf_counter()
+        try:
+            _write_private_jc_queue_repair_csv(private_queue_path, queue_headers, planned_rows)
+            after = build_dashboard_queue_safety_report("private_jc")
+            diagnostics["phase_timings"].append(
+                {
+                    "phase": "atomic_queue_write_and_verify",
+                    "elapsed_seconds": round(time.perf_counter() - write_started, 6),
+                }
+            )
+            diagnostics["phase"] = "complete"
+            diagnostics["elapsed_seconds"] = round(time.perf_counter() - repair_started, 6)
+            manifest["diagnostics"] = diagnostics
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            settings.secure_private_file(manifest_path)
+        except Exception as exc:
+            try:
+                _restore_private_jc_queue_after_failed_repair(
+                    private_queue_path,
+                    backup_path,
+                    existed_before=queue_existed_before,
+                )
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"Private JC queue repair failed and rollback also failed: {rollback_exc}"
+                ) from exc
+            raise RuntimeError(f"Private JC queue repair failed; original queue restored: {exc}") from exc
         summary = {
             "before_queue_rows": manifest["before_queue_rows"],
             "after_queue_rows": manifest["after_queue_rows"],
@@ -6011,6 +6169,7 @@ def repair_private_jc_queue() -> JSONResponse:
                 "repaired": True,
                 "message": "Private JC queue repaired from the latest confirmed dispatch preview. JC was not started.",
                 "summary": summary,
+                "diagnostics": diagnostics,
                 "queue_safety_before": before,
                 "queue_safety": after,
                 "snapshot": _build_live_snapshot(),

@@ -784,6 +784,34 @@ def email_logged_authoritative_sent_any(paths: Sequence[Path], email_addr: str) 
     return any(email_logged_authoritative_sent(path, email_addr) for path in paths)
 
 
+def load_authoritative_history_email_sets(
+    paths: Sequence[Path],
+) -> Dict[Path, Dict[str, object]]:
+    loaded: Dict[Path, Dict[str, object]] = {}
+    for raw_path in paths:
+        path = Path(raw_path)
+        sent: Set[str] = set()
+        invalid: Set[str] = set()
+        row_count = 0
+        if path.exists():
+            with path.open(newline="", encoding="utf-8-sig") as handle:
+                for row in csv.DictReader(handle):
+                    row_count += 1
+                    email = norm_email(row.get("Email") or "")
+                    if not email:
+                        continue
+                    if _log_row_is_authoritative_sent(row):
+                        sent.add(email)
+                    if str(row.get("Status") or "").strip().upper() == "INVALID":
+                        invalid.add(email)
+        loaded[path] = {
+            "sent": sent,
+            "invalid": invalid,
+            "row_count": row_count,
+        }
+    return loaded
+
+
 def is_blocked_by_same_sender_family_history(
     profile: str,
     email_addr: str,
