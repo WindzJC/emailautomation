@@ -1131,25 +1131,19 @@ astraproductions.co
 If you would rather not hear from me again, reply “unsubscribe.”
 """
 
-PITCH_WARM_SUBJECT = "Quick idea for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "Quick idea for your book launch"
+PITCH_WARM_SUBJECT = "A presentation direction for {BookTitleOrProject}"
+PITCH_WARM_SUBJECT_FALLBACK = "A presentation direction for your book"
 PITCH_WARM_BODY = """Hi {FirstName},
 
-I came across {BookTitleOrProject} and noticed you’ve been building momentum around the launch, including: {NeedSignal}
+I came across {BookTitleOrProject} and took a look at how the project is currently being presented online.
 
-I’m reaching out because if this is still active, Astra Productions could help strengthen how the book is presented online before more readers, backers, or media opportunities see it.
+The strongest opportunity I see is around {RecommendedService}. Done well, that could give the book a sharper online presence—one that makes it easier to understand, easier to trust, and easier for the right reader to take seriously.
 
-Based on what I saw, the strongest direction would be {RecommendedService} — a cleaner, more cinematic presentation that makes the project feel polished and easier to understand at first glance.
-
-A strong creative direction here would be:
-{OutreachAngle}
-
-If this is already handled, no worries. But if you’re still looking at ways to improve the launch presentation, I’d be happy to send over a simple direction for how this could look.
+I have a specific direction in mind based on the public launch and platform context. If this is still relevant, I can send over a concise concept showing what I would change and why.
 
 Windelle JC
-Creative Director, Astra Productions
-
-Examples: astraproductions.co
+Founder & CEO, Astra Productions
+astraproductions.co
 
 P.S. If you’d rather not hear from me again, just reply unsub.
 """
