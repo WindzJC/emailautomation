@@ -1426,6 +1426,31 @@ class SendShardTests(unittest.TestCase):
         cold = send_shard.PROFILES["private_jc"]
         warm = send_shard.PROFILES["private_jc_warm"]
 
+        matched_operational_settings = {
+            "provider",
+            "from_email",
+            "my_domains",
+            "interval",
+            "batch_size",
+            "cooldown_seconds",
+            "max_messages_1h",
+            "repeat",
+            "human_mode",
+            "max_total",
+            "stop_at_local",
+            "domain_log",
+            "suppress_invalid",
+            "global_dedupe",
+            "account_map",
+            "prune_sent",
+            "password_env",
+        }
+        self.assertEqual(
+            {key: cold[key] for key in matched_operational_settings},
+            {key: warm[key] for key in matched_operational_settings},
+        )
+        self.assertEqual(0, cold["max_total"])
+        self.assertEqual(0, warm["max_total"])
         self.assertEqual("recipients_private_jc_warm.csv", warm["csv"])
         self.assertNotEqual(cold["csv"], warm["csv"])
         self.assertEqual("private_jc_warm_log.csv", warm["log"])
@@ -1442,6 +1467,8 @@ class SendShardTests(unittest.TestCase):
         )
         self.assertTrue(warm["pre_rendered_message"])
         self.assertTrue(warm["allow_confirmed_warm_role_recipients"])
+        self.assertTrue(warm["dashboard_manual_only"])
+        self.assertEqual("", warm["always_send"])
         self.assertNotIn("allow_confirmed_warm_role_recipients", cold)
         self.assertFalse(any(name.startswith("sendgrid_warm") for name in send_shard.PROFILES))
 
@@ -1590,6 +1617,7 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual("", status["next_queued_email"])
             self.assertEqual("DONE", status["last_worker_event"])
             self.assertEqual("queue_complete", status["last_worker_reason"])
+            self.assertEqual(0, status["cap"])
             self.assertTrue(any(event["type"] == "SENT" for event in status["timeline"]))
 
     def test_live_warm_status_detects_partial_running_and_blocked_states(self) -> None:

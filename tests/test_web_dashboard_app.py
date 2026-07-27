@@ -1438,7 +1438,8 @@ class WebDashboardAppTests(unittest.TestCase):
             'status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
             "private_jc_warm",
             "Private JC sender",
-            "· max ${warmMax.toLocaleString()}",
+            "same limits as JC",
+            'warmMax > 0 ? `max ${warmMax.toLocaleString()}` : "no run cap"',
             "No activity yet",
             "warmDraftPreviewCount",
             "warmHasDraftPreview",
@@ -1456,6 +1457,8 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, source)
         self.assertNotIn("recipients_private_jc_warm.csv", render_body)
         self.assertNotIn("private_jc_warm_log.csv", render_body)
+        self.assertNotIn("|| 10", render_body)
+        self.assertIn("profile?.max_total ?? profile?.configured_max_total", render_body)
         self.assertNotIn('Age ${profile.last_age}', render_body)
         self.assertIn('profile === "private_jc_warm" && action === "open_lead_ops"', click_body)
         self.assertIn('setDashboardTab("leads")', click_body)

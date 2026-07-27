@@ -4938,7 +4938,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     const warmRemaining = Number(lane.queued_remaining_count ?? lane.remaining ?? 0);
     const warmSent = Number(lane.sent_count ?? 0);
     const draftCount = Number(report.warm_email_preview_rows || 0);
-    const warmCap = Number(lane.cap ?? 10);
+    const warmCap = Number(lane.cap ?? 0);
     const warmOriginal = Number(lane.ready_original_count ?? lane.original_count ?? draftCount ?? 0);
     const warmState = String(lane.state || "No queue");
     const warmStateHeadline = warmState === "Partial"
@@ -6785,9 +6785,9 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         || action === "no_queue"
         || (!warmProfile && noPendingQueue)
         || (!warmProfile && !stopAvailable && !startAvailable);
-      const warmMax = Number(profile?.max_total || profile?.max_messages_per_run || 10);
+      const warmMax = Number(profile?.max_total ?? profile?.configured_max_total ?? profile?.max_messages_per_run ?? 0);
       const warmMetadata = warmProfile
-        ? `<span class="sender-status-profile-meta">Private JC sender${warmMax > 0 ? ` · max ${warmMax.toLocaleString()}` : ""}</span>`
+        ? `<span class="sender-status-profile-meta">Private JC sender · same limits as JC · ${warmMax > 0 ? `max ${warmMax.toLocaleString()}` : "no run cap"}</span>`
         : "";
       const lastActivity = warmProfile && warmStatus.last_sent_timestamp
         ? formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)

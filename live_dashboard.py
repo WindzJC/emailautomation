@@ -3746,7 +3746,7 @@ def build_warm_private_jc_live_status() -> dict[str, object]:
         "queued_remaining_count": remaining,
         "remaining": remaining,
         "sent_count": sent_count,
-        "cap": int(profile.get("max_total") or 10),
+        "cap": int(profile.get("max_total", 0)),
         "original_count": original_count,
         "ready_original_count": original_count or sent_count + remaining,
         "last_sent_email": str(last_sent.get("Email") or last_sent.get("email") or ""),
