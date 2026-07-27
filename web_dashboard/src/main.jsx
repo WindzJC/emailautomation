@@ -130,7 +130,10 @@ export function LeadStepper({ status, steps }) {
     <>
       <LegacyNode html={status} />
       <div className="react-stepper-shell">
-        <p className="react-section-label">Dispatch workflow</p>
+        <p className="react-section-label">
+          <span className="react-cold-copy">Dispatch workflow</span>
+          <span className="react-warm-copy">Warm outreach workflow</span>
+        </p>
         <LegacyNode html={steps} />
       </div>
     </>
@@ -182,6 +185,10 @@ export function LeadOpsDashboard({ view }) {
         )}
         aside={<StatusPill tone="safe">Safety gated</StatusPill>}
       />
+      <nav id="leads-workflow-nav" className="leads-workflow-nav" aria-label="Lead Ops workflows">
+        <a href="/?tab=leads&amp;workflow=cold" data-leads-workflow="cold">Cold Campaigns</a>
+        <a href="/?tab=leads&amp;workflow=warm" data-leads-workflow="warm">Warm Outreach</a>
+      </nav>
       <section className="leads-command-center operator-workflow-section react-lead-canvas">
         <LegacyNode html={view.heading} />
         <WarmResearchPanel><SourcePanel html={view.source} /></WarmResearchPanel>
@@ -211,7 +218,7 @@ export function AppShell({ template }) {
 function DashboardControllerBridge() {
   useEffect(() => {
     const script = document.createElement("script");
-    script.src = "/static/app.js?v=react-components-20260702";
+    script.src = "/static/app.js?v=lead-workflow-routes-20260728b";
     script.dataset.dashboardController = "true";
     document.body.append(script);
     return () => script.remove();

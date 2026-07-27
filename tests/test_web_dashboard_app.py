@@ -9,9 +9,38 @@ APP_JS = Path(__file__).resolve().parents[1] / "web_dashboard" / "app.js"
 INDEX_HTML = Path(__file__).resolve().parents[1] / "web_dashboard" / "index.html"
 STYLES_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "styles.css"
 LIVE_DASHBOARD_PY = Path(__file__).resolve().parents[1] / "live_dashboard.py"
+REACT_MAIN = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "main.jsx"
 
 
 class WebDashboardAppTests(unittest.TestCase):
+    def test_lead_ops_routes_are_separate_and_upload_type_is_not_user_selectable(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        react_source = REACT_MAIN.read_text(encoding="utf-8")
+        backend_source = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+
+        for expected in [
+            'href="/?tab=leads&amp;workflow=cold"',
+            'data-leads-workflow="cold"',
+            "Cold Campaigns",
+            'href="/?tab=leads&amp;workflow=warm"',
+            'data-leads-workflow="warm"',
+            "Warm Outreach",
+        ]:
+            self.assertIn(expected, react_source)
+        self.assertIn('params.get("workflow") === "warm" ? "warm" : "cold"', source)
+        self.assertIn('url.searchParams.set("workflow", activeLeadWorkflow)', source)
+        self.assertIn('window.addEventListener("popstate"', source)
+        self.assertIn('const historyMethod = historyMode === "push" ? "pushState" : "replaceState"', source)
+        self.assertIn('<input id="leads-important-upload-type" type="hidden" value="cold" />', html)
+        self.assertNotIn('<select id="leads-important-upload-type"', html)
+        self.assertNotIn("Upload type</span>", html)
+        self.assertIn('formData.append("upload_type", selectedLeadUploadType())', source)
+        self.assertIn("lead_ops_progress_by_workflow", backend_source)
+        self.assertIn("active_important_check_jobs", backend_source)
+        self.assertIn("importantLeadCheckStorageKey", source)
+        self.assertIn('${IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY}.${leadWorkflowFromUploadType(uploadType)}', source)
+
     def test_check_job_refresh_hydration_uses_local_storage_pointer_and_backend_source(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn("emailautomation.activeImportantCheckJobId", source)
@@ -49,6 +78,29 @@ class WebDashboardAppTests(unittest.TestCase):
             "progress-fill",
         ]:
             self.assertIn(field, source)
+
+    def test_stale_lead_check_card_surfaces_reason_and_reupload_requirement(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "stale_reason",
+            "last_successful_step",
+            "reupload_required",
+            "lead-ops-progress-error",
+            "Last successful step",
+            "Re-upload required",
+        ]:
+            self.assertIn(expected, source)
+
+    def test_warm_layout_moves_the_stepper_shell_only_when_anchors_share_a_parent(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('closest(".react-stepper-shell")', source)
+        self.assertIn("workflowAnchorsShareParent", source)
+        self.assertIn("workflowTaskContainer?.parentElement === commandCenter", source)
+        self.assertIn("leadsWorkflowStatusBanner?.parentElement === commandCenter", source)
+        self.assertNotIn(
+            "commandCenter.insertBefore(els.leadsWorkflowTaskList, els.leadsWorkflowStatusBanner)",
+            source,
+        )
 
     def test_terminal_check_job_clears_saved_job_pointer(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -709,7 +761,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "Next source action",
             "leads-important-upload-file",
             "leads-important-upload-type",
-            "Warm Research",
             "leads-important-upload-check-btn",
             "leads-important-check-btn",
             "leads-important-dispatch-preview-top-btn",
@@ -739,8 +790,10 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-active-alerts",
         ]:
             self.assertIn(expected, leads_html)
+        self.assertIn('<input id="leads-important-upload-type" type="hidden" value="cold" />', leads_html)
+        self.assertNotIn('<select id="leads-important-upload-type"', leads_html)
         for expected in [
-            'formData.append("upload_type", els.leadsImportantUploadType?.value || "cold")',
+            'formData.append("upload_type", selectedLeadUploadType())',
             "Warm upload checked. Generate drafts before explicit Warm Private JC confirmation.",
             "Warm email ready",
             "Contact forms",
@@ -1461,7 +1514,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("profile?.max_total ?? profile?.configured_max_total", render_body)
         self.assertNotIn('Age ${profile.last_age}', render_body)
         self.assertIn('profile === "private_jc_warm" && action === "open_lead_ops"', click_body)
-        self.assertIn('setDashboardTab("leads")', click_body)
+        self.assertIn('setLeadWorkflow("warm")', click_body)
         self.assertIn("async function hydrateWarmSenderLeadStatus", source)
         self.assertIn('fetchJson("/api/leads/status")', source)
         self.assertIn("void hydrateWarmSenderLeadStatus()", source)
@@ -1557,7 +1610,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
         self.assertIn("controlBar.appendChild(els.leadsCurrentRunPanel)", source)
         self.assertIn("commandLeft.insertBefore(els.leadsCurrentRunPanel", source)
-        self.assertIn("commandCenter.insertBefore(els.leadsWorkflowTaskList, els.leadsWorkflowStatusBanner)", source)
+        self.assertIn("commandCenter.insertBefore(workflowTaskContainer, els.leadsWorkflowStatusBanner)", source)
         self.assertEqual(source.count('<p class="eyebrow">Warm Research Outputs</p>'), 0)
         self.assertEqual(source.count("Warm Private JC Send Status"), 1)
         self.assertEqual(source.count('<p class="eyebrow">Safety Rules</p>'), 1)

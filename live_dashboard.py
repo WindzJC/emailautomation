@@ -511,9 +511,10 @@ def _important_check_job_with_progress(job: dict[str, object]) -> dict[str, obje
     return payload
 
 
-def _find_active_important_check_job() -> dict[str, object] | None:
+def _find_active_important_check_job(upload_type: str | None = None) -> dict[str, object] | None:
     if not IMPORTANT_LEADS_CHECK_JOBS.exists():
         return None
+    expected_upload_type = str(upload_type or "").strip().lower()
     active_statuses = {"queued", "running", "checking", "auto_triage_running"}
     candidates: list[tuple[float, dict[str, object]]] = []
     for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
@@ -522,6 +523,9 @@ def _find_active_important_check_job() -> dict[str, object] | None:
         except Exception:
             continue
         if not isinstance(job, dict):
+            continue
+        job_upload_type = str(job.get("upload_type") or "cold").strip().lower()
+        if expected_upload_type and job_upload_type != expected_upload_type:
             continue
         status = str(job.get("status") or job.get("stage") or "").strip().lower()
         if status not in active_statuses:
@@ -1282,23 +1286,50 @@ def _load_lead_ops_progress(job_id: object) -> dict[str, object]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _latest_lead_ops_progress() -> dict[str, object]:
+def _latest_lead_ops_progress(upload_type: str | None = None) -> dict[str, object]:
     try:
-        candidates = sorted(
-            settings.STATE_DIR.glob("lead_ops_progress_*.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
+        paths = list(settings.STATE_DIR.glob("lead_ops_progress_*.json"))
     except Exception:
         return {}
-    for path in candidates:
+    expected_upload_type = str(upload_type or "").strip().lower()
+    candidates: list[tuple[tuple[float, float, float], dict[str, object]]] = []
+    for path in paths:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         if isinstance(raw, dict):
-            return raw
-    return {}
+            progress_upload_type = str(raw.get("selected_upload_type") or "cold").strip().lower()
+            if expected_upload_type and progress_upload_type != expected_upload_type:
+                continue
+            started = _parse_iso_timestamp(
+                raw.get("started_at_utc")
+                or raw.get("upload_received_at_utc")
+                or raw.get("upload_received_at")
+            )
+            updated = _parse_iso_timestamp(
+                raw.get("completed_at_utc")
+                or raw.get("updated_at_utc")
+                or raw.get("generated_at_utc")
+            )
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                modified_at = 0.0
+            candidates.append(
+                (
+                    (
+                        started.timestamp() if started else 0.0,
+                        updated.timestamp() if updated else 0.0,
+                        modified_at,
+                    ),
+                    raw,
+                )
+            )
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
 
 
 def _path_has_rows(path_text: object) -> bool:
@@ -1311,6 +1342,32 @@ def _path_has_rows(path_text: object) -> bool:
         return False
 
 
+def _lead_ops_progress_input_state(progress: dict[str, object]) -> dict[str, bool]:
+    raw_path = str(progress.get("input_path") or "").strip()
+    if not raw_path:
+        return {
+            "input_exists": False,
+            "input_is_expired_temp_artifact": False,
+        }
+    input_path = Path(raw_path)
+    if not input_path.is_absolute():
+        input_path = settings.APP_ROOT / input_path
+    try:
+        input_exists = input_path.exists()
+    except OSError:
+        input_exists = False
+    try:
+        relative = input_path.resolve(strict=False).relative_to(settings.APP_ROOT.resolve())
+        first_part = relative.parts[0].lower() if relative.parts else ""
+        input_is_temp_artifact = first_part.startswith("tmp") or first_part.startswith("pytest-")
+    except (OSError, ValueError):
+        input_is_temp_artifact = False
+    return {
+        "input_exists": input_exists,
+        "input_is_expired_temp_artifact": bool(input_is_temp_artifact and not input_exists),
+    }
+
+
 def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: set[str] | None = None) -> dict[str, object]:
     if not progress:
         return {}
@@ -1318,6 +1375,8 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     phase = str(payload.get("phase") or "").strip().lower()
     job_id = str(payload.get("job_id") or "").strip()
     active_job_ids = active_job_ids or set()
+    input_state = _lead_ops_progress_input_state(payload)
+    job_record_exists = bool(job_id and _important_check_job_path(job_id).exists())
     output_ready = _path_has_rows(payload.get("output_path"))
     rejected_exists = Path(str(payload.get("rejected_path") or "")).exists() if payload.get("rejected_path") else False
     keep_ready = _path_has_rows(payload.get("keep_path"))
@@ -1347,9 +1406,29 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
         if stale:
             payload["phase"] = "stale"
             payload["status"] = "stale"
-            payload["current_message"] = "Stale — rerun check before preview"
-            payload["error_summary"] = payload.get("error_summary") or "Progress was marked running but no active worker/output was found."
+            if input_state["input_is_expired_temp_artifact"] and not job_record_exists:
+                payload["current_message"] = "Stale — upload source and check job are unavailable"
+                payload["error_summary"] = (
+                    "The saved upload path points to an expired temporary artifact and the check job record is missing. "
+                    "No current check can be resumed from this state."
+                )
+                payload["stale_reason"] = "expired_temporary_upload_and_missing_job_record"
+                payload["last_successful_step"] = "Upload metadata saved"
+            elif not input_state["input_exists"]:
+                payload["current_message"] = "Stale — uploaded source is unavailable"
+                payload["error_summary"] = payload.get("error_summary") or (
+                    "Progress was marked running, but the uploaded source is missing and no active worker/output was found."
+                )
+                payload["stale_reason"] = "uploaded_source_missing"
+                payload["last_successful_step"] = "Upload received"
+            else:
+                payload["current_message"] = "Stale — rerun check before preview"
+                payload["error_summary"] = payload.get("error_summary") or "Progress was marked running but no active worker/output was found."
+                payload["stale_reason"] = "no_active_worker_or_output"
+                payload["last_successful_step"] = "Upload received"
             payload["stale_warning"] = LEAD_OPS_PROGRESS_STALE_WARNING
+            payload["retry_safe"] = True
+            payload["reupload_required"] = not input_state["input_exists"]
     elif phase in {"checking", "triaging", "previewing"} and stale_age is not None and stale_age >= LEAD_OPS_PROGRESS_STALE_SECONDS:
         payload["stale_warning"] = LEAD_OPS_PROGRESS_STALE_WARNING
     phase = str(payload.get("phase") or phase).strip().lower()
@@ -1359,15 +1438,46 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     payload["triage_reject_exists"] = triage_reject_exists
     payload["quarantine_exists"] = quarantine_exists
     payload["preview_exists"] = preview_exists
+    payload["input_exists"] = input_state["input_exists"]
+    payload["job_record_exists"] = job_record_exists
     payload["latest_master_check_matches_current_run"] = bool(output_ready and rejected_exists and phase not in {"failed", "stale"})
     return payload
 
 
-def _current_lead_ops_progress(status: dict[str, object]) -> dict[str, object]:
+def _current_lead_ops_progress(
+    status: dict[str, object],
+    upload_type: str | None = None,
+) -> dict[str, object]:
+    expected_upload_type = str(upload_type or "").strip().lower()
+    active_check_jobs = status.get("active_important_check_jobs")
+    active_check_job = None
+    if expected_upload_type and isinstance(active_check_jobs, dict):
+        active_check_job = active_check_jobs.get(expected_upload_type)
+    if active_check_job is None:
+        active_check_job = status.get("active_important_check_job")
+    active_jobs = [active_check_job]
+    if expected_upload_type != "warm_research":
+        active_jobs.extend(
+            [
+                status.get("active_important_verify_job"),
+                status.get("active_important_dispatch_job"),
+            ]
+        )
     active_jobs = [
-        status.get("active_important_check_job"),
-        status.get("active_important_verify_job"),
-        status.get("active_important_dispatch_job"),
+        job
+        for job in active_jobs
+        if isinstance(job, dict)
+        and (
+            not expected_upload_type
+            or str(job.get("upload_type") or "cold").strip().lower() == expected_upload_type
+            or (
+                expected_upload_type == "cold"
+                and (
+                    job is status.get("active_important_verify_job")
+                    or job is status.get("active_important_dispatch_job")
+                )
+            )
+        )
     ]
     active_job_ids = {
         str(job.get("job_id") or "")
@@ -1412,7 +1522,7 @@ def _current_lead_ops_progress(status: dict[str, object]) -> dict[str, object]:
                 }
             )
             return _reconcile_lead_ops_progress(synthetic, active_job_ids)
-    progress = _latest_lead_ops_progress()
+    progress = _latest_lead_ops_progress(expected_upload_type or None)
     return _reconcile_lead_ops_progress(progress, active_job_ids)
 
 
@@ -3246,11 +3356,16 @@ def _combined_leads_status() -> dict[str, object]:
     warm_status = build_warm_private_jc_live_status()
     latest_confirmed_dispatch = _load_latest_confirmed_dispatch_summary()
     active_campaign_snapshot = _load_active_campaign_snapshot_summary()
+    active_check_jobs = {
+        "cold": _find_active_important_check_job("cold"),
+        "warm_research": _find_active_important_check_job("warm_research"),
+    }
     status = {
         **shard_status(),
         **important_leads_status(),
         **important_leads_verify_status(),
         "active_important_check_job": _find_active_important_check_job(),
+        "active_important_check_jobs": active_check_jobs,
         "active_important_verify_job": _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS),
         "active_important_dispatch_job": _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS),
         "latest_auto_dispatch_preview": state.get("latest_auto_dispatch_preview", {}),
@@ -3265,6 +3380,10 @@ def _combined_leads_status() -> dict[str, object]:
         status["latest_dispatch"] = latest_confirmed_dispatch
     status = _apply_latest_staged_run_status(status)
     status["lead_ops_progress"] = _current_lead_ops_progress(status)
+    status["lead_ops_progress_by_workflow"] = {
+        "cold": _current_lead_ops_progress(status, "cold"),
+        "warm_research": _current_lead_ops_progress(status, "warm_research"),
+    }
     status["lead_check_status"] = _build_lead_check_status(status, state)
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)

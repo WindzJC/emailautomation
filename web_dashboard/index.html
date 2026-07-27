@@ -566,13 +566,7 @@
                   <p class="eyebrow">Campaign Intake</p>
                   <strong>Upload Source</strong>
                   <span id="leads-important-check-meta" class="muted">Choose a CSV/XLSX file or check the stored intake source.</span>
-                  <label class="leads-upload-type-field">
-                    <span>Upload type</span>
-                    <select id="leads-important-upload-type" aria-label="Lead upload type">
-                      <option value="cold">Cold Leads</option>
-                      <option value="warm_research">Warm Research</option>
-                    </select>
-                  </label>
+                  <input id="leads-important-upload-type" type="hidden" value="cold" />
                   <input id="leads-important-input-path" type="hidden" value="_important/leadschecker.csv" />
                   <input id="leads-important-output-path" type="hidden" value="_important/leads.csv" />
                   <input id="leads-important-rejected-path" type="hidden" value="_important/leads_rejected.csv" />
@@ -747,6 +741,6 @@
     </template>
     <div id="dashboard-root"></div>
     <noscript>This dashboard requires JavaScript.</noscript>
-    <script type="module" src="/static/build/dashboard.js?v=react-components-20260702"></script>
+    <script type="module" src="/static/build/dashboard.js?v=lead-workflow-routes-20260728b"></script>
   </body>
 </html>

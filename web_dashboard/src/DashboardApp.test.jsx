@@ -20,7 +20,7 @@ const template = {
   },
   leadOps: {
     heading: '<div class="panel-header"><h2 id="leads-command-heading">Prepare Dispatch</h2></div>',
-    source: '<section class="leads-control-bar"><select id="leads-important-upload-type"></select></section>',
+    source: '<section class="leads-control-bar"><input id="leads-important-upload-type" type="hidden" value="cold" /></section>',
     workflowStatus: '<div id="leads-workflow-status-banner" class="leads-workflow-status-banner"></div>',
     workflowSteps: '<div id="leads-workflow-task-list" class="leads-workflow-task-list"></div>',
     commandLeft: '<div class="leads-command-column-left"><div id="leads-current-run-panel"></div></div>',
@@ -39,6 +39,9 @@ describe("DashboardApp", () => {
     expect(screen.getByText("Current run")).toBeInTheDocument();
     expect(screen.getByText("Queue and delivery state")).toBeInTheDocument();
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
+    expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=leads&workflow=cold");
+    expect(document.querySelector('[data-leads-workflow="warm"]')).toHaveAttribute("href", "/?tab=leads&workflow=warm");
+    expect(document.querySelector('select#leads-important-upload-type')).not.toBeInTheDocument();
     expect(document.getElementById("auth-overlay")).toBeInTheDocument();
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();
   });

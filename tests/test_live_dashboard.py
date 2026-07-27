@@ -1437,7 +1437,11 @@ class LiveDashboardTests(unittest.TestCase):
                 filename="lead_op_author_personalized_upload.csv",
                 file=BytesIO(content),
             )
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_RUNS", check_runs_dir), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_RUNS",
+                check_runs_dir,
+            ), patch.object(
                 live_dashboard,
                 "IMPORTANT_LEADS_CHECK_JOBS",
                 jobs_dir,
@@ -1611,6 +1615,10 @@ class LiveDashboardTests(unittest.TestCase):
                 "IMPORTANT_LEADS_CHECK_JOBS",
                 jobs_dir,
             ), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                tmp / "state",
+            ), patch.object(
                 live_dashboard,
                 "IMPORTANT_LEADS_OUTPUT",
                 live_output,
@@ -1626,6 +1634,9 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "check_master_leads",
                 side_effect=check_master_leads_without_external_state,
+            ), patch.object(
+                live_dashboard,
+                "save_state",
             ), patch.object(
                 live_dashboard,
                 "_run_auto_fast_triage_after_check",
@@ -1692,6 +1703,10 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "IMPORTANT_LEADS_CHECK_JOBS",
                 jobs_dir,
+            ), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                tmp / "state",
             ), patch.object(
                 live_dashboard.threading,
                 "Thread",
@@ -1918,9 +1933,13 @@ class LiveDashboardTests(unittest.TestCase):
                     "invalid_malformed_skipped": 0,
                 }
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs), patch.object(
-                live_dashboard.settings, "BACKUPS_DIR", backups
-            ), patch.object(live_dashboard, "pack_archive", side_effect=fake_pack_archive), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_DISPATCH_JOBS",
+                jobs,
+            ), patch.object(live_dashboard.settings, "BACKUPS_DIR", backups), patch.object(
+                live_dashboard, "pack_archive", side_effect=fake_pack_archive
+            ), patch.object(
                 live_dashboard, "confirm_dispatch_preview", side_effect=fake_confirm
             ), patch.object(live_dashboard, "save_state") as save_state:
                 live_dashboard._run_important_dispatch_job("dispatch_test")
@@ -1956,7 +1975,11 @@ class LiveDashboardTests(unittest.TestCase):
                 queue_path.write_text("Email,FirstName\nmutated@example.com,Mutated\n", encoding="utf-8")
                 raise AssertionError("confirm_dispatch_preview should not run after archive failure")
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_DISPATCH_JOBS",
+                jobs,
+            ), patch.object(
                 live_dashboard,
                 "_create_pre_dispatch_archive",
                 side_effect=RuntimeError("archive failed"),
@@ -3176,6 +3199,124 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual("Stale — rerun check before preview", progress["current_message"])
             self.assertFalse(progress["output_exists"])
             self.assertFalse(progress["rejected_exists"])
+
+    def test_lead_ops_progress_explains_expired_temp_upload_without_hiding_stale_state(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            expired_root = Path(tmpdir)
+            progress = {
+                "job_id": "check_expired_warm_upload",
+                "selected_upload_type": "warm_research",
+                "phase": "checking",
+                "status": "running",
+                "input_path": str(expired_root / "warm.csv"),
+                "output_path": str(expired_root / "run" / "warm_email_ready.csv"),
+                "rejected_path": str(expired_root / "run" / "warm_rejected.csv"),
+                "updated_at_utc": "2026-07-21T14:18:43+00:00",
+            }
+        with patch.object(
+            live_dashboard,
+            "IMPORTANT_LEADS_CHECK_JOBS",
+            live_dashboard.settings.APP_ROOT / "_important" / "missing-test-check-jobs",
+        ):
+            reconciled = live_dashboard._reconcile_lead_ops_progress(progress, set())
+
+        self.assertEqual("stale", reconciled["phase"])
+        self.assertEqual("expired_temporary_upload_and_missing_job_record", reconciled["stale_reason"])
+        self.assertIn("expired temporary artifact", reconciled["error_summary"])
+        self.assertEqual("Upload metadata saved", reconciled["last_successful_step"])
+        self.assertTrue(reconciled["retry_safe"])
+        self.assertTrue(reconciled["reupload_required"])
+        self.assertFalse(reconciled["input_exists"])
+        self.assertFalse(reconciled["job_record_exists"])
+        self.assertFalse(reconciled["latest_master_check_matches_current_run"])
+
+    def test_latest_lead_ops_progress_prefers_job_start_time_over_file_mtime(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            state_dir = Path(tmpdir) / "state"
+            state_dir.mkdir()
+            current = {
+                "job_id": "check_20260721_current",
+                "selected_upload_type": "warm_research",
+                "phase": "checking",
+                "started_at_utc": "2026-07-21T14:18:43+00:00",
+                "updated_at_utc": "2026-07-21T14:18:43+00:00",
+            }
+            old_synthetic = {
+                "job_id": "check_20260512_synthetic",
+                "selected_upload_type": "cold",
+                "phase": "failed",
+                "started_at_utc": "2026-05-12T01:02:03+00:00",
+                "updated_at_utc": "2026-07-28T12:00:00+00:00",
+            }
+            current_path = state_dir / "lead_ops_progress_check_20260721_current.json"
+            old_path = state_dir / "lead_ops_progress_check_20260512_synthetic.json"
+            current_path.write_text(json.dumps(current), encoding="utf-8")
+            old_path.write_text(json.dumps(old_synthetic), encoding="utf-8")
+            os.utime(old_path, (current_path.stat().st_mtime + 60, current_path.stat().st_mtime + 60))
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir):
+                latest = live_dashboard._latest_lead_ops_progress()
+
+        self.assertEqual("check_20260721_current", latest["job_id"])
+
+    def test_lead_ops_active_jobs_and_progress_are_isolated_by_workflow(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "check_jobs"
+            state_dir = tmp / "state"
+            jobs_dir.mkdir()
+            state_dir.mkdir()
+            cold_job = {
+                "job_id": "check_cold_active",
+                "status": "checking",
+                "upload_type": "cold",
+                "created_at_utc": "2026-07-28T00:00:00+00:00",
+            }
+            warm_job = {
+                "job_id": "check_warm_active",
+                "status": "checking",
+                "upload_type": "warm_research",
+                "created_at_utc": "2026-07-28T00:01:00+00:00",
+            }
+            (jobs_dir / "check_cold_active.json").write_text(json.dumps(cold_job), encoding="utf-8")
+            (jobs_dir / "check_warm_active.json").write_text(json.dumps(warm_job), encoding="utf-8")
+            (state_dir / "lead_ops_progress_check_cold_active.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": "check_cold_active",
+                        "selected_upload_type": "cold",
+                        "phase": "checking",
+                        "started_at_utc": "2026-07-28T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "lead_ops_progress_check_warm_active.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": "check_warm_active",
+                        "selected_upload_type": "warm_research",
+                        "phase": "checking",
+                        "started_at_utc": "2026-07-28T00:01:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                active_cold = live_dashboard._find_active_important_check_job("cold")
+                active_warm = live_dashboard._find_active_important_check_job("warm_research")
+                progress_cold = live_dashboard._latest_lead_ops_progress("cold")
+                progress_warm = live_dashboard._latest_lead_ops_progress("warm_research")
+
+        self.assertEqual("check_cold_active", active_cold["job_id"])
+        self.assertEqual("check_warm_active", active_warm["job_id"])
+        self.assertEqual("check_cold_active", progress_cold["job_id"])
+        self.assertEqual("check_warm_active", progress_warm["job_id"])
 
     def test_start_important_check_job_writes_upload_received_progress_without_touching_queues(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -4405,7 +4546,11 @@ class LiveDashboardTests(unittest.TestCase):
                 self._write_csv(Path(job["rejected_path"]), ["Email"], [])
                 return report
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
                 live_dashboard,
                 "_execute_important_check",
                 side_effect=fake_execute_check,
@@ -5979,7 +6124,11 @@ class LiveDashboardTests(unittest.TestCase):
                 "staged_run_dir": str(output_path.parent),
             }
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
                 live_dashboard,
                 "fast_triage_master_leads",
             ) as fast_triage:
@@ -6003,7 +6152,11 @@ class LiveDashboardTests(unittest.TestCase):
                 "staged_run_dir": str(empty_output_path.parent),
             }
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+            with patch.object(live_dashboard.settings, "STATE_DIR", tmp / "state"), patch.object(
+                live_dashboard,
+                "IMPORTANT_LEADS_CHECK_JOBS",
+                jobs_dir,
+            ), patch.object(
                 live_dashboard,
                 "fast_triage_master_leads",
             ) as fast_triage:

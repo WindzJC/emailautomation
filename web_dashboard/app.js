@@ -196,6 +196,7 @@ let warmSenderLeadStatusRequested = false;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
 let activeDashboardTab = "ops";
+let activeLeadWorkflow = "cold";
 const tabPanelMounts = {
   initialized: false,
   opsAnchor: null,
@@ -471,7 +472,20 @@ function readDashboardTabFromLocation() {
   return params.get("tab") === "leads" ? "leads" : "ops";
 }
 
-function syncLocationState() {
+function readLeadWorkflowFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("workflow") === "warm" ? "warm" : "cold";
+}
+
+function leadWorkflowUploadType(workflow = activeLeadWorkflow) {
+  return workflow === "warm" ? "warm_research" : "cold";
+}
+
+function leadWorkflowFromUploadType(uploadType = "cold") {
+  return String(uploadType || "").trim().toLowerCase() === "warm_research" ? "warm" : "cold";
+}
+
+function syncLocationState(historyMode = "replace") {
   const url = new URL(window.location.href);
   if (wallboardMode) {
     url.searchParams.set("view", "wallboard");
@@ -480,10 +494,13 @@ function syncLocationState() {
   }
   if (activeDashboardTab === "leads" && !wallboardMode) {
     url.searchParams.set("tab", "leads");
+    url.searchParams.set("workflow", activeLeadWorkflow);
   } else {
     url.searchParams.delete("tab");
+    url.searchParams.delete("workflow");
   }
-  window.history.replaceState({}, "", url);
+  const historyMethod = historyMode === "push" ? "pushState" : "replaceState";
+  window.history[historyMethod]({}, "", url);
 }
 
 function insertAfterAnchor(anchor, node) {
@@ -553,6 +570,7 @@ function applyDashboardTab() {
 
   if (leadsActive) {
     initQuarantineInboxDisclosure();
+    applyLeadWorkflowPage();
   }
 }
 
@@ -701,6 +719,58 @@ function setDashboardTab(nextTab) {
   syncTabBackgroundActivity();
   if (isLeadsTabVisible()) {
     fetchLeadsStatus();
+  }
+}
+
+function applyLeadWorkflowPage() {
+  const warmActive = activeLeadWorkflow === "warm";
+  if (els.leadsImportantUploadType) {
+    els.leadsImportantUploadType.value = leadWorkflowUploadType();
+  }
+  document.querySelectorAll("[data-leads-workflow]").forEach((link) => {
+    const selected = link.getAttribute("data-leads-workflow") === activeLeadWorkflow;
+    link.classList.toggle("is-active", selected);
+    if (selected) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  if (els.leadsView) {
+    els.leadsView.dataset.leadWorkflow = activeLeadWorkflow;
+  }
+  if (quarantineToggleBtn) {
+    quarantineToggleBtn.hidden = warmActive;
+  }
+  if (warmActive) {
+    closeQuarantineInbox();
+  }
+  applyWarmResearchLayoutState(warmActive);
+  updateImportantLeadUploadNote(
+    warmActive
+      ? "Warm Outreach keeps validation, draft preparation, and explicit confirmation separate from cold dispatch."
+      : "Cold Campaigns uses the existing check, triage, preview, and confirm workflow.",
+  );
+}
+
+function setLeadWorkflow(nextWorkflow, { historyMode = "push" } = {}) {
+  const next = nextWorkflow === "warm" ? "warm" : "cold";
+  const changed = next !== activeLeadWorkflow;
+  if (changed) {
+    stopLeadsBackgroundActivity();
+    if (els.leadsImportantUploadFile) {
+      els.leadsImportantUploadFile.value = "";
+    }
+    activeLeadWorkflow = next;
+    lastImportantLeadCheckJob = null;
+    lastImportantVerifyJob = null;
+    lastImportantDispatchJob = null;
+  }
+  activeDashboardTab = "leads";
+  wallboardMode = false;
+  applyDashboardTab();
+  syncLocationState(historyMode);
+  syncTabBackgroundActivity();
+  renderLeadsStatus(lastLeadsStatus || {});
+  if (changed || !lastLeadsStatus) {
+    void fetchLeadsStatus();
   }
 }
 
@@ -1068,7 +1138,7 @@ function safeTimestampMs(value) {
 }
 
 function selectedLeadUploadType() {
-  return els.leadsImportantUploadType?.value === "warm_research" ? "warm_research" : "cold";
+  return leadWorkflowUploadType();
 }
 
 function reportUploadType(report = {}) {
@@ -1085,8 +1155,12 @@ function reportMatchesUploadType(report = {}, uploadType = selectedLeadUploadTyp
 }
 
 function currentImportantCheckJob(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
-  const job = status?.active_important_check_job || lastImportantLeadCheckJob || null;
-  return reportMatchesUploadType(job, uploadType) ? job : null;
+  const workflowJobs = status?.active_important_check_jobs;
+  const serverJob = workflowJobs && typeof workflowJobs === "object"
+    ? workflowJobs[uploadType]
+    : status?.active_important_check_job;
+  return [serverJob, lastImportantLeadCheckJob]
+    .find((job) => reportMatchesUploadType(job, uploadType)) || null;
 }
 
 function importantCheckJobProgress(job) {
@@ -1212,7 +1286,10 @@ function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
 }
 
 function currentLeadOpsProgress(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
-  const progress = status?.lead_ops_progress;
+  const workflowProgress = status?.lead_ops_progress_by_workflow;
+  const progress = workflowProgress && typeof workflowProgress === "object"
+    ? workflowProgress[uploadType]
+    : status?.lead_ops_progress;
   if (!progress || typeof progress !== "object") return {};
   const selectedType = String(progress.selected_upload_type || "cold").toLowerCase();
   const expectedType = uploadType === "warm_research" ? "warm_research" : "cold";
@@ -1294,6 +1371,12 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
     elapsed_seconds: progress.elapsed_seconds,
     eta_seconds: progress.eta_seconds,
     stale_warning: progress.stale_warning,
+    stale_reason: progress.stale_reason || "",
+    last_successful_step: progress.last_successful_step || "",
+    retry_safe: progress.retry_safe,
+    reupload_required: progress.reupload_required,
+    input_exists: progress.input_exists,
+    job_record_exists: progress.job_record_exists,
     phase,
     current_message: progress.current_message || label,
     error_summary: progress.error_summary || "",
@@ -1511,6 +1594,10 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   const staleWarning = String(
     check.stale_warning || progress?.stale_warning || (progressPhase === "stale" ? LEAD_OPS_PROGRESS_STALE_WARNING : ""),
   ).trim();
+  const progressMessage = String(check.current_message || progress?.current_message || "").trim();
+  const progressError = String(check.error_summary || progress?.error_summary || "").trim();
+  const lastSuccessfulStep = String(check.last_successful_step || progress?.last_successful_step || "").trim();
+  const reuploadRequired = check.reupload_required ?? progress?.reupload_required;
   const hasProgressJob = Boolean(progress?.job_id || check.job_id || check.check_job_id);
   const processing = ["processing", "upload_received", "checking", "running", "queued"].includes(state.toLowerCase());
   const processingStrip = processing
@@ -1546,7 +1633,8 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
           ${selectedFile ? `<span title="${escapeHtml(selectedFile)}">${escapeHtml(selectedFile)}</span>` : ""}
         </div>
         ${staleWarning ? `<div class="lead-ops-progress-warning">${escapeHtml(staleWarning)}</div>` : ""}
-        ${(check.current_message || check.error_summary) ? `<p>${escapeHtml(check.current_message || check.error_summary)}</p>` : ""}
+        ${progressMessage ? `<p>${escapeHtml(progressMessage)}</p>` : ""}
+        ${progressError && progressError !== progressMessage ? `<p class="lead-ops-progress-error">${escapeHtml(progressError)}</p>` : ""}
       </div>
     `
     : "";
@@ -1576,6 +1664,8 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
         <div><span>Upload received</span><strong>${escapeHtml(uploadTime)}</strong></div>
         <div><span>Check generated</span><strong>${escapeHtml(generatedTime)}</strong></div>
         ${staleCopy ? `<div><span>Stale age</span><strong>${escapeHtml(staleCopy)}</strong></div>` : ""}
+        ${lastSuccessfulStep ? `<div><span>Last successful step</span><strong>${escapeHtml(lastSuccessfulStep)}</strong></div>` : ""}
+        ${typeof reuploadRequired === "boolean" ? `<div><span>Re-upload required</span><strong>${reuploadRequired ? "yes" : "no"}</strong></div>` : ""}
       </div>
       <div class="lead-check-guidance lead-check-guidance-${escapeHtml(state)}">${escapeHtml(guidance)}</div>
     `,
@@ -1803,7 +1893,7 @@ function importantLeadUploadPayload() {
   formData.append("client_selected_size_bytes", String(size || 0));
   formData.append("client_selected_extension", extension);
   formData.append("intake_mode", els.leadsImportantIntakeMode?.value || "standard");
-  formData.append("upload_type", els.leadsImportantUploadType?.value || "cold");
+  formData.append("upload_type", selectedLeadUploadType());
   formData.append("output_path", els.leadsImportantOutputPath?.value?.trim() || "");
   formData.append("rejected_path", els.leadsImportantRejectedPath?.value?.trim() || "");
   return { formData, file, filename, size, extension };
@@ -1858,30 +1948,35 @@ function isActiveImportantLeadCheckJob(job) {
   return Boolean(job?.job_id) && !isTerminalImportantLeadCheckJob(job);
 }
 
-function readSavedImportantLeadCheckJobId() {
+function importantLeadCheckStorageKey(uploadType = selectedLeadUploadType()) {
+  return `${IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY}.${leadWorkflowFromUploadType(uploadType)}`;
+}
+
+function readSavedImportantLeadCheckJobId(uploadType = selectedLeadUploadType()) {
   try {
-    return String(localStorage.getItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY) || "").trim();
+    return String(localStorage.getItem(importantLeadCheckStorageKey(uploadType)) || "").trim();
   } catch (err) {
     return "";
   }
 }
 
-function saveImportantLeadCheckJobId(jobId) {
+function saveImportantLeadCheckJobId(jobId, uploadType = selectedLeadUploadType()) {
   const cleanJobId = String(jobId || "").trim();
   if (!cleanJobId) return;
   try {
-    localStorage.setItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY, cleanJobId);
+    localStorage.setItem(importantLeadCheckStorageKey(uploadType), cleanJobId);
   } catch (err) {
     // localStorage may be unavailable in private or restricted browser contexts.
   }
 }
 
-function clearSavedImportantLeadCheckJobId(jobId = "") {
+function clearSavedImportantLeadCheckJobId(jobId = "", uploadType = selectedLeadUploadType()) {
   const cleanJobId = String(jobId || "").trim();
   try {
-    const savedJobId = readSavedImportantLeadCheckJobId();
+    const storageKey = importantLeadCheckStorageKey(uploadType);
+    const savedJobId = readSavedImportantLeadCheckJobId(uploadType);
     if (!cleanJobId || !savedJobId || savedJobId === cleanJobId) {
-      localStorage.removeItem(IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY);
+      localStorage.removeItem(storageKey);
     }
   } catch (err) {
     // no-op
@@ -1952,6 +2047,13 @@ function stopImportantLeadCheckJobPolling() {
 
 function renderImportantLeadCheckJob(job) {
   if (!job || !job.job_id) return;
+  const jobUploadType = reportUploadType(job);
+  if (jobUploadType !== selectedLeadUploadType()) {
+    if (isActiveImportantLeadCheckJob(job)) {
+      saveImportantLeadCheckJobId(job.job_id, jobUploadType);
+    }
+    return;
+  }
   const status = importantLeadCheckJobStatus(job);
   const label = status === "completed"
     ? "Upload check complete"
@@ -1963,9 +2065,9 @@ function renderImportantLeadCheckJob(job) {
   const selectedFilename = job.selected_filename || job.original_uploaded_filename || job.source_label || "-";
   const serverFilename = job.server_received_filename || job.original_uploaded_filename || job.source_label || "-";
   if (isActiveImportantLeadCheckJob(job)) {
-    saveImportantLeadCheckJobId(job.job_id);
+    saveImportantLeadCheckJobId(job.job_id, jobUploadType);
   } else if (isTerminalImportantLeadCheckJob(job)) {
-    clearSavedImportantLeadCheckJobId(job.job_id);
+    clearSavedImportantLeadCheckJobId(job.job_id, jobUploadType);
   }
   if (els.leadsImportantCheckMeta) {
     setNodeText(
@@ -2016,7 +2118,7 @@ function renderImportantLeadCheckJob(job) {
   }
 }
 
-async function pollImportantLeadCheckJob(jobId) {
+async function pollImportantLeadCheckJob(jobId, expectedUploadType = selectedLeadUploadType()) {
   if (!jobId) return;
   stopImportantLeadCheckJobPolling();
   importantLeadCheckJobPollId = String(jobId);
@@ -2026,7 +2128,11 @@ async function pollImportantLeadCheckJob(jobId) {
     renderImportantLeadCheckJob(job);
     if (job.status === "completed") {
       stopImportantLeadCheckJobPolling();
-      clearSavedImportantLeadCheckJobId(job.job_id || jobId);
+      const jobUploadType = reportUploadType(job);
+      clearSavedImportantLeadCheckJobId(job.job_id || jobId, jobUploadType);
+      if (jobUploadType !== selectedLeadUploadType()) {
+        return;
+      }
       lastImportantLeadCheck = job.check || null;
       if (data.status) {
         renderLeadsStatus(data.status || {});
@@ -2041,23 +2147,26 @@ async function pollImportantLeadCheckJob(jobId) {
     }
     if (job.status === "failed" || job.status === "canceled" || job.status === "cancelled") {
       stopImportantLeadCheckJobPolling();
-      clearSavedImportantLeadCheckJobId(job.job_id || jobId);
+      clearSavedImportantLeadCheckJobId(job.job_id || jobId, reportUploadType(job));
       showMessage(job.error || "Upload check failed.", "error");
       return;
     }
-    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 1500);
+    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId, expectedUploadType), 1500);
   } catch (err) {
     if (String(err || "").includes("not found")) {
-      clearSavedImportantLeadCheckJobId(jobId);
+      clearSavedImportantLeadCheckJobId(jobId, expectedUploadType);
       stopImportantLeadCheckJobPolling();
       return;
     }
     showMessage(`Upload job poll failed: ${err}`, "error");
-    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId), 2500);
+    importantLeadCheckJobTimer = setTimeout(() => pollImportantLeadCheckJob(jobId, expectedUploadType), 2500);
   }
 }
 
 function resumeImportantLeadCheckJob(job) {
+  if (job?.job_id && !reportMatchesUploadType(job, selectedLeadUploadType())) {
+    return false;
+  }
   if (!isActiveImportantLeadCheckJob(job)) {
     if (isTerminalImportantLeadCheckJob(job)) {
       clearSavedImportantLeadCheckJobId(job?.job_id || "");
@@ -2067,7 +2176,7 @@ function resumeImportantLeadCheckJob(job) {
   renderImportantLeadCheckJob(job);
   const jobId = String(job.job_id || "");
   if (importantLeadCheckJobPollId !== jobId) {
-    void pollImportantLeadCheckJob(jobId);
+    void pollImportantLeadCheckJob(jobId, reportUploadType(job));
   }
   return true;
 }
@@ -2335,7 +2444,7 @@ function renderImportantLeadDispatchJob(job) {
 }
 
 function renderDispatchConfirmGuard(dispatchSource = {}, preview = null) {
-  const warmUploadSelected = els.leadsImportantUploadType?.value === "warm_research";
+  const warmUploadSelected = warmResearchUploadMode();
   const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
   const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
   const previewBlockReason = dispatchPreviewBlockReason(dispatchSource);
@@ -3795,7 +3904,7 @@ function compactPreviewTable(rows = [], preferredHeaders = [], maxRows = 5, maxC
 }
 
 function renderImportantLeadCheck(result) {
-  const isWarmResearch = result?.upload_type === "warm_research" || els.leadsImportantUploadType?.value === "warm_research";
+  const isWarmResearch = result?.upload_type === "warm_research" || warmResearchUploadMode();
   if (els.leadsImportantCheckMeta) {
     if (result?.generated_at_utc) {
       setNodeText(
@@ -4024,7 +4133,7 @@ function dispatchSkipReasonSummary(payload = {}) {
 }
 
 function warmResearchUploadMode() {
-  return els.leadsImportantUploadType?.value === "warm_research";
+  return activeLeadWorkflow === "warm";
 }
 
 function currentWarmResearchReport(status = lastLeadsStatus) {
@@ -4059,16 +4168,21 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
     );
   }
   const campaignPanel = document.querySelector("#leads-view .leads-campaign-command");
+  const workflowTaskContainer = els.leadsWorkflowTaskList?.closest(".react-stepper-shell")
+    || els.leadsWorkflowTaskList;
   if (campaignPanel) campaignPanel.hidden = active;
   if (active && controlBar && els.leadsCurrentRunPanel?.parentElement !== controlBar) {
     controlBar.appendChild(els.leadsCurrentRunPanel);
   } else if (!active && commandLeft && els.leadsCurrentRunPanel?.parentElement !== commandLeft) {
     commandLeft.insertBefore(els.leadsCurrentRunPanel, campaignPanel || commandLeft.firstChild);
   }
-  if (active && commandCenter && els.leadsWorkflowTaskList && els.leadsWorkflowStatusBanner) {
-    commandCenter.insertBefore(els.leadsWorkflowTaskList, els.leadsWorkflowStatusBanner);
-  } else if (!active && commandCenter && els.leadsWorkflowTaskList && els.leadsWorkflowStatusBanner) {
-    commandCenter.insertBefore(els.leadsWorkflowStatusBanner, els.leadsWorkflowTaskList);
+  const workflowAnchorsShareParent = commandCenter
+    && workflowTaskContainer?.parentElement === commandCenter
+    && els.leadsWorkflowStatusBanner?.parentElement === commandCenter;
+  if (active && workflowAnchorsShareParent) {
+    commandCenter.insertBefore(workflowTaskContainer, els.leadsWorkflowStatusBanner);
+  } else if (!active && workflowAnchorsShareParent) {
+    commandCenter.insertBefore(els.leadsWorkflowStatusBanner, workflowTaskContainer);
   }
   if (els.leadsDispatchCommandColumn) els.leadsDispatchCommandColumn.hidden = active;
   const advancedDiagnostics = document.querySelector("#leads-view .leads-advanced-diagnostics");
@@ -5554,14 +5668,15 @@ function renderLeadsStatus(status) {
     }
   }
   const activeCheckJob = currentImportantCheckJob(lastLeadsStatus);
-  const activeVerifyJob = lastLeadsStatus?.active_important_verify_job || null;
-  const activeDispatchJob = lastLeadsStatus?.active_important_dispatch_job || null;
+  const coldWorkflow = selectedLeadUploadType() === "cold";
+  const activeVerifyJob = coldWorkflow ? (lastLeadsStatus?.active_important_verify_job || null) : null;
+  const activeDispatchJob = coldWorkflow ? (lastLeadsStatus?.active_important_dispatch_job || null) : null;
   const shouldResumeLeadJobs = isLeadsTabVisible();
   syncImportantLeadPathInputs(lastLeadsStatus);
   syncImportantVerifyPathInputs(lastLeadsStatus);
   syncImportantDispatchSourceMode(lastLeadsStatus);
   updateImportantLeadPasteGuardrails();
-  const warmUploadSelected = els.leadsImportantUploadType?.value === "warm_research";
+  const warmUploadSelected = warmResearchUploadMode();
   applyWarmResearchLayoutState(warmUploadSelected);
   lastImportantLeadCheck = selectedLeadCheckReport(lastLeadsStatus);
   lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus);
@@ -5807,7 +5922,7 @@ async function runImportantLeadUploadCheck() {
   if (els.leadsImportantUploadCheckBtn) {
     setButtonBusy(els.leadsImportantUploadCheckBtn, true, "Uploading...");
   }
-  const uploadTypeLabel = els.leadsImportantUploadType?.value === "warm_research" ? "Warm Research" : "Cold Leads";
+  const uploadTypeLabel = warmResearchUploadMode() ? "Warm Research" : "Cold Leads";
   updateImportantLeadUploadNote(`Submitting ${filename} as ${uploadTypeLabel} (${humanizeFileSize(size)}, ${extension || "no extension"}).`);
   try {
     const data = await fetchJson("/api/leads/check-important/upload", {
@@ -5980,7 +6095,7 @@ function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
 }
 
 async function previewImportantLeadDispatch() {
-  if (els.leadsImportantUploadType?.value === "warm_research") {
+  if (warmResearchUploadMode()) {
     showMessage("Warm Research does not use Cold Dispatch Preview. Generate drafts and confirm Warm Private JC instead.", "error");
     return;
   }
@@ -9106,7 +9221,7 @@ async function handleSenderStatusClick(event) {
     const profile = actionButton.getAttribute("data-profile") || "";
     const action = actionButton.getAttribute("data-action") || "";
     if (profile === "private_jc_warm" && action === "open_lead_ops") {
-      setDashboardTab("leads");
+      setLeadWorkflow("warm");
       return;
     }
     if (!profile || !["start", "stop"].includes(action)) return;
@@ -9489,6 +9604,12 @@ if (els.opsProgressDetails) {
 }
 if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
+document.querySelectorAll("[data-leads-workflow]").forEach((link) => {
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    setLeadWorkflow(link.getAttribute("data-leads-workflow") || "cold");
+  });
+});
 if (els.leadsCurrentRunPanel) {
   els.leadsCurrentRunPanel.addEventListener("click", (event) => {
     const button = event.target.closest("[data-leads-next-action]");
@@ -9533,21 +9654,6 @@ if (els.leadsRecommendedNextAction) {
   });
 }
 if (els.leadsImportantUploadCheckBtn) els.leadsImportantUploadCheckBtn.addEventListener("click", () => runImportantLeadUploadCheck());
-if (els.leadsImportantUploadType) {
-  els.leadsImportantUploadType.addEventListener("change", () => {
-    const warmSelected = els.leadsImportantUploadType.value === "warm_research";
-    updateImportantLeadUploadNote(
-      warmSelected
-        ? "Warm Research splits direct emails and contact forms. Cold dispatch is disabled; warm confirmation stays separate."
-        : "Upload is file-only. Preview and confirm remain separate.",
-    );
-    lastImportantLeadCheck = selectedLeadCheckReport(lastLeadsStatus || {});
-    lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus || {});
-    lastImportantDispatch = warmSelected ? {} : (lastLeadsStatus?.latest_dispatch || {});
-    applyWarmResearchLayoutState(warmSelected);
-    renderLeadsStatus(lastLeadsStatus || {});
-  });
-}
 if (els.leadsImportantCheckBtn) els.leadsImportantCheckBtn.addEventListener("click", () => runImportantLeadCheck());
 if (els.leadsImportantIntakeMode) els.leadsImportantIntakeMode.addEventListener("change", () => renderLeadsOperatorStatusStrip(lastLeadsStatus || {}));
 if (els.leadsImportantVerifyBtn) els.leadsImportantVerifyBtn.addEventListener("click", () => runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE));
@@ -9732,10 +9838,24 @@ if (els.authForm) {
 }
 if (els.authLogoutBtn) els.authLogoutBtn.addEventListener("click", () => submitAuthLogout());
 
+window.addEventListener("popstate", () => {
+  wallboardMode = readWallboardModeFromLocation();
+  activeDashboardTab = readDashboardTabFromLocation();
+  activeLeadWorkflow = readLeadWorkflowFromLocation();
+  applyWallboardMode();
+  applyLeadWorkflowPage();
+  syncTabBackgroundActivity();
+  if (isLeadsTabVisible()) {
+    void fetchLeadsStatus();
+  }
+});
+
 wallboardMode = readWallboardModeFromLocation();
 activeDashboardTab = readDashboardTabFromLocation();
+activeLeadWorkflow = readLeadWorkflowFromLocation();
 applyWallboardMode();
 applyDashboardTab();
+applyLeadWorkflowPage();
 applyLeadsTriageCopy();
 initQuarantineInboxDisclosure();
 renderImportantLeadCheck(lastImportantLeadCheck);
