@@ -218,7 +218,7 @@ export function AppShell({ template }) {
 function DashboardControllerBridge() {
   useEffect(() => {
     const script = document.createElement("script");
-    script.src = "/static/app.js?v=lead-workflow-routes-20260728b";
+    script.src = "/static/app.js?v=lead-workflow-routes-20260728c";
     script.dataset.dashboardController = "true";
     document.body.append(script);
     return () => script.remove();

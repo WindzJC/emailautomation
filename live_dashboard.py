@@ -1377,7 +1377,11 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     active_job_ids = active_job_ids or set()
     input_state = _lead_ops_progress_input_state(payload)
     job_record_exists = bool(job_id and _important_check_job_path(job_id).exists())
-    output_ready = _path_has_rows(payload.get("output_path"))
+    output_path = Path(str(payload.get("output_path") or "")) if payload.get("output_path") else None
+    output_exists = bool(output_path and output_path.exists())
+    output_has_rows = _path_has_rows(payload.get("output_path"))
+    warm_research = str(payload.get("selected_upload_type") or "").strip().lower() == "warm_research"
+    output_ready = output_exists if warm_research else output_has_rows
     rejected_exists = Path(str(payload.get("rejected_path") or "")).exists() if payload.get("rejected_path") else False
     keep_ready = _path_has_rows(payload.get("keep_path"))
     triage_reject_exists = Path(str(payload.get("triage_reject_path") or "")).exists() if payload.get("triage_reject_path") else False
@@ -1432,7 +1436,7 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     elif phase in {"checking", "triaging", "previewing"} and stale_age is not None and stale_age >= LEAD_OPS_PROGRESS_STALE_SECONDS:
         payload["stale_warning"] = LEAD_OPS_PROGRESS_STALE_WARNING
     phase = str(payload.get("phase") or phase).strip().lower()
-    payload["output_exists"] = output_ready
+    payload["output_exists"] = output_exists
     payload["rejected_exists"] = rejected_exists
     payload["keep_exists"] = keep_ready
     payload["triage_reject_exists"] = triage_reject_exists
@@ -1931,6 +1935,23 @@ def _run_important_check_job(job_id: str) -> None:
             )
             job = _run_auto_fast_triage_after_check(job)
         _save_important_check_job(job)
+        if is_warm_research:
+            _write_lead_ops_progress(
+                job,
+                phase="ready_for_preview",
+                status="completed",
+                processed_rows=job["processed_rows"],
+                total_rows=int(job.get("total_input_rows") or 0),
+                percent=100,
+                current_message="Warm Research outputs ready for review",
+                completed_at_utc=str(job.get("completed_at_utc") or ""),
+                row_counts={
+                    "input_rows": int(report.get("input_rows") or report.get("total_input_rows") or 0),
+                    "warm_email_ready_rows": int(report.get("warm_email_ready_rows") or 0),
+                    "warm_contact_form_rows": int(report.get("warm_contact_form_rows") or 0),
+                    "warm_rejected_rows": int(report.get("warm_rejected_rows") or 0),
+                },
+            )
     except Exception as exc:
         job["status"] = "failed"
         job["stage"] = "failed"
@@ -2495,6 +2516,84 @@ def _latest_completed_warm_check_job() -> dict[str, object] | None:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
+
+
+def _warm_check_job_is_current(
+    job: dict[str, object] | None,
+    progress: dict[str, object] | None,
+) -> bool:
+    if not isinstance(job, dict) or not isinstance(progress, dict):
+        return False
+    job_id = str(job.get("job_id") or "").strip()
+    progress_job_id = str(progress.get("job_id") or "").strip()
+    phase = str(progress.get("phase") or progress.get("status") or "").strip().lower()
+    if not job_id or progress_job_id != job_id:
+        return False
+    if str(job.get("status") or "").strip().lower() not in {"completed", "done"}:
+        return False
+    if phase in {"", "failed", "stale", "canceled", "cancelled"}:
+        return False
+    if bool(progress.get("reupload_required")):
+        return False
+    required_progress_flags = (
+        "input_exists",
+        "job_record_exists",
+        "output_exists",
+        "rejected_exists",
+        "latest_master_check_matches_current_run",
+    )
+    if any(progress.get(key) is not True for key in required_progress_flags):
+        return False
+    required_paths = [
+        job.get("effective_input_path") or job.get("saved_input_path") or job.get("input_path"),
+        job.get("output_path"),
+        job.get("rejected_path"),
+    ]
+    contact_form_path = job.get("contact_form_review_path")
+    if contact_form_path:
+        required_paths.append(contact_form_path)
+    for raw_path in required_paths:
+        if not str(raw_path or "").strip():
+            return False
+        try:
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = settings.APP_ROOT / path
+            if not path.exists():
+                return False
+        except OSError:
+            return False
+    report = job.get("check") if isinstance(job.get("check"), dict) else {}
+    return bool(report.get("generated_at_utc"))
+
+
+def _current_completed_warm_check_job() -> dict[str, object] | None:
+    job = _latest_completed_warm_check_job()
+    if not job:
+        return None
+    progress = _load_lead_ops_progress(job.get("job_id"))
+    reconciled = _reconcile_lead_ops_progress(progress, set()) if progress else {}
+    return job if _warm_check_job_is_current(job, reconciled) else None
+
+
+def _warm_check_status_payload(
+    latest_job: dict[str, object] | None,
+    progress: dict[str, object] | None,
+) -> dict[str, object]:
+    if _warm_check_job_is_current(latest_job, progress):
+        current = dict(latest_job.get("check") or {})
+        current["current_job_id"] = str(latest_job.get("job_id") or "")
+        current["current_upload_valid"] = True
+        return {
+            "current_warm_check": current,
+            "current_warm_check_job_id": str(latest_job.get("job_id") or ""),
+            "previous_warm_check": {},
+        }
+    return {
+        "current_warm_check": {},
+        "current_warm_check_job_id": "",
+        "previous_warm_check": dict(latest_job.get("check") or {}) if latest_job else {},
+    }
 
 
 def _staged_run_dir_for_job(job: dict[str, object]) -> Path:
@@ -3384,6 +3483,12 @@ def _combined_leads_status() -> dict[str, object]:
         "cold": _current_lead_ops_progress(status, "cold"),
         "warm_research": _current_lead_ops_progress(status, "warm_research"),
     }
+    status.update(
+        _warm_check_status_payload(
+            latest_warm_job,
+            status["lead_ops_progress_by_workflow"]["warm_research"],
+        )
+    )
     status["lead_check_status"] = _build_lead_check_status(status, state)
     status["pipeline"] = _build_leads_pipeline_status(status)
     status["lead_funnel"] = _build_lead_funnel_summary(status)
@@ -5159,7 +5264,7 @@ def get_active_check_important_leads_job() -> JSONResponse:
 
 @app.post("/api/leads/check-important/warm-preview")
 def generate_warm_research_email_preview() -> JSONResponse:
-    job = _latest_completed_warm_check_job()
+    job = _current_completed_warm_check_job()
     if not job:
         return JSONResponse(
             {"ok": False, "error": "warm_check_required", "message": "Run a Warm Research upload check first."},
@@ -5212,7 +5317,7 @@ def generate_warm_research_email_preview() -> JSONResponse:
 
 @app.post("/api/leads/check-important/warm-confirm")
 def confirm_warm_research_private_jc() -> JSONResponse:
-    job = _latest_completed_warm_check_job()
+    job = _current_completed_warm_check_job()
     if not job:
         return JSONResponse(
             {"ok": False, "error": "warm_check_required", "message": "Run a Warm Research upload check first."},

@@ -91,6 +91,76 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, source)
 
+    def test_stale_warm_current_state_clears_metrics_and_locks_actions(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        state_start = source.index("function currentWarmWorkflowState")
+        state_end = source.index("function currentWarmPrivateJcStatus", state_start)
+        state_body = source[state_start:state_end]
+        panel_start = source.index("function renderLeadsCurrentRunPanel")
+        panel_end = source.index("function renderLeadsWorkflowTaskList", panel_start)
+        panel_body = source[panel_start:panel_end]
+        tracker_start = source.index("function renderLeadsWorkflowTaskList")
+        tracker_end = source.index("function renderLeadsWorkflowStatusBanner", tracker_start)
+        tracker_body = source[tracker_start:tracker_end]
+        banner_start = tracker_end
+        banner_end = source.index("function renderLeadsOperatorStatusStrip", banner_start)
+        banner_body = source[banner_start:banner_end]
+
+        for expected in [
+            '"stale"',
+            "progress?.reupload_required === true",
+            "progress?.job_record_exists !== true",
+            "progress?.output_exists !== true",
+            "progress?.rejected_exists !== true",
+            "progress?.latest_master_check_matches_current_run !== true",
+            "report: valid ? report : {}",
+            "historicalReport: previousWarmResearchReport(status)",
+        ]:
+            self.assertIn(expected, state_body)
+        for expected in [
+            "Current Warm Outreach · Re-upload required",
+            "No Current Warm Queue",
+            "!checked || draftCount <= 0 || warmConfirmed",
+            "!checked || !warmConfirmed || !laneConfirmed || warmRemaining <= 0",
+            "Historical sender activity below does not unlock this upload workflow.",
+            "Previous Warm Outreach Run",
+        ]:
+            self.assertIn(expected, panel_body)
+        for expected in [
+            'workflow.reuploadRequired ? "Re-upload Required"',
+            'status: checked ? "Available" : "Locked"',
+            'status: draftReady ? "Complete" : checked ? "Available" : "Locked"',
+            'status: currentConfirmed ? "Complete" : draftReady ? "Required" : "Locked"',
+        ]:
+            self.assertIn(expected, tracker_body)
+        self.assertIn("Previous Warm Outreach Run", banner_body)
+        self.assertIn("Historical results — not current workflow state", banner_body)
+        self.assertIn("workflow.valid && Number(report.warm_email_preview_rows || 0) > 0", banner_body)
+
+    def test_cold_start_requires_current_confirmed_matching_queue(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        tracker_start = source.index("function renderLeadsWorkflowTaskList")
+        tracker_end = source.index("function renderLeadsWorkflowStatusBanner", tracker_start)
+        tracker_body = source[tracker_start:tracker_end]
+
+        self.assertIn("const confirmedQueue = confirmedDispatchQueueState(status)", tracker_body)
+        self.assertIn(
+            "const currentConfirmedQueueExists = confirmedQueue.liveMatches && confirmedQueue.totalQueued > 0",
+            tracker_body,
+        )
+        self.assertIn('status: currentConfirmedQueueExists ? "Ready" : "Locked"', tracker_body)
+        self.assertNotIn("const liveQueueExists = liveRecipientQueueTotal(status) > 0", tracker_body)
+
+    def test_cold_and_warm_current_reports_remain_workflow_scoped(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn(
+            'const report = uploadType === "warm_research" ? status?.current_warm_check : status?.latest_master_check',
+            source,
+        )
+        self.assertIn('const progress = currentLeadOpsProgress(status, "warm_research")', source)
+        self.assertIn("current_warm_check_job_id", source)
+        self.assertIn("previous_warm_check", source)
+
     def test_warm_layout_moves_the_stepper_shell_only_when_anchors_share_a_parent(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn('closest(".react-stepper-shell")', source)
@@ -801,7 +871,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm Research uses its own draft, confirmation, and Private JC lane.",
             "Warm Research Outputs",
             "Explicit confirmation required",
-            "Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? \"Yes\" : \"No\"}",
+            "Historical sender activity below does not unlock this upload workflow.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
             "Generate Warm Draft Preview",
@@ -885,7 +955,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Confirm",
             "Start",
             "Locked until Check/Triage completes.",
-            "No live recipient queues are ready to start.",
+            "No current workflow-scoped confirmed queue is ready to start.",
             "safer_recontact_source_summary",
             "lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary",
             "active history ·",
@@ -1463,7 +1533,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Start Warm Private JC",
             "/api/leads/check-important/warm-confirm",
             "/api/start/private_jc_warm",
-            "Warm Private JC Send Status",
+            "Warm Private JC Sender History",
             "<div><span>Ready / Original</span>",
             "<div><span>Running</span>",
             "<div><span>Cap</span>",
@@ -1582,7 +1652,8 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             "Warm Research Outputs",
-            "Warm Private JC Send Status",
+            "Warm Private JC Sender History",
+            "Previous Warm Outreach Run",
             "warm-private-action-panel",
             "warm-action-stack",
             "warm-research-output-group",
@@ -1612,7 +1683,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("commandLeft.insertBefore(els.leadsCurrentRunPanel", source)
         self.assertIn("commandCenter.insertBefore(workflowTaskContainer, els.leadsWorkflowStatusBanner)", source)
         self.assertEqual(source.count('<p class="eyebrow">Warm Research Outputs</p>'), 0)
-        self.assertEqual(source.count("Warm Private JC Send Status"), 1)
+        self.assertEqual(source.count("Warm Private JC Sender History"), 1)
         self.assertEqual(source.count('<p class="eyebrow">Safety Rules</p>'), 1)
 
     def test_warm_research_uses_one_compact_four_step_workflow(self) -> None:
@@ -1737,8 +1808,9 @@ class WebDashboardAppTests(unittest.TestCase):
     def test_warm_complete_summary_is_compact_and_human_readable(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
-        self.assertIn("Warm Private JC · ${warmState}", source)
-        self.assertIn('Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? "Yes" : "No"}', source)
+        self.assertIn("Current Warm Outreach · Ready for review", source)
+        self.assertIn("Previous Warm Outreach Run", source)
+        self.assertIn("Historical / live lane", source)
         self.assertIn("warm-status-summary", source)
         self.assertIn("formatWarmActivity(lane.last_sent_timestamp)", source)
         self.assertIn('href="mailto:${escapeHtml(lane.last_sent_email)}"', source)

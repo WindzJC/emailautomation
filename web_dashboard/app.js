@@ -1417,7 +1417,7 @@ function currentLeadCheckStatus(status = lastLeadsStatus) {
 }
 
 function selectedLeadCheckReport(status = lastLeadsStatus, uploadType = selectedLeadUploadType()) {
-  const report = uploadType === "warm_research" ? status?.latest_warm_check : status?.latest_master_check;
+  const report = uploadType === "warm_research" ? status?.current_warm_check : status?.latest_master_check;
   if (report?.generated_at_utc && reportMatchesUploadType(report, uploadType)) return report;
   return {};
 }
@@ -4137,9 +4137,57 @@ function warmResearchUploadMode() {
 }
 
 function currentWarmResearchReport(status = lastLeadsStatus) {
-  const statusReport = status?.latest_warm_check;
-  if (statusReport?.upload_type === "warm_research") return statusReport;
+  const statusReport = status?.current_warm_check;
+  if (statusReport?.upload_type === "warm_research" && statusReport?.current_upload_valid === true) return statusReport;
   return {};
+}
+
+function previousWarmResearchReport(status = lastLeadsStatus) {
+  const report = status?.previous_warm_check || status?.latest_warm_check;
+  if (report?.upload_type !== "warm_research" || !report?.generated_at_utc) return {};
+  const current = currentWarmResearchReport(status);
+  const currentJobId = String(status?.current_warm_check_job_id || current?.current_job_id || "");
+  const historicalJobId = String(report?.current_job_id || report?.check_job_id || report?.job_id || "");
+  if (current?.generated_at_utc === report.generated_at_utc && (!historicalJobId || historicalJobId === currentJobId)) return {};
+  return report;
+}
+
+function currentWarmWorkflowState(status = lastLeadsStatus) {
+  const report = currentWarmResearchReport(status);
+  const progress = currentLeadOpsProgress(status, "warm_research");
+  const phase = String(progress?.phase || progress?.status || "").toLowerCase();
+  const progressJobId = String(progress?.job_id || "");
+  const currentJobId = String(status?.current_warm_check_job_id || report?.current_job_id || "");
+  const invalidPhase = ["failed", "stale", "canceled", "cancelled"].includes(phase);
+  const missingCurrentArtifacts = (
+    progress?.input_exists !== true
+    || progress?.job_record_exists !== true
+    || progress?.output_exists !== true
+    || progress?.rejected_exists !== true
+    || progress?.latest_master_check_matches_current_run !== true
+  );
+  const valid = Boolean(
+    report?.generated_at_utc
+    && report?.current_upload_valid === true
+    && progressJobId
+    && currentJobId === progressJobId
+    && !invalidPhase
+    && progress?.reupload_required !== true
+    && !missingCurrentArtifacts
+  );
+  const hasCurrentAttempt = Boolean(progressJobId);
+  const reuploadRequired = hasCurrentAttempt && !valid && (
+    invalidPhase
+    || progress?.reupload_required === true
+    || missingCurrentArtifacts
+  );
+  return {
+    valid,
+    reuploadRequired,
+    report: valid ? report : {},
+    historicalReport: previousWarmResearchReport(status),
+    progress,
+  };
 }
 
 function currentWarmPrivateJcStatus(status = lastLeadsStatus, snapshot = lastSnapshot) {
@@ -5044,32 +5092,31 @@ function privateJcAuthIssueMessage(snapshot = lastSnapshot) {
 function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   if (!els.leadsCurrentRunPanel) return;
   if (warmResearchUploadMode()) {
-    const report = currentWarmResearchReport(status);
-    const checked = Boolean(report?.generated_at_utc);
+    const workflow = currentWarmWorkflowState(status);
+    const report = workflow.report;
+    const checked = workflow.valid;
     const lane = currentWarmPrivateJcStatus(status, lastSnapshot);
     const warmRunning = Boolean(lane.running);
-    const warmConfirmed = Boolean(lane.confirmed);
+    const laneConfirmed = Boolean(lane.confirmed);
+    const warmConfirmed = checked && Boolean(report.warm_private_jc_confirmed);
     const warmRemaining = Number(lane.queued_remaining_count ?? lane.remaining ?? 0);
     const warmSent = Number(lane.sent_count ?? 0);
     const draftCount = Number(report.warm_email_preview_rows || 0);
     const warmCap = Number(lane.cap ?? 0);
     const warmOriginal = Number(lane.ready_original_count ?? lane.original_count ?? draftCount ?? 0);
-    const warmState = String(lane.state || "No queue");
-    const warmStateHeadline = warmState === "Partial"
-      ? "Warm send partially complete"
-      : warmState === "Blocked"
-        ? "Warm send blocked · no eligible rows"
-        : `Warm Private JC · ${warmState}`;
+    const warmStateHeadline = workflow.reuploadRequired
+      ? "Current Warm Outreach · Re-upload required"
+      : checked
+        ? "Current Warm Outreach · Ready for review"
+        : "Current Warm Outreach · Upload required";
     const warmTimeline = Array.isArray(lane.timeline) ? lane.timeline : [];
     const warmStartAction = warmRunning ? "stop_warm_private_jc" : "start_warm_private_jc";
     const warmStartLabel = warmRunning
       ? "Stop Warm Private JC"
-      : warmState === "Complete"
-        ? "Warm Private JC Complete"
-        : warmRemaining > 0 && warmConfirmed
+      : warmRemaining > 0 && warmConfirmed && laneConfirmed
           ? warmSent > 0 ? "Resume Warm Private JC" : "Start Warm Private JC"
-          : "No Warm Queue";
-    const warmStartDisabled = !warmRunning && (!warmConfirmed || warmRemaining <= 0);
+          : "No Current Warm Queue";
+    const warmStartDisabled = !warmRunning && (!checked || !warmConfirmed || !laneConfirmed || warmRemaining <= 0);
     if (els.leadsControlCheckResult) {
       setNodeHtml(
         els.leadsControlCheckResult,
@@ -5081,7 +5128,9 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             ["Already contacted", report.already_contacted_rows],
             ["Suppressed", report.suppressed_removed],
           ].map(([label, value]) => `<span>${escapeHtml(label)} <strong>${Number(value || 0).toLocaleString()}</strong></span>`).join("")
-          : "<span>No Warm Research upload checked yet</span>",
+          : workflow.reuploadRequired
+            ? "<span>Re-upload required. Current Warm Outreach counts are cleared until a new upload completes.</span>"
+            : "<span>No current Warm Research upload checked yet</span>",
       );
     }
     setNodeHtml(
@@ -5092,7 +5141,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             <div>
               <p class="eyebrow">Warm Private JC</p>
               <h3>${escapeHtml(warmStateHeadline)}</h3>
-              <p class="current-run-subtitle warm-status-summary">Sent ${warmSent.toLocaleString()} · Remaining ${warmRemaining.toLocaleString()} · Running ${warmRunning ? "Yes" : "No"}</p>
+              <p class="current-run-subtitle warm-status-summary">${checked ? "Current upload outputs are valid." : "Historical sender activity below does not unlock this upload workflow."}</p>
             </div>
             <div class="warm-command-badges">
               <span class="mini-pill">Explicit confirmation</span>
@@ -5108,18 +5157,19 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             </div>
             <div class="leads-action-slot warm-action-stack">
               <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>
-              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Private JC Confirmed" : "Confirm Warm Private JC"}</button>
+              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Private JC Confirmed" : "Confirm Warm Private JC"}</button>
               <button class="btn ${warmRunning ? "btn-danger" : "btn-primary"}" type="button" data-leads-next-action="${escapeHtml(warmStartAction)}" ${warmStartDisabled ? "disabled" : ""}>${escapeHtml(warmStartLabel)}</button>
             </div>
             ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
             <section class="warm-private-lane-group">
               <div class="warm-panel-heading">
-                <p class="eyebrow">Warm Private JC Send Status</p>
-                <span class="mini-pill">Live lane</span>
+                <p class="eyebrow">${checked ? "Warm Private JC Sender History" : "Previous Warm Outreach Run"}</p>
+                <span class="mini-pill">Historical / live lane</span>
               </div>
+              <p class="muted">This sender history is separate from the current upload workflow and cannot unlock preview, confirmation, or Start.</p>
               <div class="current-run-metrics warm-lane-metrics">
                 <div><span>Ready / Original</span><strong>${warmOriginal.toLocaleString()}</strong></div>
-                <div><span>Confirmed</span><strong>${warmConfirmed ? "Yes" : "No"}</strong></div>
+                <div><span>Confirmed</span><strong>${laneConfirmed ? "Yes" : "No"}</strong></div>
                 <div><span>Running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
                 <div><span>Sent</span><strong>${warmSent.toLocaleString()}</strong></div>
                 <div><span>Remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
@@ -5233,38 +5283,41 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
 function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   if (!els.leadsWorkflowTaskList) return;
   if (warmResearchUploadMode()) {
-    const report = currentWarmResearchReport(status);
+    const workflow = currentWarmWorkflowState(status);
+    const report = workflow.report;
     const activeJob = currentImportantCheckJob(status);
     const running = isActiveImportantLeadCheckJob(activeJob) && activeJob?.upload_type === "warm_research";
-    const checked = Boolean(report?.generated_at_utc);
+    const checked = workflow.valid;
+    const draftReady = checked && Number(report.warm_email_preview_rows || 0) > 0;
+    const currentConfirmed = checked && Boolean(report.warm_private_jc_confirmed);
     const tasks = [
       {
         step: "Upload Warm Research",
-        status: running ? "Waiting" : checked ? "Complete" : "Available",
-        detail: checked ? `${Number(report.input_rows || 0).toLocaleString()} rows checked` : "Choose a CSV/XLSX file and click Upload & Check.",
-        tone: running ? "warn" : checked ? "good" : "neutral",
+        status: running ? "Waiting" : checked ? "Complete" : workflow.reuploadRequired ? "Re-upload Required" : "Available",
+        detail: checked ? `${Number(report.input_rows || 0).toLocaleString()} rows checked` : workflow.reuploadRequired ? "The current job is stale or its required files are unavailable." : "Choose a CSV/XLSX file and click Upload & Check.",
+        tone: running ? "warn" : checked ? "good" : workflow.reuploadRequired ? "bad" : "neutral",
       },
       {
         step: "Review Split Outputs",
-        status: checked ? "Available" : "Waiting",
+        status: checked ? "Available" : "Locked",
         detail: checked
           ? `${Number(report.warm_email_ready_rows || 0).toLocaleString()} email ready · ${Number(report.warm_contact_form_rows || 0).toLocaleString()} contact forms`
-          : "Outputs appear after validation completes.",
+          : "Locked until a valid current Warm Research upload completes.",
         tone: checked ? "good" : "neutral",
       },
       {
         step: "Generate Draft Preview",
-        status: Number(report.warm_email_preview_rows || 0) > 0 ? "Complete" : checked ? "Available" : "Waiting",
-        detail: Number(report.warm_email_preview_rows || 0) > 0
+        status: draftReady ? "Complete" : checked ? "Available" : "Locked",
+        detail: draftReady
           ? `${Number(report.warm_email_preview_rows || 0).toLocaleString()} preview-only drafts generated`
-          : "Creates warm_email_preview.csv without writing sender queues.",
-        tone: Number(report.warm_email_preview_rows || 0) > 0 ? "good" : checked ? "warn" : "neutral",
+          : checked ? "Creates warm_email_preview.csv without writing sender queues." : "Locked until current split outputs are valid.",
+        tone: draftReady ? "good" : checked ? "warn" : "neutral",
       },
       {
         step: "Warm Private JC",
-        status: status?.warm_private_jc_lane?.confirmed ? "Complete" : Number(report.warm_email_preview_rows || 0) > 0 ? "Required" : "Waiting",
-        detail: "Uses the separate Warm Private JC queue and never routes through SendGrid.",
-        tone: status?.warm_private_jc_lane?.confirmed ? "good" : "neutral",
+        status: currentConfirmed ? "Complete" : draftReady ? "Required" : "Locked",
+        detail: checked ? "Uses the separate Warm Private JC queue and never routes through SendGrid." : "Locked until the current upload has a valid draft preview.",
+        tone: currentConfirmed ? "good" : "neutral",
       },
     ];
     setNodeHtml(
@@ -5296,7 +5349,8 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
   const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
   const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
-  const liveQueueExists = liveRecipientQueueTotal(status) > 0;
+  const confirmedQueue = confirmedDispatchQueueState(status);
+  const currentConfirmedQueueExists = confirmedQueue.liveMatches && confirmedQueue.totalQueued > 0;
   const hasUpload = Boolean(state.activeCheck?.job_id || latestCheck?.generated_at_utc);
   const checkFailed = state.checkStatus === "failed";
   const triageLocked = state.checkStatus !== "completed";
@@ -5334,9 +5388,9 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     },
     {
       step: "Start",
-      status: liveQueueExists ? "Ready" : "Locked",
-      detail: liveQueueExists ? "Start senders from the Dashboard sender table." : "No live recipient queues are ready to start.",
-      tone: liveQueueExists ? "good" : "neutral",
+      status: currentConfirmedQueueExists ? "Ready" : "Locked",
+      detail: currentConfirmedQueueExists ? "Start senders from the Dashboard sender table." : "No current workflow-scoped confirmed queue is ready to start.",
+      tone: currentConfirmedQueueExists ? "good" : "neutral",
     },
   ];
   setNodeHtml(
@@ -5365,7 +5419,9 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
 function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   if (!els.leadsWorkflowStatusBanner) return;
   if (warmResearchUploadMode()) {
-    const report = currentWarmResearchReport(status);
+    const workflow = currentWarmWorkflowState(status);
+    const report = workflow.report;
+    const historicalReport = workflow.historicalReport;
     setNodeHtml(
       els.leadsWorkflowStatusBanner,
       `
@@ -5373,12 +5429,24 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
           <section class="warm-research-output-group">
             <div class="warm-panel-heading">
               <div>
-                <p class="eyebrow">Research outputs</p>
-                <strong>Warm Research Outputs</strong>
+                <p class="eyebrow">Current workflow outputs</p>
+                <strong>${workflow.reuploadRequired ? "Re-upload required" : "Warm Research Outputs"}</strong>
               </div>
-              ${Number(report.warm_email_preview_rows || 0) > 0 ? `<span class="mini-pill">Draft preview ready</span>` : ""}
+              ${workflow.valid && Number(report.warm_email_preview_rows || 0) > 0 ? `<span class="mini-pill">Draft preview ready</span>` : ""}
             </div>
             ${warmResearchMetricMarkup(report)}
+            ${workflow.valid ? "" : `<p class="muted">Current metrics are cleared and actions remain locked until a valid current upload completes.</p>`}
+            ${historicalReport?.generated_at_utc ? `
+              <section class="previous-warm-run">
+                <div class="warm-panel-heading">
+                  <div>
+                    <p class="eyebrow">Previous Warm Outreach Run</p>
+                    <strong>Historical results — not current workflow state</strong>
+                  </div>
+                </div>
+                ${warmResearchMetricMarkup(historicalReport)}
+              </section>
+            ` : ""}
           </section>
           <aside class="warm-safety-card">
             <p class="eyebrow">Safety Rules</p>

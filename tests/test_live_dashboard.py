@@ -1740,6 +1740,7 @@ class LiveDashboardTests(unittest.TestCase):
                 self.assertFalse(saved["check"]["dispatch_enabled"])
                 self.assertIsNone(live_dashboard._latest_completed_important_check_job())
                 self.assertEqual(job["job_id"], live_dashboard._latest_completed_warm_check_job()["job_id"])
+                self.assertEqual(job["job_id"], live_dashboard._current_completed_warm_check_job()["job_id"])
                 auto_triage.assert_not_called()
 
     def test_warm_preview_endpoint_writes_preview_csv_without_dispatch_queues(self) -> None:
@@ -1782,7 +1783,7 @@ class LiveDashboardTests(unittest.TestCase):
             }
             (jobs_dir / "check_warm.json").write_text(json.dumps(job), encoding="utf-8")
 
-            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+            with patch.object(live_dashboard, "_current_completed_warm_check_job", return_value=job), patch.object(
                 live_dashboard,
                 "_combined_leads_status",
                 return_value={},
@@ -1794,6 +1795,14 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(1, body["preview"]["warm_email_preview_rows"])
             self.assertTrue((run_dir / "warm_email_preview.csv").exists())
             self.assertFalse(any(run_dir.glob("recipients_*.csv")))
+
+    def test_warm_preview_endpoint_rejects_historical_check_when_current_is_stale(self) -> None:
+        with patch.object(live_dashboard, "_current_completed_warm_check_job", return_value=None):
+            response = live_dashboard.generate_warm_research_email_preview()
+
+        body = json.loads(response.body)
+        self.assertEqual(404, response.status_code)
+        self.assertEqual("warm_check_required", body["error"])
 
     def test_check_important_leads_upload_rejects_declared_size_over_check_upload_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -3229,6 +3238,88 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(reconciled["input_exists"])
         self.assertFalse(reconciled["job_record_exists"])
         self.assertFalse(reconciled["latest_master_check_matches_current_run"])
+
+    def test_stale_warm_job_with_historical_outputs_is_not_current(self) -> None:
+        historical_check = {
+            "upload_type": "warm_research",
+            "generated_at_utc": "2026-07-20T00:00:00+00:00",
+            "warm_email_ready_rows": 8,
+            "warm_contact_form_rows": 11,
+            "warm_rejected_rows": 1,
+            "warm_email_preview_rows": 8,
+        }
+        job = {
+            "job_id": "check_stale_warm",
+            "status": "completed",
+            "check": historical_check,
+            "effective_input_path": "/missing/warm.csv",
+            "output_path": "/missing/warm_email_ready.csv",
+            "contact_form_review_path": "/missing/warm_contact_form_review.csv",
+            "rejected_path": "/missing/warm_rejected.csv",
+        }
+        progress = {
+            "job_id": "check_stale_warm",
+            "selected_upload_type": "warm_research",
+            "phase": "stale",
+            "reupload_required": True,
+            "input_exists": False,
+            "job_record_exists": False,
+            "output_exists": False,
+            "rejected_exists": False,
+            "latest_master_check_matches_current_run": False,
+        }
+
+        self.assertFalse(live_dashboard._warm_check_job_is_current(job, progress))
+        payload = live_dashboard._warm_check_status_payload(job, progress)
+        self.assertEqual({}, payload["current_warm_check"])
+        self.assertEqual(8, payload["previous_warm_check"]["warm_email_ready_rows"])
+        self.assertEqual(11, payload["previous_warm_check"]["warm_contact_form_rows"])
+        self.assertEqual(1, payload["previous_warm_check"]["warm_rejected_rows"])
+        self.assertEqual(8, payload["previous_warm_check"]["warm_email_preview_rows"])
+
+    def test_valid_current_warm_upload_restores_workflow_readiness(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            run_dir = Path(tmpdir)
+            input_path = run_dir / "warm.csv"
+            output_path = run_dir / "warm_email_ready.csv"
+            contact_path = run_dir / "warm_contact_form_review.csv"
+            rejected_path = run_dir / "warm_rejected.csv"
+            self._write_csv(input_path, ["AuthorEmail"], [{"AuthorEmail": "author@example.test"}])
+            self._write_csv(output_path, ["AuthorEmail"], [{"AuthorEmail": "author@example.test"}])
+            self._write_csv(contact_path, ["ContactPath"], [{"ContactPath": "https://example.test/contact"}])
+            self._write_csv(rejected_path, ["Reason"], [])
+            job = {
+                "job_id": "check_current_warm",
+                "status": "completed",
+                "effective_input_path": str(input_path),
+                "output_path": str(output_path),
+                "contact_form_review_path": str(contact_path),
+                "rejected_path": str(rejected_path),
+                "check": {
+                    "upload_type": "warm_research",
+                    "generated_at_utc": "2026-07-28T00:00:00+00:00",
+                    "warm_email_ready_rows": 1,
+                    "warm_contact_form_rows": 1,
+                    "warm_rejected_rows": 0,
+                },
+            }
+            progress = {
+                "job_id": "check_current_warm",
+                "selected_upload_type": "warm_research",
+                "phase": "ready_for_preview",
+                "reupload_required": False,
+                "input_exists": True,
+                "job_record_exists": True,
+                "output_exists": True,
+                "rejected_exists": True,
+                "latest_master_check_matches_current_run": True,
+            }
+
+            self.assertTrue(live_dashboard._warm_check_job_is_current(job, progress))
+            payload = live_dashboard._warm_check_status_payload(job, progress)
+            self.assertTrue(payload["current_warm_check"]["current_upload_valid"])
+            self.assertEqual("check_current_warm", payload["current_warm_check_job_id"])
+            self.assertEqual({}, payload["previous_warm_check"])
 
     def test_latest_lead_ops_progress_prefers_job_start_time_over_file_mtime(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -6685,7 +6776,7 @@ class LiveDashboardTests(unittest.TestCase):
             preview_path.write_text("AuthorEmail\nsynthetic@example.com\n", encoding="utf-8")
             job = {"job_id": "warm-job", "warm_email_preview_path": str(preview_path), "check": {"upload_type": "warm_research"}}
             confirmation = {"confirmation_id": "warm-confirm", "row_count": 1, "message": "Confirmed."}
-            with patch.object(live_dashboard, "_latest_completed_warm_check_job", return_value=job), patch.object(
+            with patch.object(live_dashboard, "_current_completed_warm_check_job", return_value=job), patch.object(
                 live_dashboard,
                 "confirm_warm_private_jc_preview",
                 return_value=confirmation,
