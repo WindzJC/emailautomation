@@ -38,6 +38,37 @@ def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = No
         + "".join(f"{email},Test,Book\n" for email in emails),
         encoding="utf-8",
     )
+    for name in ("leads.csv", "leads_triaged_keep.csv"):
+        (important / name).write_text(
+            "Email,FirstName,BookTitle\n"
+            + "".join(f"{email},Test,Book\n" for email in emails),
+            encoding="utf-8",
+        )
+    (important / "leads_triaged_reject.csv").write_text(
+        "Email,FirstName,BookTitle\n",
+        encoding="utf-8",
+    )
+    preview_header = "Email,AuthorEmail,AuthorName,FirstName,BookTitle,Subject,Body\n"
+    preview_rows = "".join(
+        f"{email},{email},Test Author,Test,Book,Subject,Body\n"
+        for email in emails
+    )
+    for name in (
+        "private_jc_message_preview.csv",
+        "private_jc_message_preview_validated.csv",
+    ):
+        (previews / name).write_text(
+            preview_header + preview_rows,
+            encoding="utf-8",
+        )
+    (previews / "private_jc_message_preview_failed.csv").write_text(
+        preview_header,
+        encoding="utf-8",
+    )
+    (previews / "private_jc_message_preview_summary.txt").write_text(
+        f"total rows: {len(emails)}\npassed rows: {len(emails)}\nfailed rows: 0\n",
+        encoding="utf-8",
+    )
     (logs / "private_jc_log.csv").write_text(
         "TimestampUTC,Email,Status,Info\n"
         + "".join(f"2026-01-01T00:00:00Z,{email},SENT,ok\n" for email in (sent or [])),
@@ -48,6 +79,17 @@ def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = No
     (state / "sendgrid_suppressions.csv").write_text("Email,Type\n", encoding="utf-8")
     (important / "campaign_history.jsonl").write_text(
         '{"campaign":"fixture"}\n', encoding="utf-8"
+    )
+    (state / "active_campaign_snapshot.json").write_text(
+        json.dumps(
+            {
+                "checked_path": str(important / "leads.csv"),
+                "intended_source_path": str(important / "leads_triaged_keep.csv"),
+                "triaged_keep_path": str(important / "leads_triaged_keep.csv"),
+                "triaged_reject_path": str(important / "leads_triaged_reject.csv"),
+            }
+        ),
+        encoding="utf-8",
     )
     with sqlite3.connect(state / "send_idempotency.sqlite3") as db:
         db.execute("CREATE TABLE IF NOT EXISTS sends (email TEXT PRIMARY KEY)")
@@ -305,6 +347,199 @@ def test_queue_safety_failure_refuses_activation(repos, tmp_path):
     with pytest.raises(runtime_handoff.HandoffError, match="Queue safety failure"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
     assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+
+
+def test_fresh_queue_safety_ignores_contradictory_stale_dashboard_state(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    (repo / "data/state/leads_dashboard_state.json").write_text(
+        json.dumps(
+            {
+                "lead_check_status": {
+                    "preview_block_reason": (
+                        "Check state mismatch: Latest check result does not match the current upload."
+                    )
+                },
+                "private_queue_safety": {
+                    "outside_checked_output_count": 1,
+                    "outside_intended_source_count": 1,
+                    "safe": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+
+    assert safety["safe"] is True
+    assert safety["active_intended_profiles"] == ["private_jc"]
+    assert safety["profiles"][0]["outside_checked_output_count"] == 0
+    assert safety["profiles"][0]["outside_intended_source_count"] == 0
+    assert safety["source_origin"] == "active_campaign_manifest"
+
+
+def test_inactive_profiles_without_previews_do_not_block(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    for index in range(1, 6):
+        (repo / f"data/shards/recipients_sendgrid_{index}.csv").write_text(
+            "Email,FirstName,AuthorEmail,AuthorName,BookTitle\n",
+            encoding="utf-8",
+        )
+    (repo / "data/shards/recipients_private_jc_warm.csv").write_text(
+        "AuthorEmail,EmailSubject,EmailBody,ContactPath\n",
+        encoding="utf-8",
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+
+    assert safety["safe"] is True
+    assert safety["active_intended_profiles"] == ["private_jc"]
+    assert [item["profile"] for item in safety["profiles"]] == ["private_jc"]
+
+
+def test_active_profile_stale_preview_is_precise_and_failed_initialize_is_read_only(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["one@example.test", "two@example.test"])
+    preview = repo / "data/message_previews/private_jc_message_preview.csv"
+    validated = repo / "data/message_previews/private_jc_message_preview_validated.csv"
+    for path in (preview, validated):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+    before = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    monkeypatch.setattr(runtime_handoff, "git", lambda _repo, *args: "abc123")
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+    with pytest.raises(
+        runtime_handoff.HandoffError,
+        match=r"profile=private_jc.*queue_rows=2.*preview_rows=1",
+    ):
+        runtime_handoff.initialize_authority(repo, machine="windows-wsl")
+
+    assert safety["unsafe_reasons"] == ["active profile preview is stale or invalid"]
+    assert safety["profiles"][0]["preview"]["queue_row_count"] == 2
+    assert safety["profiles"][0]["preview"]["preview_row_count"] == 1
+    after = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not runtime_authority.authority_path(repo).exists()
+    assert not runtime_authority.generation_floor_path(repo).exists()
+
+
+def test_historical_campaign_metadata_does_not_become_sent_overlap(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    (repo / "data/logs/campaign_history.csv").write_text(
+        "Email,Status,Campaign\ncurrent@example.test,SENT,historical-only\n",
+        encoding="utf-8",
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+
+    assert safety["safe"] is True
+    assert safety["queue_sent_overlap"] == 0
+
+
+def test_authoritative_sent_log_overlap_blocks_with_exact_profile_details(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    (repo / "data/logs/private_jc_log.csv").write_text(
+        "TimestampUTC,Email,Status,Info\n"
+        "2026-01-01T00:00:00Z,current@example.test,SENT,ok\n",
+        encoding="utf-8",
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+
+    assert safety["safe"] is False
+    assert safety["queue_sent_overlap"] == 1
+    assert safety["profiles"][0]["sent_overlap_count"] == 1
+    assert "profile=private_jc" in safety["failure_details"][0]
+    assert "private_jc_log.csv" in safety["failure_details"][0]
+
+
+def test_suppression_overlap_remains_fail_closed(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    (repo / "data/state/unsubscribed.csv").write_text(
+        "Email\ncurrent@example.test\n",
+        encoding="utf-8",
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+
+    assert safety["safe"] is False
+    assert safety["queue_suppression_overlap"] == 1
+    assert safety["profiles"][0]["suppression_overlap_count"] == 1
+    assert "unsubscribed.csv" in safety["failure_details"][0]
+
+
+def test_current_idempotency_overlap_blocks_but_old_campaign_does_not(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    database = repo / "data/state/send_idempotency.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            """
+            CREATE TABLE send_reservations (
+                campaign_id TEXT,
+                provider TEXT,
+                email TEXT,
+                profile TEXT
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO send_reservations VALUES (?, ?, ?, ?)",
+            ("older-campaign", "private", "current@example.test", "private_jc"),
+        )
+
+    old_only = runtime_handoff.recompute_queue_safety(repo)
+    assert old_only["safe"] is True
+    assert old_only["queue_idempotency_overlap"] == 0
+
+    with sqlite3.connect(database) as db:
+        db.execute(
+            "INSERT INTO send_reservations VALUES (?, ?, ?, ?)",
+            ("cold", "private", "current@example.test", "private_jc"),
+        )
+
+    current = runtime_handoff.recompute_queue_safety(repo)
+    assert current["safe"] is False
+    assert current["queue_idempotency_overlap"] == 1
+    assert current["profiles"][0]["idempotency_overlap_count"] == 1
+    assert "send_idempotency.sqlite3" in current["failure_details"][0]
+
+
+def test_safe_current_queue_initializes_after_matching_validated_preview(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    monkeypatch.setattr(runtime_handoff, "git", lambda _repo, *args: "abc123")
+
+    result = runtime_handoff.initialize_authority(
+        repo,
+        machine="windows-wsl",
+    )
+
+    assert result["status"] == runtime_authority.ACTIVE_STATUS
+    assert result["authorized_machine"] == "windows-wsl"
+    assert runtime_authority.load_authority(repo)["bundle_id"] == result["bundle_id"]
 
 
 def test_sender_authority_enforcement_and_preflight_inspection(repos):

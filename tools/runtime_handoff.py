@@ -8,6 +8,7 @@ which encrypts transport. Secrets and source code are never included.
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import hashlib
 import io
@@ -81,6 +82,13 @@ EXCLUDED_PARTS = {
 }
 ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".zip", ".age", ".gpg")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+QUEUE_SAFETY_MANIFEST = Path("data/state/active_campaign_snapshot.json")
+QUEUE_SAFETY_FALLBACKS = {
+    "checked": Path("_important/leads.csv"),
+    "intended": Path("_important/leads_triaged_keep.csv"),
+    "triaged_keep": Path("_important/leads_triaged_keep.csv"),
+    "triaged_reject": Path("_important/leads_triaged_reject.csv"),
+}
 
 
 class HandoffError(RuntimeError):
@@ -590,111 +598,560 @@ def mark_target_disabled(
     )
 
 
-def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
-    queue_emails: set[str] = set()
-    duplicate_count = 0
-    invalid_count = 0
-    for path in sorted((runtime_root / "data/shards").glob("recipients_*.csv")):
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            fields = {str(field or "").strip().lower() for field in (reader.fieldnames or [])}
-            if "email" not in fields and "authoremail" not in fields:
-                raise HandoffError(f"Queue safety failure: missing Email header in {path.name}")
-            local_seen: set[str] = set()
-            for row in reader:
-                email = str(row.get("Email") or row.get("AuthorEmail") or "").strip().lower()
-                if not EMAIL_RE.match(email):
-                    invalid_count += 1
-                elif email in local_seen:
-                    duplicate_count += 1
-                else:
-                    local_seen.add(email)
-                    queue_emails.add(email)
-    suppression_count = 0
-    suppressed_emails: set[str] = set()
-    for name in ("suppressed.csv", "unsubscribed.csv", "sendgrid_suppressions.csv"):
-        path = runtime_root / "data/state" / name
-        if not path.exists() or path.stat().st_size == 0:
+def _profile_runtime_layout() -> dict[str, dict[str, Any]]:
+    source_path = Path(__file__).resolve().parents[1] / "send_shard.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    profiles: dict[str, dict[str, Any]] | None = None
+    for node in tree.body:
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "PROFILES"
+        ):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, dict):
+                profiles = value
+            break
+    if profiles is None:
+        raise HandoffError(f"Could not read sender profile layout: {source_path}")
+    return profiles
+
+
+def _normalized_row_value(row: dict[str, str], *names: str) -> str:
+    values = {
+        str(key or "").strip().lower(): str(value or "").strip()
+        for key, value in row.items()
+    }
+    return next((values.get(name.lower(), "") for name in names if values.get(name.lower())), "")
+
+
+def _read_queue_state(path: Path, profile: str) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = {str(field or "").strip().lower() for field in (reader.fieldnames or [])}
+        if "email" not in fields and "authoremail" not in fields:
+            raise HandoffError(
+                f"Queue safety failure: profile={profile} queue={path} missing Email header"
+            )
+        emails: set[str] = set()
+        campaigns: dict[str, set[str]] = {}
+        duplicate_count = 0
+        invalid_count = 0
+        row_count = 0
+        fallback_campaign = "warm_research" if profile == "private_jc_warm" else "cold"
+        for row in reader:
+            row_count += 1
+            email = _normalized_row_value(row, "Email", "AuthorEmail").lower()
+            if not EMAIL_RE.match(email):
+                invalid_count += 1
+                continue
+            if email in emails:
+                duplicate_count += 1
+            emails.add(email)
+            campaign = _normalized_row_value(
+                row,
+                "campaign_id",
+                "dispatch_id",
+                "preview_id",
+                "campaign_type",
+            ).lower() or fallback_campaign
+            campaigns.setdefault(email, set()).add(campaign)
+    return {
+        "row_count": row_count,
+        "emails": emails,
+        "campaigns": campaigns,
+        "duplicate_count": duplicate_count,
+        "invalid_count": invalid_count,
+        "fingerprint": _email_fingerprint(emails),
+    }
+
+
+def _email_fingerprint(emails: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    for email in sorted(set(emails)):
+        digest.update(email.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest() if emails else ""
+
+
+def _resolve_runtime_path(runtime_root: Path, value: object) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        candidate = runtime_root / path
+    else:
+        parts = path.parts
+        marker_index = next(
+            (index for index, part in enumerate(parts) if part in {"data", "_important"}),
+            None,
+        )
+        if marker_index is None:
+            return None
+        candidate = runtime_root.joinpath(*parts[marker_index:])
+    try:
+        candidate.resolve(strict=False).relative_to(runtime_root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _queue_safety_sources(runtime_root: Path) -> dict[str, Any]:
+    manifest_path = runtime_root / QUEUE_SAFETY_MANIFEST
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HandoffError(f"Unreadable queue safety state: {manifest_path}") from exc
+        if not isinstance(manifest, dict):
+            raise HandoffError(f"Queue safety state is not an object: {manifest_path}")
+        intended = _resolve_runtime_path(
+            runtime_root,
+            manifest.get("intended_source_path") or manifest.get("triaged_keep_path"),
+        )
+        checked = _resolve_runtime_path(runtime_root, manifest.get("checked_path"))
+        keep = _resolve_runtime_path(
+            runtime_root,
+            manifest.get("triaged_keep_path") or manifest.get("intended_source_path"),
+        )
+        reject = _resolve_runtime_path(runtime_root, manifest.get("triaged_reject_path"))
+        return {
+            "origin": "active_campaign_manifest",
+            "state_path": manifest_path,
+            "state_fingerprint": sha256_file(manifest_path),
+            "manifest": manifest,
+            "intended": intended,
+            "checked": checked,
+            "triaged_keep": keep,
+            "triaged_reject": reject,
+        }
+    checked = runtime_root / QUEUE_SAFETY_FALLBACKS["checked"]
+    intended = runtime_root / QUEUE_SAFETY_FALLBACKS["intended"]
+    if not intended.exists():
+        intended = checked
+    return {
+        "origin": "current_important_fallback",
+        "state_path": "",
+        "state_fingerprint": "",
+        "manifest": {},
+        "intended": intended,
+        "checked": checked,
+        "triaged_keep": intended,
+        "triaged_reject": runtime_root / QUEUE_SAFETY_FALLBACKS["triaged_reject"],
+    }
+
+
+def _read_email_set(path: Path | None) -> set[str]:
+    if path is None or not path.is_file():
+        return set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return {
+            email
+            for row in reader
+            if (email := _normalized_row_value(row, "Email", "AuthorEmail").lower())
+            and EMAIL_RE.match(email)
+        }
+
+
+def _profile_log_paths(
+    runtime_root: Path,
+    profiles: dict[str, dict[str, Any]],
+    profile: str,
+) -> list[Path]:
+    if profile in {"private_jc", "private_jc_warm"}:
+        family_profiles = ("private_jc", "private_jc_warm")
+    elif str(profiles.get(profile, {}).get("provider") or "").lower() == "sendgrid":
+        family_profiles = tuple(
+            name
+            for name, config in profiles.items()
+            if str(config.get("provider") or "").lower() == "sendgrid"
+        )
+    else:
+        family_profiles = (profile,)
+    paths: list[Path] = []
+    for name in family_profiles:
+        config = profiles.get(name, {})
+        keys = ("log", "domain_log") if str(config.get("provider") or "").lower() == "sendgrid" else ("log",)
+        for key in keys:
+            filename = str(config.get(key) or "").strip()
+            path = runtime_root / "data/logs" / filename
+            if filename and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _authoritative_sent_emails(paths: Iterable[Path]) -> set[str]:
+    sent: set[str] = set()
+    for path in paths:
+        if not path.is_file():
             continue
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            fields = {str(field or "").strip().lower() for field in (reader.fieldnames or [])}
-            if "email" not in fields:
-                raise HandoffError(f"Suppression validation failure: missing Email header in {name}")
-            for row in reader:
-                email = str(row.get("Email") or "").strip().lower()
+            for row in csv.DictReader(handle):
+                status = _normalized_row_value(row, "Status", "Event", "Result").upper()
+                info = _normalized_row_value(row, "Info", "Details", "Message").lower()
+                if status != "SENT" and not (
+                    status == "ATTEMPT" and "outcome=sent" in info
+                ):
+                    continue
+                email = _normalized_row_value(row, "Email", "AuthorEmail").lower()
                 if email:
-                    suppressed_emails.add(email)
-                    suppression_count += 1
-    authoritative_sent: set[str] = set()
-    logs_root = runtime_root / "data/logs"
-    if logs_root.exists():
-        for path in logs_root.rglob("*.csv"):
-            with path.open("r", encoding="utf-8-sig", newline="") as handle:
-                for row in csv.DictReader(handle):
-                    status = str(row.get("Status") or "").strip().upper()
-                    info = str(row.get("Info") or "").strip().lower()
-                    if status == "SENT" or (
-                        status == "ATTEMPT" and "outcome=sent" in info
-                    ):
-                        email = str(row.get("Email") or "").strip().lower()
-                        if email:
-                            authoritative_sent.add(email)
-    idempotency_path = runtime_root / "data/state/send_idempotency.sqlite3"
-    if idempotency_path.exists():
-        try:
-            with sqlite3.connect(
-                f"file:{idempotency_path.resolve().as_posix()}?mode=ro", uri=True
-            ) as db:
-                table = db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='send_reservations'"
-                ).fetchone()
-                if table:
-                    for (email,) in db.execute(
-                        """
-                        SELECT email FROM send_reservations
-                        WHERE lower(coalesce(status, '')) IN
-                              ('submitted', 'sent', 'reserved', 'ambiguous')
-                           OR lower(coalesce(outcome, '')) = 'sent'
-                        """
-                    ):
-                        normalized = str(email or "").strip().lower()
-                        if normalized:
-                            authoritative_sent.add(normalized)
-        except sqlite3.DatabaseError as exc:
-            raise HandoffError(
-                f"Queue safety failure: unreadable idempotency state: {exc}"
-            ) from exc
-    sent_overlap = queue_emails & authoritative_sent
-    failed_preview_rows = 0
-    previews = runtime_root / "data/message_previews"
-    if previews.exists():
-        for path in previews.glob("*_message_preview_failed.csv"):
-            failed_preview_rows += _csv_count(path)
-        for path in previews.glob("*_message_preview_summary.txt"):
-            text = path.read_text(encoding="utf-8").lower()
-            match = re.search(r"(?:failed|failures)\s*[:=]\s*(\d+)", text)
+                    sent.add(email)
+    return sent
+
+
+def _idempotency_overlap(
+    runtime_root: Path,
+    profile: str,
+    provider: str,
+    queue_state: dict[str, Any],
+) -> set[str]:
+    path = runtime_root / "data/state/send_idempotency.sqlite3"
+    if not path.is_file():
+        return set()
+    try:
+        with sqlite3.connect(
+            f"file:{path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        ) as db:
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='send_reservations'"
+            ).fetchone()
+            if not table:
+                return set()
+            rows = db.execute(
+                "SELECT campaign_id, provider, email, profile FROM send_reservations"
+            ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise HandoffError(
+            f"Queue safety failure: unreadable idempotency state path={path}: {exc}"
+        ) from exc
+    queue_emails = queue_state["emails"]
+    campaigns = queue_state["campaigns"]
+    overlap: set[str] = set()
+    for campaign_id, row_provider, email_value, row_profile in rows:
+        email = str(email_value or "").strip().lower()
+        if email not in queue_emails:
+            continue
+        same_campaign = (
+            str(row_provider or "").strip().lower() == provider
+            and str(campaign_id or "").strip().lower() in campaigns.get(email, set())
+        )
+        cross_lane = (
+            profile == "private_jc_warm"
+            or (
+                profile == "private_jc"
+                and str(row_profile or "").strip().lower() == "private_jc_warm"
+            )
+        )
+        if same_campaign or cross_lane:
+            overlap.add(email)
+    return overlap
+
+
+def _preview_safety(
+    runtime_root: Path,
+    profile: str,
+    queue_path: Path,
+    queue_state: dict[str, Any],
+) -> dict[str, Any]:
+    preview_dir = runtime_root / "data/message_previews"
+    preview_path = preview_dir / f"{profile}_message_preview.csv"
+    validated_path = preview_dir / f"{profile}_message_preview_validated.csv"
+    failed_path = preview_dir / f"{profile}_message_preview_failed.csv"
+    summary_path = preview_dir / f"{profile}_message_preview_summary.txt"
+    queue_rows = int(queue_state["row_count"])
+    queue_emails = set(queue_state["emails"])
+    preview_rows = _csv_count(preview_path) if preview_path.is_file() else 0
+    preview_emails = _read_email_set(preview_path)
+    validated_rows = _csv_count(validated_path) if validated_path.is_file() else 0
+    validated_emails = _read_email_set(validated_path)
+    failed_rows = _csv_count(failed_path) if failed_path.is_file() else -1
+    summary_counts: dict[str, int] = {}
+    if summary_path.is_file():
+        text = summary_path.read_text(encoding="utf-8")
+        for key in ("total", "passed", "failed"):
+            match = re.search(rf"(?im)^{key}\s+rows:\s*(\d+)\s*$", text)
             if match:
-                failed_preview_rows += int(match.group(1))
+                summary_counts[key] = int(match.group(1))
+    summary_matches = summary_counts == {
+        "total": queue_rows,
+        "passed": queue_rows,
+        "failed": 0,
+    }
+    exact_match = (
+        preview_path.is_file()
+        and validated_path.is_file()
+        and failed_path.is_file()
+        and summary_path.is_file()
+        and preview_rows == queue_rows
+        and validated_rows == queue_rows
+        and preview_emails == queue_emails
+        and validated_emails == queue_emails
+        and failed_rows == 0
+        and summary_matches
+    )
+    return {
+        "safe": exact_match,
+        "profile": profile,
+        "queue_path": str(queue_path),
+        "queue_row_count": queue_rows,
+        "queue_fingerprint": queue_state["fingerprint"],
+        "preview_path": str(preview_path),
+        "preview_row_count": preview_rows,
+        "preview_fingerprint": _email_fingerprint(preview_emails),
+        "validated_path": str(validated_path),
+        "validated_row_count": validated_rows,
+        "validated_fingerprint": _email_fingerprint(validated_emails),
+        "failed_path": str(failed_path),
+        "failed_row_count": failed_rows,
+        "summary_path": str(summary_path),
+        "summary_counts": summary_counts,
+        "message": (
+            ""
+            if exact_match
+            else (
+                f"profile={profile} queue={queue_path} queue_rows={queue_rows} "
+                f"queue_fingerprint={queue_state['fingerprint']} preview={preview_path} "
+                f"preview_rows={preview_rows} preview_fingerprint={_email_fingerprint(preview_emails)} "
+                f"validated={validated_path} validated_rows={validated_rows} "
+                f"failed={failed_path} failed_rows={failed_rows} summary={summary_path} "
+                "reason=current queue requires a matching generated and validated preview; "
+                "regenerate and validate the active profile preview"
+            )
+        ),
+    }
+
+
+def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
+    profiles = _profile_runtime_layout()
+    queue_dir = runtime_root / "data/shards"
+    active: list[tuple[str, dict[str, Any], Path, dict[str, Any]]] = []
+    known_queue_names: set[str] = set()
+    for profile, config in profiles.items():
+        queue_name = str(config.get("csv") or "").strip()
+        if not queue_name:
+            continue
+        known_queue_names.add(queue_name)
+        queue_path = queue_dir / queue_name
+        if not queue_path.is_file():
+            continue
+        queue_state = _read_queue_state(queue_path, profile)
+        if int(queue_state["row_count"]) > 0:
+            active.append((profile, config, queue_path, queue_state))
+    unknown_active = []
+    for queue_path in sorted(queue_dir.glob("recipients_*.csv")):
+        if queue_path.name not in known_queue_names and _csv_count(queue_path) > 0:
+            unknown_active.append(queue_path)
+
+    sources = _queue_safety_sources(runtime_root)
+    intended_path = sources["intended"]
+    checked_path = sources["checked"]
+    reject_path = sources["triaged_reject"]
+    intended_emails = _read_email_set(intended_path)
+    checked_emails = _read_email_set(checked_path)
+    reject_emails = _read_email_set(reject_path)
+    source_actual_fingerprints = {
+        "checked": _email_fingerprint(checked_emails),
+        "intended_source": _email_fingerprint(intended_emails),
+        "triaged_keep": _email_fingerprint(_read_email_set(sources["triaged_keep"])),
+        "triaged_reject": _email_fingerprint(reject_emails),
+    }
+    source_fingerprint_mismatches: list[str] = []
+    manifest_files = sources.get("manifest", {}).get("files")
+    if isinstance(manifest_files, dict):
+        for key, actual in source_actual_fingerprints.items():
+            stored = manifest_files.get(key)
+            expected = (
+                str(stored.get("email_fingerprint") or "")
+                if isinstance(stored, dict)
+                else ""
+            )
+            if expected and expected != actual:
+                source_fingerprint_mismatches.append(
+                    f"{key}:expected={expected}:actual={actual}"
+                )
+    suppressed_emails: set[str] = set()
+    suppression_records = 0
+    suppression_paths = [
+        runtime_root / "data/state/suppressed.csv",
+        runtime_root / "data/state/unsubscribed.csv",
+        runtime_root / "data/state/sendgrid_suppressions.csv",
+    ]
+    for path in suppression_paths:
+        values = _read_email_set(path)
+        suppressed_emails.update(values)
+        suppression_records += len(values)
+
     reasons: list[str] = []
-    if duplicate_count:
+    details: list[str] = []
+    profile_reports: list[dict[str, Any]] = []
+    all_queue_emails: set[str] = set()
+    duplicate_across_profiles = 0
+    duplicate_rows = 0
+    invalid_rows = 0
+    suppression_overlap: set[str] = set()
+    sent_overlap: set[str] = set()
+    idempotency_overlap: set[str] = set()
+    preview_failed_rows = 0
+
+    if unknown_active:
+        reasons.append("unknown active recipient queues")
+        details.extend(
+            f"profile=unknown queue={path} overlap_count={_csv_count(path)} "
+            "authoritative_source=sender profile configuration reason=queue is not mapped to a sender profile"
+            for path in unknown_active
+        )
+
+    for profile, config, queue_path, queue_state in active:
+        queue_emails = set(queue_state["emails"])
+        duplicate_across_profiles += len(all_queue_emails & queue_emails)
+        all_queue_emails.update(queue_emails)
+        duplicate_rows += int(queue_state["duplicate_count"])
+        invalid_rows += int(queue_state["invalid_count"])
+        outside_checked = queue_emails - checked_emails if checked_emails else set(queue_emails)
+        outside_intended = queue_emails - intended_emails if intended_emails else set(queue_emails)
+        reject_overlap = queue_emails & reject_emails
+        profile_suppressed = queue_emails & suppressed_emails
+        suppression_overlap.update(profile_suppressed)
+        provider = str(config.get("provider") or "").strip().lower()
+        log_paths = _profile_log_paths(runtime_root, profiles, profile)
+        profile_sent = queue_emails & _authoritative_sent_emails(log_paths)
+        profile_idempotency = _idempotency_overlap(
+            runtime_root,
+            profile,
+            provider,
+            queue_state,
+        )
+        sent_overlap.update(profile_sent)
+        idempotency_overlap.update(profile_idempotency)
+        preview = _preview_safety(runtime_root, profile, queue_path, queue_state)
+        if not preview["safe"]:
+            preview_failed_rows += max(1, abs(int(preview["queue_row_count"]) - int(preview["preview_row_count"])))
+
+        source_state_path = str(sources.get("state_path") or "")
+        source_state_fingerprint = str(sources.get("state_fingerprint") or "")
+        source_description = (
+            f"checked={checked_path} intended={intended_path} reject={reject_path} "
+            f"state={source_state_path or 'current_important_fallback'} "
+            f"state_fingerprint={source_state_fingerprint or 'none'}"
+        )
+        source_failures = (
+            len(outside_checked)
+            + len(outside_intended)
+            + len(reject_overlap)
+        )
+        if source_failures:
+            reasons.append("queue source validation failures")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={source_failures} "
+                f"outside_checked={len(outside_checked)} outside_intended={len(outside_intended)} "
+                f"reject_overlap={len(reject_overlap)} authoritative_source={source_description} "
+                f"queue_fingerprint={queue_state['fingerprint']}"
+            )
+        if source_fingerprint_mismatches:
+            reasons.append("queue source fingerprint mismatch")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count=0 "
+                f"authoritative_source={source_description} "
+                f"fingerprint_mismatch={','.join(source_fingerprint_mismatches)} "
+                "reason=active campaign source fingerprint does not match its state file"
+            )
+        if int(queue_state["duplicate_count"]):
+            reasons.append("duplicate queue recipients")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={queue_state['duplicate_count']} "
+                f"authoritative_source={queue_path} fingerprint={queue_state['fingerprint']} "
+                "reason=duplicate recipients in active queue"
+            )
+        if int(queue_state["invalid_count"]):
+            reasons.append("invalid queue recipients")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={queue_state['invalid_count']} "
+                f"authoritative_source={queue_path} fingerprint={queue_state['fingerprint']} "
+                "reason=invalid recipient rows"
+            )
+        if profile_suppressed:
+            reasons.append("queue overlaps suppression/unsubscribe state")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={len(profile_suppressed)} "
+                f"authoritative_source={','.join(str(path) for path in suppression_paths)} "
+                f"fingerprint={_email_fingerprint(profile_suppressed)}"
+            )
+        if profile_sent:
+            reasons.append("queue overlaps authoritative sent logs")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={len(profile_sent)} "
+                f"authoritative_source={','.join(str(path) for path in log_paths)} "
+                f"fingerprint={_email_fingerprint(profile_sent)}"
+            )
+        if profile_idempotency:
+            idempotency_path = runtime_root / "data/state/send_idempotency.sqlite3"
+            reasons.append("queue overlaps current idempotency state")
+            details.append(
+                f"profile={profile} queue={queue_path} overlap_count={len(profile_idempotency)} "
+                f"authoritative_source={idempotency_path} "
+                f"fingerprint={_email_fingerprint(profile_idempotency)}"
+            )
+        if not preview["safe"]:
+            reasons.append("active profile preview is stale or invalid")
+            details.append(str(preview["message"]))
+
+        profile_reports.append(
+            {
+                "profile": profile,
+                "queue_path": str(queue_path),
+                "queue_row_count": queue_state["row_count"],
+                "queue_unique_emails": len(queue_emails),
+                "queue_fingerprint": queue_state["fingerprint"],
+                "outside_checked_output_count": len(outside_checked),
+                "outside_intended_source_count": len(outside_intended),
+                "reject_overlap_count": len(reject_overlap),
+                "duplicate_overlap_count": int(queue_state["duplicate_count"]),
+                "suppression_overlap_count": len(profile_suppressed),
+                "sent_overlap_count": len(profile_sent),
+                "idempotency_overlap_count": len(profile_idempotency),
+                "authoritative_log_paths": [str(path) for path in log_paths],
+                "source_state_path": source_state_path,
+                "source_state_fingerprint": source_state_fingerprint,
+                "source_fingerprint_mismatches": list(source_fingerprint_mismatches),
+                "preview": preview,
+            }
+        )
+
+    if duplicate_across_profiles:
         reasons.append("duplicate queue recipients")
-    if invalid_count:
-        reasons.append("invalid queue recipients")
-    if failed_preview_rows:
-        reasons.append("preview validation failures")
-    if sent_overlap:
-        reasons.append("queue overlaps authoritative sent/idempotency state")
+        details.append(
+            f"profile=multiple-active-profiles queue={queue_dir} overlap_count={duplicate_across_profiles} "
+            f"authoritative_source={queue_dir} fingerprint={_email_fingerprint(all_queue_emails)} "
+            "reason=recipient appears in more than one active queue"
+        )
+    reasons = list(dict.fromkeys(reasons))
     return {
         "safe": not reasons,
         "unsafe_reasons": reasons,
-        "queue_unique_emails": len(queue_emails),
-        "duplicate_queue_rows": duplicate_count,
-        "invalid_queue_rows": invalid_count,
-        "suppression_records": suppression_count,
-        "queue_suppression_overlap": len(queue_emails & suppressed_emails),
+        "failure_details": details,
+        "active_intended_profiles": [profile for profile, _config, _path, _state in active],
+        "profiles": profile_reports,
+        "queue_unique_emails": len(all_queue_emails),
+        "duplicate_queue_rows": duplicate_rows + duplicate_across_profiles,
+        "invalid_queue_rows": invalid_rows,
+        "suppression_records": suppression_records,
+        "queue_suppression_overlap": len(suppression_overlap),
         "queue_sent_overlap": len(sent_overlap),
-        "preview_failed_rows": failed_preview_rows,
+        "queue_idempotency_overlap": len(idempotency_overlap),
+        "preview_failed_rows": preview_failed_rows,
+        "source_origin": sources["origin"],
+        "source_state_path": str(sources.get("state_path") or ""),
+        "source_state_fingerprint": str(sources.get("state_fingerprint") or ""),
+        "source_fingerprint_mismatches": source_fingerprint_mismatches,
+        "checked_path": str(checked_path or ""),
+        "checked_fingerprint": _email_fingerprint(checked_emails),
+        "intended_source_path": str(intended_path or ""),
+        "intended_source_fingerprint": _email_fingerprint(intended_emails),
+        "triaged_reject_path": str(reject_path or ""),
+        "triaged_reject_fingerprint": _email_fingerprint(reject_emails),
     }
 
 
@@ -907,8 +1364,12 @@ def initialize_authority(
     assert_processes_stopped(repo)
     safety = recompute_queue_safety(repo)
     if not safety["safe"]:
+        details = list(safety.get("failure_details") or [])
+        message = "; ".join(str(detail) for detail in details) or ", ".join(
+            str(reason) for reason in safety["unsafe_reasons"]
+        )
         raise HandoffError(
-            "Cannot initialize unsafe runtime: " + ", ".join(safety["unsafe_reasons"])
+            "Cannot initialize unsafe runtime: " + message
         )
     if authority_path(repo).exists() and not force:
         raise HandoffError("Authority already exists; refusing bootstrap without --force")
