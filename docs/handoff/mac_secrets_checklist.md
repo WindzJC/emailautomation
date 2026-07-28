@@ -1,5 +1,8 @@
 # Mac Secrets Checklist
 
+> Supplementary secret-handling notes only. Runtime transfer authority and
+> operator commands are defined in [`README.md`](README.md).
+
 The handoff archive intentionally excludes local secrets and credentials. Recreate or copy these manually on the Mac using a private channel.
 
 ## Required Runtime Secrets

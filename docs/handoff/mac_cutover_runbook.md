@@ -1,5 +1,9 @@
 # WSL to Mac cutover runbook
 
+> Archived one-way procedure. Do not use for production cutover. Use
+> [`README.md`](README.md) and the root `./handoff` command; the older procedure
+> does not implement bidirectional authority generations.
+
 This prepares a cutover; it does not authorize sending. GitHub `main` is the
 code source. A single frozen WSL bundle is the runtime source. Never run workers
 on both machines.

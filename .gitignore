@@ -66,3 +66,5 @@ audit*/
 
 # Local Mac cutover bundles and verification output.
 /_migration/
+/.runtime_handoff/
+/runtime_handoff_bundles/

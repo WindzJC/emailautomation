@@ -1,5 +1,8 @@
 # Mac Handoff Audit
 
+> Historical audit only. Its paths and queue counts are not current operating
+> instructions. Use [`README.md`](README.md) for bidirectional handoff.
+
 Generated: 2026-05-25T23:23:58+08:00
 Repo path: `/home/jc/email-automation`
 Latest commit: `83e07ae Fix manual author staged dispatch flow`

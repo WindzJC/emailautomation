@@ -1,5 +1,8 @@
 # Mac Setup Commands
 
+> Archived one-way setup notes. Do not use these commands for a current runtime
+> handoff; use [`README.md`](README.md) and root `./handoff`.
+
 Place `email_automation_mac_handoff_20260525_234519.tgz` in the Mac home directory, then run:
 
 ```bash

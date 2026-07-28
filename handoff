@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${HANDOFF_PYTHON:-python3}"
+MAC_HOST="${HANDOFF_MAC_HOST:-}"
+WINDOWS_HOST="${HANDOFF_WINDOWS_HOST:-}"
+MAC_REPO="${HANDOFF_MAC_REPO:-/Users/windellereboquio/AstraHandoff/emailautomation}"
+WINDOWS_REPO="${HANDOFF_WINDOWS_REPO:-/home/jc/email-automation}"
+BUNDLE_DIR="${HANDOFF_BUNDLE_DIR:-${REPO_ROOT}/runtime_handoff_bundles}"
+
+runtime_handoff() {
+  "${PYTHON_BIN}" "${REPO_ROOT}/tools/runtime_handoff.py" --repo "${REPO_ROOT}" "$@"
+}
+
+switch_to() {
+  local target="$1"
+  local host remote_repo bundle remote_bundle
+  case "${target}" in
+    mac)
+      host="${MAC_HOST}"
+      remote_repo="${MAC_REPO}"
+      ;;
+    windows-wsl)
+      host="${WINDOWS_HOST}"
+      remote_repo="${WINDOWS_REPO}"
+      ;;
+    *)
+      echo "Unsupported target machine: ${target}" >&2
+      exit 2
+      ;;
+  esac
+  if [[ -z "${host}" ]]; then
+    echo "REFUSED: configure the target Tailscale SSH hostname first." >&2
+    echo "Set HANDOFF_MAC_HOST or HANDOFF_WINDOWS_HOST as appropriate." >&2
+    exit 2
+  fi
+  bundle="$(runtime_handoff export --target "${target}" --output-dir "${BUNDLE_DIR}")"
+  remote_bundle="/tmp/$(basename "${bundle}")"
+  echo "Source is now unauthorized. Transferring bundle over SCP..."
+  scp -p "${bundle}" "${host}:${remote_bundle}"
+  ssh "${host}" "cd '${remote_repo}' && ./handoff receive '${remote_bundle}'"
+  echo "Handoff activated on ${target}; no sender was started."
+}
+
+case "${1:-}" in
+  switch-to-mac)
+    switch_to mac
+    ;;
+  switch-to-windows)
+    switch_to windows-wsl
+    ;;
+  status)
+    runtime_handoff status
+    ;;
+  receive)
+    [[ $# -eq 2 ]] || { echo "Usage: ./handoff receive BUNDLE" >&2; exit 2; }
+    runtime_handoff import "$2"
+    ;;
+  verify)
+    [[ $# -eq 2 ]] || { echo "Usage: ./handoff verify BUNDLE" >&2; exit 2; }
+    runtime_handoff verify "$2"
+    ;;
+  activate)
+    shift
+    runtime_handoff activate "$@"
+    ;;
+  rollback)
+    shift
+    runtime_handoff rollback "$@"
+    ;;
+  *)
+    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|status|verify|activate|rollback}" >&2
+    exit 2
+    ;;
+esac

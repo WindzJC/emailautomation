@@ -33,6 +33,7 @@ from urllib.parse import quote
 
 import settings
 import runtime_audit
+from runtime_authority import AuthorityError, assert_send_authorized
 from provider_pacing import (
     mark_recovery_started,
     provider_pacing_status,
@@ -3677,6 +3678,22 @@ def main():
     if args.profile and not args.status:
         print(f"PROFILE: {args.profile}")
 
+    # Preflight, status, dry-run, and preview are inspection-only. Every path
+    # capable of a real delivery fails closed before queue/log mutation.
+    inspection_only = bool(
+        no_send_mode
+        or getattr(args, "preflight", False)
+        or getattr(args, "status", False)
+        or getattr(args, "status_sendgrid", False)
+        or getattr(args, "resync_sendgrid", False)
+    )
+    if not inspection_only:
+        try:
+            assert_send_authorized(ROOT)
+        except AuthorityError as exc:
+            print(f"REFUSED: real send is not authorized: {exc}")
+            return
+
     configured_interval_seconds = max(0, int(getattr(profile_defaults, "get", lambda *_: 0)("interval", 0) or getattr(args, "interval", 0) or 0))
     configured_cooldown_seconds = max(0, int(getattr(profile_defaults, "get", lambda *_: 0)("cooldown_seconds", 0) or getattr(args, "cooldown_seconds", 0) or 0))
 
@@ -4706,6 +4723,10 @@ def main():
         Gmail: keep connection open
         """
         nonlocal smtp
+        # Re-check immediately before every provider submission. This closes
+        # the gap where a long-running worker was started while authorized but
+        # a target import later revoked this machine.
+        assert_send_authorized(ROOT)
         if args.provider == "sendgrid":
             return send_via_sendgrid(
                 sendgrid_api_key,

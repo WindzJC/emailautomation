@@ -44,6 +44,18 @@ from send_shard import (
 
 
 class SendShardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Existing sender tests exercise synthetic delivery behavior in isolated
+        # temp runtimes. Authority enforcement has dedicated fail-closed tests;
+        # these cases explicitly model a runtime that already passed it.
+        authority = patch.object(
+            send_shard,
+            "assert_send_authorized",
+            return_value={"status": "active", "authorized_machine": "mac"},
+        )
+        authority.start()
+        self.addCleanup(authority.stop)
+
     def _write_csv(self, path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8") as handle:
