@@ -19,6 +19,7 @@ import ssl
 import tempfile
 import time
 import traceback
+import unicodedata
 import uuid
 from collections import deque
 from contextlib import contextmanager
@@ -1132,7 +1133,7 @@ If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_WARM_SUBJECT = "A presentation direction for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "A presentation direction for your book"
+PITCH_WARM_SUBJECT_FALLBACK = "A presentation direction for your author platform"
 PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
 {PersonalizationLine}
@@ -1171,7 +1172,7 @@ WARM_RECOMMENDED_SERVICE_PHRASES = {
     "custom author website": "a custom author website",
     "cinematic book trailer": "a cinematic book trailer",
     "book launch visuals": "book launch visuals",
-    "author platform presentation": "stronger author-platform presentation",
+    "author platform presentation": "a stronger author-platform presentation",
     "book landing page": "a book landing page",
     "launch visuals + landing page + trailer clips": "launch visuals, a landing page, and trailer clips",
     "book trailer + launch visuals + landing page": "a book trailer, launch visuals, and a landing page",
@@ -1196,24 +1197,67 @@ WARM_RECOMMENDED_SERVICE_PHRASES = {
 }
 WARM_RECOMMENDED_SERVICE_FALLBACK = "a focused launch presentation"
 WARM_INTERNAL_PERSONALIZATION_LABEL_RE = re.compile(
-    r"\b(?:explicit\s+need|verified\s+presentation\s+gap|needsignal|outreachangle|"
-    r"scraper\s+notes?|(?:confidence\s+)?score|scoring|research\s+status|"
-    r"internal(?:\s+(?:note|only|classification))?|"
-    r"classification|source\s+url|source\s+platform|contact\s+path)\s*(?:[:：—–-]|$)",
+    r"\b(?:need[\W_]*signal|outreach[\W_]*angle|explicit[\W_]*need|"
+    r"verified[\W_]*presentation[\W_]*gap|lead[\W_]*score|scraper[\W_]*notes?|"
+    r"research[\W_]*classification|internal[\W_]*workflow[\W_]*instruction|"
+    r"(?:confidence[\W_]*)?score|scoring|research[\W_]*status|"
+    r"internal(?:[\W_]+(?:note|only|classification))?|classification|"
+    r"source[\W_]*url|source[\W_]*platform|contact[\W_]*path)\b",
     flags=re.IGNORECASE,
 )
 WARM_PERSONALIZATION_URL_RE = re.compile(
-    r"(?:https?://|www\.)\S+|\b[a-z0-9][a-z0-9.-]+\.(?:com|org|net|co|io|gov|edu)(?:/|\b)",
+    r"(?:https?://|www\.)\S+|"
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b(?:[/?#][^\s]*)?",
     flags=re.IGNORECASE,
 )
 WARM_PERSONALIZATION_EMAIL_RE = re.compile(
     r"\b[^@\s]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
     flags=re.IGNORECASE,
 )
+WARM_PERSONALIZATION_HTML_RE = re.compile(r"</?[a-z][^>]*>", flags=re.IGNORECASE)
+WARM_PERSONALIZATION_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\r\n]+\]\([^)]+\)")
+WARM_PERSONALIZATION_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z][A-Za-z0-9_]*\}")
+WARM_PERSONALIZATION_LIST_RE = re.compile(r"(?m)^\s*(?:[-*+•]|\d+[.)])\s+\S")
+WARM_WEAK_PROJECT_TITLES = {
+    "current catalog",
+    "current catalog and newest two books",
+    "multiple projects",
+    "newest books",
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "author platform",
+}
+
+
+def _warm_text_has_control_characters(text: str) -> bool:
+    return any(
+        unicodedata.category(character) in {"Cc", "Cf"}
+        and character not in {"\t", "\r", "\n"}
+        for character in text
+    )
+
+
+def _warm_text_has_unsafe_markup_or_structure(text: str) -> bool:
+    return bool(
+        _warm_text_has_control_characters(text)
+        or re.search(r"(?:\r?\n[ \t]*){2,}", text)
+        or WARM_PERSONALIZATION_LIST_RE.search(text)
+        or WARM_PERSONALIZATION_HTML_RE.search(text)
+        or WARM_PERSONALIZATION_MARKDOWN_LINK_RE.search(text)
+        or WARM_PERSONALIZATION_PLACEHOLDER_RE.search(text)
+        or "`" in text
+        or "<" in text
+        or ">" in text
+    )
 
 
 def normalize_warm_personalization_line(value: object) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    raw_text = str(value or "")
+    if _warm_text_has_unsafe_markup_or_structure(raw_text):
+        return ""
+    text = re.sub(r"\s+", " ", raw_text).strip()
     if len(text) < 18 or len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'’.-]*", text)) < 4:
         return ""
     if len(text) > 320:
@@ -1225,6 +1269,23 @@ def normalize_warm_personalization_line(value: object) -> str:
     text = re.sub(r"([.!?])\1+", r"\1", text)
     if not re.search(r"[.!?][\"'”’)]?$", text):
         text += "."
+    return text
+
+
+def normalize_warm_book_title_or_project(value: object) -> str:
+    raw_text = str(value or "")
+    if _warm_text_has_unsafe_markup_or_structure(raw_text):
+        return ""
+    text = re.sub(r"\s+", " ", raw_text).strip()
+    if not text or text.casefold() in WARM_WEAK_PROJECT_TITLES:
+        return ""
+    if (
+        len(text) > 200
+        or WARM_INTERNAL_PERSONALIZATION_LABEL_RE.search(text)
+        or WARM_PERSONALIZATION_URL_RE.search(text)
+        or WARM_PERSONALIZATION_EMAIL_RE.search(text)
+    ):
+        return ""
     return text
 
 
@@ -1262,7 +1323,7 @@ def render_warm_email_copy(
     personalization_line: object = "",
 ) -> Dict[str, object]:
     safe_first_name = re.sub(r"\s+", " ", str(first_name or "")).strip() or "there"
-    book_title = re.sub(r"\s+", " ", str(book_title_or_project or "")).strip()
+    book_title = normalize_warm_book_title_or_project(book_title_or_project)
     subject = (
         PITCH_WARM_SUBJECT.format(BookTitleOrProject=book_title)
         if book_title
@@ -1271,7 +1332,7 @@ def render_warm_email_copy(
     safe_personalization = normalize_warm_personalization_line(personalization_line)
     merge_values = {
         "FirstName": safe_first_name,
-        "BookTitleOrProject": book_title or "your book",
+        "BookTitleOrProject": book_title or "your author platform",
         "RecommendedServicePhrase": format_warm_recommended_service_phrase(recommended_service),
         "PersonalizationLine": safe_personalization,
     }

@@ -34,6 +34,7 @@ from send_shard import (
     load_bad_sendgrid_event_emails,
     load_done_statuses_from_logs,
     normalize_campaign_type,
+    normalize_warm_personalization_line,
     normalized_warm_confirmation_payload,
     render_warm_email_copy,
     validate_warm_confirmed_queue,
@@ -1101,6 +1102,15 @@ def check_warm_research_leads(
                     code, reason = "SUPPRESSED", "Email is blocked by suppression, unsubscribe, or bad-event history."
                 elif email in already_contacted:
                     code, reason = "ALREADY_CONTACTED", "Email appears in authoritative Private JC, SendGrid, or contact history."
+                else:
+                    personalization_line = normalize_warm_personalization_line(
+                        row.get("PersonalizationLine", "")
+                    )
+                    if not personalization_line:
+                        code = "PERSONALIZATION_REVIEW_REQUIRED"
+                        reason = "Manual review required: missing or invalid PersonalizationLine."
+                    else:
+                        row["PersonalizationLine"] = personalization_line
         elif not code and contact_method == "contact_form":
             contact_key = _strip_cell(row.get("ContactPath", "")).lower().rstrip("/")
             if contact_key in seen_contact_paths:

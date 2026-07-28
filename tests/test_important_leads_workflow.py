@@ -85,7 +85,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             unsubscribed_path = tmp / "unsubscribed.csv"
             suppressions_path = tmp / "sendgrid_suppressions.csv"
             bad_events_path = tmp / "sendgrid_events.jsonl"
-            headers = list(important_leads_workflow.WARM_RESEARCH_HEADERS)
+            headers = [
+                *important_leads_workflow.WARM_RESEARCH_HEADERS,
+                *important_leads_workflow.WARM_RESEARCH_OPTIONAL_HEADERS,
+            ]
 
             def warm_row(name: str, contact_path: str) -> dict[str, str]:
                 return {
@@ -97,6 +100,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     "ContactPath": contact_path,
                     "RecommendedService": "Website",
                     "OutreachAngle": "Synthetic angle",
+                    "PersonalizationLine": (
+                        "I noticed your recent launch gives readers a clear way into the project."
+                    ),
                 }
 
             write_csv(
@@ -142,7 +148,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("ready@example.com", ready_row["AuthorEmail"])
             self.assertEqual("New", ready_row["ResearchStatus"])
             self.assertIn("PersonalizationLine", ready_row)
-            self.assertEqual("", ready_row["PersonalizationLine"])
+            self.assertEqual(
+                "I noticed your recent launch gives readers a clear way into the project.",
+                ready_row["PersonalizationLine"],
+            )
             self.assertEqual("contact_form", read_csv_rows(forms_path)[0]["ContactMethod"])
             self.assertEqual(
                 {"DUPLICATE_IN_BATCH", "ALREADY_CONTACTED", "SUPPRESSED", "INVALID_EMAIL_SYNTAX"},
@@ -233,8 +242,15 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), list(rows[0].keys()))
             self.assertEqual("A presentation direction for The Silent Garden", rows[0]["EmailSubject"])
             self.assertIn("Hi Sarah,", rows[0]["EmailBody"])
-            self.assertEqual("A presentation direction for your book", rows[1]["EmailSubject"])
+            self.assertEqual(
+                "A presentation direction for your author platform",
+                rows[1]["EmailSubject"],
+            )
             self.assertIn("Hi there,", rows[1]["EmailBody"])
+            self.assertIn(
+                "I came across your author platform and wanted to reach out with one focused idea.",
+                rows[1]["EmailBody"],
+            )
             self.assertNotIn("{FirstName}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
             self.assertNotIn("{BookTitleOrProject}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
 
@@ -298,6 +314,19 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "NeedSignal: launch copy needs work",
             "OutreachAngle: lead with the trailer",
             "Scraper notes: source was https://example.test/internal",
+            "NeedSignal suggests the launch copy needs clearer reader direction",
+            "OUTREACH-ANGLE recommends leading with the trailer direction",
+            "Need.Signal recommends a clearer reader direction for the launch",
+            "The author shared more context at example.ai/about",
+            "The author shared more context at https://example.test/about",
+            "Reach the author directly at author@example.test",
+            "<strong>The launch is centered on the reader journey.</strong>",
+            "[The launch page](https://example.test) focuses on the reader journey.",
+            "The `internal note` describes the current reader journey.",
+            "The {FieldName} placeholder describes the current reader journey.",
+            "The launch centers on readers.\n\nThe research also notes a new edition.",
+            "- The launch centers on readers\n- A new edition is coming soon",
+            "The launch centers on readers.\u0007",
         )
         for value in unsafe_values:
             with self.subTest(personalization=value):
@@ -328,7 +357,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "Custom author website": "a custom author website",
             "Cinematic book trailer": "a cinematic book trailer",
             "Book launch visuals": "book launch visuals",
-            "Author platform presentation": "stronger author-platform presentation",
+            "Author platform presentation": "a stronger author-platform presentation",
             "Book landing page": "a book landing page",
             "Launch visuals + landing page + trailer clips": (
                 "launch visuals, a landing page, and trailer clips"
@@ -342,6 +371,190 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     phrase,
                     send_shard.format_warm_recommended_service_phrase(value),
                 )
+        rendered = send_shard.render_warm_email_copy(
+            first_name="Sarah",
+            book_title_or_project="The Silent Garden",
+            recommended_service="Author platform presentation",
+            personalization_line="I saw how your recent launch gives readers a clear path into the story.",
+        )
+        self.assertIn(
+            "The clearest fit I see is a stronger author-platform presentation.",
+            rendered["body"],
+        )
+
+    def test_warm_research_requires_valid_personalization_for_email_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "warm.csv"
+            headers = [
+                *important_leads_workflow.WARM_RESEARCH_HEADERS,
+                *important_leads_workflow.WARM_RESEARCH_OPTIONAL_HEADERS,
+            ]
+            base = {
+                "BookTitleOrProject": "Synthetic Project",
+                "NeedSignal": "Synthetic need",
+                "SourcePlatform": "Synthetic source",
+                "SourceURL": "https://example.test/source",
+                "RecommendedService": "Website",
+                "OutreachAngle": "Synthetic angle",
+            }
+            write_csv(
+                input_path,
+                headers,
+                [
+                    {
+                        **base,
+                        "AuthorName": "Valid",
+                        "ContactPath": "valid@example.com",
+                        "PersonalizationLine": (
+                            "I noticed your latest release gives readers a clear entry into the series."
+                        ),
+                    },
+                    {
+                        **base,
+                        "AuthorName": "Blank",
+                        "ContactPath": "blank@example.com",
+                        "PersonalizationLine": "",
+                    },
+                    {
+                        **base,
+                        "AuthorName": "Unsafe",
+                        "ContactPath": "unsafe@example.com",
+                        "PersonalizationLine": "NeedSignal indicates a stronger launch page is required",
+                    },
+                ],
+            )
+            for name, fields in (
+                ("suppressed.csv", ["Email"]),
+                ("unsubscribed.csv", ["Email"]),
+                ("sendgrid_suppressions.csv", ["email", "state", "type"]),
+            ):
+                write_csv(tmp / name, fields, [])
+            (tmp / "events.jsonl").write_text("", encoding="utf-8")
+
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=tmp / "warm_email_ready.csv",
+                contact_form_review_path=tmp / "warm_contact_form_review.csv",
+                rejected_path=tmp / "warm_rejected.csv",
+                log_paths=[],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                bad_events_path=tmp / "events.jsonl",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            )
+
+            self.assertEqual(1, report["warm_email_ready_rows"])
+            self.assertEqual(0, report["warm_contact_form_rows"])
+            self.assertEqual(2, report["warm_rejected_rows"])
+            rejected = read_csv_rows(tmp / "warm_rejected.csv")
+            self.assertTrue(
+                all(row["reject_code"] == "PERSONALIZATION_REVIEW_REQUIRED" for row in rejected)
+            )
+            self.assertTrue(
+                all(
+                    row["reject_reason"]
+                    == "Manual review required: missing or invalid PersonalizationLine."
+                    for row in rejected
+                )
+            )
+
+    def test_legacy_warm_research_without_personalization_is_parseable_but_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "legacy_warm.csv"
+            write_csv(
+                input_path,
+                list(important_leads_workflow.WARM_RESEARCH_HEADERS),
+                [{
+                    "AuthorName": "Legacy",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "NeedSignal": "Synthetic need",
+                    "SourcePlatform": "Synthetic source",
+                    "SourceURL": "https://example.test/source",
+                    "ContactPath": "legacy@example.com",
+                    "RecommendedService": "Website",
+                    "OutreachAngle": "Synthetic angle",
+                }],
+            )
+            for name, fields in (
+                ("suppressed.csv", ["Email"]),
+                ("unsubscribed.csv", ["Email"]),
+                ("sendgrid_suppressions.csv", ["email", "state", "type"]),
+            ):
+                write_csv(tmp / name, fields, [])
+            (tmp / "events.jsonl").write_text("", encoding="utf-8")
+
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=tmp / "warm_email_ready.csv",
+                contact_form_review_path=tmp / "warm_contact_form_review.csv",
+                rejected_path=tmp / "warm_rejected.csv",
+                log_paths=[],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                bad_events_path=tmp / "events.jsonl",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            )
+
+            self.assertEqual(0, report["warm_email_ready_rows"])
+            self.assertEqual(1, report["warm_rejected_rows"])
+            rejected = read_csv_rows(tmp / "warm_rejected.csv")[0]
+            self.assertEqual("Legacy", rejected["AuthorName"])
+            self.assertEqual("PERSONALIZATION_REVIEW_REQUIRED", rejected["reject_code"])
+
+    def test_warm_subject_uses_author_platform_fallback_for_unsafe_project_labels(self) -> None:
+        unsafe_titles = (
+            "",
+            "Current catalog",
+            "  cUrReNt   CaTaLoG  ",
+            "Current catalog and newest two books",
+            "Multiple projects",
+            "Newest books",
+            "Unknown",
+            "N/A",
+            "NA",
+            "None",
+            "Author platform",
+            "example.ai/catalog",
+            "author@example.test",
+            "NeedSignal: internal title",
+            "<strong>Current catalog</strong>",
+            "[Current catalog](https://example.test)",
+            "{BookTitleOrProject}",
+        )
+        for title in unsafe_titles:
+            with self.subTest(title=title):
+                rendered = send_shard.render_warm_email_copy(
+                    first_name="Sarah",
+                    book_title_or_project=title,
+                    recommended_service="Book landing page",
+                    personalization_line="",
+                )
+                self.assertEqual(
+                    "A presentation direction for your author platform",
+                    rendered["subject"],
+                )
+                self.assertIn(
+                    "I came across your author platform and wanted to reach out with one focused idea.",
+                    rendered["body"],
+                )
+                if title:
+                    self.assertNotIn(title, rendered["subject"])
+                    self.assertNotIn(title, rendered["body"])
+
+        clean = send_shard.render_warm_email_copy(
+            first_name="Sarah",
+            book_title_or_project="The Silent Garden",
+            recommended_service="Book landing page",
+            personalization_line="",
+        )
+        self.assertEqual(
+            "A presentation direction for The Silent Garden",
+            clean["subject"],
+        )
 
     def test_warm_optional_personalization_does_not_change_queue_or_hash_schema(self) -> None:
         self.assertIn(
