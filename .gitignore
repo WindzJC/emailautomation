@@ -63,3 +63,6 @@ audit*/
 /*_log.csv
 /*_log_worker.jsonl
 /warm_email_preview*.csv
+
+# Local Mac cutover bundles and verification output.
+/_migration/
