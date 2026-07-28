@@ -953,6 +953,33 @@ def record_send_idempotency_outcome(
         conn.commit()
 
 
+def release_send_idempotency_reservation(
+    *,
+    campaign_id: str,
+    provider: str,
+    email: str,
+    db_path: Path | None = None,
+) -> bool:
+    """Release only an unattempted reservation so a corrected row can retry."""
+    clean_email = norm_email(email)
+    clean_campaign = str(campaign_id or "").strip() or CAMPAIGN_TYPE_COLD
+    clean_provider = str(provider or "").strip().lower() or "unknown"
+    path = db_path or send_idempotency_db_path()
+    if not path.exists():
+        return False
+    with sqlite3.connect(path, timeout=30) as conn:
+        _init_send_idempotency_db(conn)
+        cursor = conn.execute(
+            """
+            DELETE FROM send_reservations
+            WHERE campaign_id = ? AND provider = ? AND email = ? AND status = 'reserved'
+            """,
+            (clean_campaign, clean_provider, clean_email),
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0) == 1
+
+
 def campaign_id_for_row(row: Dict[str, str], fallback_campaign_type: str) -> str:
     return (
         get_row_value_ci(row, ["campaign_id", "CampaignId", "CampaignID", "dispatch_id", "DispatchId", "preview_id", "PreviewId"])
@@ -960,25 +987,81 @@ def campaign_id_for_row(row: Dict[str, str], fallback_campaign_type: str) -> str
     )
 
 
-def claim_queue_row(csv_path: Path, email_addr: str) -> bool:
+def claim_queue_row_with_receipt(
+    csv_path: Path,
+    email_addr: str,
+) -> Optional[Dict[str, object]]:
     target = norm_email(email_addr)
     if not target or not csv_path.exists():
-        return False
+        return None
     with lock_files([csv_path]):
         with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or ["Email", "FirstName", "BookTitle"]
             kept_rows: List[Dict[str, str]] = []
-            claimed = False
+            claimed_row: Optional[Dict[str, str]] = None
+            claimed_index = -1
             for row in reader:
                 clean_row = {k: v for k, v in row.items() if k is not None}
-                if not claimed and norm_email(resolve_recipient_email(clean_row) or clean_row.get("Email") or "") == target:
-                    claimed = True
+                if (
+                    claimed_row is None
+                    and norm_email(
+                        resolve_recipient_email(clean_row)
+                        or clean_row.get("Email")
+                        or ""
+                    )
+                    == target
+                ):
+                    claimed_row = clean_row
+                    claimed_index = len(kept_rows)
                     continue
                 kept_rows.append(clean_row)
-        if claimed:
+        if claimed_row is not None:
             rewrite_csv_rows(csv_path, fieldnames, kept_rows)
-        return claimed
+            return {
+                "email": target,
+                "row": claimed_row,
+                "index": claimed_index,
+                "fieldnames": list(fieldnames),
+            }
+    return None
+
+
+def claim_queue_row(csv_path: Path, email_addr: str) -> bool:
+    return claim_queue_row_with_receipt(csv_path, email_addr) is not None
+
+
+def restore_claimed_queue_row(
+    csv_path: Path,
+    receipt: Optional[Dict[str, object]],
+) -> bool:
+    """Restore one exact claimed row at its prior position without duplicating it."""
+    if not receipt or not csv_path.exists():
+        return False
+    if bool(receipt.get("restored")):
+        return True
+    claimed_row = receipt.get("row")
+    if not isinstance(claimed_row, dict):
+        return False
+    target = norm_email(str(receipt.get("email") or ""))
+    if not target:
+        return False
+    with lock_files([csv_path]):
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or receipt.get("fieldnames") or claimed_row.keys())
+            rows = [
+                {key: value for key, value in row.items() if key is not None}
+                for row in reader
+            ]
+        try:
+            index = max(0, min(int(receipt.get("index") or 0), len(rows)))
+        except (TypeError, ValueError):
+            index = len(rows)
+        rows.insert(index, {str(key): str(value or "") for key, value in claimed_row.items()})
+        rewrite_csv_rows(csv_path, fieldnames, rows)
+        receipt["restored"] = True
+    return True
 
 # ===== SIGNATURES =====
 SIGNATURE_CID = "sigimg"
@@ -2224,6 +2307,128 @@ def load_bad_sendgrid_event_emails(path: Path = settings.WEBHOOK_EVENTS_PATH) ->
             if email:
                 out.add(email)
     return out
+
+
+def _block_source_signature(path: Path) -> tuple[object, ...]:
+    signatures: List[object] = [str(path)]
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            stat = candidate.stat()
+            signatures.extend(
+                (str(candidate), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            )
+        except FileNotFoundError:
+            signatures.extend((str(candidate), None))
+    return tuple(signatures)
+
+
+def load_ledger_blocked_emails(path: Path) -> Set[str]:
+    if not path.exists():
+        return set()
+    blocked: Set[str] = set()
+    uri = f"file:{path.resolve().as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=30) as conn:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lead_ledger'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError("Lead ledger is missing the lead_ledger table.")
+        rows = conn.execute(
+            """
+            SELECT normalized_email
+            FROM lead_ledger
+            WHERE suppressed = 1
+               OR lower(trim(last_outcome)) IN (
+                    'blocked', 'bounced', 'complained', 'dropped',
+                    'invalid', 'spamreport', 'spam_report', 'unsubscribed'
+               )
+            """
+        )
+        for (raw_email,) in rows:
+            email = norm_email(raw_email or "")
+            if email:
+                blocked.add(email)
+    return blocked
+
+
+class GlobalBlockRefresher:
+    """Late, metadata-cached view of every authoritative global block source."""
+
+    def __init__(
+        self,
+        *,
+        unsubscribed_path: Path,
+        suppressed_path: Path,
+        sendgrid_suppression_path: Path,
+        sendgrid_events_path: Path,
+        authoritative_log_paths: Sequence[Path],
+        ledger_path: Path,
+        include_sendgrid_sources: bool,
+    ) -> None:
+        self.unsubscribed_path = Path(unsubscribed_path)
+        self.suppressed_path = Path(suppressed_path)
+        self.sendgrid_suppression_path = Path(sendgrid_suppression_path)
+        self.sendgrid_events_path = Path(sendgrid_events_path)
+        self.authoritative_log_paths = tuple(Path(path) for path in authoritative_log_paths)
+        self.ledger_path = Path(ledger_path)
+        self.include_sendgrid_sources = bool(include_sendgrid_sources)
+        self._signature: Optional[tuple[object, ...]] = None
+        self._sets: Dict[str, Set[str]] = {}
+        self.reload_count = 0
+
+    def _current_signature(self) -> tuple[object, ...]:
+        paths = [
+            self.unsubscribed_path,
+            self.suppressed_path,
+            self.ledger_path,
+            *self.authoritative_log_paths,
+        ]
+        if self.include_sendgrid_sources:
+            paths.extend(
+                (self.sendgrid_suppression_path, self.sendgrid_events_path)
+            )
+        return tuple(_block_source_signature(path) for path in paths)
+
+    def refresh(self, *, force: bool = False) -> bool:
+        signature = self._current_signature()
+        if not force and signature == self._signature:
+            return False
+        loaded = {
+            "unsubscribed": load_emails_from_csv(self.unsubscribed_path),
+            "global_suppression": load_emails_from_csv(self.suppressed_path),
+            "ledger_blocked": load_ledger_blocked_emails(self.ledger_path),
+            "bad_outcome": load_done_statuses_from_logs(
+                self.authoritative_log_paths, {"INVALID"}
+            ),
+            "sendgrid_suppression": set(),
+        }
+        if self.include_sendgrid_sources:
+            loaded["sendgrid_suppression"], _summary = load_active_suppressed_emails(
+                self.sendgrid_suppression_path
+            )
+            loaded["bad_outcome"] |= load_bad_sendgrid_event_emails(
+                self.sendgrid_events_path
+            )
+        self._sets = loaded
+        self._signature = signature
+        self.reload_count += 1
+        return True
+
+    def classification(self, email_addr: str) -> str:
+        email = norm_email(email_addr)
+        if not email:
+            return "invalid_or_malformed"
+        self.refresh()
+        for classification in (
+            "unsubscribed",
+            "global_suppression",
+            "sendgrid_suppression",
+            "bad_outcome",
+            "ledger_blocked",
+        ):
+            if email in self._sets.get(classification, set()):
+                return classification
+        return ""
 
 
 def email_logged_sent(sent_log: Path, email_addr: str) -> bool:
@@ -4127,6 +4332,19 @@ def main():
         provider=str(args.provider or ""),
         current_csv=csv_path,
     )
+    global_block_refresher = GlobalBlockRefresher(
+        unsubscribed_path=unsub_csv_path,
+        suppressed_path=suppress_csv_path,
+        sendgrid_suppression_path=sendgrid_suppression_csv_path,
+        sendgrid_events_path=settings.WEBHOOK_EVENTS_PATH,
+        authoritative_log_paths=global_bad_outcome_log_paths,
+        ledger_path=getattr(
+            settings,
+            "LEAD_LEDGER_DB_PATH",
+            STATE_DIR / "lead_ledger.sqlite3",
+        ),
+        include_sendgrid_sources=args.provider in {"private", "sendgrid"},
+    )
     if args.provider in ("private", "sendgrid") and args.max_messages_1h:
         print(
             f"{args.provider.upper()} 1H CAP: {args.max_messages_1h} "
@@ -4431,6 +4649,44 @@ def main():
         except Exception:
             pass
 
+    def prevent_blocked_retry(
+        *,
+        email: str,
+        campaign_type: str,
+        campaign_id: str,
+        reservation_token: str,
+        phase: str,
+        idempotency_reserved: bool,
+    ) -> bool:
+        classification = global_block_refresher.classification(email)
+        if not classification:
+            return False
+        finalize_domain_attempt_slot(
+            reservation_token,
+            email,
+            "blocked_before_retry",
+            classification,
+        )
+        log_row(
+            log_path,
+            email,
+            "SKIP",
+            campaign_log_info(
+                f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} "
+                f"skip_reason={classification} phase={phase}",
+                campaign_type,
+            ),
+        )
+        if idempotency_reserved:
+            record_send_idempotency_outcome(
+                campaign_id=campaign_id,
+                provider=args.provider,
+                email=email,
+                outcome="blocked_after_attempt",
+                info=classification,
+            )
+        return True
+
     def ensure_smtp() -> smtplib.SMTP:
         nonlocal smtp
         if smtp is None:
@@ -4611,6 +4867,8 @@ def main():
                 row_campaign_type = normalize_campaign_type(get_row_value_ci(r, ["campaign_type", "CampaignType", "campaign type"]) or args.campaign_type)
                 row_campaign_id = campaign_id_for_row(r, row_campaign_type)
                 idempotency_reserved = False
+                queue_claim_receipt: Optional[Dict[str, object]] = None
+                submission_attempted = False
                 last_recipient_for_audit = to_email
                 audit_worker(
                     "running",
@@ -4651,60 +4909,6 @@ def main():
                         )
                     next_index = idx + 1
                     continue
-
-                if not no_send_mode and args.provider in {"private", "sendgrid"}:
-                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info(
-                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family",
-                                row_campaign_type,
-                            ),
-                        )
-                        if to_email not in always_send_set:
-                            remove_email_from_csv(csv_path, to_email)
-                        next_index = idx + 1
-                        continue
-                    if not claim_queue_row(csv_path, to_email):
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info("event_type=SKIPPED_QUEUE_ROW_ALREADY_CLAIMED", row_campaign_type),
-                        )
-                        next_index = idx + 1
-                        continue
-                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info(
-                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family_after_claim",
-                                row_campaign_type,
-                            ),
-                        )
-                        next_index = idx + 1
-                        continue
-                    reserved, reserve_reason = reserve_send_idempotency(
-                        campaign_id=row_campaign_id,
-                        provider=args.provider,
-                        email=to_email,
-                        profile=str(args.profile or ""),
-                        queue_file=csv_path.name,
-                    )
-                    if not reserved:
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info(f"event_type=SKIPPED_IDEMPOTENCY_DUPLICATE reason={reserve_reason}", row_campaign_type),
-                        )
-                        next_index = idx + 1
-                        continue
-                    idempotency_reserved = True
 
                 if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
                     if args.max_messages_24h and gmail_messages_24h >= args.max_messages_24h:
@@ -4765,22 +4969,140 @@ def main():
                 first_name = author.split()[0] if author else GENERIC_SALUTATION
                 merge_fields = row_merge_fields(r, to_email, first_name, book_title)
 
-                if pre_rendered_message:
-                    msg, subject_text, body_text, html_body, cid = build_pre_rendered_message(
-                        from_user,
+                try:
+                    if pre_rendered_message:
+                        msg, subject_text, body_text, html_body, cid = build_pre_rendered_message(
+                            from_user,
+                            to_email,
+                            r,
+                            unsub_email,
+                        )
+                    else:
+                        msg, subject_text, body_text, html_body, cid = build_message(
+                            from_user, to_email, author, book_title,
+                            subject, body_template, unsub_email,
+                            signature_file=sig_path,
+                            merge_fields=merge_fields,
+                            subject_fallback=subject_fallback,
+                            body_fallback=body_fallback,
+                        )
+                except Exception as build_exc:
+                    error_count += 1
+                    build_error = single_line(str(build_exc))
+                    log_row(
+                        log_path,
                         to_email,
-                        r,
-                        unsub_email,
+                        "ERROR",
+                        campaign_log_info(
+                            f"event_type=DEFINITELY_NOT_SUBMITTED phase=message_build error={build_error}",
+                            row_campaign_type,
+                        ),
                     )
-                else:
-                    msg, subject_text, body_text, html_body, cid = build_message(
-                        from_user, to_email, author, book_title,
-                        subject, body_template, unsub_email,
-                        signature_file=sig_path,
-                        merge_fields=merge_fields,
-                        subject_fallback=subject_fallback,
-                        body_fallback=body_fallback,
+                    emit_worker_event(
+                        "ERROR",
+                        "message_build_failed_not_submitted",
+                        phase="message_build",
+                        error_type=type(build_exc).__name__,
                     )
+                    print(
+                        f"[{i}/{len(pending)}] ERROR (not submitted) "
+                        f"{to_email} :: {build_error}"
+                    )
+                    stop_reason = "message_build_failed"
+                    break
+
+                if not no_send_mode:
+                    try:
+                        final_block = global_block_refresher.classification(to_email)
+                    except Exception as block_exc:
+                        error_count += 1
+                        block_error = single_line(str(block_exc))
+                        log_row(
+                            log_path,
+                            to_email,
+                            "ERROR",
+                            campaign_log_info(
+                                f"event_type=DEFINITELY_NOT_SUBMITTED phase=global_block_refresh error={block_error}",
+                                row_campaign_type,
+                            ),
+                        )
+                        emit_worker_event(
+                            "ERROR",
+                            "global_block_refresh_failed_not_submitted",
+                            phase="before_claim",
+                            error_type=type(block_exc).__name__,
+                        )
+                        stop_reason = "global_block_refresh_failed"
+                        break
+                    if final_block:
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(
+                                f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} "
+                                f"skip_reason={final_block} phase=before_claim",
+                                row_campaign_type,
+                            ),
+                        )
+                        next_index = idx + 1
+                        continue
+
+                if not no_send_mode and args.provider in {"private", "sendgrid"}:
+                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(
+                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family",
+                                row_campaign_type,
+                            ),
+                        )
+                        if to_email not in always_send_set:
+                            remove_email_from_csv(csv_path, to_email)
+                        next_index = idx + 1
+                        continue
+                    queue_claim_receipt = claim_queue_row_with_receipt(csv_path, to_email)
+                    if queue_claim_receipt is None:
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info("event_type=SKIPPED_QUEUE_ROW_ALREADY_CLAIMED", row_campaign_type),
+                        )
+                        next_index = idx + 1
+                        continue
+                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(
+                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family_after_claim",
+                                row_campaign_type,
+                            ),
+                        )
+                        next_index = idx + 1
+                        continue
+                    reserved, reserve_reason = reserve_send_idempotency(
+                        campaign_id=row_campaign_id,
+                        provider=args.provider,
+                        email=to_email,
+                        profile=str(args.profile or ""),
+                        queue_file=csv_path.name,
+                    )
+                    if not reserved:
+                        restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                        log_row(
+                            log_path,
+                            to_email,
+                            "SKIP",
+                            campaign_log_info(f"event_type=SKIPPED_IDEMPOTENCY_DUPLICATE reason={reserve_reason}", row_campaign_type),
+                        )
+                        next_index = idx + 1
+                        continue
+                    idempotency_reserved = True
 
                 next_index = idx + 1
                 attempt_slot_token = ""
@@ -4807,6 +5129,28 @@ def main():
                         log_row(log_path, to_email, "DRYRUN", campaign_log_info("not_sent", row_campaign_type))
                         print(f"[{i}/{len(pending)}] DRYRUN {to_email}")
                     else:
+                        final_block = global_block_refresher.classification(to_email)
+                        if final_block:
+                            if queue_claim_receipt is not None:
+                                restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                            if idempotency_reserved:
+                                release_send_idempotency_reservation(
+                                    campaign_id=row_campaign_id,
+                                    provider=args.provider,
+                                    email=to_email,
+                                )
+                                idempotency_reserved = False
+                            log_row(
+                                log_path,
+                                to_email,
+                                "SKIP",
+                                campaign_log_info(
+                                    f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} "
+                                    f"skip_reason={final_block} phase=before_submission",
+                                    row_campaign_type,
+                                ),
+                            )
+                            continue
                         attempt_slot_token = reserve_domain_attempt_slot()
                         sendgrid_custom_args = (
                             build_sendgrid_astra_custom_args(
@@ -4820,6 +5164,35 @@ def main():
                             if args.provider == "sendgrid"
                             else {}
                         )
+                        final_block = global_block_refresher.classification(to_email)
+                        if final_block:
+                            if queue_claim_receipt is not None:
+                                restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                            if idempotency_reserved:
+                                release_send_idempotency_reservation(
+                                    campaign_id=row_campaign_id,
+                                    provider=args.provider,
+                                    email=to_email,
+                                )
+                                idempotency_reserved = False
+                            finalize_domain_attempt_slot(
+                                attempt_slot_token,
+                                to_email,
+                                "blocked_before_submission",
+                                final_block,
+                            )
+                            log_row(
+                                log_path,
+                                to_email,
+                                "SKIP",
+                                campaign_log_info(
+                                    f"event_type={SKIPPED_SUPPRESSED_OR_BAD_OUTCOME} "
+                                    f"skip_reason={final_block} phase=immediately_before_submission",
+                                    row_campaign_type,
+                                ),
+                            )
+                            continue
+                        submission_attempted = True
                         send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = ""
                         if args.provider == "sendgrid" and send_result.get("message_id"):
@@ -4884,7 +5257,11 @@ def main():
                         record_sendgrid_success()
                         quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
-                            if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                            if (
+                                queue_claim_receipt is None
+                                and to_email not in always_send_set
+                                and remove_email_from_csv(csv_path, to_email)
+                            ):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
                         batch_sent += 1
                         if args.provider == "gmail":
@@ -5010,6 +5387,16 @@ def main():
                         retry_slot_token = ""
                         try:
                             retry_slot_token = reserve_domain_attempt_slot()
+                            if prevent_blocked_retry(
+                                email=to_email,
+                                campaign_type=row_campaign_type,
+                                campaign_id=row_campaign_id,
+                                reservation_token=retry_slot_token,
+                                phase="immediately_before_auth_retry",
+                                idempotency_reserved=idempotency_reserved,
+                            ):
+                                stop_reason = "globally_blocked_before_retry"
+                                break
                             send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                             send_info = "auth_retry_ok"
                             if args.provider == "sendgrid" and send_result.get("message_id"):
@@ -5047,7 +5434,11 @@ def main():
                             record_sendgrid_success()
                             quality_reason = note_quality_event(is_invalid=False)
                             if args.provider in ("sendgrid", "private"):
-                                if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                if (
+                                    queue_claim_receipt is None
+                                    and to_email not in always_send_set
+                                    and remove_email_from_csv(csv_path, to_email)
+                                ):
                                     print(f"CSV: removed {to_email} from {csv_path.name}")
                             batch_sent += 1
                             if args.provider == "gmail":
@@ -5180,6 +5571,16 @@ def main():
                     retry_slot_token = ""
                     try:
                         retry_slot_token = reserve_domain_attempt_slot()
+                        if prevent_blocked_retry(
+                            email=to_email,
+                            campaign_type=row_campaign_type,
+                            campaign_id=row_campaign_id,
+                            reservation_token=retry_slot_token,
+                            phase="immediately_before_reconnect_retry",
+                            idempotency_reserved=idempotency_reserved,
+                        ):
+                            stop_reason = "globally_blocked_before_retry"
+                            break
 
                         send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = "reconnect_ok"
@@ -5218,7 +5619,11 @@ def main():
                         record_sendgrid_success()
                         quality_reason = note_quality_event(is_invalid=False)
                         if args.provider in ("sendgrid", "private"):
-                            if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                            if (
+                                queue_claim_receipt is None
+                                and to_email not in always_send_set
+                                and remove_email_from_csv(csv_path, to_email)
+                            ):
                                 print(f"CSV: removed {to_email} from {csv_path.name}")
                         batch_sent += 1
                         if args.provider == "gmail":
@@ -5283,6 +5688,16 @@ def main():
                         retry_slot_token = ""
                         try:
                             retry_slot_token = reserve_domain_attempt_slot()
+                            if prevent_blocked_retry(
+                                email=to_email,
+                                campaign_type=row_campaign_type,
+                                campaign_id=row_campaign_id,
+                                reservation_token=retry_slot_token,
+                                phase="immediately_before_throttle_retry",
+                                idempotency_reserved=idempotency_reserved,
+                            ):
+                                stop_reason = "globally_blocked_before_retry"
+                                break
 
                             send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
                             send_info = "throttle_retry_ok"
@@ -5321,7 +5736,11 @@ def main():
                             record_sendgrid_success()
                             quality_reason = note_quality_event(is_invalid=False)
                             if args.provider in ("sendgrid", "private"):
-                                if to_email not in always_send_set and remove_email_from_csv(csv_path, to_email):
+                                if (
+                                    queue_claim_receipt is None
+                                    and to_email not in always_send_set
+                                    and remove_email_from_csv(csv_path, to_email)
+                                ):
                                     print(f"CSV: removed {to_email} from {csv_path.name}")
                             batch_sent += 1
                             if args.provider == "gmail":
@@ -5363,6 +5782,55 @@ def main():
 
                 except Exception as e:
                     err_text = str(e)
+                    if not submission_attempted:
+                        finalize_domain_attempt_slot(
+                            attempt_slot_token,
+                            to_email,
+                            "not_submitted",
+                            err_text,
+                        )
+                        restored = (
+                            restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                            if queue_claim_receipt is not None
+                            else True
+                        )
+                        released = (
+                            release_send_idempotency_reservation(
+                                campaign_id=row_campaign_id,
+                                provider=args.provider,
+                                email=to_email,
+                            )
+                            if idempotency_reserved
+                            else True
+                        )
+                        idempotency_reserved = False
+                        log_row(
+                            log_path,
+                            to_email,
+                            "ERROR",
+                            campaign_log_info(
+                                "event_type=DEFINITELY_NOT_SUBMITTED "
+                                f"phase=pre_submit restored={str(restored).lower()} "
+                                f"reservation_released={str(released).lower()} "
+                                f"error={single_line(err_text)}",
+                                row_campaign_type,
+                            ),
+                        )
+                        emit_worker_event(
+                            "ERROR",
+                            "pre_submit_failure_not_submitted",
+                            phase="pre_submit",
+                            restored=bool(restored),
+                            reservation_released=bool(released),
+                            error_type=type(e).__name__,
+                        )
+                        error_count += 1
+                        print(
+                            f"[{i}/{len(pending)}] ERROR (not submitted) "
+                            f"{to_email} :: {single_line(err_text)}"
+                        )
+                        stop_reason = "pre_submit_failure"
+                        break
                     code, text = extract_code_text_from_exception(e)
                     if not text:
                         text = err_text
@@ -5373,7 +5841,7 @@ def main():
                             campaign_id=row_campaign_id,
                             provider=args.provider,
                             email=to_email,
-                            outcome="error",
+                            outcome="ambiguous",
                             info=err_text,
                         )
                     error_count += 1

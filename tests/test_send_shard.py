@@ -424,6 +424,229 @@ class SendShardTests(unittest.TestCase):
             self.assertFalse(send_shard.claim_queue_row(queue_path, "author@example.test"))
             self.assertNotIn("author@example.test", queue_path.read_text(encoding="utf-8"))
 
+    def test_claim_receipt_restores_order_and_multiline_fields_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            original_rows = [
+                {"Email": "first@example.test", "FirstName": "First", "Notes": "one"},
+                {
+                    "Email": "middle@example.test",
+                    "FirstName": "Middle",
+                    "Notes": "line one\nline two, with comma",
+                },
+                {"Email": "last@example.test", "FirstName": "Last", "Notes": "three"},
+            ]
+            self._write_csv(
+                queue_path,
+                ["Email", "FirstName", "Notes"],
+                original_rows,
+            )
+
+            receipt = send_shard.claim_queue_row_with_receipt(
+                queue_path, "middle@example.test"
+            )
+            self.assertIsNotNone(receipt)
+            self.assertTrue(
+                send_shard.restore_claimed_queue_row(queue_path, receipt)
+            )
+
+            with queue_path.open(newline="", encoding="utf-8-sig") as handle:
+                restored_rows = list(csv.DictReader(handle))
+            self.assertEqual(original_rows, restored_rows)
+            self.assertTrue(
+                send_shard.restore_claimed_queue_row(queue_path, receipt)
+            )
+            with queue_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(original_rows, list(csv.DictReader(handle)))
+
+    def test_unattempted_idempotency_reservation_can_retry_but_ambiguous_cannot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+            kwargs = {
+                "campaign_id": "campaign-a",
+                "provider": "sendgrid",
+                "email": "author@example.test",
+                "profile": "sendgrid_annette",
+                "queue_file": "recipients_sendgrid_1.csv",
+                "db_path": db_path,
+            }
+
+            self.assertTrue(send_shard.reserve_send_idempotency(**kwargs)[0])
+            self.assertTrue(
+                send_shard.release_send_idempotency_reservation(
+                    campaign_id="campaign-a",
+                    provider="sendgrid",
+                    email="author@example.test",
+                    db_path=db_path,
+                )
+            )
+            self.assertTrue(send_shard.reserve_send_idempotency(**kwargs)[0])
+            send_shard.record_send_idempotency_outcome(
+                campaign_id="campaign-a",
+                provider="sendgrid",
+                email="author@example.test",
+                outcome="ambiguous",
+                db_path=db_path,
+            )
+            self.assertFalse(
+                send_shard.release_send_idempotency_reservation(
+                    campaign_id="campaign-a",
+                    provider="sendgrid",
+                    email="author@example.test",
+                    db_path=db_path,
+                )
+            )
+            self.assertFalse(send_shard.reserve_send_idempotency(**kwargs)[0])
+
+    def test_global_block_refresher_caches_unchanged_sources_and_reloads_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unsub = root / "unsubscribed.csv"
+            suppressed = root / "suppressed.csv"
+            sg_suppressed = root / "sendgrid_suppressions.csv"
+            events = root / "sendgrid_events.jsonl"
+            log = root / "sendgrid_log.csv"
+            ledger = root / "lead_ledger.sqlite3"
+            self._write_csv(unsub, ["Email"], [])
+            self._write_csv(suppressed, ["Email"], [])
+            self._write_csv(
+                sg_suppressed,
+                ["Email", "Status", "Reason", "Source", "CreatedAtUtc", "ExpiresAtUtc"],
+                [],
+            )
+            events.write_text("", encoding="utf-8")
+            self._write_csv(log, ["Email", "Status", "Info"], [])
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        normalized_email TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.commit()
+            refresher = send_shard.GlobalBlockRefresher(
+                unsubscribed_path=unsub,
+                suppressed_path=suppressed,
+                sendgrid_suppression_path=sg_suppressed,
+                sendgrid_events_path=events,
+                authoritative_log_paths=[log],
+                ledger_path=ledger,
+                include_sendgrid_sources=True,
+            )
+
+            self.assertEqual("", refresher.classification("fresh@example.test"))
+            self.assertEqual("", refresher.classification("fresh@example.test"))
+            self.assertEqual(1, refresher.reload_count)
+            self._write_csv(
+                unsub,
+                ["Email"],
+                [{"Email": "fresh@example.test"}],
+            )
+            self.assertEqual(
+                "unsubscribed",
+                refresher.classification("fresh@example.test"),
+            )
+            self.assertEqual(2, refresher.reload_count)
+
+    def test_global_block_refresher_combines_suppression_bad_outcome_and_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unsub = root / "unsubscribed.csv"
+            suppressed = root / "suppressed.csv"
+            sg_suppressed = root / "sendgrid_suppressions.csv"
+            events = root / "sendgrid_events.jsonl"
+            log = root / "sendgrid_log.csv"
+            ledger = root / "lead_ledger.sqlite3"
+            self._write_csv(unsub, ["Email"], [])
+            self._write_csv(
+                suppressed,
+                ["Email"],
+                [{"Email": "suppressed@example.test"}],
+            )
+            self._write_csv(
+                sg_suppressed,
+                [
+                    "email",
+                    "status",
+                    "code",
+                    "reason",
+                    "last_seen_utc",
+                    "is_permanent",
+                    "ttl_until_utc",
+                ],
+                [
+                    {
+                        "email": "provider@example.test",
+                        "status": "bounce",
+                        "code": "550",
+                        "reason": "synthetic",
+                        "last_seen_utc": "2026-07-29T00:00:00+00:00",
+                        "is_permanent": "true",
+                        "ttl_until_utc": "",
+                    }
+                ],
+            )
+            events.write_text(
+                json.dumps(
+                    {"email": "bounce@example.test", "event": "spamreport"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self._write_csv(
+                log,
+                ["Email", "Status", "Info"],
+                [{"Email": "invalid@example.test", "Status": "INVALID", "Info": ""}],
+            )
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        normalized_email TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO lead_ledger VALUES (?, ?, ?)",
+                    ("ledger@example.test", 1, ""),
+                )
+                conn.commit()
+            refresher = send_shard.GlobalBlockRefresher(
+                unsubscribed_path=unsub,
+                suppressed_path=suppressed,
+                sendgrid_suppression_path=sg_suppressed,
+                sendgrid_events_path=events,
+                authoritative_log_paths=[log],
+                ledger_path=ledger,
+                include_sendgrid_sources=True,
+            )
+
+            self.assertEqual(
+                "global_suppression",
+                refresher.classification("suppressed@example.test"),
+            )
+            self.assertEqual(
+                "sendgrid_suppression",
+                refresher.classification("provider@example.test"),
+            )
+            self.assertEqual(
+                "bad_outcome",
+                refresher.classification("bounce@example.test"),
+            )
+            self.assertEqual(
+                "bad_outcome",
+                refresher.classification("invalid@example.test"),
+            )
+            self.assertEqual(
+                "ledger_blocked",
+                refresher.classification("ledger@example.test"),
+            )
+
     def test_profile_runtime_lock_prevents_duplicate_profile_acquire(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(send_shard, "STATE_DIR", Path(tmpdir)):
@@ -506,6 +729,100 @@ class SendShardTests(unittest.TestCase):
             "repeat": False,
         }
         return base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile
+
+    def _run_synthetic_sendgrid(
+        self,
+        fixture: tuple[
+            Path, Path, Path, Path, Path, Path, Path, Path, Path,
+            dict[str, object],
+        ],
+        *,
+        send_side_effect=None,
+        max_total: int = 0,
+    ) -> tuple[str, object]:
+        (
+            base,
+            shards,
+            logs,
+            state,
+            _csv_path,
+            unsub,
+            suppress,
+            sg_suppress,
+            counters,
+            profile,
+        ) = fixture
+        events = state / "sendgrid_events.jsonl"
+        events.touch(exist_ok=True)
+        ledger = state / "lead_ledger.sqlite3"
+        profile.update(
+            {
+                "repeat": False,
+                "interval": 0,
+                "cooldown_seconds": 0,
+                "max_messages_1h": 0,
+                "stop_at_local": "",
+                "always_send": "",
+                "global_dedupe": False,
+                "prune_sent": False,
+            }
+        )
+        stdout = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(settings, "APP_ROOT", base))
+            stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+            stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+            stack.enter_context(patch.object(settings, "STATE_DIR", state))
+            stack.enter_context(patch.object(settings, "WEBHOOK_EVENTS_PATH", events))
+            stack.enter_context(patch.object(settings, "LEAD_LEDGER_DB_PATH", ledger))
+            stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+            stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+            stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+            stack.enter_context(patch.object(send_shard, "ROOT", base))
+            stack.enter_context(patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub))
+            stack.enter_context(patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppress))
+            stack.enter_context(
+                patch.object(
+                    send_shard,
+                    "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+                    sg_suppress,
+                )
+            )
+            stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
+            stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
+            send_mock = stack.enter_context(
+                patch.object(
+                    send_shard,
+                    "send_via_sendgrid",
+                    side_effect=send_side_effect,
+                    return_value={"message_id": "synthetic-message"},
+                )
+            )
+            stack.enter_context(patch.object(send_shard, "domain_wait_for_slot", return_value=""))
+            stack.enter_context(patch.object(send_shard, "domain_finalize_attempt"))
+            stack.enter_context(patch.object(send_shard.time, "sleep", return_value=None))
+            stack.enter_context(patch.object(send_shard, "sleep_with_jitter", return_value=None))
+            stack.enter_context(
+                patch.dict(
+                    send_shard.PROFILES,
+                    {"sendgrid_annette": profile},
+                    clear=False,
+                )
+            )
+            stack.enter_context(
+                patch.dict(
+                    send_shard.os.environ,
+                    {"SENDGRID_API_KEY": "SG.synthetic-key"},
+                    clear=False,
+                )
+            )
+            argv = ["send_shard.py", "--profile", "sendgrid_annette"]
+            if max_total:
+                argv.extend(["--max_total", str(max_total)])
+            stack.enter_context(patch.object(sys, "argv", argv))
+            stack.enter_context(redirect_stdout(stdout))
+            send_shard.main()
+        return stdout.getvalue(), send_mock
 
     def test_preflight_reports_prune_without_mutating_shard_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -731,7 +1048,7 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual("max_total", events[-1]["reason"])
             self.assertIn("SENT fresh@example.com", stdout.getvalue())
 
-    def test_worker_logs_top_level_exception_traceback(self) -> None:
+    def test_message_build_failure_is_logged_and_preserves_queue_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
             profile.update(
@@ -777,14 +1094,371 @@ class SendShardTests(unittest.TestCase):
                 stack.enter_context(patch.dict(send_shard.PROFILES, {"sendgrid_annette": profile}, clear=False))
                 stack.enter_context(patch.dict(send_shard.os.environ, {"SENDGRID_API_KEY": "SG.test-key"}, clear=False))
                 stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "sendgrid_annette"]))
-                with self.assertRaises(RuntimeError):
-                    send_shard.main()
+                send_shard.main()
 
             events = [json.loads(line) for line in worker_log.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual("START", events[0]["event_type"])
-            self.assertEqual("ERROR", events[-1]["event_type"])
-            self.assertEqual("RuntimeError", events[-1]["reason"])
-            self.assertIn("boom from build_message", events[-1]["traceback"])
+            build_error = next(
+                event
+                for event in events
+                if event.get("reason") == "message_build_failed_not_submitted"
+            )
+            self.assertEqual("ERROR", build_error["event_type"])
+            self.assertEqual("RuntimeError", build_error["error_type"])
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                queued = list(csv.DictReader(handle))
+            self.assertEqual(["fresh@example.com"], [row["Email"] for row in queued])
+
+    def test_corrected_message_build_retries_once_and_success_claims_one_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "fresh@example.test,Fresh,Book C\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                send_shard,
+                "build_message",
+                side_effect=RuntimeError("synthetic render failure"),
+            ):
+                _first_output, first_send = self._run_synthetic_sendgrid(fixture)
+            first_send.assert_not_called()
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(
+                    ["fresh@example.test"],
+                    [row["Email"] for row in csv.DictReader(handle)],
+                )
+
+            _second_output, second_send = self._run_synthetic_sendgrid(fixture)
+            self.assertEqual(1, second_send.call_count)
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+            with log_path.open(newline="", encoding="utf-8-sig") as handle:
+                statuses = [row["Status"] for row in csv.DictReader(handle)]
+            self.assertEqual(1, statuses.count("SENT"))
+
+    def test_confirmed_success_removes_exactly_one_duplicate_queue_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,Notes\n"
+                "duplicate@example.test,First,Book A,\"first row\"\n"
+                "duplicate@example.test,Second,Book B,\"second row\"\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            _output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            self.assertEqual(1, send_mock.call_count)
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                remaining = list(csv.DictReader(handle))
+            self.assertEqual(1, len(remaining))
+            self.assertEqual("Second", remaining[0]["FirstName"])
+            self.assertEqual("second row", remaining[0]["Notes"])
+
+    def test_ambiguous_provider_failure_keeps_claim_and_idempotency_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            state = fixture[3]
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "ambiguous@example.test,Ada,Book A,campaign-ambiguous\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            _output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                send_side_effect=TimeoutError("synthetic response lost"),
+            )
+
+            self.assertEqual(1, send_mock.call_count)
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+            with send_shard.sqlite3.connect(
+                state / "send_idempotency.sqlite3"
+            ) as conn:
+                reservation = conn.execute(
+                    "SELECT status FROM send_reservations WHERE email = ?",
+                    ("ambiguous@example.test",),
+                ).fetchone()
+            self.assertEqual(("ambiguous",), reservation)
+            self.assertFalse(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="campaign-ambiguous",
+                    provider="sendgrid",
+                    email="ambiguous@example.test",
+                    profile="sendgrid_annette",
+                    queue_file=csv_path.name,
+                    db_path=state / "send_idempotency.sqlite3",
+                )[0]
+            )
+
+    def test_definite_provider_rejection_keeps_existing_invalid_policy_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            state = fixture[3]
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "rejected@example.test,Reject,Book A,rejected-campaign\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            rejection = smtplib.SMTPRecipientsRefused(
+                {"rejected@example.test": (550, b"5.1.1 user unknown")}
+            )
+
+            _output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                send_side_effect=rejection,
+            )
+
+            self.assertEqual(1, send_mock.call_count)
+            with log_path.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(["INVALID"], [row["Status"] for row in rows])
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+            self.assertFalse(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="rejected-campaign",
+                    provider="sendgrid",
+                    email="rejected@example.test",
+                    profile="sendgrid_annette",
+                    queue_file=csv_path.name,
+                    db_path=state / "send_idempotency.sqlite3",
+                )[0]
+            )
+
+    def test_new_global_block_between_synthetic_sends_prevents_second_submission(self) -> None:
+        cases = ("unsubscribed", "global_suppression", "bad_outcome")
+        for block_source in cases:
+            with self.subTest(block_source=block_source):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+                    state = fixture[3]
+                    csv_path = fixture[4]
+                    unsub = fixture[5]
+                    suppressed = fixture[6]
+                    log_path = fixture[2] / fixture[-1]["log"]
+                    events = state / "sendgrid_events.jsonl"
+                    csv_path.write_text(
+                        "Email,FirstName,BookTitle\n"
+                        "first@example.test,First,Book A\n"
+                        "second@example.test,Second,Book B\n",
+                        encoding="utf-8",
+                    )
+                    log_path.write_text(
+                        "TimestampUTC,Email,Status,Info\n",
+                        encoding="utf-8",
+                    )
+                    calls = 0
+
+                    def submit_then_block(*_args, **_kwargs):
+                        nonlocal calls
+                        calls += 1
+                        if calls == 1:
+                            if block_source == "unsubscribed":
+                                self._write_csv(
+                                    unsub,
+                                    ["Email"],
+                                    [{"Email": "second@example.test"}],
+                                )
+                            elif block_source == "global_suppression":
+                                self._write_csv(
+                                    suppressed,
+                                    ["Email"],
+                                    [{"Email": "second@example.test"}],
+                                )
+                            else:
+                                events.write_text(
+                                    json.dumps(
+                                        {
+                                            "email": "second@example.test",
+                                            "event": "bounce",
+                                        }
+                                    )
+                                    + "\n",
+                                    encoding="utf-8",
+                                )
+                        return {"message_id": "synthetic-message"}
+
+                    _output, send_mock = self._run_synthetic_sendgrid(
+                        fixture,
+                        send_side_effect=submit_then_block,
+                    )
+
+                    self.assertEqual(1, send_mock.call_count)
+                    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                        queued = list(csv.DictReader(handle))
+                    self.assertEqual(
+                        ["second@example.test"],
+                        [row["Email"] for row in queued],
+                    )
+                    with log_path.open(newline="", encoding="utf-8-sig") as handle:
+                        rows = list(csv.DictReader(handle))
+                    second_rows = [
+                        row for row in rows if row["Email"] == "second@example.test"
+                    ]
+                    self.assertEqual(["SKIP"], [row["Status"] for row in second_rows])
+                    self.assertNotIn("SENT", [row["Status"] for row in second_rows])
+
+    def test_block_added_during_construction_prevents_claim_and_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path = fixture[4]
+            suppressed = fixture[6]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle\n"
+                "late-block@example.test,Late,Book A\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            real_build_message = send_shard.build_message
+
+            def build_then_suppress(*args, **kwargs):
+                result = real_build_message(*args, **kwargs)
+                self._write_csv(
+                    suppressed,
+                    ["Email"],
+                    [{"Email": "late-block@example.test"}],
+                )
+                return result
+
+            with patch.object(
+                send_shard,
+                "build_message",
+                side_effect=build_then_suppress,
+            ):
+                _output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            send_mock.assert_not_called()
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                queued = list(csv.DictReader(handle))
+            self.assertEqual(
+                ["late-block@example.test"],
+                [row["Email"] for row in queued],
+            )
+
+    def test_local_pre_submit_failure_restores_claim_and_releases_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            state = fixture[3]
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "retryable@example.test,Retry,Book A,retryable-campaign\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                send_shard,
+                "build_sendgrid_astra_custom_args",
+                side_effect=RuntimeError("synthetic local configuration failure"),
+            ):
+                _output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            send_mock.assert_not_called()
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                queued = list(csv.DictReader(handle))
+            self.assertEqual(
+                ["retryable@example.test"],
+                [row["Email"] for row in queued],
+            )
+            with send_shard.sqlite3.connect(
+                state / "send_idempotency.sqlite3"
+            ) as conn:
+                count = conn.execute(
+                    "SELECT count(*) FROM send_reservations WHERE email = ?",
+                    ("retryable@example.test",),
+                ).fetchone()[0]
+            self.assertEqual(0, count)
+
+            _retry_output, retry_send = self._run_synthetic_sendgrid(fixture)
+            self.assertEqual(1, retry_send.call_count)
+
+    def test_block_added_after_claim_is_restored_before_provider_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            state = fixture[3]
+            csv_path = fixture[4]
+            suppressed = fixture[6]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "race@example.test,Race,Book A,race-campaign\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            real_reserve = send_shard.reserve_send_idempotency
+
+            def reserve_then_block(**kwargs):
+                result = real_reserve(**kwargs)
+                self._write_csv(
+                    suppressed,
+                    ["Email"],
+                    [{"Email": "race@example.test"}],
+                )
+                return result
+
+            with patch.object(
+                send_shard,
+                "reserve_send_idempotency",
+                side_effect=reserve_then_block,
+            ):
+                _output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            send_mock.assert_not_called()
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                queued = list(csv.DictReader(handle))
+            self.assertEqual(
+                ["race@example.test"],
+                [row["Email"] for row in queued],
+            )
+            with send_shard.sqlite3.connect(
+                state / "send_idempotency.sqlite3"
+            ) as conn:
+                count = conn.execute(
+                    "SELECT count(*) FROM send_reservations WHERE email = ?",
+                    ("race@example.test",),
+                ).fetchone()[0]
+            self.assertEqual(0, count)
 
     def test_prune_sent_from_csv_mutates_during_normal_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1747,6 +2421,305 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(row["EmailBody"], body)
         self.assertEqual(row["EmailSubject"], message["Subject"])
         self.assertNotIn(send_shard.PITCH_JC_BODY, body)
+
+    def test_warm_pre_rendered_build_failure_preserves_exact_queue_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "data/shards"
+            logs = root / "data/logs"
+            state = root / "data/state"
+            shards.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            state.mkdir(parents=True)
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            original_rows = [
+                {
+                    "Email": "synthetic@example.test",
+                    "FirstName": "Jamie",
+                    "EmailSubject": "Synthetic subject",
+                    "EmailBody": "Line one\nLine two, with comma",
+                    "campaign_id": "warm-synthetic",
+                }
+            ]
+            self._write_csv(
+                queue_path,
+                [
+                    "Email",
+                    "FirstName",
+                    "EmailSubject",
+                    "EmailBody",
+                    "campaign_id",
+                ],
+                original_rows,
+            )
+            log_path = logs / "private_jc_warm_log.csv"
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            unsub = state / "unsubscribed.csv"
+            suppressed = state / "suppressed.csv"
+            sg_suppressed = state / "sendgrid_suppressions.csv"
+            self._write_csv(unsub, ["Email"], [])
+            self._write_csv(suppressed, ["Email"], [])
+            self._write_csv(
+                sg_suppressed,
+                ["Email", "Status", "Reason", "Source", "CreatedAtUtc", "ExpiresAtUtc"],
+                [],
+            )
+            profile = {
+                **send_shard.PROFILES["private_jc_warm"],
+                "interval": 0,
+                "cooldown_seconds": 0,
+                "repeat": False,
+                "max_messages_1h": 0,
+                "stop_at_local": "",
+            }
+            stdout = io.StringIO()
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "APP_ROOT", root))
+                stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "WEBHOOK_EVENTS_PATH",
+                        logs / "sendgrid_events.jsonl",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "LEAD_LEDGER_DB_PATH",
+                        state / "lead_ledger.sqlite3",
+                    )
+                )
+                stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+                stack.enter_context(patch.object(send_shard, "ROOT", root))
+                stack.enter_context(patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub))
+                stack.enter_context(
+                    patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppressed)
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+                        sg_suppressed,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "load_warm_confirmation_manifest",
+                        return_value={"confirmed": True},
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "validate_warm_confirmed_queue",
+                        return_value={"valid": True},
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "validate_warm_queue_contract",
+                        return_value=True,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "build_pre_rendered_message",
+                        side_effect=ValueError("synthetic malformed warm body"),
+                    )
+                )
+                send_mock = stack.enter_context(
+                    patch.object(send_shard, "smtp_login")
+                )
+                stack.enter_context(
+                    patch.dict(
+                        send_shard.PROFILES,
+                        {"private_jc_warm": profile},
+                        clear=False,
+                    )
+                )
+                stack.enter_context(
+                    patch.dict(
+                        send_shard.os.environ,
+                        {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
+                        clear=False,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["send_shard.py", "--profile", "private_jc_warm"],
+                    )
+                )
+                stack.enter_context(redirect_stdout(stdout))
+                send_shard.main()
+
+            send_mock.assert_not_called()
+            with queue_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(original_rows, list(csv.DictReader(handle)))
+            self.assertIn("ERROR (not submitted)", stdout.getvalue())
+
+    def test_private_cold_and_warm_profiles_use_final_global_block_check(self) -> None:
+        for profile_name in ("private_jc", "private_jc_warm"):
+            with self.subTest(profile_name=profile_name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    shards = root / "data/shards"
+                    logs = root / "data/logs"
+                    state = root / "data/state"
+                    shards.mkdir(parents=True)
+                    logs.mkdir(parents=True)
+                    state.mkdir(parents=True)
+                    profile = {
+                        **send_shard.PROFILES[profile_name],
+                        "interval": 0,
+                        "cooldown_seconds": 0,
+                        "repeat": False,
+                        "max_messages_1h": 0,
+                        "stop_at_local": "",
+                        "global_dedupe": False,
+                        "prune_sent": False,
+                        "always_send": "",
+                    }
+                    queue_path = shards / str(profile["csv"])
+                    row = {
+                        "Email": "blocked@example.test",
+                        "FirstName": "Blocked",
+                        "BookTitle": "Synthetic Book",
+                        "EmailSubject": "Synthetic subject",
+                        "EmailBody": "Synthetic body",
+                        "campaign_id": "synthetic-campaign",
+                    }
+                    self._write_csv(queue_path, list(row), [row])
+                    (logs / str(profile["log"])).write_text(
+                        "TimestampUTC,Email,Status,Info\n",
+                        encoding="utf-8",
+                    )
+                    unsub = state / "unsubscribed.csv"
+                    suppressed = state / "suppressed.csv"
+                    sg_suppressed = state / "sendgrid_suppressions.csv"
+                    self._write_csv(unsub, ["Email"], [])
+                    self._write_csv(suppressed, ["Email"], [])
+                    self._write_csv(
+                        sg_suppressed,
+                        [
+                            "email",
+                            "status",
+                            "code",
+                            "reason",
+                            "last_seen_utc",
+                            "is_permanent",
+                            "ttl_until_utc",
+                        ],
+                        [],
+                    )
+                    stdout = io.StringIO()
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(settings, "APP_ROOT", root))
+                        stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+                        stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+                        stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                        stack.enter_context(
+                            patch.object(
+                                settings,
+                                "WEBHOOK_EVENTS_PATH",
+                                logs / "sendgrid_events.jsonl",
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                settings,
+                                "LEAD_LEDGER_DB_PATH",
+                                state / "lead_ledger.sqlite3",
+                            )
+                        )
+                        stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+                        stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+                        stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+                        stack.enter_context(patch.object(send_shard, "ROOT", root))
+                        stack.enter_context(
+                            patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub)
+                        )
+                        stack.enter_context(
+                            patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppressed)
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                send_shard,
+                                "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+                                sg_suppressed,
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                send_shard,
+                                "load_warm_confirmation_manifest",
+                                return_value={"confirmed": True},
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                send_shard,
+                                "validate_warm_confirmed_queue",
+                                return_value={"valid": True},
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                send_shard,
+                                "validate_warm_queue_contract",
+                                return_value=True,
+                            )
+                        )
+                        classification = stack.enter_context(
+                            patch.object(
+                                send_shard.GlobalBlockRefresher,
+                                "classification",
+                                return_value="global_suppression",
+                            )
+                        )
+                        smtp_login = stack.enter_context(
+                            patch.object(send_shard, "smtp_login")
+                        )
+                        stack.enter_context(
+                            patch.dict(
+                                send_shard.PROFILES,
+                                {profile_name: profile},
+                                clear=False,
+                            )
+                        )
+                        stack.enter_context(
+                            patch.dict(
+                                send_shard.os.environ,
+                                {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
+                                clear=False,
+                            )
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                sys,
+                                "argv",
+                                ["send_shard.py", "--profile", profile_name],
+                            )
+                        )
+                        stack.enter_context(redirect_stdout(stdout))
+                        send_shard.main()
+
+                    classification.assert_called_with("blocked@example.test")
+                    smtp_login.assert_not_called()
+                    with queue_path.open(newline="", encoding="utf-8-sig") as handle:
+                        self.assertEqual([row], list(csv.DictReader(handle)))
 
     def test_warm_reservation_blocks_cross_lane_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
