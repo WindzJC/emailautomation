@@ -11,6 +11,7 @@ import tempfile
 import unicodedata
 import uuid
 from collections import Counter
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from functools import lru_cache
 from io import StringIO
@@ -42,7 +43,13 @@ from send_shard import (
 )
 
 from sendgrid_hygiene import load_active_suppressed_emails, norm_email
-from tools.rebuild_recipient_queues import SENDGRID_REQUIRED_HEADERS, build_queue_safety_report, default_sendgrid_log_paths, write_active_campaign_manifest
+from tools.rebuild_recipient_queues import (
+    SENDGRID_REQUIRED_HEADERS,
+    active_campaign_manifest_path,
+    build_queue_safety_report,
+    default_sendgrid_log_paths,
+    write_active_campaign_manifest,
+)
 
 
 IMPORTANT_DIR = settings.APP_ROOT / "_important"
@@ -717,6 +724,72 @@ def _write_csv_atomic(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict
         writer.writerows(row_list)
     tmp_path.replace(path)
     settings.secure_private_file(path)
+
+
+def _stage_csv_payload(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, str]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            newline="",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.dispatch.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=list(fieldnames), extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(list(rows))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return tmp_path
+    except Exception:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+FileSnapshot = tuple[bytes, int, int, int] | None
+
+
+def _snapshot_file(path: Path, snapshots: Dict[Path, FileSnapshot]) -> None:
+    if path not in snapshots:
+        if path.exists():
+            metadata = path.stat()
+            snapshots[path] = (
+                path.read_bytes(),
+                metadata.st_atime_ns,
+                metadata.st_mtime_ns,
+                metadata.st_mode,
+            )
+        else:
+            snapshots[path] = None
+
+
+def _restore_file_snapshots(snapshots: Dict[Path, FileSnapshot]) -> None:
+    for path, original in reversed(list(snapshots.items())):
+        if original is None:
+            path.unlink(missing_ok=True)
+            continue
+        content, atime_ns, mtime_ns, mode = original
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.rollback.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            restore_path = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        restore_path.replace(path)
+        os.chmod(path, mode & 0o7777)
+        os.utime(path, ns=(atime_ns, mtime_ns))
 
 
 def _detect_core_headers(fieldnames: Sequence[str]) -> Dict[str, str]:
@@ -1711,6 +1784,7 @@ def _archive_and_clear_staged_batch(
     preview: Dict[str, object],
     report: Dict[str, object],
     backup_root: Path,
+    archive_dir: Path | None = None,
 ) -> Dict[str, object]:
     if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) != DISPATCH_SOURCE_TRIAGED_KEEP:
         return {
@@ -1723,7 +1797,7 @@ def _archive_and_clear_staged_batch(
 
     paths_by_key = _staged_batch_paths_for_cleanup(preview)
     existing = [(key, path) for key, path in paths_by_key.items() if path.exists()]
-    archive_dir = _staged_batch_archive_dir(backup_root, str(report.get("run_id") or ""))
+    archive_dir = archive_dir or _staged_batch_archive_dir(backup_root, str(report.get("run_id") or ""))
     archived_files: List[Dict[str, object]] = []
     archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2451,8 +2525,13 @@ def _unique_dispatch_archive_path(directory: Path, prefix: str) -> Path:
     return candidate
 
 
-def _archive_assigned_dispatch_preview(preview: Dict[str, object], archive_dir: Path = DISPATCH_PREVIEWS_DIR) -> Path:
-    path = _unique_dispatch_archive_path(archive_dir, "dispatch_preview")
+def _archive_assigned_dispatch_preview(
+    preview: Dict[str, object],
+    archive_dir: Path = DISPATCH_PREVIEWS_DIR,
+    *,
+    archive_path: Path | None = None,
+) -> Path:
+    path = archive_path or _unique_dispatch_archive_path(archive_dir, "dispatch_preview")
     queue_rows = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
     planned_summary = _planned_queue_row_summary(queue_rows)
     sendgrid_shard_planned_counts = {
@@ -2520,8 +2599,13 @@ def _archive_assigned_dispatch_preview(preview: Dict[str, object], archive_dir: 
     return path
 
 
-def _archive_confirmed_dispatch_summary(report: Dict[str, object], archive_dir: Path = DISPATCH_CONFIRMED_DIR) -> Path:
-    path = _unique_dispatch_archive_path(archive_dir, "dispatch_confirmed")
+def _archive_confirmed_dispatch_summary(
+    report: Dict[str, object],
+    archive_dir: Path = DISPATCH_CONFIRMED_DIR,
+    *,
+    archive_path: Path | None = None,
+) -> Path:
+    path = archive_path or _unique_dispatch_archive_path(archive_dir, "dispatch_confirmed")
     payload = {
         "confirmed_at": str(report.get("completed_at_utc") or report.get("generated_at_utc") or ""),
         "confirmed_at_utc": str(report.get("completed_at_utc") or report.get("generated_at_utc") or ""),
@@ -2844,13 +2928,6 @@ def _lead_dispatch_payload(
         "current_status": "QUEUED",
         "last_seen_at": iso_utc(),
     }
-
-
-def _restore_queue_backups(paths: Sequence[Path], backup_dir: Path) -> None:
-    for path in paths:
-        backup_path = backup_dir / path.name
-        if backup_path.exists():
-            shutil.copy2(backup_path, path)
 
 
 def _record_dispatch_history_from_preview(
@@ -3637,6 +3714,58 @@ def confirm_dispatch_preview(
     report_dir: Path = STATE_DIR,
     persist_state: bool = True,
     preview_dir: Path = DISPATCH_PREVIEWS_DIR,
+    _fault_injector: Callable[[str], None] | None = None,
+) -> Dict[str, object]:
+    snapshots: Dict[Path, FileSnapshot] = {}
+    rollback_dirs: List[Path] = []
+    temporary_paths: List[Path] = []
+    temporary_dirs: List[Path] = []
+    with ExitStack() as lock_stack:
+        try:
+            return _confirm_dispatch_preview_impl(
+                preview_id,
+                require_stopped=require_stopped,
+                allow_high_risk_recontact=allow_high_risk_recontact,
+                backup_root=backup_root,
+                report_dir=report_dir,
+                persist_state=persist_state,
+                preview_dir=preview_dir,
+                _fault_injector=_fault_injector,
+                _lock_stack=lock_stack,
+                _snapshots=snapshots,
+                _rollback_dirs=rollback_dirs,
+                _temporary_paths=temporary_paths,
+                _temporary_dirs=temporary_dirs,
+            )
+        except Exception:
+            for directory in reversed(rollback_dirs):
+                if directory.exists():
+                    shutil.rmtree(directory)
+            _restore_file_snapshots(snapshots)
+            raise
+        finally:
+            for path in temporary_paths:
+                path.unlink(missing_ok=True)
+            for directory in temporary_dirs:
+                if directory.exists():
+                    shutil.rmtree(directory)
+
+
+def _confirm_dispatch_preview_impl(
+    preview_id: str,
+    *,
+    require_stopped: bool,
+    allow_high_risk_recontact: bool,
+    backup_root: Path,
+    report_dir: Path,
+    persist_state: bool,
+    preview_dir: Path,
+    _fault_injector: Callable[[str], None] | None,
+    _lock_stack: ExitStack,
+    _snapshots: Dict[Path, FileSnapshot],
+    _rollback_dirs: List[Path],
+    _temporary_paths: List[Path],
+    _temporary_dirs: List[Path],
 ) -> Dict[str, object]:
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
     active_states = _active_sender_states() if require_stopped else {}
@@ -3710,6 +3839,7 @@ def confirm_dispatch_preview(
     effective_preview["plan_dispatch_events_by_queue"] = effective_dispatch_events_by_queue
 
     planned_temp_dir = Path(tempfile.mkdtemp(prefix="dispatch_queue_plan_"))
+    _temporary_dirs.append(planned_temp_dir)
     planned_queue_paths = [planned_temp_dir / path.name for path in queue_paths]
     for key, path in zip(queue_keys, planned_queue_paths):
         planned_rows = effective_plan_rows_by_queue.get(key) or []
@@ -3736,31 +3866,57 @@ def confirm_dispatch_preview(
     run_id = f"dispatch_run_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     started_at_utc = iso_utc()
     backup_dir = backup_root / f"dispatch_{timestamp_slug()}"
+    if backup_dir.exists():
+        backup_dir = backup_root / f"{backup_dir.name}_{uuid.uuid4().hex[:8]}"
+    staged_queue_paths: List[Path] = []
+    for key, path in zip(queue_keys, queue_paths):
+        staged_path = _stage_csv_payload(path, queue_headers, effective_plan_rows_by_queue.get(key) or [])
+        staged_queue_paths.append(staged_path)
+        _temporary_paths.append(staged_path)
 
-    with lock_files(queue_paths):
-        preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
-        active_states = _active_sender_states() if require_stopped else {}
-        if active_states:
-            raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
-        existing_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
-        for path in queue_paths:
-            _headers, rows = _read_queue_rows(path)
-            existing_rows_by_path[path] = rows
-        _copy_queue_backups(queue_paths, backup_dir)
-        final_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
-        for key, path in zip(queue_keys, queue_paths):
-            new_rows = effective_plan_rows_by_queue.get(key) or []
-            final_rows_by_path[path] = new_rows
-            _write_csv_atomic(path, queue_headers, final_rows_by_path[path])
-        try:
-            dispatch_history_rows_created, dispatch_history_rows_per_queue = _record_dispatch_history_from_preview(
-                effective_preview,
-                run_id=run_id,
-                dispatched_at=started_at_utc,
-            )
-        except Exception:
-            _restore_queue_backups(queue_paths, backup_dir)
-            raise
+    _lock_stack.enter_context(lock_files(queue_paths))
+    preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
+    active_states = _active_sender_states() if require_stopped else {}
+    if active_states:
+        raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
+    existing_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
+    for path in queue_paths:
+        _headers, rows = _read_queue_rows(path)
+        existing_rows_by_path[path] = rows
+        _snapshot_file(path, _snapshots)
+    _rollback_dirs.append(backup_dir)
+    _copy_queue_backups(queue_paths, backup_dir)
+    final_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
+    if _fault_injector:
+        _fault_injector("before_first_replacement")
+    for position, (key, path, staged_path) in enumerate(
+        zip(queue_keys, queue_paths, staged_queue_paths),
+        start=1,
+    ):
+        final_rows_by_path[path] = list(effective_plan_rows_by_queue.get(key) or [])
+        staged_path.replace(path)
+        settings.secure_private_file(path)
+        if _fault_injector:
+            _fault_injector(f"queue_replacement_{position}")
+    if _fault_injector:
+        _fault_injector("after_sixth_replacement")
+
+    ledger_path_text = str(effective_preview.get("lead_ledger_db_path") or "").strip()
+    ledger_path = _lead_ledger_db_path(Path(ledger_path_text) if ledger_path_text else None)
+    for path in (
+        ledger_path,
+        Path(f"{ledger_path}-journal"),
+        Path(f"{ledger_path}-wal"),
+        Path(f"{ledger_path}-shm"),
+    ):
+        _snapshot_file(path, _snapshots)
+    dispatch_history_rows_created, dispatch_history_rows_per_queue = _record_dispatch_history_from_preview(
+        effective_preview,
+        run_id=run_id,
+        dispatched_at=started_at_utc,
+    )
+    if _fault_injector:
+        _fault_injector("ledger_recording")
 
     final_queue_counts = {
         "jc": len(final_rows_by_path[queue_paths[0]]),
@@ -3865,10 +4021,19 @@ def confirm_dispatch_preview(
         "dispatch_history_rows_per_queue": dict(dispatch_history_rows_per_queue),
     }
     report.update(_dispatch_alias_fields(report))
+    staged_paths = _staged_batch_paths_for_cleanup(preview)
+    for path in staged_paths.values():
+        _snapshot_file(path, _snapshots)
+    staged_archive_root = backup_root / "staged_batches"
+    if not staged_archive_root.exists():
+        _rollback_dirs.append(staged_archive_root)
+    staged_archive_dir = _staged_batch_archive_dir(backup_root, run_id)
+    _rollback_dirs.append(staged_archive_dir)
     staged_batch_cleanup = _archive_and_clear_staged_batch(
         preview=preview,
         report=report,
         backup_root=backup_root,
+        archive_dir=staged_archive_dir,
     )
     report["staged_batch_cleanup"] = staged_batch_cleanup
     report["staged_batch_archive_path"] = str(staged_batch_cleanup.get("archive_path") or "")
@@ -3881,6 +4046,8 @@ def confirm_dispatch_preview(
     manifest_keep_path = archived_by_key.get("triaged_keep") or cleanup_paths.get("triaged_keep") or Path(str(preview.get("dispatch_source_path") or ""))
     manifest_reject_path = archived_by_key.get("triaged_reject") or cleanup_paths.get("triaged_reject") or TRIAGED_REJECT_PATH
     manifest_source_path = manifest_keep_path if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) == DISPATCH_SOURCE_TRIAGED_KEEP else Path(str(preview.get("dispatch_source_path") or manifest_checked_path))
+    active_manifest_target = active_campaign_manifest_path(report_dir)
+    _snapshot_file(active_manifest_target, _snapshots)
     active_manifest_path = write_active_campaign_manifest(
         checked_path=manifest_checked_path,
         triaged_keep_path=manifest_keep_path,
@@ -3899,7 +4066,13 @@ def confirm_dispatch_preview(
             else "Dispatch confirmed."
         )
     if not str(report.get("assigned_preview_archive_path") or "").strip():
-        assigned_preview_archive_path = _archive_assigned_dispatch_preview(preview, report_dir / "dispatch_previews")
+        assigned_preview_archive_path = _unique_dispatch_archive_path(report_dir / "dispatch_previews", "dispatch_preview")
+        _snapshot_file(assigned_preview_archive_path, _snapshots)
+        assigned_preview_archive_path = _archive_assigned_dispatch_preview(
+            preview,
+            report_dir / "dispatch_previews",
+            archive_path=assigned_preview_archive_path,
+        )
         report["assigned_preview_archive_path"] = str(assigned_preview_archive_path)
     report["private_jc_added"] = int(report.get("added_astra") or 0)
     report["sendgrid_added"] = int(report.get("added_sendgrid") or 0)
@@ -3908,24 +4081,40 @@ def confirm_dispatch_preview(
     report["sg3_added"] = int(report.get("assigned_sg3") or 0)
     report["sg4_added"] = int(report.get("assigned_sg4") or 0)
     report["sg5_added"] = int(report.get("assigned_sg5") or 0)
-    confirmed_summary_path = _archive_confirmed_dispatch_summary(report, report_dir / "dispatch_confirmed")
+    confirmed_summary_path = _unique_dispatch_archive_path(report_dir / "dispatch_confirmed", "dispatch_confirmed")
+    _snapshot_file(confirmed_summary_path, _snapshots)
+    confirmed_summary_path = _archive_confirmed_dispatch_summary(
+        report,
+        report_dir / "dispatch_confirmed",
+        archive_path=confirmed_summary_path,
+    )
     report["confirmed_summary_path"] = str(confirmed_summary_path)
     report["confirmed_summary_archive_path"] = str(confirmed_summary_path)
 
     report_path = report_dir / f"important_leads_dispatch_{timestamp_slug()}.json"
+    _snapshot_file(report_path, _snapshots)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_payload = dict(report)
     report_payload["report_path"] = str(report_path)
     report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report["report_path"] = str(report_path)
-    _append_dispatch_run_history(report, history_path=report_dir / DISPATCH_RUN_HISTORY_PATH.name)
+    history_path = report_dir / DISPATCH_RUN_HISTORY_PATH.name
+    _snapshot_file(history_path, _snapshots)
+    _append_dispatch_run_history(report, history_path=history_path)
+    if _fault_injector:
+        _fault_injector("campaign_history_recording")
     if persist_state:
+        _snapshot_file(settings.LEADS_STATE_PATH, _snapshots)
         save_state(**{MASTER_DISPATCH_STATE_KEY: report})
 
+    preview_path = _dispatch_preview_path(preview_id, preview_dir)
+    _snapshot_file(preview_path, _snapshots)
     preview["status"] = "confirmed"
     preview["confirmed_at_utc"] = report["completed_at_utc"]
     preview["confirmed_run_id"] = run_id
     _save_dispatch_preview(preview, preview_dir)
+    if _fault_injector:
+        _fault_injector("final_confirmation_state")
     return report
 
 

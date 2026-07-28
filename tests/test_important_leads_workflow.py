@@ -11,6 +11,7 @@ from unittest.mock import patch
 import important_leads_verify
 import important_leads_workflow
 import lead_ledger
+import leads_workflow
 import send_shard
 from tools.rebuild_recipient_queues import default_queue_paths
 from important_leads_workflow import (
@@ -2745,6 +2746,160 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 self.assertEqual(content, path.read_text(encoding="utf-8"))
             for path, content in queue_before.items():
                 self.assertEqual(content, path.read_text(encoding="utf-8"))
+
+    def test_confirm_dispatch_preview_is_transactional_across_queues_and_records(self) -> None:
+        fault_phases = [
+            "before_first_replacement",
+            *[f"queue_replacement_{position}" for position in range(1, 7)],
+            "after_sixth_replacement",
+            "ledger_recording",
+            "campaign_history_recording",
+            "final_confirmation_state",
+        ]
+
+        for fault_phase in fault_phases:
+            with self.subTest(fault_phase=fault_phase), tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                master_path = tmp / "leads.csv"
+                rejected_path = tmp / "leads_rejected.csv"
+                triaged_keep_path = tmp / "leads_triaged_keep.csv"
+                triaged_reject_path = tmp / "leads_triaged_reject.csv"
+                triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
+                preview_dir = tmp / "previews"
+                report_dir = tmp / "reports"
+                backup_root = tmp / "backups"
+                ledger_path = tmp / "lead_ledger.sqlite3"
+                state_path = tmp / "leads_state.json"
+                jc_queue = tmp / "recipients_private_jc.csv"
+                sg_queues = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+                queue_paths = [jc_queue, *sg_queues]
+                logs = [tmp / "private_jc_log.csv"] + [
+                    tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)
+                ]
+                source_rows = [
+                    {
+                        "FullName": f"Person {index}",
+                        "FirstName": f"Person{index}",
+                        "Email": f"person{index}@example.com",
+                        "BookTitle": "A title with\nan intact second line" if index == 1 else f"Book {index}",
+                        "Status": "KEEP",
+                    }
+                    for index in range(1, 13)
+                ]
+                write_csv(
+                    master_path,
+                    ["FullName", "FirstName", "Email", "BookTitle"],
+                    [{key: row[key] for key in ["FullName", "FirstName", "Email", "BookTitle"]} for row in source_rows],
+                )
+                write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+                write_csv(
+                    triaged_keep_path,
+                    ["FullName", "FirstName", "Email", "BookTitle", "Status"],
+                    source_rows,
+                )
+                write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+                write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
+                for position, path in enumerate(queue_paths[:-1], start=1):
+                    write_csv(
+                        path,
+                        ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"],
+                        [planned_row(f"original-{position}@example.com", f"Original{position}")],
+                    )
+                self.assertFalse(queue_paths[-1].exists())
+                for path in logs:
+                    write_csv(path, ["Email", "Status"], [])
+                report_dir.mkdir(parents=True, exist_ok=True)
+                history_path = report_dir / important_leads_workflow.DISPATCH_RUN_HISTORY_PATH.name
+                history_path.write_bytes(b'[{"run_id":"original-history"}]\n')
+                manifest_path = report_dir / "active_campaign_snapshot.json"
+                manifest_path.write_bytes(b'{"state":"original-manifest"}\n')
+                state_path.write_bytes(b'{"latest_dispatch":{"status":"original"}}\n')
+
+                preview = preview_dispatch_master_leads(
+                    master_path=master_path,
+                    triaged_keep_path=triaged_keep_path,
+                    rejected_path=rejected_path,
+                    dispatch_source_mode="triaged_keep",
+                    jc_queue_path=jc_queue,
+                    sendgrid_queue_paths=sg_queues,
+                    jc_log_path=logs[0],
+                    sendgrid_log_paths=logs[1:],
+                    sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                    suppressed_path=tmp / "suppressed.csv",
+                    unsubscribed_path=tmp / "unsubscribed.csv",
+                    lead_ledger_db_path=ledger_path,
+                    preview_dir=preview_dir,
+                )
+                tracked_files = [
+                    *queue_paths,
+                    ledger_path,
+                    state_path,
+                    history_path,
+                    manifest_path,
+                    preview_dir / f"{preview['preview_id']}.json",
+                    master_path,
+                    rejected_path,
+                    triaged_keep_path,
+                    triaged_reject_path,
+                    triaged_quarantine_path,
+                ]
+                before = {
+                    path: path.read_bytes() if path.exists() else None
+                    for path in tracked_files
+                }
+
+                def inject(phase: str) -> None:
+                    if phase == fault_phase:
+                        raise RuntimeError(f"injected failure: {phase}")
+
+                with (
+                    patch.object(important_leads_workflow.settings, "LEADS_STATE_PATH", state_path),
+                    patch.object(leads_workflow, "LEADS_STATE_PATH", state_path),
+                    self.assertRaisesRegex(RuntimeError, f"injected failure: {fault_phase}"),
+                ):
+                    confirm_dispatch_preview(
+                        preview["preview_id"],
+                        require_stopped=False,
+                        backup_root=backup_root,
+                        report_dir=report_dir,
+                        persist_state=True,
+                        preview_dir=preview_dir,
+                        _fault_injector=inject,
+                    )
+
+                for path, original in before.items():
+                    if original is None:
+                        self.assertFalse(path.exists(), f"{path} should remain missing after {fault_phase}")
+                    else:
+                        self.assertEqual(original, path.read_bytes(), f"{path} changed after {fault_phase}")
+                self.assertFalse(list(tmp.rglob("*.dispatch.*.tmp")))
+                self.assertFalse((backup_root / "staged_batches").exists())
+                self.assertEqual([], list((report_dir / "dispatch_confirmed").glob("*.json")))
+                self.assertEqual("previewed", load_dispatch_preview(preview["preview_id"], preview_dir=preview_dir)["status"])
+
+                with (
+                    patch.object(important_leads_workflow.settings, "LEADS_STATE_PATH", state_path),
+                    patch.object(leads_workflow, "LEADS_STATE_PATH", state_path),
+                ):
+                    report = confirm_dispatch_preview(
+                        preview["preview_id"],
+                        require_stopped=False,
+                        backup_root=backup_root,
+                        report_dir=report_dir,
+                        persist_state=True,
+                        preview_dir=preview_dir,
+                    )
+                self.assertEqual("completed", report["status"])
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+                self.assertEqual(1, sum(item.get("run_id") == report["run_id"] for item in history))
+                all_rows = [row for path in queue_paths for row in read_csv_rows(path)]
+                all_emails = [row["Email"] for row in all_rows]
+                self.assertEqual(len(all_emails), len(set(all_emails)))
+                self.assertIn("A title with\nan intact second line", {row["BookTitle"] for row in all_rows})
+                self.assertEqual(
+                    preview["queue_headers"],
+                    list(all_rows[0]),
+                )
 
     def test_preview_dispatch_master_leads_blocks_empty_triaged_keep_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
