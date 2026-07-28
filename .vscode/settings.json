@@ -6,7 +6,6 @@
     "python-envs.defaultEnvManager": "ms-python.python:system",
     "python-envs.pythonProjects": [],
     "files.exclude": {
-        ".DS_Store": true,
         ".dockerignore": true,
         ".env": true,
         ".env.example": true,
@@ -26,7 +25,6 @@
         "audits": true,
         "backups": true,
         "cleaned": true,
-        "curl.exe": true,
         "data": true,
         "docker-compose.yml": true,
         "imports": true,

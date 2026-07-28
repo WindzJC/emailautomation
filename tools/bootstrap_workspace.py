@@ -20,7 +20,6 @@ LEADSCHECKER_HEADER = "FirstName,Email\n"
 
 def important_link_targets() -> dict[str, Path]:
     return {
-        "sendshard.py": settings.APP_ROOT / "send_shard.py",
         "recipients_private_jc.csv": settings.SHARDS_DIR / "recipients_private_jc.csv",
         "recipients_sendgrid_1.csv": settings.SHARDS_DIR / "recipients_sendgrid_1.csv",
         "recipients_sendgrid_2.csv": settings.SHARDS_DIR / "recipients_sendgrid_2.csv",

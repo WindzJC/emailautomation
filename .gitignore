@@ -2,6 +2,8 @@
 node_modules/
 __pycache__/
 *.pyc
+.pytest_cache/
+.DS_Store
 emailautomation/
 .env
 .env.local

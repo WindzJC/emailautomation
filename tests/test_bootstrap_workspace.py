@@ -40,7 +40,6 @@ class BootstrapWorkspaceTests(unittest.TestCase):
             leadschecker.write_text("FirstName,Email\nAlice,alice@example.com\n", encoding="utf-8")
 
             targets: dict[str, Path] = {
-                "sendshard.py": root / "send_shard.py",
                 "recipients_private_jc.csv": root / "data" / "shards" / "recipients_private_jc.csv",
             }
             for path in targets.values():
@@ -56,8 +55,13 @@ class BootstrapWorkspaceTests(unittest.TestCase):
 
             self.assertEqual("kept", report["leadschecker"]["status"])
             self.assertIn("Alice,alice@example.com", leadschecker.read_text(encoding="utf-8"))
-            self.assertTrue((important_dir / "sendshard.py").is_symlink())
             self.assertTrue((important_dir / "recipients_private_jc.csv").is_symlink())
+
+    def test_bootstrap_workspace_does_not_create_sender_alias(self) -> None:
+        targets = bootstrap_workspace.important_link_targets()
+
+        self.assertNotIn("sendshard.py", targets)
+        self.assertNotIn("send_shard.py", targets)
 
 
 if __name__ == "__main__":

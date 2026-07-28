@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -21,6 +22,119 @@ import important_leads_workflow
 import live_dashboard
 import send_shard
 from important_leads_workflow import ImportantLeadsCheckError
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _snapshot_live_dashboard_write_targets() -> dict[str, str]:
+    targets = (
+        REPOSITORY_ROOT / "_important" / "check_runs",
+        REPOSITORY_ROOT / "data" / "logs",
+        REPOSITORY_ROOT / "data" / "state",
+    )
+    snapshot: dict[str, str] = {}
+    for target in targets:
+        if not target.exists():
+            continue
+        for path in sorted(item for item in target.rglob("*") if item.is_file()):
+            relative = path.relative_to(REPOSITORY_ROOT).as_posix()
+            snapshot[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return snapshot
+
+
+def test_dashboard_runtime_fixture_prevents_live_runtime_writes() -> None:
+    before = _snapshot_live_dashboard_write_targets()
+    runtime_root = live_dashboard.settings.APP_ROOT
+    source = runtime_root / "_important" / "leads.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "Email,FirstName,AuthorEmail,AuthorName,BookTitle\n"
+        "reader@synthetic-author.test,Ava,reader@synthetic-author.test,Ava Author,Synthetic Book\n",
+        encoding="utf-8",
+    )
+
+    upload = live_dashboard.UploadFile(
+        filename="synthetic_dashboard_isolation.csv",
+        file=BytesIO(b"Email,FirstName\ninvalid-one,One\ninvalid-two,Two\n"),
+    )
+    with patch.object(
+        live_dashboard,
+        "important_leads_path_state",
+        return_value={
+            "input_path": str(source),
+            "output_path": str(source),
+            "rejected_path": str(runtime_root / "_important" / "leads_rejected.csv"),
+        },
+    ), patch.object(
+        live_dashboard,
+        "_start_important_check_job",
+        return_value={"job_id": "check_isolated", "status": "queued"},
+    ) as start_job, patch.object(
+        live_dashboard,
+        "important_leads_status",
+        return_value={},
+    ), patch.object(
+        live_dashboard,
+        "important_leads_verify_status",
+        return_value={},
+    ), patch.object(
+        live_dashboard,
+        "shard_status",
+        return_value={},
+    ):
+        response = asyncio.run(
+            live_dashboard.check_important_leads_upload(
+                file=upload,
+                client_selected_filename="synthetic_dashboard_isolation.csv",
+                client_selected_size_bytes="50",
+                client_selected_extension=".csv",
+                output_path=str(source),
+                rejected_path=str(runtime_root / "_important" / "leads_rejected.csv"),
+            )
+        )
+    assert response.status_code == 202
+    saved_input = Path(start_job.call_args.kwargs["effective_input_path"])
+    assert saved_input.is_relative_to(runtime_root)
+
+    triage_report = important_leads_verify.fast_triage_master_leads(
+        input_path=source,
+        persist_state=False,
+    )
+    assert Path(triage_report["report_path"]).is_relative_to(runtime_root)
+
+    queue_paths = [
+        runtime_root / "data" / "shards" / "recipients_private_jc.csv",
+        *[
+            runtime_root / "data" / "shards" / f"recipients_sendgrid_{index}.csv"
+            for index in range(1, 6)
+        ],
+    ]
+    log_paths = [
+        runtime_root / "data" / "logs" / "private_jc_log.csv",
+        *[
+            runtime_root / "data" / "logs" / f"sendgrid_{index}_log.csv"
+            for index in range(1, 6)
+        ],
+    ]
+    for path in queue_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Email,FirstName,AuthorEmail,AuthorName,BookTitle\n", encoding="utf-8")
+    for path in log_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Email,Status\n", encoding="utf-8")
+
+    preview = important_leads_workflow.preview_dispatch_master_leads(
+        master_path=source,
+        rejected_path=runtime_root / "_important" / "leads_rejected.csv",
+        dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_CLEANED,
+        jc_queue_path=queue_paths[0],
+        sendgrid_queue_paths=queue_paths[1:],
+        jc_log_path=log_paths[0],
+        sendgrid_log_paths=log_paths[1:],
+    )
+    assert Path(preview["preview_path"]).is_relative_to(runtime_root)
+    assert _snapshot_live_dashboard_write_targets() == before
 
 
 class LiveDashboardTests(unittest.TestCase):
