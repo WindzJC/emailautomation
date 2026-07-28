@@ -1133,13 +1133,13 @@ If you would rather not hear from me again, reply “unsubscribe.”
 
 PITCH_WARM_SUBJECT = "A presentation direction for {BookTitleOrProject}"
 PITCH_WARM_SUBJECT_FALLBACK = "A presentation direction for your book"
-PITCH_WARM_BODY = """Hi {FirstName},
+PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
-I came across {BookTitleOrProject} and took a look at how the project is currently being presented online.
+{PersonalizationLine}
 
-The strongest opportunity I see is around {RecommendedService}. Done well, that could give the book a sharper online presence—one that makes it easier to understand, easier to trust, and easier for the right reader to take seriously.
+The clearest fit I see is {RecommendedServicePhrase}. Astra could address that specific need without overbuilding the project or replacing what is already working.
 
-I have a specific direction in mind based on the public launch and platform context. If this is still relevant, I can send over a concise concept showing what I would change and why.
+If this is still relevant, I can send over a concise concept showing the direction I would recommend, what I would prioritize, and why.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1147,6 +1147,142 @@ astraproductions.co
 
 P.S. If you’d rather not hear from me again, just reply unsub.
 """
+
+PITCH_WARM_BODY_FALLBACK = """Hi {FirstName},
+
+I came across {BookTitleOrProject} and wanted to reach out with one focused idea.
+
+The clearest fit I see is {RecommendedServicePhrase}. Done well, it could give readers a clearer path to understand the project and take the next step without replacing what is already working.
+
+If this is relevant, I can send over a concise concept showing the direction I would recommend, what I would prioritize, and why.
+
+Windelle JC
+Founder & CEO, Astra Productions
+astraproductions.co
+
+P.S. If you’d rather not hear from me again, just reply unsub.
+"""
+
+# Kept as a compatibility alias for code that only needs the safe generic body.
+PITCH_WARM_BODY = PITCH_WARM_BODY_FALLBACK
+
+WARM_RECOMMENDED_SERVICE_PHRASES = {
+    "website": "a custom author website",
+    "custom author website": "a custom author website",
+    "cinematic book trailer": "a cinematic book trailer",
+    "book launch visuals": "book launch visuals",
+    "author platform presentation": "stronger author-platform presentation",
+    "book landing page": "a book landing page",
+    "launch visuals + landing page + trailer clips": "launch visuals, a landing page, and trailer clips",
+    "book trailer + launch visuals + landing page": "a book trailer, launch visuals, and a landing page",
+    "book landing page + trailer + launch visuals": "a book landing page, a trailer, and launch visuals",
+    "launch page + trailer + visuals": "a launch page, a trailer, and supporting visuals",
+    "book launch page + newsletter cta + trailer": "a book launch page, a newsletter call to action, and a trailer",
+    "author site upgrade + book landing pages": "an author-site upgrade and dedicated book landing pages",
+    "direct-store landing page + launch visuals + trailer": "a direct-store landing page, launch visuals, and a trailer",
+    "series landing page + launch visuals + trailer clips": "a series landing page, launch visuals, and trailer clips",
+    "author website refresh + book landing pages + newsletter cta": "an author-website refresh, book landing pages, and a newsletter call to action",
+    "book trailer + special-edition visuals + landing page": "a book trailer, special-edition visuals, and a landing page",
+    "launch visuals + landing page funnel + trailer": "launch visuals, a landing-page funnel, and a trailer",
+    "launch visuals + book landing page + trailer": "launch visuals, a book landing page, and a trailer",
+    "trailer refresh + launch page + social clips": "a trailer refresh, a launch page, and social clips",
+    "launch page + book trailer + visuals": "a launch page, a book trailer, and supporting visuals",
+    "kickstarter launch visuals + trailer/social clips": "Kickstarter launch visuals and trailer/social clips",
+    "book landing page + newsletter funnel + visuals": "a book landing page, a newsletter funnel, and supporting visuals",
+    "launch visuals + book landing page + trailer clips": "launch visuals, a book landing page, and trailer clips",
+    "newsletter/signup landing page": "a newsletter signup landing page",
+    "book campaign page upgrade": "a book-campaign page upgrade",
+    "book landing page and launch visuals": "a book landing page and launch visuals",
+}
+WARM_RECOMMENDED_SERVICE_FALLBACK = "a focused launch presentation"
+WARM_INTERNAL_PERSONALIZATION_LABEL_RE = re.compile(
+    r"\b(?:explicit\s+need|verified\s+presentation\s+gap|needsignal|outreachangle|"
+    r"scraper\s+notes?|(?:confidence\s+)?score|scoring|research\s+status|"
+    r"internal(?:\s+(?:note|only|classification))?|"
+    r"classification|source\s+url|source\s+platform|contact\s+path)\s*(?:[:：—–-]|$)",
+    flags=re.IGNORECASE,
+)
+WARM_PERSONALIZATION_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+|\b[a-z0-9][a-z0-9.-]+\.(?:com|org|net|co|io|gov|edu)(?:/|\b)",
+    flags=re.IGNORECASE,
+)
+WARM_PERSONALIZATION_EMAIL_RE = re.compile(
+    r"\b[^@\s]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_warm_personalization_line(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) < 18 or len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'’.-]*", text)) < 4:
+        return ""
+    if len(text) > 320:
+        return ""
+    if WARM_INTERNAL_PERSONALIZATION_LABEL_RE.search(text):
+        return ""
+    if WARM_PERSONALIZATION_URL_RE.search(text) or WARM_PERSONALIZATION_EMAIL_RE.search(text):
+        return ""
+    text = re.sub(r"([.!?])\1+", r"\1", text)
+    if not re.search(r"[.!?][\"'”’)]?$", text):
+        text += "."
+    return text
+
+
+def format_warm_recommended_service_phrase(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    key = text.casefold()
+    if not text or key in {"recommendedservice", "service", "synthetic service"}:
+        return WARM_RECOMMENDED_SERVICE_FALLBACK
+    mapped = WARM_RECOMMENDED_SERVICE_PHRASES.get(key)
+    if mapped:
+        return mapped
+    if (
+        len(text) > 160
+        or WARM_INTERNAL_PERSONALIZATION_LABEL_RE.search(text)
+        or WARM_PERSONALIZATION_URL_RE.search(text)
+        or WARM_PERSONALIZATION_EMAIL_RE.search(text)
+    ):
+        return WARM_RECOMMENDED_SERVICE_FALLBACK
+    phrase = text[:1].lower() + text[1:]
+    if phrase.casefold().startswith(
+        ("a ", "an ", "the ", "stronger ", "clearer ", "focused ", "improved ", "polished ")
+    ):
+        return phrase
+    if "+" in phrase or " and " in phrase.casefold() or phrase.casefold().endswith(("visuals", "clips", "pages")):
+        return phrase
+    article = "an" if phrase[:1].casefold() in {"a", "e", "i", "o", "u"} else "a"
+    return f"{article} {phrase}"
+
+
+def render_warm_email_copy(
+    *,
+    first_name: object,
+    book_title_or_project: object,
+    recommended_service: object,
+    personalization_line: object = "",
+) -> Dict[str, object]:
+    safe_first_name = re.sub(r"\s+", " ", str(first_name or "")).strip() or "there"
+    book_title = re.sub(r"\s+", " ", str(book_title_or_project or "")).strip()
+    subject = (
+        PITCH_WARM_SUBJECT.format(BookTitleOrProject=book_title)
+        if book_title
+        else PITCH_WARM_SUBJECT_FALLBACK
+    )
+    safe_personalization = normalize_warm_personalization_line(personalization_line)
+    merge_values = {
+        "FirstName": safe_first_name,
+        "BookTitleOrProject": book_title or "your book",
+        "RecommendedServicePhrase": format_warm_recommended_service_phrase(recommended_service),
+        "PersonalizationLine": safe_personalization,
+    }
+    body_template = PITCH_WARM_BODY_PERSONALIZED if safe_personalization else PITCH_WARM_BODY_FALLBACK
+    return {
+        "subject": subject,
+        "body": body_template.format(**merge_values),
+        "template": "personalized" if safe_personalization else "fallback",
+        "personalization_line": safe_personalization,
+        "recommended_service_phrase": merge_values["RecommendedServicePhrase"],
+    }
 
 
 # ===== PITCH REGISTRY =====
@@ -1195,7 +1331,8 @@ PITCHES = {
     "pitch_warm": {
         "subject": PITCH_WARM_SUBJECT,
         "subject_fallback": PITCH_WARM_SUBJECT_FALLBACK,
-        "body": PITCH_WARM_BODY,
+        "body": PITCH_WARM_BODY_FALLBACK,
+        "body_personalized": PITCH_WARM_BODY_PERSONALIZED,
         "pre_rendered_message": True,
     },
 }

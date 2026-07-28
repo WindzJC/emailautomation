@@ -26,9 +26,6 @@ from recipient_file_lock import lock_files
 from important_leads_verify import important_leads_triage_path_state, important_leads_verify_path_state
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
-    PITCH_WARM_BODY,
-    PITCH_WARM_SUBJECT,
-    PITCH_WARM_SUBJECT_FALLBACK,
     PROFILES,
     ROLE_LOCALPART_BLOCKLIST,
     is_recontact_cold_campaign,
@@ -38,6 +35,7 @@ from send_shard import (
     load_done_statuses_from_logs,
     normalize_campaign_type,
     normalized_warm_confirmation_payload,
+    render_warm_email_copy,
     validate_warm_confirmed_queue,
     warm_confirmation_payload_hash,
 )
@@ -184,7 +182,8 @@ WARM_RESEARCH_HEADERS = (
     "RecommendedService",
     "OutreachAngle",
 )
-WARM_RESEARCH_OUTPUT_HEADERS = (*WARM_RESEARCH_HEADERS, "ResearchStatus")
+WARM_RESEARCH_OPTIONAL_HEADERS = ("PersonalizationLine",)
+WARM_RESEARCH_OUTPUT_HEADERS = (*WARM_RESEARCH_HEADERS, *WARM_RESEARCH_OPTIONAL_HEADERS, "ResearchStatus")
 WARM_EMAIL_READY_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "AuthorEmail", "ContactMethod")
 WARM_CONTACT_FORM_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "ContactMethod")
 WARM_REJECTED_HEADERS = (
@@ -990,6 +989,9 @@ def _warm_research_rows(path: Path) -> tuple[List[Dict[str, str]], int]:
             header: _strip_cell(raw_row.get(header_by_key[_normalize_header_key(header)], ""))
             for header in WARM_RESEARCH_HEADERS
         }
+        for header in WARM_RESEARCH_OPTIONAL_HEADERS:
+            source_header = header_by_key.get(_normalize_header_key(header), "")
+            row[header] = _strip_cell(raw_row.get(source_header, "")) if source_header else ""
         status_value = _strip_cell(raw_row.get(status_header, "")) if status_header else ""
         research_status_value = _strip_cell(raw_row.get(research_status_header, "")) if research_status_header else ""
         if not any(row.values()) and not status_value and not research_status_value:
@@ -1188,21 +1190,18 @@ def generate_warm_email_preview(
             continue
         first_name = _trimmed_first_name(row.get("AuthorName", "")) or "there"
         book_title = _strip_cell(row.get("BookTitleOrProject", ""))
-        merge_values = {
-            "FirstName": first_name,
-            "BookTitleOrProject": book_title or "your book launch",
-            "NeedSignal": _strip_cell(row.get("NeedSignal", "")) or "the launch could use a stronger online presentation",
-            "RecommendedService": _strip_cell(row.get("RecommendedService", "")) or "a focused launch presentation",
-            "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")) or "a clearer, more polished way to present the project online.",
-        }
-        subject = (PITCH_WARM_SUBJECT if book_title else PITCH_WARM_SUBJECT_FALLBACK).format(**merge_values)
-        body = PITCH_WARM_BODY.format(**merge_values)
+        rendered_copy = render_warm_email_copy(
+            first_name=first_name,
+            book_title_or_project=book_title,
+            recommended_service=_strip_cell(row.get("RecommendedService", "")),
+            personalization_line=_strip_cell(row.get("PersonalizationLine", "")),
+        )
         preview_rows.append({
             "AuthorName": _strip_cell(row.get("AuthorName", "")),
             "AuthorEmail": email,
             "BookTitleOrProject": book_title,
-            "EmailSubject": subject,
-            "EmailBody": body,
+            "EmailSubject": str(rendered_copy["subject"]),
+            "EmailBody": str(rendered_copy["body"]),
             "NeedSignal": _strip_cell(row.get("NeedSignal", "")),
             "RecommendedService": _strip_cell(row.get("RecommendedService", "")),
             "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")),

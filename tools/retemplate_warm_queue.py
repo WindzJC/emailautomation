@@ -20,11 +20,9 @@ from important_leads_workflow import WARM_PRIVATE_JC_QUEUE_HEADERS, _write_csv_a
 from leads_workflow import write_json_atomic
 from recipient_file_lock import lock_files
 from send_shard import (
-    PITCH_WARM_BODY,
-    PITCH_WARM_SUBJECT,
-    PITCH_WARM_SUBJECT_FALLBACK,
     norm_email,
     normalized_warm_confirmation_payload,
+    render_warm_email_copy,
     validate_warm_confirmed_queue,
     warm_confirmation_payload_hash,
 )
@@ -91,17 +89,13 @@ def _render_pending_rows(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]
             raise ValueError(f"Warm queue row {index} is missing FirstName.")
         book_title = str(row.get("BookTitleOrProject") or "").strip()
         recommended_service = str(row.get("RecommendedService") or "").strip() or "a focused launch presentation"
-        merge_values = {
-            "FirstName": first_name,
-            "BookTitleOrProject": book_title or "your book",
-            "RecommendedService": recommended_service,
-        }
-        row["EmailSubject"] = (
-            PITCH_WARM_SUBJECT.format(**merge_values)
-            if book_title
-            else PITCH_WARM_SUBJECT_FALLBACK
+        rendered_copy = render_warm_email_copy(
+            first_name=first_name,
+            book_title_or_project=book_title,
+            recommended_service=recommended_service,
         )
-        row["EmailBody"] = PITCH_WARM_BODY.format(**merge_values)
+        row["EmailSubject"] = str(rendered_copy["subject"])
+        row["EmailBody"] = str(rendered_copy["body"])
         rendered.append(row)
     return rendered
 
