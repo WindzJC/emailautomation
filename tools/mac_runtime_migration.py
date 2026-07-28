@@ -27,6 +27,8 @@ from typing import Iterable
 
 
 DEFAULT_TARGET_ROOT = Path("/Users/windellereboquio/AstraHandoff/emailautomation")
+ARCHIVE_MANIFEST_NAME = "manifest.json"
+ARCHIVE_RUNTIME_ROOT = "runtime"
 ACTIVE_JOB_STATES = {
     "queued", "running", "checking", "verifying", "dispatching",
     "auto_triage_running",
@@ -394,7 +396,7 @@ def build_manifest(
     entries = []
     for source, classification in candidate_files(repo):
         relative = source.relative_to(repo)
-        destination = staging / "runtime" / relative
+        destination = staging / ARCHIVE_RUNTIME_ROOT / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_hash = sha256_file(source)
         if source.suffix == ".sqlite3":
@@ -449,26 +451,76 @@ def bundle(repo: Path, output_dir: Path, target_root: Path) -> Path:
     with tempfile.TemporaryDirectory(prefix="mac-runtime-", dir=output_dir) as temp:
         staging = Path(temp)
         manifest = build_manifest(repo, staging, target_root, expected_commit)
-        manifest_path = staging / "manifest.json"
+        manifest_path = staging / ARCHIVE_MANIFEST_NAME
         manifest_path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         with tarfile.open(destination, "x:gz") as archive:
-            archive.add(manifest_path, arcname="manifest.json", recursive=False)
-            archive.add(staging / "runtime", arcname="runtime")
+            archive.add(
+                manifest_path,
+                arcname=ARCHIVE_MANIFEST_NAME,
+                recursive=False,
+            )
+            archive.add(
+                staging / ARCHIVE_RUNTIME_ROOT,
+                arcname=ARCHIVE_RUNTIME_ROOT,
+            )
     destination.chmod(0o600)
     return destination
 
 
+def runtime_archive_name(relative: str | Path | PurePosixPath) -> str:
+    return f"{ARCHIVE_RUNTIME_ROOT}/{PurePosixPath(str(relative)).as_posix()}"
+
+
+def _safe_manifest_relative_path(value: object) -> str:
+    raw = str(value or "")
+    path = PurePosixPath(raw)
+    if (
+        not raw
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() in {"", "."}
+    ):
+        raise MigrationError(f"Unsafe manifest path: {raw}")
+    return path.as_posix()
+
+
 def safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     members = archive.getmembers()
+    seen: dict[str, tarfile.TarInfo] = {}
     for member in members:
         path = PurePosixPath(member.name)
-        if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk():
+        canonical = path.as_posix().rstrip("/")
+        if path.is_absolute() or ".." in path.parts or canonical in {"", "."}:
             raise MigrationError(f"Unsafe archive member: {member.name}")
-        if member.name != "manifest.json" and not member.name.startswith("runtime/"):
+        if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+            raise MigrationError(f"Unsafe archive member type: {member.name}")
+        if canonical in seen:
+            raise MigrationError(f"Duplicate archive member: {member.name}")
+        seen[canonical] = member
+
+        if canonical == ARCHIVE_MANIFEST_NAME:
+            if not member.isfile():
+                raise MigrationError("Bundle manifest must be a regular file")
+        elif canonical == ARCHIVE_RUNTIME_ROOT:
+            if not member.isdir():
+                raise MigrationError("Archive runtime root must be a directory")
+        elif canonical.startswith(f"{ARCHIVE_RUNTIME_ROOT}/"):
+            pass
+        else:
             raise MigrationError(f"Unexpected archive member: {member.name}")
+
+    for canonical, member in seen.items():
+        parts = PurePosixPath(canonical).parts
+        for index in range(1, len(parts)):
+            parent_name = PurePosixPath(*parts[:index]).as_posix()
+            parent = seen.get(parent_name)
+            if parent is not None and not parent.isdir():
+                raise MigrationError(
+                    f"Conflicting archive members: {parent.name} and {member.name}"
+                )
     return members
 
 
@@ -476,7 +528,7 @@ def read_manifest(bundle_path: Path) -> dict:
     with tarfile.open(bundle_path, "r:gz") as archive:
         safe_members(archive)
         try:
-            member = archive.getmember("manifest.json")
+            member = archive.getmember(ARCHIVE_MANIFEST_NAME)
         except KeyError as exc:
             raise MigrationError("Bundle manifest is missing") from exc
         handle = archive.extractfile(member)
@@ -487,15 +539,36 @@ def read_manifest(bundle_path: Path) -> dict:
 
 def verify_bundle(bundle_path: Path) -> dict:
     manifest = read_manifest(bundle_path)
-    expected = {entry["path"]: entry for entry in manifest.get("files", [])}
+    expected: dict[str, dict] = {}
+    for entry in manifest.get("files", []):
+        if not isinstance(entry, dict):
+            raise MigrationError("Bundle manifest has an invalid file entry")
+        relative = _safe_manifest_relative_path(entry.get("path"))
+        if relative in expected:
+            raise MigrationError(f"Duplicate manifest path: {relative}")
+        expected[relative] = entry
     with tarfile.open(bundle_path, "r:gz") as archive:
-        safe_members(archive)
+        members = safe_members(archive)
+        payload_files = {
+            PurePosixPath(member.name).as_posix()
+            for member in members
+            if member.isfile() and member.name != ARCHIVE_MANIFEST_NAME
+        }
+        expected_payload_files = {
+            runtime_archive_name(relative)
+            for relative in expected
+        }
+        unexpected = sorted(payload_files - expected_payload_files)
+        if unexpected:
+            raise MigrationError(f"Unexpected bundle file: {unexpected[0]}")
         for relative, entry in expected.items():
-            name = f"runtime/{relative}"
+            name = runtime_archive_name(relative)
             try:
                 member = archive.getmember(name)
             except KeyError as exc:
                 raise MigrationError(f"Missing bundle file: {relative}") from exc
+            if not member.isfile():
+                raise MigrationError(f"Bundle payload must be a regular file: {relative}")
             handle = archive.extractfile(member)
             if handle is None:
                 raise MigrationError(f"Unreadable bundle file: {relative}")
@@ -532,7 +605,7 @@ def restore(repo: Path, bundle_path: Path) -> None:
         try:
             for entry in entries:
                 relative = Path(entry["path"])
-                source = staging / "runtime" / relative
+                source = staging / ARCHIVE_RUNTIME_ROOT / relative
                 destination = repo / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(source, destination)

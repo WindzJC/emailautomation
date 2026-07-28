@@ -8,6 +8,18 @@ import pytest
 from tools import mac_runtime_migration as migration
 
 
+def _add_bytes(archive: tarfile.TarFile, name: str, payload: bytes = b"") -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    archive.addfile(info, io.BytesIO(payload))
+
+
+def _add_directory(archive: tarfile.TarFile, name: str) -> None:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.DIRTYPE
+    archive.addfile(info)
+
+
 def _repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "data/shards").mkdir(parents=True)
@@ -157,6 +169,111 @@ def test_verify_rejects_checksum_mismatch(tmp_path):
         migration.verify_bundle(bundle)
 
 
+def test_bundle_created_by_bundler_verifies(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    output_dir = tmp_path / "bundles"
+    monkeypatch.setattr(migration, "assert_frozen", lambda _repo: "abc123")
+
+    bundle = migration.bundle(
+        repo,
+        output_dir,
+        Path("/Users/test/emailautomation"),
+    )
+
+    manifest = migration.verify_bundle(bundle)
+    assert manifest["expected_commit"] == "abc123"
+    assert len(manifest["files"]) == 2
+
+
+def test_exact_runtime_directory_and_valid_descendants_are_accepted(tmp_path):
+    bundle = tmp_path / "valid-layout.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, "manifest.json", b'{"files":[]}')
+        _add_directory(archive, "runtime")
+        _add_directory(archive, "runtime/data")
+        _add_bytes(archive, "runtime/data/state.json", b"{}")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        names = [member.name for member in migration.safe_members(archive)]
+
+    assert names == [
+        "manifest.json",
+        "runtime",
+        "runtime/data",
+        "runtime/data/state.json",
+    ]
+
+
+def test_regular_file_named_runtime_is_rejected(tmp_path):
+    bundle = tmp_path / "runtime-file.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, "manifest.json", b'{"files":[]}')
+        _add_bytes(archive, "runtime", b"not-a-directory")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="runtime root must be a directory"):
+            migration.safe_members(archive)
+
+
+def test_symlink_named_runtime_is_rejected(tmp_path):
+    bundle = tmp_path / "runtime-link.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, "manifest.json", b'{"files":[]}')
+        info = tarfile.TarInfo("runtime")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "elsewhere"
+        archive.addfile(info)
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="Unsafe archive member type"):
+            migration.safe_members(archive)
+
+
+@pytest.mark.parametrize("name", ["/absolute", "runtime/../../outside"])
+def test_absolute_and_parent_traversal_members_are_rejected(tmp_path, name):
+    bundle = tmp_path / "unsafe-path.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, name, b"x")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="Unsafe archive member"):
+            migration.safe_members(archive)
+
+
+@pytest.mark.parametrize("name", ["runtime-other", "unexpected.json"])
+def test_unknown_top_level_members_are_rejected(tmp_path, name):
+    bundle = tmp_path / "unexpected-top.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, name, b"x")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="Unexpected archive member"):
+            migration.safe_members(archive)
+
+
+def test_duplicate_archive_members_are_rejected(tmp_path):
+    bundle = tmp_path / "duplicate.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_directory(archive, "runtime")
+        _add_directory(archive, "runtime")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="Duplicate archive member"):
+            migration.safe_members(archive)
+
+
+def test_conflicting_archive_members_are_rejected(tmp_path):
+    bundle = tmp_path / "conflict.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_directory(archive, "runtime")
+        _add_bytes(archive, "runtime/data", b"not-a-directory")
+        _add_bytes(archive, "runtime/data/state.json", b"{}")
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(migration.MigrationError, match="Conflicting archive members"):
+            migration.safe_members(archive)
+
+
 def test_archive_path_traversal_is_rejected(tmp_path):
     bundle = tmp_path / "unsafe.tgz"
     with tarfile.open(bundle, "w:gz") as archive:
@@ -167,6 +284,31 @@ def test_archive_path_traversal_is_rejected(tmp_path):
     with tarfile.open(bundle, "r:gz") as archive:
         with pytest.raises(migration.MigrationError, match="Unsafe archive member"):
             migration.safe_members(archive)
+
+
+def test_restore_refuses_to_overwrite_existing_runtime_file(monkeypatch, tmp_path):
+    source = _repo(tmp_path / "source")
+    monkeypatch.setattr(migration, "assert_frozen", lambda _repo: "abc123")
+    bundle = migration.bundle(
+        source,
+        tmp_path / "bundles",
+        Path("/Users/test/emailautomation"),
+    )
+    target = tmp_path / "target"
+    existing = target / "data/shards/recipients_private_jc.csv"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"original target bytes\n")
+    monkeypatch.setattr(migration, "process_blockers", lambda: [])
+    monkeypatch.setattr(
+        migration,
+        "git",
+        lambda _repo, *args: "" if args[:2] == ("status", "--porcelain") else "abc123",
+    )
+
+    with pytest.raises(migration.MigrationError, match="Refusing to overwrite"):
+        migration.restore(target, bundle)
+
+    assert existing.read_bytes() == b"original target bytes\n"
 
 
 def test_profile_inventory_uses_static_profiles_and_queue_counts(tmp_path):
