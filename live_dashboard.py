@@ -53,6 +53,11 @@ except Exception:  # pragma: no cover - dependency fallback
 import runtime_control
 import runtime_audit
 import settings
+from dashboard_security import (
+    DashboardSecurityStatus,
+    require_dashboard_startup_security,
+    validate_dashboard_security,
+)
 from dashboard_core import (
     SENDGRID_PROFILES,
     append_campaign_run_history,
@@ -211,8 +216,15 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
         if path in _AUTH_PROTECTED_DOC_PATHS or path.startswith("/api/") or path == "/ws":
             if _dashboard_auth_disabled():
                 return await call_next(request)
-            if not settings.DASHBOARD_AUTH_PASSWORD:
-                return await call_next(request)
+            if not _dashboard_credentials_valid():
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "dashboard_auth_configuration_invalid",
+                        "message": "Dashboard authentication is not securely configured.",
+                    },
+                    status_code=503,
+                )
             if not bool(request.session.get(_AUTH_SESSION_KEY)):
                 return JSONResponse(
                     {"ok": False, "message": "Authentication required."},
@@ -222,9 +234,19 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(DashboardAuthMiddleware)
+_INITIAL_DASHBOARD_SECURITY = validate_dashboard_security(
+    password=settings.DASHBOARD_AUTH_PASSWORD,
+    session_secret=settings.DASHBOARD_SESSION_SECRET,
+    host=settings.APP_HOST,
+)
+_SESSION_MIDDLEWARE_SECRET = (
+    settings.DASHBOARD_SESSION_SECRET
+    if _INITIAL_DASHBOARD_SECURITY.credentials_valid
+    else secrets.token_urlsafe(48)
+)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=settings.DASHBOARD_SESSION_SECRET,
+    secret_key=_SESSION_MIDDLEWARE_SECRET,
     session_cookie=settings.DASHBOARD_AUTH_COOKIE_NAME,
     same_site="lax",
     https_only=False,
@@ -4135,6 +4157,11 @@ async def _background_automation_loop() -> None:
 
 @app.on_event("startup")
 async def _startup_background_automation() -> None:
+    require_dashboard_startup_security(
+        password=settings.DASHBOARD_AUTH_PASSWORD,
+        session_secret=settings.DASHBOARD_SESSION_SECRET,
+        host=settings.APP_HOST,
+    )
     runtime_audit.write_app_start()
     if getattr(app.state, "automation_task", None) is None:
         app.state.automation_task = asyncio.create_task(_background_automation_loop())
@@ -4198,17 +4225,32 @@ def _dashboard_env_flag(name: str) -> bool:
     return str(os.environ.get(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _dashboard_security_status() -> DashboardSecurityStatus:
+    return validate_dashboard_security(
+        password=settings.DASHBOARD_AUTH_PASSWORD,
+        session_secret=settings.DASHBOARD_SESSION_SECRET,
+        host=settings.APP_HOST,
+    )
+
+
+def _dashboard_credentials_valid() -> bool:
+    return _dashboard_security_status().credentials_valid
+
+
 def _dashboard_auth_disabled() -> bool:
-    return _dashboard_env_flag("DASHBOARD_AUTH_DISABLED") or _dashboard_env_flag("LOCAL_DASHBOARD_NO_AUTH")
+    return _dashboard_security_status().no_auth_allowed
 
 
 def _dashboard_auth_enabled() -> bool:
-    return bool(settings.DASHBOARD_AUTH_PASSWORD) and not _dashboard_auth_disabled()
+    status = _dashboard_security_status()
+    return status.credentials_valid and not status.no_auth_allowed
 
 
 def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
-    if _dashboard_auth_disabled() or not _dashboard_auth_enabled():
+    if _dashboard_auth_disabled():
         return True
+    if not _dashboard_auth_enabled():
+        return False
     session = getattr(scope, "session", None)
     if not isinstance(session, dict):
         session = {}
@@ -4216,18 +4258,30 @@ def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
 
 
 def _dashboard_auth_response() -> dict[str, object]:
-    auth_disabled = _dashboard_auth_disabled()
-    auth_enabled = _dashboard_auth_enabled()
+    security = _dashboard_security_status()
+    auth_disabled = security.no_auth_allowed
+    auth_enabled = security.credentials_valid and not auth_disabled
+    if auth_disabled:
+        dashboard_mode = "local_dev"
+    elif auth_enabled:
+        dashboard_mode = "live"
+    else:
+        dashboard_mode = "configuration_error"
     return {
         "auth_enabled": auth_enabled,
         "auth_disabled": auth_disabled,
-        "authenticated": True if auth_disabled or not auth_enabled else False,
+        "auth_configuration_valid": security.credentials_valid,
+        "authenticated": bool(auth_disabled),
         "username": str(settings.DASHBOARD_AUTH_USERNAME or "admin"),
-        "local_mode": not auth_enabled,
-        "dashboard_mode": "local_dev" if not auth_enabled else "live",
-        "auto_start_allowed": _dashboard_auto_start_allowed(),
+        "local_mode": auth_disabled,
+        "dashboard_mode": dashboard_mode,
+        "auto_start_allowed": _dashboard_auto_start_allowed() if security.startup_allowed else False,
         "auto_start_env_var": DASHBOARD_AUTO_START_ENV_VAR,
-        "live_actions_enabled": _dashboard_live_actions_enabled(),
+        "live_actions_enabled": (
+            _dashboard_live_actions_enabled()
+            if auth_enabled or auth_disabled
+            else False
+        ),
         "live_actions_env_var": DASHBOARD_LIVE_ACTIONS_ENV_VAR,
     }
 
@@ -4264,7 +4318,9 @@ def auth_status(request: Request) -> JSONResponse:
         {
             "ok": True,
             **auth_response,
-            "authenticated": bool(auth_response["authenticated"]) or authenticated,
+            "authenticated": bool(auth_response["authenticated"]) or (
+                bool(auth_response["auth_enabled"]) and authenticated
+            ),
             "username": str(request.session.get("dashboard_username") or settings.DASHBOARD_AUTH_USERNAME or "admin"),
         }
     )
@@ -4312,7 +4368,9 @@ def snapshot(
 
 
 def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
-    if _dashboard_auth_enabled() or _dashboard_live_actions_enabled():
+    if _dashboard_auth_enabled() or (
+        _dashboard_auth_disabled() and _dashboard_live_actions_enabled()
+    ):
         return None
     return JSONResponse(
         {
@@ -6612,17 +6670,27 @@ def leads_status() -> JSONResponse:
 @app.post("/webhooks/sendgrid/events")
 async def sendgrid_event_webhook(request: Request) -> JSONResponse:
     raw_body = await request.body()
-    if SENDGRID_EVENT_PUBLIC_KEY:
-        signature = request.headers.get(SENDGRID_SIG_HEADER, "")
-        timestamp = request.headers.get(SENDGRID_TS_HEADER, "")
-        if not signature or not timestamp:
-            return JSONResponse({"ok": False, "message": "Missing SendGrid signature headers."}, status_code=401)
-        try:
-            verified = _verify_sendgrid_signature(raw_body, signature, timestamp)
-        except Exception:
-            return JSONResponse({"ok": False, "message": "Invalid SendGrid verification key or signature payload."}, status_code=400)
-        if not verified:
-            return JSONResponse({"ok": False, "message": "Invalid SendGrid webhook signature."}, status_code=401)
+    if not SENDGRID_EVENT_PUBLIC_KEY:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "sendgrid_webhook_verification_not_configured",
+                "message": "SendGrid webhook signature verification is not configured.",
+            },
+            status_code=503,
+        )
+    signature = request.headers.get(SENDGRID_SIG_HEADER, "")
+    timestamp = request.headers.get(SENDGRID_TS_HEADER, "")
+    if not signature:
+        return JSONResponse({"ok": False, "message": "Missing SendGrid signature header."}, status_code=401)
+    if not timestamp:
+        return JSONResponse({"ok": False, "message": "Missing SendGrid timestamp header."}, status_code=401)
+    try:
+        verified = _verify_sendgrid_signature(raw_body, signature, timestamp)
+    except Exception:
+        return JSONResponse({"ok": False, "message": "Invalid SendGrid verification key or signature payload."}, status_code=400)
+    if not verified:
+        return JSONResponse({"ok": False, "message": "Invalid SendGrid webhook signature."}, status_code=401)
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except Exception:

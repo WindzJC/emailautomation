@@ -19,6 +19,19 @@ ATTACH_MODE="${TMUX_TUNNEL_ATTACH:-0}"
 TARGET_URL="${TMUX_TUNNEL_URL:-http://localhost:${LIVE_DASHBOARD_PORT:-${APP_PORT:-8001}}}"
 METRICS_ADDR="${TMUX_TUNNEL_METRICS_ADDR:-127.0.0.1:20241}"
 TUNNEL_PATTERN="${TMUX_TUNNEL_PATTERN:-cloudflared tunnel --url $TARGET_URL}"
+HOST="${LIVE_DASHBOARD_HOST:-${APP_HOST:-127.0.0.1}}"
+PY="${PYTHON_BIN:-./.venv/bin/python}"
+
+if [[ ! -x "$PY" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  else
+    echo "Missing Python runtime. Expected $PY or python3 in PATH."
+    exit 1
+  fi
+fi
+
+"$PY" dashboard_security.py --host "$HOST" --tunnel
 
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 pkill -f "$TUNNEL_PATTERN" 2>/dev/null || true

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import json
 import os
 import subprocess
+from contextlib import ExitStack
 from io import BytesIO, StringIO
 import tempfile
 import unittest
@@ -13,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from openpyxl import Workbook
 
 import lead_ledger
@@ -3824,68 +3828,182 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertFalse(status["latest_auto_dispatch_preview_current"])
             self.assertEqual(live_dashboard._dashboard_path_label(keep_path), status["dispatch_source_path"])
 
-    def test_sendgrid_event_webhook_returns_ledger_summary_without_breaking_response(self) -> None:
+    @staticmethod
+    def _sendgrid_webhook_request(
+        *,
+        body: bytes = b'[{"email":"synthetic@example.test","event":"delivered"}]',
+        headers: dict[str, str] | None = None,
+    ):
         class RequestStub:
-            headers: dict[str, str] = {}
+            def __init__(self) -> None:
+                self.headers = dict(headers or {})
 
             async def body(self) -> bytes:
-                return b'[{"email":"user@example.com","event":"delivered"}]'
+                return body
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            with patch.object(live_dashboard, "SENDGRID_EVENT_PUBLIC_KEY", ""), patch.object(
-                live_dashboard,
-                "WEBHOOK_DEDUPE_PATH",
-                tmp / "webhook_dedupe.sqlite3",
-            ), patch.object(
-                live_dashboard,
-                "WEBHOOK_EVENTS_PATH",
-                tmp / "sendgrid_events.jsonl",
-            ), patch.object(
-                live_dashboard,
-                "SUPPRESSION_CSV",
-                tmp / "sendgrid_suppressions.csv",
-            ), patch.object(
-                live_dashboard,
-                "normalize_webhook_events",
-                return_value=[{"email": "user@example.com", "status": "delivered"}],
-            ), patch.object(
-                live_dashboard,
-                "dedupe_webhook_events",
-                return_value={"unique_events": [{"email": "user@example.com", "status": "delivered"}], "duplicates": 0},
-            ), patch.object(
-                live_dashboard,
-                "append_events_jsonl",
-                return_value=1,
-            ), patch.object(
-                live_dashboard,
-                "update_suppressions_from_events",
-                return_value={"updated_events": 0, "records_total": 0, "total_perm": 0, "total_temp_active": 0},
-            ), patch.object(
-                live_dashboard,
-                "ingest_send_outcome_events",
-                return_value={
-                    "processed_events": 1,
-                    "matched_events": 1,
-                    "unmatched_events": 0,
-                    "ignored_events": 0,
-                    "dispatch_rows_updated": 1,
-                    "lead_rows_updated": 1,
-                    "suppressed_events": 0,
-                    "outcome_counts": {"delivered": 1},
-                },
-            ), patch.object(
-                live_dashboard.runtime_control,
-                "apply_delivery_guards",
-                return_value={},
-            ):
-                response = asyncio.run(live_dashboard.sendgrid_event_webhook(RequestStub()))
+        return RequestStub()
+
+    @staticmethod
+    def _patch_sendgrid_webhook_mutations(stack: ExitStack):
+        normalized = [{"email": "synthetic@example.test", "status": "delivered"}]
+        mocks = {
+            "normalize": stack.enter_context(
+                patch.object(live_dashboard, "normalize_webhook_events", return_value=normalized)
+            ),
+            "dedupe": stack.enter_context(
+                patch.object(
+                    live_dashboard,
+                    "dedupe_webhook_events",
+                    return_value={"unique_events": normalized, "duplicates": 0},
+                )
+            ),
+            "append": stack.enter_context(
+                patch.object(live_dashboard, "append_events_jsonl", return_value=1)
+            ),
+            "suppressions": stack.enter_context(
+                patch.object(
+                    live_dashboard,
+                    "update_suppressions_from_events",
+                    return_value={
+                        "updated_events": 0,
+                        "records_total": 0,
+                        "total_perm": 0,
+                        "total_temp_active": 0,
+                    },
+                )
+            ),
+            "ledger": stack.enter_context(
+                patch.object(
+                    live_dashboard,
+                    "ingest_send_outcome_events",
+                    return_value={
+                        "processed_events": 1,
+                        "matched_events": 1,
+                        "unmatched_events": 0,
+                        "ignored_events": 0,
+                        "dispatch_rows_updated": 1,
+                        "lead_rows_updated": 1,
+                        "suppressed_events": 0,
+                        "outcome_counts": {"delivered": 1},
+                    },
+                )
+            ),
+            "guards": stack.enter_context(
+                patch.object(live_dashboard.runtime_control, "apply_delivery_guards", return_value={})
+            ),
+        }
+        return mocks
+
+    def _assert_webhook_rejection_has_no_state_changes(
+        self,
+        *,
+        public_key: str,
+        headers: dict[str, str],
+        expected_status: int,
+        verify_result: bool | None = None,
+    ) -> dict[str, object]:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(live_dashboard, "SENDGRID_EVENT_PUBLIC_KEY", public_key))
+            verify = stack.enter_context(
+                patch.object(
+                    live_dashboard,
+                    "_verify_sendgrid_signature",
+                    return_value=verify_result,
+                )
+            )
+            mutation_mocks = self._patch_sendgrid_webhook_mutations(stack)
+            response = asyncio.run(
+                live_dashboard.sendgrid_event_webhook(
+                    self._sendgrid_webhook_request(headers=headers)
+                )
+            )
+
+        self.assertEqual(expected_status, response.status_code)
+        for mock in mutation_mocks.values():
+            mock.assert_not_called()
+        if verify_result is None:
+            verify.assert_not_called()
+        return json.loads(response.body)
+
+    def test_sendgrid_event_webhook_rejects_missing_public_key_without_state_changes(self) -> None:
+        body = self._assert_webhook_rejection_has_no_state_changes(
+            public_key="",
+            headers={},
+            expected_status=503,
+        )
+        self.assertEqual("sendgrid_webhook_verification_not_configured", body["error"])
+
+    def test_sendgrid_event_webhook_rejects_missing_signature_without_state_changes(self) -> None:
+        body = self._assert_webhook_rejection_has_no_state_changes(
+            public_key="configured-public-key",
+            headers={live_dashboard.SENDGRID_TS_HEADER: "1700000000"},
+            expected_status=401,
+        )
+        self.assertEqual("Missing SendGrid signature header.", body["message"])
+
+    def test_sendgrid_event_webhook_rejects_missing_timestamp_without_state_changes(self) -> None:
+        body = self._assert_webhook_rejection_has_no_state_changes(
+            public_key="configured-public-key",
+            headers={live_dashboard.SENDGRID_SIG_HEADER: "synthetic-signature"},
+            expected_status=401,
+        )
+        self.assertEqual("Missing SendGrid timestamp header.", body["message"])
+
+    def test_sendgrid_event_webhook_rejects_invalid_signature_without_state_changes(self) -> None:
+        body = self._assert_webhook_rejection_has_no_state_changes(
+            public_key="configured-public-key",
+            headers={
+                live_dashboard.SENDGRID_SIG_HEADER: "synthetic-signature",
+                live_dashboard.SENDGRID_TS_HEADER: "1700000000",
+            },
+            expected_status=401,
+            verify_result=False,
+        )
+        self.assertEqual("Invalid SendGrid webhook signature.", body["message"])
+
+    def test_sendgrid_event_webhook_accepts_valid_signed_payload(self) -> None:
+        raw_body = b'[{"email":"synthetic@example.test","event":"delivered"}]'
+        timestamp = "1700000000"
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key_der = private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        public_key_b64 = base64.b64encode(public_key_der).decode("ascii")
+        signature = private_key.sign(
+            timestamp.encode("utf-8") + raw_body,
+            ec.ECDSA(hashes.SHA256()),
+        )
+        signature_b64 = base64.b64encode(signature).decode("ascii")
+
+        live_dashboard._load_sendgrid_public_key.cache_clear()
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(live_dashboard, "SENDGRID_EVENT_PUBLIC_KEY", public_key_b64)
+                )
+                mutation_mocks = self._patch_sendgrid_webhook_mutations(stack)
+                response = asyncio.run(
+                    live_dashboard.sendgrid_event_webhook(
+                        self._sendgrid_webhook_request(
+                            body=raw_body,
+                            headers={
+                                live_dashboard.SENDGRID_SIG_HEADER: signature_b64,
+                                live_dashboard.SENDGRID_TS_HEADER: timestamp,
+                            },
+                        )
+                    )
+                )
+        finally:
+            live_dashboard._load_sendgrid_public_key.cache_clear()
 
         body = json.loads(response.body)
         self.assertEqual(200, response.status_code)
         self.assertTrue(body["ok"])
         self.assertEqual({"delivered": 1}, body["ledger_summary"]["outcome_counts"])
         self.assertIn("suppression_summary", body)
+        for mock in mutation_mocks.values():
+            mock.assert_called_once()
 
     def test_check_important_leads_accepts_pasted_csv_text(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:

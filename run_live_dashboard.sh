@@ -34,4 +34,5 @@ if [[ ! -x "$PY" ]]; then
   fi
 fi
 
+"$PY" dashboard_security.py --host "$HOST"
 exec "$PY" -m uvicorn live_dashboard:app --host "$HOST" --port "$PORT"
