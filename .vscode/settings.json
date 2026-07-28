@@ -89,7 +89,6 @@
         "run_tunnel_tmux.sh": true,
         "runtime_backend_tmux.py": true,
         "runtime_control.py": true,
-        "send_shard.py": true,
         "sendgrid_alison_log.csv": true,
         "sendgrid_annette_log.csv": true,
         "sendgrid_daily_counters.json": true,
