@@ -2330,7 +2330,7 @@ class SendShardTests(unittest.TestCase):
             body_fallback=pitch["body_fallback"],
         )
 
-        self.assertEqual("Website direction for your author brand", subject_text)
+        self.assertEqual("One idea for your author platform", subject_text)
         self.assertIn("I came across your author profile", body_text)
         self.assertNotIn("My team came across", body_text)
         self.assertNotIn("Our team came across", body_text)
@@ -2349,7 +2349,7 @@ class SendShardTests(unittest.TestCase):
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("Website direction for The Quiet Harbor", subject_text)
+        self.assertEqual("One idea for The Quiet Harbor", subject_text)
         self.assertIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
