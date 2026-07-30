@@ -1106,8 +1106,15 @@ def _read_ordered_emails(path: Path | None) -> list[str]:
 
 
 def _read_successfully_sent_emails(path: Path) -> set[str]:
+    """Return recipients safely completed by send or authoritative prior-send."""
     if not path.is_file():
         return set()
+
+    def row_value(row: dict[str, Any], field_name: str) -> str:
+        for key, value in row.items():
+            if str(key or "").strip().lower() == field_name:
+                return str(value or "").strip()
+        return ""
 
     try:
         with path.open(newline="", encoding="utf-8-sig") as stream:
@@ -1116,22 +1123,27 @@ def _read_successfully_sent_emails(path: Path) -> set[str]:
             if email_field is None:
                 return set()
 
-            sent: set[str] = set()
+            completed: set[str] = set()
 
             for row in reader:
-                values = {
-                    str(value or "").strip().upper()
-                    for value in row.values()
-                }
-
-                if "SENT" not in values:
-                    continue
-
                 email = str(row.get(email_field) or "").strip().lower()
-                if email:
-                    sent.add(email)
+                status = row_value(row, "status").upper()
+                info = row_value(row, "info").upper()
 
-            return sent
+                sent_now = status == "SENT"
+                sent_previously = (
+                    status == "SKIP"
+                    and (
+                        "EVENT_TYPE="
+                        "SKIPPED_ALREADY_SENT_AUTHORITATIVE"
+                    )
+                    in info
+                )
+
+                if email and (sent_now or sent_previously):
+                    completed.add(email)
+
+            return completed
     except (OSError, UnicodeError, csv.Error):
         return set()
 

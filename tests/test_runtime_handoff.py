@@ -1350,3 +1350,23 @@ def test_import_never_invokes_process_start(repos, tmp_path, monkeypatch):
     result = runtime_handoff.import_runtime(mac, bundle, machine="mac")
     assert starts == []
     assert result["sender_started"] is False
+
+
+def test_authoritative_already_sent_skip_counts_as_completed(tmp_path):
+    log_path = tmp_path / "private_jc_log.csv"
+    log_path.write_text(
+        "TimestampUTC,Email,Status,Info\n"
+        "2026-07-30T18:10:04Z,sent@example.com,SENT,"
+        "campaign_type=cold\n"
+        "2026-07-30T18:10:05Z,prior@example.com,SKIP,"
+        "campaign_type=cold "
+        "event_type=SKIPPED_ALREADY_SENT_AUTHORITATIVE\n"
+        "2026-07-30T18:10:06Z,suppressed@example.com,SKIP,"
+        "campaign_type=cold event_type=SKIPPED_SUPPRESSED\n",
+        encoding="utf-8",
+    )
+
+    assert runtime_handoff._read_successfully_sent_emails(log_path) == {
+        "sent@example.com",
+        "prior@example.com",
+    }
