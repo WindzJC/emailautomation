@@ -1168,32 +1168,34 @@ If this is not a fit, no problem — just reply “no” and we will not follow 
 
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
-# Keep {BookTitle} and {{FirstName}} exactly formatted.
+# Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.
 
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle} and thought it deserved a sharper online presence: "
-    "one that makes the book easier to understand, easier to trust, "
-    "and easier for the right reader to take seriously."
+    "I came across {BookTitle} and saw an opportunity to make its online presentation "
+    "clearer and more persuasive—so readers can quickly understand what the book is about, "
+    "why it matters, and where to go next."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your author profile and thought your work deserved a sharper online presence: "
-    "one that makes your books easier to understand, easier to trust, "
-    "and easier for the right reader to take seriously."
+    "I came across your author profile and saw an opportunity to make your online presentation "
+    "clearer and more persuasive—so readers can quickly understand your work, "
+    "why it matters, and where to go next."
 )
 
-PITCH_JC_SUBJECT = "Website direction for {BookTitle}"
-PITCH_JC_SUBJECT_FALLBACK = "Website direction for your author brand"
+PITCH_JC_SUBJECT = "One idea for {BookTitle}"
+PITCH_JC_SUBJECT_FALLBACK = "One idea for your author platform"
 
 PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
+Before a reader, reviewer, bookstore, publisher, or media contact takes the next step, they will often look up the book and author first. That first impression can determine whether they continue exploring or move on.
 
-Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals shaped into a clear online presentation built around clarity and trust.
+Astra Productions helps authors bring that experience together through focused author websites, book landing pages, book trailers, and launch visuals. The goal is not simply to add more content—it is to create a clear online presentation that strengthens trust and makes the next step easier.
 
-If useful, I can send over a clean website direction for how {{BookTitle}} could be positioned more strongly online.
+If useful, I can send you a brief direction for {{BookTitle}} showing the first three improvements I would prioritize and why.
+
+No meeting is required. I can send the initial direction by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1206,11 +1208,13 @@ PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
+Before a reader, reviewer, bookstore, publisher, or media contact takes the next step, they will often look up the author first. That first impression can determine whether they continue exploring or move on.
 
-Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals shaped into a clear online presentation built around clarity and trust.
+Astra Productions helps authors bring that experience together through focused author websites, book landing pages, book trailers, and launch visuals. The goal is not simply to add more content—it is to create a clear online presentation that strengthens trust and makes the next step easier.
 
-If useful, I can send over a clean website direction for how your author brand could be positioned more strongly online.
+If useful, I can send you a brief direction for your author platform showing the first three improvements I would prioritize and why.
+
+No meeting is required. I can send the initial direction by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1219,37 +1223,43 @@ astraproductions.co
 If you would rather not hear from me again, reply “unsubscribe.”
 """
 
-PITCH_WARM_SUBJECT = "A presentation direction for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "A presentation direction for your author platform"
+PITCH_WARM_SUBJECT = "A focused direction for {BookTitleOrProject}"
+PITCH_WARM_SUBJECT_FALLBACK = "A focused direction for your author platform"
+
 PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
 {PersonalizationLine}
 
-The clearest fit I see is {RecommendedServicePhrase}. Astra could address that specific need without overbuilding the project or replacing what is already working.
+Based on what you shared, the clearest next step is {RecommendedServicePhrase}. That directly addresses the need without replacing what already works or adding unnecessary complexity.
 
-If this is still relevant, I can send over a concise concept showing the direction I would recommend, what I would prioritize, and why.
+I can turn that recommendation into a concise concept showing the structure I would use, what I would prioritize first, and how the direction would help the intended audience understand the project and take the next step.
+
+No meeting is required. I can send the initial concept by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
 astraproductions.co
 
-P.S. If you’d rather not hear from me again, just reply unsub.
+P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_WARM_BODY_FALLBACK = """Hi {FirstName},
 
-I came across {BookTitleOrProject} and wanted to reach out with one focused idea.
+I reviewed the available information about {BookTitleOrProject} and identified one focused opportunity to strengthen how the project is presented.
 
-The clearest fit I see is {RecommendedServicePhrase}. Done well, it could give readers a clearer path to understand the project and take the next step without replacing what is already working.
+The clearest fit I see is {RecommendedServicePhrase}. It could address the most visible need without replacing what already works or making the project unnecessarily complicated.
 
-If this is relevant, I can send over a concise concept showing the direction I would recommend, what I would prioritize, and why.
+If useful, I can send a concise concept showing the structure I would recommend, what I would prioritize first, and why that direction would help the intended audience.
+
+No meeting is required. I can send the initial concept by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
 astraproductions.co
 
-P.S. If you’d rather not hear from me again, just reply unsub.
+P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
+
 
 # Kept as a compatibility alias for code that only needs the safe generic body.
 PITCH_WARM_BODY = PITCH_WARM_BODY_FALLBACK
