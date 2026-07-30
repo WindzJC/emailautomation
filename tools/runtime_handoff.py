@@ -1051,6 +1051,214 @@ def _read_preview_summary(path: Path) -> dict[str, Any]:
     return result
 
 
+
+def _select_email_field(fieldnames: Iterable[str]) -> str | None:
+    names = [str(name or "").strip() for name in fieldnames]
+
+    preferred = {
+        "email",
+        "authoremail",
+        "author_email",
+        "recipientemail",
+        "recipient_email",
+        "toemail",
+        "to_email",
+    }
+
+    for name in names:
+        normalized = "".join(
+            character for character in name.lower()
+            if character.isalnum() or character == "_"
+        )
+        if normalized in preferred:
+            return name
+
+    for name in names:
+        normalized = "".join(
+            character for character in name.lower()
+            if character.isalnum()
+        )
+        if "email" in normalized:
+            return name
+
+    return None
+
+
+def _read_ordered_emails(path: Path | None) -> list[str]:
+    if path is None or not path.is_file():
+        return []
+
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream)
+            email_field = _select_email_field(reader.fieldnames or [])
+            if email_field is None:
+                return []
+
+            emails: list[str] = []
+            for row in reader:
+                email = str(row.get(email_field) or "").strip().lower()
+                if email:
+                    emails.append(email)
+            return emails
+    except (OSError, UnicodeError, csv.Error):
+        return []
+
+
+def _read_successfully_sent_emails(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream)
+            email_field = _select_email_field(reader.fieldnames or [])
+            if email_field is None:
+                return set()
+
+            sent: set[str] = set()
+
+            for row in reader:
+                values = {
+                    str(value or "").strip().upper()
+                    for value in row.values()
+                }
+
+                if "SENT" not in values:
+                    continue
+
+                email = str(row.get(email_field) or "").strip().lower()
+                if email:
+                    sent.add(email)
+
+            return sent
+    except (OSError, UnicodeError, csv.Error):
+        return set()
+
+
+def _emergency_queue_progress_match(
+    runtime_root: Path,
+    *,
+    profile: str,
+    manifest: dict[str, Any],
+    intended_record: dict[str, Any] | None,
+    provenance: dict[str, Any],
+    queue_state: dict[str, Any],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "safe": False,
+        "original_rows": 0,
+        "current_rows": 0,
+        "removed_rows": 0,
+        "missing_sent_rows": 0,
+        "failed_predicates": [],
+    }
+
+    if not isinstance(intended_record, dict):
+        result["failed_predicates"].append("intended_record_present")
+        return result
+
+    intended_path_value = (
+        intended_record.get("path")
+        or intended_record.get("relative_path")
+        or manifest.get("intended_source_path")
+    )
+    queue_path_value = (
+        provenance.get("queue_path")
+        or manifest.get("queue_path")
+    )
+
+    intended_path = _resolve_runtime_path(runtime_root, intended_path_value)
+    queue_path = _resolve_runtime_path(runtime_root, queue_path_value)
+
+    original_emails = _read_ordered_emails(intended_path)
+    current_emails = _read_ordered_emails(queue_path)
+
+    result["original_rows"] = len(original_emails)
+    result["current_rows"] = len(current_emails)
+
+    if not original_emails:
+        result["failed_predicates"].append("original_queue_readable")
+
+    if not current_emails:
+        result["failed_predicates"].append("current_queue_readable")
+
+    if result["failed_predicates"]:
+        return result
+
+    if len(set(original_emails)) != len(original_emails):
+        result["failed_predicates"].append("original_queue_unique")
+
+    if len(set(current_emails)) != len(current_emails):
+        result["failed_predicates"].append("current_queue_unique")
+
+    if len(current_emails) >= len(original_emails):
+        result["failed_predicates"].append("queue_was_reduced")
+
+    original_set = set(original_emails)
+    current_set = set(current_emails)
+
+    if not current_set.issubset(original_set):
+        result["failed_predicates"].append("no_new_recipients_added")
+
+    ordered_remaining = [
+        email for email in original_emails
+        if email in current_set
+    ]
+
+    if ordered_remaining != current_emails:
+        result["failed_predicates"].append(
+            "remaining_queue_order_preserved"
+        )
+
+    removed_emails = [
+        email for email in original_emails
+        if email not in current_set
+    ]
+    result["removed_rows"] = len(removed_emails)
+
+    log_path = (
+        runtime_root
+        / "data"
+        / "logs"
+        / f"{profile}_log.csv"
+    )
+    successfully_sent = _read_successfully_sent_emails(log_path)
+
+    missing_sent = [
+        email for email in removed_emails
+        if email not in successfully_sent
+    ]
+    result["missing_sent_rows"] = len(missing_sent)
+
+    if missing_sent:
+        result["failed_predicates"].append(
+            "every_removed_recipient_has_sent_record"
+        )
+
+    try:
+        expected_rows = int(queue_state["row_count"])
+    except (KeyError, TypeError, ValueError):
+        expected_rows = -1
+
+    if len(current_emails) != expected_rows:
+        result["failed_predicates"].append(
+            "current_queue_count_matches_runtime"
+        )
+
+    expected_fingerprint = str(
+        queue_state.get("fingerprint") or ""
+    ).strip()
+    actual_fingerprint = _email_fingerprint(current_emails)
+
+    if actual_fingerprint != expected_fingerprint:
+        result["failed_predicates"].append(
+            "current_queue_fingerprint_matches_runtime"
+        )
+
+    result["safe"] = not result["failed_predicates"]
+    return result
+
 def _preview_campaign_match(
     runtime_root: Path,
     *,
@@ -1190,6 +1398,45 @@ def _preview_campaign_match(
                     result["failed_predicates"].append(
                         "emergency_provenance_validation_mode_match"
                     )
+
+
+        queue_mismatch_predicates = {
+            "emergency_snapshot_queue_fingerprint_match",
+            "emergency_snapshot_queue_count_match",
+            "emergency_provenance_queue_count_match",
+            "emergency_provenance_queue_fingerprint_match",
+        }
+
+        if any(
+            predicate in result["failed_predicates"]
+            for predicate in queue_mismatch_predicates
+        ):
+            progress_match = _emergency_queue_progress_match(
+                runtime_root,
+                profile=profile,
+                manifest=manifest,
+                intended_record=(
+                    intended_record
+                    if isinstance(intended_record, dict)
+                    else None
+                ),
+                provenance=provenance,
+                queue_state=queue_state,
+            )
+            result["emergency_queue_progress"] = progress_match
+
+            if progress_match["safe"]:
+                result["failed_predicates"] = [
+                    predicate
+                    for predicate in result["failed_predicates"]
+                    if predicate not in queue_mismatch_predicates
+                ]
+            else:
+                for predicate in progress_match["failed_predicates"]:
+                    decorated = f"emergency_queue_progress:{predicate}"
+                    if decorated not in result["failed_predicates"]:
+                        result["failed_predicates"].append(decorated)
+
 
     ownership_floor = max(
         state_path.stat().st_mtime_ns,
