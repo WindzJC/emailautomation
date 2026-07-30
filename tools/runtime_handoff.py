@@ -42,6 +42,10 @@ from runtime_authority import (  # noqa: E402
     write_authority,
     write_generation_floor,
 )
+from sendgrid_hygiene import (  # noqa: E402
+    SuppressionSchemaError,
+    load_suppression_email_tokens,
+)
 
 
 SCHEMA_VERSION = 1
@@ -105,11 +109,14 @@ EMERGENCY_EXPECTED_PRIVATE_JC_FINGERPRINT = (
     "644d003718e09d3be1d57044d24ba514d2de58d6e8e4e2dd615384d1c6515c90"
 )
 EMERGENCY_TAKEOVER_ROOT = Path("data/state/emergency_takeovers")
-EMERGENCY_NEXT_ACTION = (
-    "./.venv/bin/python send_shard.py --profile private_jc --preview_messages && "
-    "./.venv/bin/python tools/validate_message_preview.py --profile private_jc "
-    "--pitch-mode consignment --fail-on-errors"
-)
+PITCH_VALIDATION_MODES = {
+    "pitch1": "consignment",
+    "pitch2": "consignment",
+    "pitch3": "consignment",
+    "pitch4": "consignment",
+    "pitch5": "consignment",
+    "pitch_jc": "astra_visual",
+}
 
 
 class HandoffError(RuntimeError):
@@ -645,6 +652,29 @@ def _profile_runtime_layout() -> dict[str, dict[str, Any]]:
     if profiles is None:
         raise HandoffError(f"Could not read sender profile layout: {source_path}")
     return profiles
+
+
+def _profile_validation_mode(profile: str) -> str:
+    config = _profile_runtime_layout().get(profile)
+    if not isinstance(config, dict):
+        raise HandoffError(f"Unknown emergency profile: {profile}")
+    pitch = str(config.get("pitch") or "").strip()
+    mode = PITCH_VALIDATION_MODES.get(pitch)
+    if not mode:
+        raise HandoffError(
+            "Emergency preview validation has no known mode mapping: "
+            f"profile={profile} pitch={pitch or '<missing>'}"
+        )
+    return mode
+
+
+def _emergency_next_action(profile: str) -> str:
+    mode = _profile_validation_mode(profile)
+    return (
+        f"./.venv/bin/python send_shard.py --profile {profile} --preview_messages && "
+        "./.venv/bin/python tools/validate_message_preview.py "
+        f"--profile {profile} --pitch-mode {mode} --fail-on-errors"
+    )
 
 
 def _normalized_row_value(row: dict[str, str], *names: str) -> str:
@@ -1219,35 +1249,23 @@ def _sender_role_blocklist() -> set[str]:
     raise HandoffError(f"Could not read sender role-recipient policy: {source_path}")
 
 
-def _validated_email_state(path: Path, label: str) -> set[str]:
-    if not path.is_file():
-        return set()
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        field_map = {
-            str(field or "").strip().lower(): str(field or "")
-            for field in (reader.fieldnames or [])
-        }
-        email_field = field_map.get("email") or field_map.get("authoremail")
-        if not email_field:
-            raise HandoffError(
-                f"Emergency validation failed: {label} lacks an Email header: {path}"
-            )
-        emails: set[str] = set()
-        invalid = 0
-        for row in reader:
-            email = str(row.get(email_field) or "").strip().lower()
-            if not email:
-                continue
-            if not EMAIL_RE.match(email):
-                invalid += 1
-            else:
-                emails.add(email)
-    if invalid:
+def _validated_email_state(
+    path: Path,
+    label: str,
+) -> tuple[set[str], dict[str, Any]]:
+    try:
+        emails, diagnostics = load_suppression_email_tokens(path)
+    except SuppressionSchemaError as exc:
         raise HandoffError(
-            f"Emergency validation failed: {label} has {invalid} malformed email row(s): {path}"
+            f"Emergency validation failed: {label} is structurally invalid: {exc}"
+        ) from exc
+    malformed = int(diagnostics["malformed_email_rows"])
+    if malformed:
+        raise HandoffError(
+            f"Emergency validation failed: {label} has {malformed} malformed "
+            f"email row(s): {path}"
         )
-    return emails
+    return emails, diagnostics
 
 
 def _verify_legacy_emergency_bundle(
@@ -1393,7 +1411,11 @@ def _emergency_reject_source(repo: Path) -> tuple[Path | None, set[str]]:
         if not isinstance(candidate, Path) or candidate in seen or not candidate.is_file():
             continue
         seen.add(candidate)
-        return candidate, _validated_email_state(candidate, "triaged reject source")
+        emails, _diagnostics = _validated_email_state(
+            candidate,
+            "triaged reject source",
+        )
+        return candidate, emails
     return None, set()
 
 
@@ -1414,12 +1436,18 @@ def _emergency_queue_validation(
     suppressed_path = repo / "data/state/suppressed.csv"
     sendgrid_suppression_path = repo / "data/state/sendgrid_suppressions.csv"
     unsubscribed_path = repo / "data/state/unsubscribed.csv"
-    suppressed = _validated_email_state(suppressed_path, "global suppression state")
-    sendgrid_suppressed = _validated_email_state(
+    suppressed, suppressed_diagnostics = _validated_email_state(
+        suppressed_path,
+        "global suppression state",
+    )
+    sendgrid_suppressed, sendgrid_diagnostics = _validated_email_state(
         sendgrid_suppression_path,
         "SendGrid suppression state",
     )
-    unsubscribed = _validated_email_state(unsubscribed_path, "unsubscribe state")
+    unsubscribed, unsubscribe_diagnostics = _validated_email_state(
+        unsubscribed_path,
+        "unsubscribe state",
+    )
     suppression_overlap = queue_emails & (suppressed | sendgrid_suppressed)
     unsubscribe_overlap = queue_emails & unsubscribed
     profiles = _profile_runtime_layout()
@@ -1471,6 +1499,11 @@ def _emergency_queue_validation(
         "queue_unique_count": len(queue_emails),
         "queue_fingerprint": queue_state["fingerprint"],
         "suppression_record_count": len(suppressed | sendgrid_suppressed),
+        "suppression_sources": {
+            "global": suppressed_diagnostics,
+            "sendgrid": sendgrid_diagnostics,
+            "unsubscribe": unsubscribe_diagnostics,
+        },
         "unsubscribe_record_count": len(unsubscribed),
         "authoritative_sent_record_count": len(
             _authoritative_sent_emails(log_paths)
@@ -1573,6 +1606,8 @@ def emergency_takeover(
 
     profiles = _profile_runtime_layout()
     config = profiles.get(profile)
+    validation_mode = _profile_validation_mode(profile)
+    next_required_action = _emergency_next_action(profile)
     queue_name = str(config.get("csv") or "") if isinstance(config, dict) else ""
     if not queue_name:
         raise HandoffError(f"Emergency profile has no configured queue: {profile}")
@@ -1716,6 +1751,7 @@ def emergency_takeover(
                 "created_utc": created_utc,
                 "machine_id": machine,
                 "profile": profile,
+                "preview_validation_mode": validation_mode,
                 "operator_reason": reason.strip(),
                 "bundle_path": str(bundle),
                 "bundle_sha256": expected_bundle_sha256,
@@ -1824,7 +1860,7 @@ def emergency_takeover(
                 "authority_initialized": False,
                 "sender_started": False,
                 "activation_allowed": False,
-                "next_required_action": EMERGENCY_NEXT_ACTION,
+                "next_required_action": next_required_action,
             }
         except Exception:
             if snapshot_replaced:

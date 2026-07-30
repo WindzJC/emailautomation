@@ -48,6 +48,14 @@ SUPPRESSION_HEADERS = [
     "is_permanent",
     "ttl_until_utc",
 ]
+SUPPRESSION_EMAIL_FIELD_ALIASES = {
+    "email",
+    "email_address",
+    "emailaddress",
+    "recipient_email",
+    "author_email",
+    "authoremail",
+}
 
 PERMANENT_BLOCK_PATTERNS = (
     "mailbox disabled",
@@ -91,6 +99,106 @@ NON_SUPPRESSION_STATUSES = {
 
 def norm_email(value: str) -> str:
     return (value or "").strip().lower()
+
+
+class SuppressionSchemaError(ValueError):
+    """A suppression CSV cannot be interpreted without ambiguity."""
+
+
+def load_suppression_email_tokens(path: Path) -> Tuple[Set[str], Dict[str, object]]:
+    """Load address-shaped suppression tokens and return address-free diagnostics.
+
+    Legacy global suppression files may contain opaque, non-address suppression
+    tokens in the same column. Production matching only needs address-shaped
+    tokens. Values containing an ``@`` are treated as attempted addresses and
+    must have exactly one nonblank local/domain component; metadata columns are
+    never inspected as address fields.
+    """
+    if not path.is_file():
+        raise SuppressionSchemaError(f"Suppression CSV is missing: {path}")
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle, strict=True)
+            raw_headers = [str(field or "").strip() for field in (reader.fieldnames or [])]
+            if not raw_headers:
+                raise SuppressionSchemaError(
+                    f"Suppression CSV has no header: {path}"
+                )
+            lowered = [field.casefold() for field in raw_headers]
+            duplicates = sorted(
+                {field for field in lowered if field and lowered.count(field) > 1}
+            )
+            if duplicates or any(not field for field in raw_headers):
+                raise SuppressionSchemaError(
+                    "Suppression CSV has duplicate or blank headers: "
+                    + ", ".join(duplicates or ["<blank>"])
+                )
+            email_headers = [
+                raw
+                for raw, lowered_name in zip(raw_headers, lowered)
+                if lowered_name in SUPPRESSION_EMAIL_FIELD_ALIASES
+            ]
+            if len(email_headers) != 1:
+                raise SuppressionSchemaError(
+                    "Suppression CSV requires exactly one recognized email field; "
+                    f"found={len(email_headers)} headers={raw_headers}"
+                )
+            email_header = email_headers[0]
+            emails: Set[str] = set()
+            total_rows = 0
+            blank_rows = 0
+            malformed_rows = 0
+            non_address_rows = 0
+            duplicate_email_rows = 0
+            for row in reader:
+                total_rows += 1
+                if None in row and row[None]:
+                    raise SuppressionSchemaError(
+                        f"Suppression CSV row {total_rows + 1} has extra columns"
+                    )
+                value = norm_email(str(row.get(email_header) or ""))
+                if not value:
+                    blank_rows += 1
+                    continue
+                if "@" not in value:
+                    # Legacy opaque token or metadata. It cannot match a valid
+                    # recipient address and is not interpreted as one.
+                    non_address_rows += 1
+                    continue
+                if (
+                    value.count("@") != 1
+                    or not value.partition("@")[0]
+                    or not value.partition("@")[2]
+                    or any(character.isspace() for character in value)
+                    or "<" in value
+                    or ">" in value
+                ):
+                    malformed_rows += 1
+                    continue
+                if value in emails:
+                    duplicate_email_rows += 1
+                emails.add(value)
+    except SuppressionSchemaError:
+        raise
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise SuppressionSchemaError(
+            f"Suppression CSV is unreadable or unparsable: {path}: {exc}"
+        ) from exc
+    return emails, {
+        "schema": {
+            "headers": raw_headers,
+            "email_field": email_header,
+            "metadata_fields": [
+                field for field in raw_headers if field != email_header
+            ],
+        },
+        "total_rows": total_rows,
+        "valid_suppression_emails": len(emails),
+        "blank_email_rows": blank_rows,
+        "malformed_email_rows": malformed_rows,
+        "non_address_legacy_rows": non_address_rows,
+        "duplicate_email_rows": duplicate_email_rows,
+    }
 
 
 def domain_from_email(email: str) -> str:

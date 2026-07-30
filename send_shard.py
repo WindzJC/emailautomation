@@ -43,7 +43,10 @@ from provider_pacing import (
     throttle_pause_seconds,
 )
 from recipient_file_lock import lock_files
-from sendgrid_hygiene import load_active_suppressed_emails
+from sendgrid_hygiene import (
+    load_active_suppressed_emails,
+    load_suppression_email_tokens,
+)
 
 # ===== SMTP PRESETS =====
 SMTP_PRESETS = {
@@ -1188,7 +1191,7 @@ PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
 
-Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals built around clarity, trust, and presentation.
+Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals shaped into a clear online presentation built around clarity and trust.
 
 If useful, I can send over a clean website direction for how {{BookTitle}} could be positioned more strongly online.
 
@@ -1205,7 +1208,7 @@ PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 That online first impression matters. Before a reader, reviewer, publisher, bookstore, or media contact takes the next step, they usually look the author up first.
 
-Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals built around clarity, trust, and presentation.
+Astra Productions helps authors turn that moment into a stronger sales and credibility asset through polished author websites, book landing pages, book trailers, and launch visuals shaped into a clear online presentation built around clarity and trust.
 
 If useful, I can send over a clean website direction for how your author brand could be positioned more strongly online.
 
@@ -1862,12 +1865,20 @@ def read_rows(path: Path) -> List[Dict[str, str]]:
 def load_emails_from_csv(path: Path) -> Set[str]:
     if not path.exists():
         return set()
+    emails, _diagnostics = load_suppression_email_tokens(path)
+    return emails
+
+
+def load_queue_emails_from_csv(path: Path) -> Set[str]:
+    """Read the canonical Email column without applying suppression schema rules."""
+    if not path.exists():
+        return set()
     out: Set[str] = set()
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            e = norm_email(r.get("Email") or "")
-            if e:
-                out.add(e)
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            email = norm_email(row.get("Email") or "")
+            if email:
+                out.add(email)
     return out
 
 
@@ -3837,7 +3848,9 @@ def main():
             csv_path = _resolve_shard_path(cfg.get("csv") or "")
             log_path = _resolve_log_path(cfg.get("log") or "")
 
-            recipients = load_emails_from_csv(csv_path) if csv_path.exists() else set()
+            recipients = (
+                load_queue_emails_from_csv(csv_path) if csv_path.exists() else set()
+            )
             sent_set, failed_set, last_success = load_log_statuses(log_path)
             failed_only = failed_set - sent_set
 
@@ -4126,7 +4139,7 @@ def main():
         for p in recipient_paths:
             if p.resolve() == current_csv:
                 continue
-            other_recipients |= load_emails_from_csv(p)
+            other_recipients |= load_queue_emails_from_csv(p)
 
     if args.prune_sent and not is_recontact_cold_campaign(args.campaign_type):
         sent_for_prune = set(already_done)

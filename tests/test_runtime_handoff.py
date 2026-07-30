@@ -15,6 +15,7 @@ import pytest
 
 import runtime_authority
 import send_shard
+from sendgrid_hygiene import load_suppression_email_tokens
 from tools import runtime_handoff
 
 
@@ -309,7 +310,9 @@ def test_emergency_verified_bundle_matching_queue_creates_immutable_source_snaps
     assert result["authority_initialized"] is False
     assert result["sender_started"] is False
     assert result["activation_allowed"] is False
-    assert result["next_required_action"] == runtime_handoff.EMERGENCY_NEXT_ACTION
+    assert "--profile private_jc" in result["next_required_action"]
+    assert "--pitch-mode astra_visual" in result["next_required_action"]
+    assert "--pitch-mode consignment" not in result["next_required_action"]
     takeover_root = Path(result["takeover_root"])
     snapshot = json.loads(fixture["snapshot_path"].read_text(encoding="utf-8"))
     assert snapshot["snapshot_type"] == "emergency_takeover"
@@ -329,6 +332,7 @@ def test_emergency_verified_bundle_matching_queue_creates_immutable_source_snaps
         (takeover_root / "provenance_manifest.json").read_text(encoding="utf-8")
     )
     assert provenance["status"] == "awaiting_preview_validation"
+    assert provenance["preview_validation_mode"] == "astra_visual"
     assert provenance["queue_match_mode"] == "byte_for_byte"
     assert provenance["previous_campaign_snapshot_fingerprint"]
     assert (
@@ -337,6 +341,140 @@ def test_emergency_verified_bundle_matching_queue_creates_immutable_source_snaps
     assert not runtime_authority.authority_path(fixture["repo"]).exists()
     assert (fixture["repo"] / "data/logs/private_jc_log.csv").read_bytes() == log_before
     assert (fixture["repo"] / "data/state/suppressed.csv").read_bytes() == suppressed_before
+
+
+def test_actual_legacy_suppression_schema_loads_with_aggregate_diagnostics(
+    tmp_path,
+):
+    path = tmp_path / "suppressed.csv"
+    path.write_text(
+        "Email\n"
+        "blocked@example.test\n"
+        "legacy-opaque-suppression-token\n"
+        "local@internal\n",
+        encoding="utf-8",
+    )
+
+    emails, diagnostics = load_suppression_email_tokens(path)
+
+    assert emails == {"blocked@example.test", "local@internal"}
+    assert diagnostics == {
+        "schema": {
+            "headers": ["Email"],
+            "email_field": "Email",
+            "metadata_fields": [],
+        },
+        "total_rows": 3,
+        "valid_suppression_emails": 2,
+        "blank_email_rows": 0,
+        "malformed_email_rows": 0,
+        "non_address_legacy_rows": 1,
+        "duplicate_email_rows": 0,
+    }
+
+
+def test_suppression_metadata_and_blank_email_cells_are_not_email_values(tmp_path):
+    path = tmp_path / "suppressed.csv"
+    path.write_text(
+        "Email,TimestampUTC,Reason,Provider,Hash,Status\n"
+        "blocked@example.test,2026-07-30T00:00:00Z,bad@@metadata,sendgrid,"
+        "not-an-email,SUPPRESSED\n"
+        ",2026-07-30T00:01:00Z,manual,private,opaque-hash,ACTIVE\n",
+        encoding="utf-8",
+    )
+
+    emails, diagnostics = load_suppression_email_tokens(path)
+
+    assert emails == {"blocked@example.test"}
+    assert diagnostics["schema"]["metadata_fields"] == [
+        "TimestampUTC",
+        "Reason",
+        "Provider",
+        "Hash",
+        "Status",
+    ]
+    assert diagnostics["total_rows"] == 2
+    assert diagnostics["valid_suppression_emails"] == 1
+    assert diagnostics["blank_email_rows"] == 1
+    assert diagnostics["malformed_email_rows"] == 0
+
+
+def test_malformed_value_in_suppression_email_column_blocks_without_writes(
+    emergency_fixture,
+):
+    fixture = emergency_fixture
+    suppression_path = fixture["repo"] / "data/state/suppressed.csv"
+    suppression_path.write_text("Email\nbad@@example.test\n", encoding="utf-8")
+    snapshot_before = fixture["snapshot_path"].read_bytes()
+    suppression_before = suppression_path.read_bytes()
+
+    with pytest.raises(runtime_handoff.HandoffError, match="malformed email row"):
+        _emergency_run(fixture)
+
+    assert fixture["snapshot_path"].read_bytes() == snapshot_before
+    assert suppression_path.read_bytes() == suppression_before
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+    assert not (fixture["repo"] / runtime_handoff.EMERGENCY_TAKEOVER_ROOT).exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "TimestampUTC,Reason\n2026-07-30T00:00:00Z,manual\n",
+        "Email,email\nblocked@example.test,other@example.test\n",
+        'Email,Reason\n"unterminated,manual\n',
+    ],
+)
+def test_structurally_invalid_suppression_csv_blocks_takeover(
+    emergency_fixture,
+    payload,
+):
+    fixture = emergency_fixture
+    suppression_path = fixture["repo"] / "data/state/suppressed.csv"
+    suppression_path.write_text(payload, encoding="utf-8")
+    snapshot_before = fixture["snapshot_path"].read_bytes()
+
+    with pytest.raises(runtime_handoff.HandoffError, match="structurally invalid"):
+        _emergency_run(fixture)
+
+    assert fixture["snapshot_path"].read_bytes() == snapshot_before
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+
+
+def test_unreadable_suppression_path_blocks_takeover(emergency_fixture):
+    fixture = emergency_fixture
+    suppression_path = fixture["repo"] / "data/state/suppressed.csv"
+    suppression_path.unlink()
+    suppression_path.mkdir()
+    snapshot_before = fixture["snapshot_path"].read_bytes()
+
+    with pytest.raises(runtime_handoff.HandoffError, match="structurally invalid"):
+        _emergency_run(fixture)
+
+    assert fixture["snapshot_path"].read_bytes() == snapshot_before
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+
+
+def test_preview_validation_mode_is_derived_from_profile_pitch():
+    assert runtime_handoff._profile_validation_mode("private_jc") == "astra_visual"
+    assert runtime_handoff._profile_validation_mode("sendgrid_annette") == "consignment"
+    assert "--pitch-mode astra_visual" in runtime_handoff._emergency_next_action(
+        "private_jc"
+    )
+    assert "--pitch-mode consignment" in runtime_handoff._emergency_next_action(
+        "sendgrid_annette"
+    )
+
+
+def test_unknown_profile_pitch_validation_mode_refuses(monkeypatch):
+    monkeypatch.setattr(
+        runtime_handoff,
+        "_profile_runtime_layout",
+        lambda: {"custom": {"pitch": "unmapped_pitch"}},
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match="no known mode mapping"):
+        runtime_handoff._emergency_next_action("custom")
 
 
 def test_emergency_bundle_checksum_mismatch_refuses_without_writes(emergency_fixture):

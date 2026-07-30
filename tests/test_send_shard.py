@@ -19,6 +19,7 @@ import settings
 import dashboard_core
 import live_dashboard
 from tools.diagnose_private_jc_auth import run_diagnostic
+from tools.validate_message_preview import validate_row
 from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROVIDER_LIMIT_DEFAULTS,
@@ -2029,6 +2030,65 @@ class SendShardTests(unittest.TestCase):
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
         self.assertNotIn("I came across your author profile", body_text)
         self.assertNotIn("{BookTitle}", body_text)
+
+    def test_generated_pitch_jc_message_passes_astra_visual_validation(self) -> None:
+        pitch = send_shard.PITCHES["pitch_jc"]
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="jc@astraproductions.co",
+            to_email="reader@example.test",
+            author="Jamie Example",
+            book_title="The Quiet Harbor",
+            subject=pitch["subject"],
+            body_template=pitch["body"],
+            unsub_email="jc@astraproductions.co",
+            subject_fallback=pitch["subject_fallback"],
+            body_fallback=pitch["body_fallback"],
+        )
+
+        failures = validate_row(
+            {
+                "Email": "reader@example.test",
+                "AuthorName": "Jamie Example",
+                "FirstName": "Jamie",
+                "BookTitle": "The Quiet Harbor",
+                "Subject": subject_text,
+                "Body": body_text,
+            },
+            "astra_visual",
+        )
+
+        self.assertEqual([], failures)
+
+    def test_non_astra_consignment_message_fails_astra_visual_validation(self) -> None:
+        pitch = send_shard.PITCHES["pitch1"]
+        _msg, subject_text, body_text, _html_body, _cid = build_message(
+            from_email="annette@barnesnoblemarketing.com",
+            to_email="reader@example.test",
+            author="Jamie Example",
+            book_title="The Quiet Harbor",
+            subject=pitch["subject"],
+            body_template=pitch["body"],
+            unsub_email="annette@barnesnoblemarketing.com",
+            subject_fallback=pitch["subject_fallback"],
+            body_fallback=pitch["body_fallback"],
+        )
+
+        failures = validate_row(
+            {
+                "Email": "reader@example.test",
+                "AuthorName": "Jamie Example",
+                "FirstName": "Jamie",
+                "BookTitle": "The Quiet Harbor",
+                "Subject": subject_text,
+                "Body": body_text,
+            },
+            "astra_visual",
+        )
+
+        self.assertTrue(
+            any(reason.startswith("astra_visual_missing_service_term:") for reason in failures)
+        )
+        self.assertIn("astra_visual_contains_consignment_language", failures)
 
     def test_pitch_jc_fallback_capable_queue_contract_allows_missing_book_title_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
