@@ -1,0 +1,23 @@
+[Unit]
+Description=Offline encrypted backup of Astra runtime state
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/emailautomation
+EnvironmentFile=/etc/astra-emailautomation/astra.env
+Environment=ASTRA_MACHINE_ID=cloud
+Environment=ASTRA_DISABLE_DOTENV=1
+RuntimeDirectory=astra-emailautomation
+RuntimeDirectoryMode=0700
+ExecStart=/opt/astra/emailautomation/deploy/cloud/backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/astra-backups
+ReadWritePaths=/run/astra-emailautomation

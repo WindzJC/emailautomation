@@ -9,6 +9,8 @@ emailautomation/
 .env.local
 .env.*
 !.env.example
+/KEYS
+/ACC GMAIL
 data/
 uploads/
 cleaned/

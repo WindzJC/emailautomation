@@ -5,8 +5,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${HANDOFF_PYTHON:-python3}"
 MAC_HOST="${HANDOFF_MAC_HOST:-}"
 WINDOWS_HOST="${HANDOFF_WINDOWS_HOST:-}"
+CLOUD_HOST="${HANDOFF_CLOUD_HOST:-}"
 MAC_REPO="${HANDOFF_MAC_REPO:-/Users/windellereboquio/AstraHandoff/emailautomation}"
 WINDOWS_REPO="${HANDOFF_WINDOWS_REPO:-/home/jc/email-automation}"
+CLOUD_REPO="${HANDOFF_CLOUD_REPO:-/opt/astra/emailautomation}"
 BUNDLE_DIR="${HANDOFF_BUNDLE_DIR:-${REPO_ROOT}/runtime_handoff_bundles}"
 
 runtime_handoff() {
@@ -25,6 +27,10 @@ switch_to() {
       host="${WINDOWS_HOST}"
       remote_repo="${WINDOWS_REPO}"
       ;;
+    cloud)
+      host="${CLOUD_HOST}"
+      remote_repo="${CLOUD_REPO}"
+      ;;
     *)
       echo "Unsupported target machine: ${target}" >&2
       exit 2
@@ -32,14 +38,15 @@ switch_to() {
   esac
   if [[ -z "${host}" ]]; then
     echo "REFUSED: configure the target Tailscale SSH hostname first." >&2
-    echo "Set HANDOFF_MAC_HOST or HANDOFF_WINDOWS_HOST as appropriate." >&2
+    echo "Set HANDOFF_MAC_HOST, HANDOFF_WINDOWS_HOST, or HANDOFF_CLOUD_HOST as appropriate." >&2
     exit 2
   fi
   bundle="$(runtime_handoff export --target "${target}" --output-dir "${BUNDLE_DIR}")"
   remote_bundle="/tmp/$(basename "${bundle}")"
   echo "Source is now unauthorized. Transferring bundle over SCP..."
   scp -p "${bundle}" "${host}:${remote_bundle}"
-  ssh "${host}" "cd '${remote_repo}' && ./handoff receive '${remote_bundle}'"
+  ssh "${host}" \
+    "cd '${remote_repo}' && ASTRA_MACHINE_ID='${target}' ./handoff receive '${remote_bundle}'"
   echo "Handoff activated on ${target}; no sender was started."
 }
 
@@ -49,6 +56,9 @@ case "${1:-}" in
     ;;
   switch-to-windows)
     switch_to windows-wsl
+    ;;
+  switch-to-cloud)
+    switch_to cloud
     ;;
   status)
     runtime_handoff status
@@ -74,7 +84,7 @@ case "${1:-}" in
     runtime_handoff rollback "$@"
     ;;
   *)
-    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|status|verify|activate|emergency-takeover|rollback}" >&2
+    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|switch-to-cloud|status|verify|activate|emergency-takeover|rollback}" >&2
     exit 2
     ;;
 esac

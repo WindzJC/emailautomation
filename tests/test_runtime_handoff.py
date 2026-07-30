@@ -16,6 +16,7 @@ import pytest
 
 import runtime_authority
 import send_shard
+import settings
 from sendgrid_hygiene import load_suppression_email_tokens
 from tools import runtime_handoff
 
@@ -161,10 +162,10 @@ def repos(tmp_path: Path, monkeypatch):
         sent=["already-sent@example.test"],
     )
     _write_runtime(mac, ["old-mac@example.test"])
-    runtime_handoff.initialize_authority(windows, machine="windows-wsl")
-    _set_inactive(mac, "mac")
     monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
     monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    runtime_handoff.initialize_authority(windows, machine="windows-wsl")
+    _set_inactive(mac, "mac")
     return windows, mac
 
 
@@ -191,6 +192,109 @@ def _rewrite_bundle(
         )
         archive.add(stage / runtime_handoff.RUNTIME_ROOT, arcname=runtime_handoff.RUNTIME_ROOT)
     return output
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/state/KEYS",
+        "data/state/ACC GMAIL",
+        "data/state/nested/.env",
+        "data/state/nested/.env.cloud",
+        "data/state/nested/KEYS",
+        "data/state/nested/ACC GMAIL",
+    ],
+)
+def test_runtime_files_exclude_sensitive_names(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    allowed = tmp_path / "data/state/allowed.json"
+    allowed.parent.mkdir(parents=True, exist_ok=True)
+    allowed.write_text("{}\n", encoding="utf-8")
+    sensitive = tmp_path / relative
+    sensitive.parent.mkdir(parents=True, exist_ok=True)
+    sensitive.write_text("synthetic-test-value", encoding="utf-8")
+
+    names = {
+        path.relative_to(tmp_path).as_posix()
+        for path in runtime_handoff.runtime_files(tmp_path)
+    }
+
+    assert "data/state/allowed.json" in names
+    assert relative not in names
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/state/KEYS",
+        "data/state/ACC GMAIL",
+        "data/state/nested/.env",
+        "data/state/nested/.env.cloud",
+        "data/state/nested/KEYS",
+        "data/state/nested/ACC GMAIL",
+    ],
+)
+def test_handoff_archive_refuses_sensitive_members(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    bundle = tmp_path / "sensitive-member.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, payload in (
+            (runtime_handoff.MANIFEST_NAME, b"{}"),
+            (runtime_handoff.BUNDLE_AUTHORITY_NAME, b"{}"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        runtime = tarfile.TarInfo(runtime_handoff.RUNTIME_ROOT)
+        runtime.type = tarfile.DIRTYPE
+        archive.addfile(runtime)
+        payload = b"synthetic-test-value"
+        member = tarfile.TarInfo(
+            f"{runtime_handoff.RUNTIME_ROOT}/{relative}"
+        )
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(
+            runtime_handoff.HandoffError,
+            match="Sensitive archive member is forbidden",
+        ):
+            runtime_handoff.safe_members(archive)
+
+
+def test_pre_import_backup_excludes_sensitive_names(tmp_path: Path) -> None:
+    allowed = tmp_path / "data/state/allowed.json"
+    allowed.parent.mkdir(parents=True, exist_ok=True)
+    allowed.write_text("{}\n", encoding="utf-8")
+    for relative in (
+        "data/state/KEYS",
+        "data/state/ACC GMAIL",
+        "data/state/nested/.env",
+        "data/state/nested/.env.cloud",
+        "data/state/nested/KEYS",
+        "data/state/nested/ACC GMAIL",
+    ):
+        sensitive = tmp_path / relative
+        sensitive.parent.mkdir(parents=True, exist_ok=True)
+        sensitive.write_text("synthetic-test-value", encoding="utf-8")
+
+    backup = runtime_handoff._archive_existing_runtime(
+        tmp_path,
+        "synthetic-bundle",
+    )
+
+    with tarfile.open(backup, "r:gz") as archive:
+        names = {member.name for member in archive.getmembers()}
+    assert "data/state/allowed.json" in names
+    assert not any(
+        runtime_handoff._contains_secret_name(Path(name))
+        for name in names
+    )
 
 
 def _legacy_bundle(
@@ -748,6 +852,33 @@ def test_windows_to_mac_handoff_carries_changed_queue_logs_suppressions_and_db(
         assert db.execute("SELECT count(*) FROM sends").fetchone()[0] == 2
 
 
+def test_windows_to_cloud_handoff_activates_only_cloud_authority(repos, tmp_path):
+    windows, _mac = repos
+    cloud = tmp_path / "cloud"
+    _run(tmp_path, "git", "clone", "-q", str(windows), str(cloud))
+    _write_runtime(cloud, ["old-cloud@example.test"])
+    _set_inactive(cloud, "cloud")
+
+    bundle = _export(windows, tmp_path, "cloud", "windows-wsl")
+    result = runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+    assert result["sender_started"] is False
+    assert result["authority"]["authorized_machine"] == "cloud"
+    assert result["authority"]["generation"] == 2
+    assert runtime_authority.load_authority(windows)["status"] == (
+        "handoff_in_progress"
+    )
+    with pytest.raises(runtime_authority.AuthorityError, match="handoff_in_progress"):
+        runtime_authority.assert_send_authorized(
+            windows,
+            machine="windows-wsl",
+        )
+    assert runtime_authority.assert_send_authorized(
+        cloud,
+        machine="cloud",
+    )["status"] == "active"
+
+
 def test_mac_to_windows_return_handoff_increments_generation(repos, tmp_path):
     windows, mac = repos
     first = _export(windows, tmp_path, "mac", "windows-wsl")
@@ -1295,6 +1426,195 @@ def test_sender_authority_enforcement_and_preflight_inspection(repos):
         runtime_authority.assert_send_authorized(windows, machine="mac")
     with pytest.raises(runtime_authority.AuthorityError, match="inactive"):
         runtime_authority.assert_send_authorized(mac, machine="mac")
+
+
+def test_cloud_machine_can_hold_single_valid_runtime_authority(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "cloud"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("cloud fixture\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "fixture")
+    _write_runtime(repo, ["cloud-recipient@example.test"])
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+
+    authority = runtime_handoff.initialize_authority(repo, machine="cloud")
+
+    assert runtime_authority.current_machine(
+        {"ASTRA_MACHINE_ID": "cloud"}
+    ) == "cloud"
+    assert authority["authorized_machine"] == "cloud"
+    assert authority["source_machine"] == "mac"
+    assert authority["target_machine"] == "cloud"
+    assert runtime_authority.assert_send_authorized(
+        repo,
+        machine="cloud",
+    )["status"] == "active"
+    with pytest.raises(runtime_authority.AuthorityError, match="authorized for cloud"):
+        runtime_authority.assert_send_authorized(repo, machine="mac")
+
+
+def test_mac_authority_rejects_simultaneous_cloud_authority(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "mac"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("mac fixture\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "fixture")
+    _write_runtime(repo, ["mac-recipient@example.test"])
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    runtime_handoff.initialize_authority(repo, machine="mac")
+
+    with pytest.raises(runtime_authority.AuthorityError, match="authorized for mac"):
+        runtime_authority.assert_send_authorized(repo, machine="cloud")
+
+
+def test_cloud_authority_refuses_checkout_at_different_git_commit(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "cloud"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("first\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "first")
+    _write_runtime(repo, ["cloud-recipient@example.test"])
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    runtime_handoff.initialize_authority(repo, machine="cloud")
+    (repo / "README.md").write_text("second\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "second")
+
+    with pytest.raises(
+        runtime_authority.AuthorityError,
+        match="expected Git commit",
+    ):
+        runtime_authority.assert_send_authorized(repo, machine="cloud")
+
+
+def test_sender_refuses_real_start_when_cloud_authority_is_invalid(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "fixture")
+    payload = {
+        "authorized_machine": "mac",
+        "generation": 1,
+        "bundle_id": "mac-only",
+        "source_machine": "windows-wsl",
+        "target_machine": "mac",
+        "created_utc": runtime_authority.utc_now(),
+        "expected_git_commit": _run(repo, "git", "rev-parse", "HEAD"),
+        "runtime_manifest_hash": "fixture",
+        "status": "active",
+    }
+    runtime_authority.write_authority(repo, payload)
+    runtime_authority.write_generation_floor(repo, 1, payload["bundle_id"])
+    output = io.StringIO()
+    monkeypatch.setenv("ASTRA_MACHINE_ID", "cloud")
+
+    with (
+        patch.object(send_shard, "ROOT", repo),
+        patch.object(
+            send_shard,
+            "send_via_sendgrid",
+            side_effect=AssertionError("invalid cloud authority must not submit"),
+        ) as submit,
+        patch.object(
+            sys,
+            "argv",
+            ["send_shard.py", "--profile", "private_jc"],
+        ),
+        redirect_stdout(output),
+    ):
+        send_shard.main()
+
+    submit.assert_not_called()
+    assert "REFUSED: real send is not authorized" in output.getvalue()
+    assert "authorized for mac, not cloud" in output.getvalue()
+
+
+def test_cloud_preflight_succeeds_without_authority_or_submission(
+    tmp_path,
+    monkeypatch,
+):
+    _write_runtime(tmp_path, ["cloud-preflight@example.test"])
+    shards = tmp_path / "data/shards"
+    logs = tmp_path / "data/logs"
+    state = tmp_path / "data/state"
+    output = io.StringIO()
+    monkeypatch.setenv("ASTRA_MACHINE_ID", "cloud")
+
+    with (
+        patch.object(settings, "APP_ROOT", tmp_path),
+        patch.object(settings, "SHARDS_DIR", shards),
+        patch.object(settings, "LOGS_DIR", logs),
+        patch.object(settings, "STATE_DIR", state),
+        patch.object(send_shard, "ROOT", tmp_path),
+        patch.object(send_shard, "SHARDS_DIR", shards),
+        patch.object(send_shard, "LOGS_DIR", logs),
+        patch.object(send_shard, "STATE_DIR", state),
+        patch.object(
+            send_shard,
+            "DEFAULT_UNSUB_CSV",
+            state / "unsubscribed.csv",
+        ),
+        patch.object(
+            send_shard,
+            "DEFAULT_SUPPRESS_CSV",
+            state / "suppressed.csv",
+        ),
+        patch.object(
+            send_shard,
+            "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+            state / "sendgrid_suppressions.csv",
+        ),
+        patch.object(
+            send_shard,
+            "assert_send_authorized",
+            side_effect=AssertionError("preflight must not require authority"),
+        ),
+        patch.object(
+            send_shard,
+            "send_via_sendgrid",
+            side_effect=AssertionError("preflight must not submit"),
+        ) as submit,
+        patch.object(send_shard, "smtp_login") as smtp_login,
+        patch.object(
+            sys,
+            "argv",
+            ["send_shard.py", "--profile", "private_jc", "--preflight"],
+        ),
+        redirect_stdout(output),
+    ):
+        send_shard.main()
+
+    submit.assert_not_called()
+    smtp_login.assert_not_called()
+    assert "PREFLIGHT: ok (no sending)." in output.getvalue()
 
 
 def test_send_shard_real_send_refuses_missing_authority_but_preflight_skips_gate(

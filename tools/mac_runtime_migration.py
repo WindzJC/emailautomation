@@ -39,7 +39,7 @@ PROCESS_BLOCKERS = (
     "uvicorn live_dashboard:app",
     "cloudflared",
 )
-SECRET_NAMES = {".env", ".env.local", "KEYS"}
+SECRET_NAMES = {".env", ".env.local", "KEYS", "ACC GMAIL"}
 EXCLUDED_PARTS = {
     ".git", ".venv", "__pycache__", ".pytest_cache", "node_modules",
     "backups", "audits", "tmp", "temp",
@@ -227,10 +227,17 @@ def assert_frozen(repo: Path, *, require_clean_git: bool = True) -> str:
     return head
 
 
+def _contains_secret_name(relative: Path | PurePosixPath) -> bool:
+    return any(
+        part in SECRET_NAMES or part.startswith(".env.")
+        for part in relative.parts
+    )
+
+
 def excluded(relative: Path) -> bool:
     parts = set(relative.parts)
     name = relative.name
-    if parts & EXCLUDED_PARTS or name in SECRET_NAMES:
+    if parts & EXCLUDED_PARTS or _contains_secret_name(relative):
         return True
     if name in EPHEMERAL_STATE_NAMES:
         return True
@@ -429,7 +436,7 @@ def build_manifest(
         "private_configuration": {
             "classification": "REQUIRED_PRIVATE_TRANSFER",
             "included": False,
-            "files": [".env"],
+            "files": [".env", ".env.local", "KEYS", "ACC GMAIL"],
             "transfer": "encrypted direct SSH/SCP only; chmod 600 on target",
         },
         "excluded": {
@@ -484,6 +491,8 @@ def _safe_manifest_relative_path(value: object) -> str:
         or path.as_posix() in {"", "."}
     ):
         raise MigrationError(f"Unsafe manifest path: {raw}")
+    if _contains_secret_name(path):
+        raise MigrationError(f"Sensitive manifest path is forbidden: {raw}")
     return path.as_posix()
 
 
@@ -508,7 +517,11 @@ def safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
             if not member.isdir():
                 raise MigrationError("Archive runtime root must be a directory")
         elif canonical.startswith(f"{ARCHIVE_RUNTIME_ROOT}/"):
-            pass
+            relative = PurePosixPath(*path.parts[1:])
+            if _contains_secret_name(relative):
+                raise MigrationError(
+                    f"Sensitive archive member is forbidden: {member.name}"
+                )
         else:
             raise MigrationError(f"Unexpected archive member: {member.name}")
 

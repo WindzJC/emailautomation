@@ -14,6 +14,13 @@ ENV_FILES = [APP_ROOT / ".env.local", APP_ROOT / ".env"]
 
 
 def _load_env_files() -> None:
+    if os.environ.get("ASTRA_DISABLE_DOTENV", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
     for path in ENV_FILES:
         if not path.exists():
             continue

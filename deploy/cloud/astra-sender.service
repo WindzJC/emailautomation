@@ -1,0 +1,33 @@
+[Unit]
+Description=Astra private_jc email sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/emailautomation
+EnvironmentFile=/etc/astra-emailautomation/astra.env
+Environment=ASTRA_MACHINE_ID=cloud
+Environment=ASTRA_DISABLE_DOTENV=1
+RuntimeDirectory=astra-emailautomation
+RuntimeDirectoryMode=0700
+ExecCondition=/opt/astra/emailautomation/deploy/cloud/verify.sh --require-authority
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/astra-emailautomation/private_jc.lock /opt/astra/emailautomation/.venv/bin/python send_shard.py --profile private_jc
+Restart=on-failure
+RestartPreventExitStatus=75
+RestartSec=30s
+TimeoutStopSec=90s
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/astra/emailautomation/data
+ReadWritePaths=/opt/astra/emailautomation/_important
+ReadWritePaths=/opt/astra/emailautomation/.runtime_handoff
+
+[Install]
+WantedBy=multi-user.target

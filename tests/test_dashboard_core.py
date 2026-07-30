@@ -19,6 +19,27 @@ from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
+    def test_cloud_service_flag_disables_repository_dotenv_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "ASTRA_SYNTHETIC_DOTENV_VALUE=must-not-load\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(settings, "ENV_FILES", [env_file]),
+                patch.dict(
+                    os.environ,
+                    {"ASTRA_DISABLE_DOTENV": "1"},
+                    clear=True,
+                ),
+            ):
+                settings._load_env_files()
+                self.assertNotIn(
+                    "ASTRA_SYNTHETIC_DOTENV_VALUE",
+                    os.environ,
+                )
+
     def test_campaign_run_history_appends_and_loads_recent_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             history_path = Path(tmpdir) / "campaign_run_history.jsonl"

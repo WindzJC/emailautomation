@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runtime_authority import (  # noqa: E402
     ACTIVE_STATUS,
+    MACHINES,
     AuthorityError,
     authority_path,
     assert_send_authorized,
@@ -77,7 +78,7 @@ JOB_ROOTS = (
     "_important/verify_jobs",
     "data/state/dispatch_jobs",
 )
-SECRET_NAMES = {".env", ".env.local", "KEYS"}
+SECRET_NAMES = {".env", ".env.local", "KEYS", "ACC GMAIL"}
 EXCLUDED_PARTS = {
     ".git",
     ".venv",
@@ -121,6 +122,12 @@ PITCH_VALIDATION_MODES = {
 
 class HandoffError(RuntimeError):
     """A fail-closed operator-readable refusal."""
+
+
+def _default_peer_machine(identity: str) -> str:
+    if identity == "mac":
+        return "windows-wsl"
+    return "mac"
 
 
 def git(repo: Path, *args: str) -> str:
@@ -169,13 +176,20 @@ def fsync_runtime(repo: Path) -> None:
         _fsync_directory(root)
 
 
+def _contains_secret_name(path: Path | PurePosixPath) -> bool:
+    return any(
+        part in SECRET_NAMES or part.startswith(".env.")
+        for part in path.parts
+    )
+
+
 def excluded(repo: Path, path: Path) -> bool:
     relative = path.relative_to(repo)
     if relative == Path("data/state/runtime_authority.json"):
         return True
-    if set(relative.parts) & (EXCLUDED_PARTS | SECRET_NAMES):
+    if set(relative.parts) & EXCLUDED_PARTS:
         return True
-    if relative.name in SECRET_NAMES or relative.name.startswith(".env"):
+    if _contains_secret_name(relative):
         return True
     if relative.name.endswith(ARCHIVE_SUFFIXES) or relative.name.endswith((".lock", ".tmp")):
         return True
@@ -428,6 +442,8 @@ def _safe_relative(value: Any) -> str:
     path = PurePosixPath(text)
     if not text or path.is_absolute() or ".." in path.parts or path.as_posix() in {"", "."}:
         raise HandoffError(f"Unsafe manifest path: {text!r}")
+    if _contains_secret_name(path):
+        raise HandoffError(f"Sensitive manifest path is forbidden: {text!r}")
     return path.as_posix()
 
 
@@ -449,6 +465,12 @@ def safe_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
         )
         if not allowed:
             raise HandoffError(f"Unexpected archive member: {member.name}")
+        if name.startswith(f"{RUNTIME_ROOT}/"):
+            relative = PurePosixPath(*path.parts[1:])
+            if _contains_secret_name(relative):
+                raise HandoffError(
+                    f"Sensitive archive member is forbidden: {member.name}"
+                )
     for required in (MANIFEST_NAME, BUNDLE_AUTHORITY_NAME, RUNTIME_ROOT):
         if required not in seen:
             raise HandoffError(f"Archive is missing {required}")
@@ -614,7 +636,10 @@ def mark_target_disabled(
         identity = machine or current_machine()
         generation = max(1, load_generation_floor(repo))
         bundle_id = str((metadata or {}).get("bundle_id") or uuid.uuid4())
-        source = str((metadata or {}).get("source_machine") or ("mac" if identity == "windows-wsl" else "windows-wsl"))
+        source = str(
+            (metadata or {}).get("source_machine")
+            or _default_peer_machine(identity)
+        )
         target = identity
         commit = str((metadata or {}).get("expected_git_commit") or git(repo, "rev-parse", "HEAD"))
         runtime_hash = str((metadata or {}).get("runtime_manifest_hash") or "import-not-verified")
@@ -2548,7 +2573,15 @@ def _archive_existing_runtime(repo: Path, bundle_id: str) -> Path:
         for root_name in ("data", "_important"):
             root = repo / root_name
             if root.exists():
-                archive.add(root, arcname=root_name)
+                archive.add(
+                    root,
+                    arcname=root_name,
+                    filter=lambda member: (
+                        None
+                        if _contains_secret_name(PurePosixPath(member.name))
+                        else member
+                    ),
+                )
     destination.chmod(0o600)
     return destination
 
@@ -2593,6 +2626,7 @@ def _restore_runtime_backup(repo: Path, backup: Path) -> None:
                     or ".." in path.parts
                     or not path.parts
                     or path.parts[0] not in {"data", "_important"}
+                    or _contains_secret_name(path)
                     or not (member.isfile() or member.isdir())
                     or member.issym()
                     or member.islnk()
@@ -2757,7 +2791,7 @@ def initialize_authority(
     if authority_path(repo).exists() and not force:
         raise HandoffError("Authority already exists; refusing bootstrap without --force")
     generation = max(1, load_generation_floor(repo))
-    other = "windows-wsl" if identity == "mac" else "mac"
+    other = _default_peer_machine(identity)
     payload = {
         "authorized_machine": identity,
         "generation": generation,
@@ -2787,7 +2821,13 @@ def rollback(repo: Path, backup: Path | None = None) -> dict[str, Any]:
         with tarfile.open(selected, "r:gz") as archive:
             for member in archive.getmembers():
                 path = PurePosixPath(member.name)
-                if path.is_absolute() or ".." in path.parts or path.parts[0] not in {"data", "_important"}:
+                if (
+                    path.is_absolute()
+                    or ".." in path.parts
+                    or not path.parts
+                    or path.parts[0] not in {"data", "_important"}
+                    or _contains_secret_name(path)
+                ):
                     raise HandoffError(f"Unsafe rollback archive member: {member.name}")
                 if not (member.isfile() or member.isdir()) or member.issym() or member.islnk():
                     raise HandoffError(f"Unsafe rollback archive type: {member.name}")
@@ -2840,11 +2880,15 @@ def status(repo: Path, *, machine: str | None = None) -> dict[str, Any]:
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--machine", choices=("mac", "windows-wsl"))
+    parser.add_argument("--machine", choices=tuple(sorted(MACHINES)))
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     export_parser = commands.add_parser("export")
-    export_parser.add_argument("--target", required=True, choices=("mac", "windows-wsl"))
+    export_parser.add_argument(
+        "--target",
+        required=True,
+        choices=tuple(sorted(MACHINES)),
+    )
     export_parser.add_argument("--output-dir", type=Path, default=Path("runtime_handoff_bundles"))
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("bundle", type=Path)

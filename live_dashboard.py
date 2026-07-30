@@ -4380,7 +4380,7 @@ def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse |
             "profile": str(profile_name or ""),
             "message": (
                 "Live sender Start/Resume actions are disabled in local dev or auth-disabled mode. "
-                f"Set {DASHBOARD_LIVE_ACTIONS_ENV_VAR}=1 only on the intended live Windows/WSL machine."
+                f"Set {DASHBOARD_LIVE_ACTIONS_ENV_VAR}=1 only on the intended authorized runtime machine."
             ),
         },
         status_code=403,

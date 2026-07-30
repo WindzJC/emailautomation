@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-MACHINES = {"mac", "windows-wsl"}
+MACHINES = {"cloud", "mac", "windows-wsl"}
 ACTIVE_STATUS = "active"
 AUTHORITY_FILENAME = "runtime_authority.json"
 GENERATION_FLOOR_RELATIVE = Path(".runtime_handoff/generation_floor.json")
@@ -58,7 +58,8 @@ def current_machine(env: dict[str, str] | None = None) -> str:
         if "microsoft" in f"{release} {version}".lower():
             return "windows-wsl"
     raise AuthorityError(
-        "Machine identity could not be inferred; set ASTRA_MACHINE_ID=mac or windows-wsl"
+        "Machine identity could not be inferred; set ASTRA_MACHINE_ID to one of "
+        + ", ".join(sorted(MACHINES))
     )
 
 

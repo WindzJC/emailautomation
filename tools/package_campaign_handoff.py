@@ -8,7 +8,7 @@ import io
 import json
 import tarfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,8 +45,6 @@ QUEUE_LOG_FILES = [
 ]
 
 STATE_FILES = [
-    ROOT / ".env",
-    ROOT / ".env.local",
     STATE_DIR / "dashboard_run_settings.json",
     STATE_DIR / "dashboard_auto_start_state.json",
     STATE_DIR / "dashboard_timer_state.json",
@@ -80,6 +78,14 @@ IMPORTANT_FILES = [
 ]
 
 CHECK_JOB_DIR = IMPORTANT_DIR / "check_runs" / "jobs"
+SECRET_NAMES = {".env", ".env.local", "KEYS", "ACC GMAIL"}
+
+
+def _contains_secret_name(path: Path | PurePosixPath) -> bool:
+    return any(
+        part in SECRET_NAMES or part.startswith(".env.")
+        for part in path.parts
+    )
 
 
 def _csv_rows(path: Path) -> int:
@@ -102,7 +108,7 @@ def _sha256(path: Path) -> str:
 def _gather_paths(include_check_history: bool = False) -> list[Path]:
     paths: list[Path] = []
     for path in [*QUEUE_FILES, *QUEUE_LOG_FILES, *STATE_FILES, *IMPORTANT_FILES]:
-        if path.exists():
+        if path.exists() and not _contains_secret_name(path.relative_to(ROOT)):
             paths.append(path)
     if CHECK_JOB_DIR.exists():
         paths.extend(sorted(path for path in CHECK_JOB_DIR.glob("*.json") if path.is_file()))
@@ -110,7 +116,11 @@ def _gather_paths(include_check_history: bool = False) -> list[Path]:
         history_root = IMPORTANT_DIR / "check_runs"
         if history_root.exists():
             for path in sorted(history_root.glob("*")):
-                if path.is_file() and path.name != "jobs":
+                if (
+                    path.is_file()
+                    and path.name != "jobs"
+                    and not _contains_secret_name(path.relative_to(ROOT))
+                ):
                     paths.append(path)
     seen: set[Path] = set()
     unique_paths: list[Path] = []
@@ -132,12 +142,15 @@ def _manifest_for(paths: list[Path], archive_name: str) -> dict[str, object]:
     for path in paths:
         if not path.exists():
             continue
+        relative = path.relative_to(ROOT)
+        if _contains_secret_name(relative):
+            raise ValueError(f"Sensitive archive path is forbidden: {relative}")
         try:
             stat = path.stat()
         except FileNotFoundError:
             continue
 
-        rel = str(path.relative_to(ROOT))
+        rel = str(relative)
         existing_paths.append(path)
         manifest_files.append(
             {
@@ -210,6 +223,8 @@ def pack_archive(archive_path: Path, include_check_history: bool = False) -> dic
             rel = str(file_info.get("path") or "").strip()
             if not rel:
                 continue
+            if _contains_secret_name(PurePosixPath(rel)):
+                raise ValueError(f"Sensitive archive path is forbidden: {rel}")
             path = ROOT / rel
             if not path.exists():
                 continue

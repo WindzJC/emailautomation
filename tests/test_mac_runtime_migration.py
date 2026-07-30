@@ -58,6 +58,45 @@ def test_candidates_exclude_secrets_locks_backups_and_caches(tmp_path):
     assert not any(
         name.endswith((".lock", ".tgz", ".bak", "-wal")) for name in names
     )
+    for relative in (
+        Path("KEYS"),
+        Path("ACC GMAIL"),
+        Path("nested/.env"),
+        Path("nested/.env.cloud"),
+        Path("nested/KEYS"),
+        Path("nested/ACC GMAIL"),
+    ):
+        assert migration.excluded(relative)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "data/state/KEYS",
+        "data/state/ACC GMAIL",
+        "data/state/nested/.env",
+        "data/state/nested/.env.cloud",
+        "data/state/nested/KEYS",
+        "data/state/nested/ACC GMAIL",
+    ],
+)
+def test_legacy_archive_refuses_sensitive_members(tmp_path, relative):
+    bundle = tmp_path / "sensitive-member.tgz"
+    with tarfile.open(bundle, "w:gz") as archive:
+        _add_bytes(archive, migration.ARCHIVE_MANIFEST_NAME, b'{"files":[]}')
+        _add_directory(archive, migration.ARCHIVE_RUNTIME_ROOT)
+        _add_bytes(
+            archive,
+            f"{migration.ARCHIVE_RUNTIME_ROOT}/{relative}",
+            b"synthetic-test-value",
+        )
+
+    with tarfile.open(bundle, "r:gz") as archive:
+        with pytest.raises(
+            migration.MigrationError,
+            match="Sensitive archive member is forbidden",
+        ):
+            migration.safe_members(archive)
 
 
 def test_manifest_remaps_json_without_changing_source(tmp_path):

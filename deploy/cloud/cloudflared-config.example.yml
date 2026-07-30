@@ -1,0 +1,12 @@
+# Copy to /etc/cloudflared/config.yml and replace only on the cloud host.
+# Keep the credentials JSON outside the repository with mode 0600.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: dashboard.example.com
+    service: http://127.0.0.1:8000
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: false
+  - service: http_status:404
