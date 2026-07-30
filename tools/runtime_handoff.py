@@ -910,6 +910,302 @@ def _idempotency_overlap(
     return overlap
 
 
+PREVIEW_GENERATED_REQUIRED_FIELDS = {
+    "email",
+    "authoremail",
+    "authorname",
+    "firstname",
+    "booktitle",
+    "personalizedopeningline",
+    "subject",
+    "body",
+}
+PREVIEW_VALIDATED_REQUIRED_FIELDS = PREVIEW_GENERATED_REQUIRED_FIELDS | {
+    "validationstatus",
+    "failurereasons",
+}
+
+
+def _read_preview_csv(
+    path: Path,
+    *,
+    required_fields: set[str],
+    require_pass: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "exists": path.is_file(),
+        "row_count": 0,
+        "emails": set(),
+        "fingerprint": "",
+        "headers": [],
+        "missing_fields": [],
+        "duplicate_headers": [],
+        "extra_column_rows": 0,
+        "blank_email_rows": 0,
+        "malformed_email_rows": 0,
+        "conflicting_email_rows": 0,
+        "duplicate_email_rows": 0,
+        "non_pass_rows": 0,
+        "parse_error": "",
+    }
+    if not path.is_file():
+        return result
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle, strict=True)
+            headers = [str(field or "").strip() for field in (reader.fieldnames or [])]
+            lowered = [field.casefold() for field in headers]
+            duplicate_headers = sorted(
+                {field for field in lowered if field and lowered.count(field) > 1}
+            )
+            result["headers"] = headers
+            result["duplicate_headers"] = duplicate_headers
+            result["missing_fields"] = sorted(required_fields - set(lowered))
+            if not headers or any(not field for field in headers):
+                result["parse_error"] = "blank_or_missing_header"
+                return result
+            if duplicate_headers:
+                result["parse_error"] = "duplicate_headers"
+                return result
+            field_map = dict(zip(lowered, headers))
+            if result["missing_fields"]:
+                return result
+            emails: set[str] = set()
+            for row in reader:
+                result["row_count"] += 1
+                if None in row and row[None]:
+                    result["extra_column_rows"] += 1
+                    continue
+                email = str(row.get(field_map["email"]) or "").strip().lower()
+                author_email = str(
+                    row.get(field_map.get("authoremail", "")) or ""
+                ).strip().lower()
+                if not email:
+                    result["blank_email_rows"] += 1
+                    continue
+                if not EMAIL_RE.fullmatch(email):
+                    result["malformed_email_rows"] += 1
+                    continue
+                if author_email:
+                    if not EMAIL_RE.fullmatch(author_email):
+                        result["malformed_email_rows"] += 1
+                        continue
+                    if author_email != email:
+                        result["conflicting_email_rows"] += 1
+                        continue
+                if email in emails:
+                    result["duplicate_email_rows"] += 1
+                emails.add(email)
+                if require_pass:
+                    status = str(
+                        row.get(field_map["validationstatus"]) or ""
+                    ).strip().upper()
+                    if status != "PASS":
+                        result["non_pass_rows"] += 1
+            result["emails"] = emails
+            result["fingerprint"] = _email_fingerprint(emails)
+    except (OSError, UnicodeError, csv.Error) as exc:
+        result["parse_error"] = type(exc).__name__
+    return result
+
+
+def _read_preview_summary(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "exists": path.is_file(),
+        "mode": "",
+        "counts": {},
+        "missing_fields": [],
+        "duplicate_fields": [],
+        "parse_error": "",
+    }
+    if not path.is_file():
+        return result
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        result["parse_error"] = type(exc).__name__
+        return result
+    patterns = {
+        "mode": r"(?im)^pitch\s+mode:\s*([A-Za-z0-9_.-]+)\s*$",
+        "total": r"(?im)^total\s+rows\s+checked:\s*(\d+)\s*$",
+        "passed": r"(?im)^passed\s+rows:\s*(\d+)\s*$",
+        "failed": r"(?im)^failed\s+rows:\s*(\d+)\s*$",
+    }
+    values: dict[str, str] = {}
+    for key, pattern in patterns.items():
+        matches = re.findall(pattern, text)
+        if not matches:
+            result["missing_fields"].append(key)
+        elif len(matches) > 1:
+            result["duplicate_fields"].append(key)
+        else:
+            values[key] = matches[0]
+    if result["missing_fields"] or result["duplicate_fields"]:
+        return result
+    result["mode"] = values["mode"].strip().lower()
+    result["counts"] = {
+        "total": int(values["total"]),
+        "passed": int(values["passed"]),
+        "failed": int(values["failed"]),
+    }
+    return result
+
+
+def _preview_campaign_match(
+    runtime_root: Path,
+    *,
+    profile: str,
+    queue_state: dict[str, Any],
+    preview_paths: Iterable[Path],
+) -> dict[str, Any]:
+    state_path = runtime_root / QUEUE_SAFETY_MANIFEST
+    result: dict[str, Any] = {
+        "safe": False,
+        "snapshot_type": "",
+        "takeover_id": "",
+        "provenance_path": "",
+        "failed_predicates": [],
+    }
+    if not state_path.is_file():
+        result["failed_predicates"].append("active_campaign_state_exists")
+        return result
+    try:
+        manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        result["failed_predicates"].append("active_campaign_state_readable")
+        return result
+    if not isinstance(manifest, dict):
+        result["failed_predicates"].append("active_campaign_state_object")
+        return result
+    snapshot_type = str(manifest.get("snapshot_type") or "").strip()
+    takeover_id = str(manifest.get("takeover_id") or "").strip()
+    result["snapshot_type"] = snapshot_type
+    result["takeover_id"] = takeover_id
+    manifest_profile = str(manifest.get("profile") or "").strip()
+    if manifest_profile and manifest_profile != profile:
+        result["failed_predicates"].append("active_campaign_profile_match")
+
+    provenance_path: Path | None = None
+    provenance: dict[str, Any] = {}
+    if snapshot_type == "emergency_takeover":
+        if manifest_profile != profile:
+            result["failed_predicates"].append(
+                "emergency_snapshot_profile_match"
+            )
+        if str(manifest.get("status") or "").strip() != "awaiting_preview_validation":
+            result["failed_predicates"].append(
+                "emergency_snapshot_awaiting_preview_validation"
+            )
+        if not takeover_id:
+            result["failed_predicates"].append("emergency_takeover_id_present")
+        source_files = manifest.get("files")
+        intended_record = (
+            source_files.get("intended_source")
+            if isinstance(source_files, dict)
+            else None
+        )
+        if not isinstance(intended_record, dict):
+            result["failed_predicates"].append(
+                "emergency_snapshot_queue_record_present"
+            )
+        else:
+            if (
+                str(intended_record.get("email_fingerprint") or "").strip()
+                != str(queue_state["fingerprint"])
+            ):
+                result["failed_predicates"].append(
+                    "emergency_snapshot_queue_fingerprint_match"
+                )
+            try:
+                snapshot_queue_rows = int(intended_record.get("row_count"))
+            except (TypeError, ValueError):
+                snapshot_queue_rows = -1
+            if snapshot_queue_rows != int(queue_state["row_count"]):
+                result["failed_predicates"].append(
+                    "emergency_snapshot_queue_count_match"
+                )
+        provenance_path = _resolve_runtime_path(
+            runtime_root,
+            manifest.get("provenance_manifest_path"),
+        )
+        result["provenance_path"] = str(provenance_path or "")
+        if provenance_path is None or not provenance_path.is_file():
+            result["failed_predicates"].append("emergency_provenance_exists")
+        else:
+            try:
+                loaded = json.loads(provenance_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                result["failed_predicates"].append("emergency_provenance_readable")
+            else:
+                if not isinstance(loaded, dict):
+                    result["failed_predicates"].append(
+                        "emergency_provenance_object"
+                    )
+                else:
+                    provenance = loaded
+        if provenance:
+            if (
+                str(provenance.get("status") or "").strip()
+                != "awaiting_preview_validation"
+            ):
+                result["failed_predicates"].append(
+                    "emergency_provenance_awaiting_preview_validation"
+                )
+            if str(provenance.get("takeover_id") or "").strip() != takeover_id:
+                result["failed_predicates"].append(
+                    "emergency_provenance_takeover_id_match"
+                )
+            if str(provenance.get("profile") or "").strip() != profile:
+                result["failed_predicates"].append(
+                    "emergency_provenance_profile_match"
+                )
+            try:
+                provenance_queue_rows = int(provenance.get("queue_row_count"))
+            except (TypeError, ValueError):
+                provenance_queue_rows = -1
+            if provenance_queue_rows != int(queue_state["row_count"]):
+                result["failed_predicates"].append(
+                    "emergency_provenance_queue_count_match"
+                )
+            if (
+                str(provenance.get("queue_fingerprint") or "").strip()
+                != str(queue_state["fingerprint"])
+            ):
+                result["failed_predicates"].append(
+                    "emergency_provenance_queue_fingerprint_match"
+                )
+            try:
+                expected_mode = _profile_validation_mode(profile)
+            except HandoffError:
+                result["failed_predicates"].append(
+                    "emergency_profile_validation_mode_known"
+                )
+            else:
+                if (
+                    str(provenance.get("preview_validation_mode") or "")
+                    .strip()
+                    .lower()
+                    != expected_mode
+                ):
+                    result["failed_predicates"].append(
+                        "emergency_provenance_validation_mode_match"
+                    )
+
+    ownership_floor = max(
+        state_path.stat().st_mtime_ns,
+        provenance_path.stat().st_mtime_ns
+        if provenance_path is not None and provenance_path.is_file()
+        else 0,
+    )
+    for path in preview_paths:
+        if path.is_file() and path.stat().st_mtime_ns < ownership_floor:
+            result["failed_predicates"].append(
+                f"preview_artifact_current:{path.name}"
+            )
+    result["safe"] = not result["failed_predicates"]
+    return result
+
+
 def _preview_safety(
     runtime_root: Path,
     profile: str,
@@ -923,35 +1219,109 @@ def _preview_safety(
     summary_path = preview_dir / f"{profile}_message_preview_summary.txt"
     queue_rows = int(queue_state["row_count"])
     queue_emails = set(queue_state["emails"])
-    preview_rows = _csv_count(preview_path) if preview_path.is_file() else 0
-    preview_emails = _read_email_set(preview_path)
-    validated_rows = _csv_count(validated_path) if validated_path.is_file() else 0
-    validated_emails = _read_email_set(validated_path)
-    failed_rows = _csv_count(failed_path) if failed_path.is_file() else -1
-    summary_counts: dict[str, int] = {}
-    if summary_path.is_file():
-        text = summary_path.read_text(encoding="utf-8")
-        for key in ("total", "passed", "failed"):
-            match = re.search(rf"(?im)^{key}\s+rows:\s*(\d+)\s*$", text)
-            if match:
-                summary_counts[key] = int(match.group(1))
-    summary_matches = summary_counts == {
-        "total": queue_rows,
-        "passed": queue_rows,
-        "failed": 0,
-    }
-    exact_match = (
-        preview_path.is_file()
-        and validated_path.is_file()
-        and failed_path.is_file()
-        and summary_path.is_file()
-        and preview_rows == queue_rows
-        and validated_rows == queue_rows
-        and preview_emails == queue_emails
-        and validated_emails == queue_emails
-        and failed_rows == 0
-        and summary_matches
+    generated = _read_preview_csv(
+        preview_path,
+        required_fields=PREVIEW_GENERATED_REQUIRED_FIELDS,
+        require_pass=False,
     )
+    validated = _read_preview_csv(
+        validated_path,
+        required_fields=PREVIEW_VALIDATED_REQUIRED_FIELDS,
+        require_pass=True,
+    )
+    failed = _read_preview_csv(
+        failed_path,
+        required_fields=PREVIEW_VALIDATED_REQUIRED_FIELDS,
+        require_pass=False,
+    )
+    summary = _read_preview_summary(summary_path)
+    try:
+        expected_mode = _profile_validation_mode(profile)
+    except HandoffError:
+        expected_mode = ""
+    campaign = _preview_campaign_match(
+        runtime_root,
+        profile=profile,
+        queue_state=queue_state,
+        preview_paths=(preview_path, validated_path, failed_path, summary_path),
+    )
+    failed_predicates: list[str] = []
+    for label, report in (
+        ("generated", generated),
+        ("validated", validated),
+        ("failed", failed),
+    ):
+        if not report["exists"]:
+            failed_predicates.append(f"{label}_file_exists")
+        if report["parse_error"]:
+            failed_predicates.append(
+                f"{label}_csv_parse:{report['parse_error']}"
+            )
+        if report["missing_fields"]:
+            failed_predicates.append(
+                f"{label}_required_columns:{','.join(report['missing_fields'])}"
+            )
+        for metric, predicate in (
+            ("extra_column_rows", "no_extra_columns"),
+            ("blank_email_rows", "no_blank_emails"),
+            ("malformed_email_rows", "valid_emails"),
+            ("conflicting_email_rows", "email_authoremail_match"),
+            ("duplicate_email_rows", "unique_emails"),
+        ):
+            if int(report[metric]):
+                failed_predicates.append(
+                    f"{label}_{predicate}:{report[metric]}"
+                )
+    if int(validated["non_pass_rows"]):
+        failed_predicates.append(
+            f"validated_all_rows_pass:{validated['non_pass_rows']}"
+        )
+    if int(generated["row_count"]) != queue_rows:
+        failed_predicates.append("generated_row_count_matches_queue")
+    if int(validated["row_count"]) != queue_rows:
+        failed_predicates.append("validated_row_count_matches_queue")
+    if set(generated["emails"]) != queue_emails:
+        failed_predicates.append("generated_email_set_matches_queue")
+    if set(validated["emails"]) != queue_emails:
+        failed_predicates.append("validated_email_set_matches_queue")
+    queue_fingerprint = str(queue_state["fingerprint"])
+    if str(generated["fingerprint"]) != queue_fingerprint:
+        failed_predicates.append("generated_fingerprint_matches_queue")
+    if str(validated["fingerprint"]) != queue_fingerprint:
+        failed_predicates.append("validated_fingerprint_matches_queue")
+    if int(failed["row_count"]) != 0:
+        failed_predicates.append("failed_preview_has_zero_rows")
+    if not summary["exists"]:
+        failed_predicates.append("summary_file_exists")
+    if summary["parse_error"]:
+        failed_predicates.append(f"summary_parse:{summary['parse_error']}")
+    if summary["missing_fields"]:
+        failed_predicates.append(
+            f"summary_fields_present:{','.join(summary['missing_fields'])}"
+        )
+    if summary["duplicate_fields"]:
+        failed_predicates.append(
+            f"summary_fields_unique:{','.join(summary['duplicate_fields'])}"
+        )
+    summary_counts = dict(summary["counts"])
+    if summary_counts:
+        if summary_counts["total"] != int(generated["row_count"]):
+            failed_predicates.append("summary_total_matches_generated")
+        if summary_counts["total"] != int(validated["row_count"]):
+            failed_predicates.append("summary_total_matches_validated")
+        if summary_counts["passed"] != int(validated["row_count"]):
+            failed_predicates.append("summary_passed_matches_validated")
+        if summary_counts["failed"] != int(failed["row_count"]):
+            failed_predicates.append("summary_failed_matches_failed_preview")
+        if summary_counts["failed"] != 0:
+            failed_predicates.append("summary_failed_is_zero")
+    if summary["mode"] and summary["mode"] != expected_mode:
+        failed_predicates.append("summary_pitch_mode_matches_profile")
+    if not expected_mode:
+        failed_predicates.append("profile_validation_mode_known")
+    failed_predicates.extend(campaign["failed_predicates"])
+    failed_predicates = list(dict.fromkeys(failed_predicates))
+    exact_match = not failed_predicates
     return {
         "safe": exact_match,
         "profile": profile,
@@ -959,26 +1329,42 @@ def _preview_safety(
         "queue_row_count": queue_rows,
         "queue_fingerprint": queue_state["fingerprint"],
         "preview_path": str(preview_path),
-        "preview_row_count": preview_rows,
-        "preview_fingerprint": _email_fingerprint(preview_emails),
+        "preview_row_count": generated["row_count"],
+        "preview_fingerprint": generated["fingerprint"],
         "validated_path": str(validated_path),
-        "validated_row_count": validated_rows,
-        "validated_fingerprint": _email_fingerprint(validated_emails),
+        "validated_row_count": validated["row_count"],
+        "validated_fingerprint": validated["fingerprint"],
         "failed_path": str(failed_path),
-        "failed_row_count": failed_rows,
+        "failed_row_count": failed["row_count"] if failed["exists"] else -1,
         "summary_path": str(summary_path),
         "summary_counts": summary_counts,
+        "summary_mode": summary["mode"],
+        "expected_summary_mode": expected_mode,
+        "generated_validation": {
+            key: value for key, value in generated.items() if key != "emails"
+        },
+        "validated_validation": {
+            key: value for key, value in validated.items() if key != "emails"
+        },
+        "failed_validation": {
+            key: value for key, value in failed.items() if key != "emails"
+        },
+        "campaign_match": campaign,
+        "failed_predicates": failed_predicates,
         "message": (
             ""
             if exact_match
             else (
                 f"profile={profile} queue={queue_path} queue_rows={queue_rows} "
                 f"queue_fingerprint={queue_state['fingerprint']} preview={preview_path} "
-                f"preview_rows={preview_rows} preview_fingerprint={_email_fingerprint(preview_emails)} "
-                f"validated={validated_path} validated_rows={validated_rows} "
-                f"failed={failed_path} failed_rows={failed_rows} summary={summary_path} "
-                "reason=current queue requires a matching generated and validated preview; "
-                "regenerate and validate the active profile preview"
+                f"preview_rows={generated['row_count']} "
+                f"preview_fingerprint={generated['fingerprint']} "
+                f"validated={validated_path} validated_rows={validated['row_count']} "
+                f"validated_fingerprint={validated['fingerprint']} "
+                f"failed={failed_path} failed_rows="
+                f"{failed['row_count'] if failed['exists'] else -1} "
+                f"summary={summary_path} summary_mode={summary['mode'] or 'missing'} "
+                f"failed_predicates={','.join(failed_predicates)}"
             )
         ),
     }

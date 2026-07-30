@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import io
 import shutil
@@ -26,6 +27,51 @@ def _run(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _write_preview_fixture(
+    repo: Path,
+    emails: list[str],
+    *,
+    mode: str = "astra_visual",
+) -> None:
+    previews = repo / "data/message_previews"
+    previews.mkdir(parents=True, exist_ok=True)
+    generated_header = (
+        "CampaignType,Email,AuthorEmail,AuthorName,FirstName,BookTitle,"
+        "PersonalizedOpeningLine,Subject,Body\n"
+    )
+    generated_rows = "".join(
+        f"cold,{email},{email},Test Author,Test,Book,Opening,Subject,Body\n"
+        for email in emails
+    )
+    validated_header = (
+        "Email,AuthorEmail,AuthorName,FirstName,BookTitle,"
+        "PersonalizedOpeningLine,Subject,Body,ValidationStatus,FailureReasons\n"
+    )
+    validated_rows = "".join(
+        f"{email},{email},Test Author,Test,Book,Opening,Subject,Body,PASS,\n"
+        for email in emails
+    )
+    (previews / "private_jc_message_preview.csv").write_text(
+        generated_header + generated_rows,
+        encoding="utf-8",
+    )
+    (previews / "private_jc_message_preview_validated.csv").write_text(
+        validated_header + validated_rows,
+        encoding="utf-8",
+    )
+    (previews / "private_jc_message_preview_failed.csv").write_text(
+        validated_header,
+        encoding="utf-8",
+    )
+    (previews / "private_jc_message_preview_summary.txt").write_text(
+        f"pitch mode: {mode}\n"
+        f"total rows checked: {len(emails)}\n"
+        f"passed rows: {len(emails)}\n"
+        "failed rows: 0\n",
+        encoding="utf-8",
+    )
+
+
 def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = None) -> None:
     shards = repo / "data/shards"
     logs = repo / "data/logs"
@@ -47,27 +93,6 @@ def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = No
         )
     (important / "leads_triaged_reject.csv").write_text(
         "Email,FirstName,BookTitle\n",
-        encoding="utf-8",
-    )
-    preview_header = "Email,AuthorEmail,AuthorName,FirstName,BookTitle,Subject,Body\n"
-    preview_rows = "".join(
-        f"{email},{email},Test Author,Test,Book,Subject,Body\n"
-        for email in emails
-    )
-    for name in (
-        "private_jc_message_preview.csv",
-        "private_jc_message_preview_validated.csv",
-    ):
-        (previews / name).write_text(
-            preview_header + preview_rows,
-            encoding="utf-8",
-        )
-    (previews / "private_jc_message_preview_failed.csv").write_text(
-        preview_header,
-        encoding="utf-8",
-    )
-    (previews / "private_jc_message_preview_summary.txt").write_text(
-        f"total rows: {len(emails)}\npassed rows: {len(emails)}\nfailed rows: 0\n",
         encoding="utf-8",
     )
     (logs / "private_jc_log.csv").write_text(
@@ -92,6 +117,7 @@ def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = No
         ),
         encoding="utf-8",
     )
+    _write_preview_fixture(repo, emails)
     with sqlite3.connect(state / "send_idempotency.sqlite3") as db:
         db.execute("CREATE TABLE IF NOT EXISTS sends (email TEXT PRIMARY KEY)")
         for email in sent or []:
@@ -1063,6 +1089,201 @@ def test_safe_current_queue_initializes_after_matching_validated_preview(
     assert result["status"] == runtime_authority.ACTIVE_STATUS
     assert result["authorized_machine"] == "windows-wsl"
     assert runtime_authority.load_authority(repo)["bundle_id"] == result["bundle_id"]
+
+
+def test_real_preview_schema_with_2574_matching_recipients_is_safe(tmp_path):
+    repo = tmp_path / "repo"
+    emails = [f"recipient-{index:04d}@example.test" for index in range(2574)]
+    _write_runtime(repo, emails)
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+    preview = safety["profiles"][0]["preview"]
+
+    assert safety["safe"] is True
+    assert preview["safe"] is True
+    assert preview["preview_row_count"] == 2574
+    assert preview["validated_row_count"] == 2574
+    assert preview["failed_row_count"] == 0
+    assert preview["queue_fingerprint"] == preview["preview_fingerprint"]
+    assert preview["queue_fingerprint"] == preview["validated_fingerprint"]
+    assert preview["summary_counts"] == {
+        "total": 2574,
+        "passed": 2574,
+        "failed": 0,
+    }
+    assert preview["summary_mode"] == "astra_visual"
+    assert preview["failed_predicates"] == []
+
+
+def test_preview_email_and_author_email_same_normalized_recipient_is_safe(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["recipient@example.test"])
+    for name in (
+        "private_jc_message_preview.csv",
+        "private_jc_message_preview_validated.csv",
+    ):
+        path = repo / "data/message_previews" / name
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "recipient@example.test,recipient@example.test",
+                "RECIPIENT@EXAMPLE.TEST,recipient@example.test",
+            ),
+            encoding="utf-8",
+        )
+
+    preview = runtime_handoff.recompute_queue_safety(repo)["profiles"][0]["preview"]
+
+    assert preview["safe"] is True
+    assert preview["generated_validation"]["conflicting_email_rows"] == 0
+    assert preview["validated_validation"]["conflicting_email_rows"] == 0
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_predicate"),
+    [
+        ("conflicting_emails", "generated_email_authoremail_match:1"),
+        ("validated_fingerprint", "validated_fingerprint_matches_queue"),
+        ("non_pass", "validated_all_rows_pass:1"),
+        ("failed_data", "failed_preview_has_zero_rows"),
+        ("summary_count", "summary_total_matches_generated"),
+        ("wrong_mode", "summary_pitch_mode_matches_profile"),
+        ("missing_column", "validated_required_columns:validationstatus"),
+        ("malformed_email", "generated_valid_emails:1"),
+        ("duplicate_email", "generated_unique_emails:1"),
+    ],
+)
+def test_invalid_preview_predicate_refuses_without_runtime_writes(
+    tmp_path,
+    monkeypatch,
+    case,
+    expected_predicate,
+):
+    repo = tmp_path / "repo"
+    emails = ["first@example.test", "second@example.test"]
+    _write_runtime(repo, emails)
+    preview_dir = repo / "data/message_previews"
+    generated = preview_dir / "private_jc_message_preview.csv"
+    validated = preview_dir / "private_jc_message_preview_validated.csv"
+    failed = preview_dir / "private_jc_message_preview_failed.csv"
+    summary = preview_dir / "private_jc_message_preview_summary.txt"
+
+    if case == "conflicting_emails":
+        generated.write_text(
+            generated.read_text(encoding="utf-8").replace(
+                "first@example.test,first@example.test",
+                "first@example.test,other@example.test",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "validated_fingerprint":
+        validated.write_text(
+            validated.read_text(encoding="utf-8").replace(
+                "first@example.test,first@example.test",
+                "other@example.test,other@example.test",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "non_pass":
+        validated.write_text(
+            validated.read_text(encoding="utf-8").replace(",PASS,", ",FAIL,", 1),
+            encoding="utf-8",
+        )
+    elif case == "failed_data":
+        failed.write_text(
+            failed.read_text(encoding="utf-8")
+            + "first@example.test,first@example.test,Test Author,Test,Book,"
+            "Opening,Subject,Body,FAIL,synthetic\n",
+            encoding="utf-8",
+        )
+    elif case == "summary_count":
+        summary.write_text(
+            summary.read_text(encoding="utf-8").replace(
+                "total rows checked: 2",
+                "total rows checked: 1",
+            ),
+            encoding="utf-8",
+        )
+    elif case == "wrong_mode":
+        summary.write_text(
+            summary.read_text(encoding="utf-8").replace(
+                "pitch mode: astra_visual",
+                "pitch mode: consignment",
+            ),
+            encoding="utf-8",
+        )
+    elif case == "missing_column":
+        validated.write_text(
+            validated.read_text(encoding="utf-8").replace(
+                ",ValidationStatus,FailureReasons",
+                ",FailureReasons",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "malformed_email":
+        generated.write_text(
+            generated.read_text(encoding="utf-8").replace(
+                "first@example.test,first@example.test",
+                "invalid@@example.test,invalid@@example.test",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "duplicate_email":
+        generated.write_text(
+            generated.read_text(encoding="utf-8").replace(
+                "second@example.test,second@example.test",
+                "first@example.test,first@example.test",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    before = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+
+    with pytest.raises(runtime_handoff.HandoffError, match=expected_predicate):
+        runtime_handoff.initialize_authority(repo, machine="mac")
+
+    after = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not runtime_authority.authority_path(repo).exists()
+    assert not runtime_authority.generation_floor_path(repo).exists()
+
+
+def test_valid_emergency_takeover_preview_allows_initialization(emergency_fixture):
+    fixture = emergency_fixture
+    _emergency_run(fixture)
+    with fixture["queue_path"].open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        emails = [str(row["Email"]).strip() for row in csv.DictReader(handle)]
+    _write_preview_fixture(fixture["repo"], emails)
+
+    result = runtime_handoff.initialize_authority(
+        fixture["repo"],
+        machine="mac",
+    )
+
+    assert result["status"] == runtime_authority.ACTIVE_STATUS
+    assert result["authorized_machine"] == "mac"
+    safety = runtime_handoff.recompute_queue_safety(fixture["repo"])
+    assert safety["safe"] is True
+    assert safety["profiles"][0]["preview"]["campaign_match"]["safe"] is True
+    assert safety["profiles"][0]["preview"]["failed_predicates"] == []
 
 
 def test_sender_authority_enforcement_and_preflight_inspection(repos):
