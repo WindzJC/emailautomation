@@ -2345,9 +2345,24 @@ def load_ledger_blocked_emails(path: Path) -> Set[str]:
         ).fetchone()
         if table is None:
             raise RuntimeError("Lead ledger is missing the lead_ledger table.")
+        schema_rows = conn.execute("PRAGMA table_info(lead_ledger)").fetchall()
+        columns = {
+            str(row[1] or "").strip().lower()
+            for row in schema_rows
+            if len(row) > 1 and str(row[1] or "").strip()
+        }
+        if "normalized_email" in columns:
+            email_column = '"normalized_email"'
+        elif "email" in columns:
+            email_column = '"email"'
+        else:
+            raise RuntimeError(
+                "Lead ledger lead_ledger table has neither normalized_email "
+                "nor email column."
+            )
         rows = conn.execute(
-            """
-            SELECT normalized_email
+            f"""
+            SELECT {email_column}
             FROM lead_ledger
             WHERE suppressed = 1
                OR lower(trim(last_outcome)) IN (
@@ -2356,10 +2371,18 @@ def load_ledger_blocked_emails(path: Path) -> Set[str]:
                )
             """
         )
+        malformed_count = 0
         for (raw_email,) in rows:
             email = norm_email(raw_email or "")
-            if email:
-                blocked.add(email)
+            if not email or not BOOK_TITLE_EMAIL_RE.fullmatch(email):
+                malformed_count += 1
+                continue
+            blocked.add(email)
+        if malformed_count:
+            raise RuntimeError(
+                "Lead ledger lead_ledger table contains "
+                f"{malformed_count} malformed blocked email value(s)."
+            )
     return blocked
 
 

@@ -533,7 +533,7 @@ class SendShardTests(unittest.TestCase):
                 conn.execute(
                     """
                     CREATE TABLE lead_ledger (
-                        normalized_email TEXT,
+                        email TEXT,
                         suppressed INTEGER,
                         last_outcome TEXT
                     )
@@ -618,7 +618,7 @@ class SendShardTests(unittest.TestCase):
                 conn.execute(
                     """
                     CREATE TABLE lead_ledger (
-                        normalized_email TEXT,
+                        email TEXT,
                         suppressed INTEGER,
                         last_outcome TEXT
                     )
@@ -658,6 +658,159 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(
                 "ledger_blocked",
                 refresher.classification("ledger@example.test"),
+            )
+
+    def test_ledger_blocks_with_production_email_schema_and_normalizes_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        lead_id TEXT,
+                        email TEXT,
+                        full_name TEXT,
+                        first_name TEXT,
+                        source_file TEXT,
+                        source_row_hash TEXT,
+                        first_seen_at TEXT,
+                        last_seen_at TEXT,
+                        current_stage TEXT,
+                        current_status TEXT,
+                        score REAL,
+                        reason_codes TEXT,
+                        suppressed INTEGER,
+                        suppression_reason TEXT,
+                        last_dispatch_at TEXT,
+                        dispatch_count INTEGER,
+                        last_outcome TEXT,
+                        last_profile TEXT,
+                        operator_note TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO lead_ledger (
+                        lead_id, email, suppressed, last_outcome
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    ("blocked", "  BLOCKED@EXAMPLE.TEST  ", 1, ""),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO lead_ledger (
+                        lead_id, email, suppressed, last_outcome
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    ("ordinary", "ordinary@example.test", 0, ""),
+                )
+                conn.commit()
+
+            blocked = send_shard.load_ledger_blocked_emails(ledger)
+
+            self.assertEqual({"blocked@example.test"}, blocked)
+            self.assertNotIn("ordinary@example.test", blocked)
+
+    def test_ledger_prefers_newer_normalized_email_column_when_both_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        email TEXT,
+                        normalized_email TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO lead_ledger VALUES (?, ?, ?, ?)",
+                    (
+                        "noncanonical@example.test",
+                        "canonical@example.test",
+                        1,
+                        "",
+                    ),
+                )
+                conn.commit()
+
+            blocked = send_shard.load_ledger_blocked_emails(ledger)
+
+            self.assertEqual({"canonical@example.test"}, blocked)
+
+    def test_ledger_without_supported_email_column_refuses_clearly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        recipient_key TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.commit()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "neither normalized_email nor email column",
+            ):
+                send_shard.load_ledger_blocked_emails(ledger)
+
+    def test_ledger_malformed_blocked_email_refuses_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        email TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO lead_ledger VALUES (?, ?, ?)",
+                    ("invalid@@example.test", 1, ""),
+                )
+                conn.commit()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "1 malformed blocked email value",
+            ):
+                send_shard.load_ledger_blocked_emails(ledger)
+
+    def test_ledger_bad_outcome_still_blocks_without_suppressed_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        email TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO lead_ledger VALUES (?, ?, ?)",
+                    ("bad-outcome@example.test", 0, "bounced"),
+                )
+                conn.commit()
+
+            self.assertEqual(
+                {"bad-outcome@example.test"},
+                send_shard.load_ledger_blocked_emails(ledger),
             )
 
     def test_profile_runtime_lock_prevents_duplicate_profile_acquire(self) -> None:
@@ -836,6 +989,178 @@ class SendShardTests(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             send_shard.main()
         return stdout.getvalue(), send_mock
+
+    def test_global_block_refresh_schema_failure_prevents_smtp_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            base, _shards, logs, state, csv_path, *_rest = fixture
+            original_queue = csv_path.read_bytes()
+            ledger = state / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        recipient_key TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.commit()
+
+            output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            send_mock.assert_not_called()
+            self.assertEqual(original_queue, csv_path.read_bytes())
+            self.assertIn("total_sent_attempted=0", output)
+            log_text = (logs / "sendgrid_annette_log.csv").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("event_type=DEFINITELY_NOT_SUBMITTED", log_text)
+            self.assertIn("phase=global_block_refresh", log_text)
+            self.assertIn(
+                "neither normalized_email nor email column",
+                log_text,
+            )
+
+    def test_private_smtp_submission_is_not_opened_when_ledger_refresh_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "data/shards"
+            logs = root / "data/logs"
+            state = root / "data/state"
+            for path in (shards, logs, state):
+                path.mkdir(parents=True)
+            queue = shards / "recipients_private_jc.csv"
+            self._write_csv(
+                queue,
+                ["Email", "FirstName", "BookTitle"],
+                [
+                    {
+                        "Email": "recipient@example.test",
+                        "FirstName": "Recipient",
+                        "BookTitle": "Synthetic Book",
+                    }
+                ],
+            )
+            log = logs / "private_jc_log.csv"
+            self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
+            unsubscribed = state / "unsubscribed.csv"
+            suppressed = state / "suppressed.csv"
+            sendgrid_suppressed = state / "sendgrid_suppressions.csv"
+            self._write_csv(unsubscribed, ["Email"], [])
+            self._write_csv(suppressed, ["Email"], [])
+            self._write_csv(
+                sendgrid_suppressed,
+                [
+                    "email",
+                    "status",
+                    "code",
+                    "reason",
+                    "last_seen_utc",
+                    "is_permanent",
+                    "ttl_until_utc",
+                ],
+                [],
+            )
+            ledger = state / "lead_ledger.sqlite3"
+            with send_shard.sqlite3.connect(ledger) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        recipient_key TEXT,
+                        suppressed INTEGER,
+                        last_outcome TEXT
+                    )
+                    """
+                )
+                conn.commit()
+            profile = {
+                **send_shard.PROFILES["private_jc"],
+                "interval": 0,
+                "cooldown_seconds": 0,
+                "repeat": False,
+                "max_messages_1h": 0,
+                "stop_at_local": "",
+                "always_send": "",
+                "global_dedupe": False,
+                "prune_sent": False,
+            }
+            stdout = io.StringIO()
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(settings, "APP_ROOT", root))
+                stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "WEBHOOK_EVENTS_PATH",
+                        state / "sendgrid_events.jsonl",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(settings, "LEAD_LEDGER_DB_PATH", ledger)
+                )
+                stack.enter_context(patch.object(send_shard, "ROOT", root))
+                stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+                stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+                stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "DEFAULT_UNSUB_CSV",
+                        unsubscribed,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "DEFAULT_SUPPRESS_CSV",
+                        suppressed,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        send_shard,
+                        "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+                        sendgrid_suppressed,
+                    )
+                )
+                smtp_login = stack.enter_context(
+                    patch.object(send_shard, "smtp_login")
+                )
+                stack.enter_context(
+                    patch.dict(
+                        send_shard.PROFILES,
+                        {"private_jc": profile},
+                        clear=False,
+                    )
+                )
+                stack.enter_context(
+                    patch.dict(
+                        send_shard.os.environ,
+                        {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
+                        clear=False,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        sys,
+                        "argv",
+                        ["send_shard.py", "--profile", "private_jc"],
+                    )
+                )
+                stack.enter_context(redirect_stdout(stdout))
+                send_shard.main()
+
+            smtp_login.assert_not_called()
+            self.assertIn("total_sent_attempted=0", stdout.getvalue())
+            log_text = log.read_text(encoding="utf-8")
+            self.assertIn("phase=global_block_refresh", log_text)
+            self.assertIn("event_type=DEFINITELY_NOT_SUBMITTED", log_text)
 
     def test_preflight_reports_prune_without_mutating_shard_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
