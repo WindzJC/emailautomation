@@ -961,6 +961,8 @@ def _read_preview_csv(
         "exists": path.is_file(),
         "row_count": 0,
         "emails": set(),
+        "ordered_emails": [],
+        "rows_by_email": {},
         "fingerprint": "",
         "headers": [],
         "missing_fields": [],
@@ -996,6 +998,8 @@ def _read_preview_csv(
             if result["missing_fields"]:
                 return result
             emails: set[str] = set()
+            ordered_emails: list[str] = []
+            rows_by_email: dict[str, dict[str, str]] = {}
             for row in reader:
                 result["row_count"] += 1
                 if None in row and row[None]:
@@ -1021,6 +1025,11 @@ def _read_preview_csv(
                 if email in emails:
                     result["duplicate_email_rows"] += 1
                 emails.add(email)
+                ordered_emails.append(email)
+                rows_by_email[email] = {
+                    header: str(row.get(header) or "")
+                    for header in headers
+                }
                 if require_pass:
                     status = str(
                         row.get(field_map["validationstatus"]) or ""
@@ -1028,6 +1037,8 @@ def _read_preview_csv(
                     if status != "PASS":
                         result["non_pass_rows"] += 1
             result["emails"] = emails
+            result["ordered_emails"] = ordered_emails
+            result["rows_by_email"] = rows_by_email
             result["fingerprint"] = _email_fingerprint(emails)
     except (OSError, UnicodeError, csv.Error) as exc:
         result["parse_error"] = type(exc).__name__
@@ -1173,6 +1184,239 @@ def _read_successfully_sent_emails(path: Path) -> set[str]:
         return set()
 
 
+def _read_ordered_recipient_rows(path: Path | None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "safe": False,
+        "headers": [],
+        "ordered_emails": [],
+        "rows_by_email": {},
+        "fingerprint": "",
+        "failed_predicates": [],
+    }
+    if path is None or not path.is_file():
+        result["failed_predicates"].append("file_exists")
+        return result
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream, strict=True)
+            headers = [str(name or "").strip() for name in (reader.fieldnames or [])]
+            lowered = [name.casefold() for name in headers]
+            if not headers or any(not name for name in headers):
+                result["failed_predicates"].append("headers_present")
+                return result
+            if len(set(lowered)) != len(lowered):
+                result["failed_predicates"].append("headers_unique")
+                return result
+            field_map = dict(zip(lowered, headers))
+            email_field = field_map.get("email")
+            author_email_field = field_map.get("authoremail")
+            if email_field is None:
+                result["failed_predicates"].append("email_column_present")
+                return result
+
+            ordered_emails: list[str] = []
+            rows_by_email: dict[str, dict[str, str]] = {}
+            for row in reader:
+                if None in row and row[None]:
+                    result["failed_predicates"].append("no_extra_columns")
+                    continue
+                normalized_row = {
+                    header: str(row.get(header) or "")
+                    for header in headers
+                }
+                email = normalized_row[email_field].strip().lower()
+                author_email = (
+                    normalized_row[author_email_field].strip().lower()
+                    if author_email_field is not None
+                    else ""
+                )
+                if not email:
+                    result["failed_predicates"].append("no_blank_emails")
+                    continue
+                if not EMAIL_RE.fullmatch(email):
+                    result["failed_predicates"].append("valid_emails")
+                    continue
+                if author_email:
+                    if not EMAIL_RE.fullmatch(author_email):
+                        result["failed_predicates"].append("valid_emails")
+                        continue
+                    if author_email != email:
+                        result["failed_predicates"].append(
+                            "email_authoremail_match"
+                        )
+                        continue
+                if email in rows_by_email:
+                    result["failed_predicates"].append("unique_emails")
+                    continue
+                ordered_emails.append(email)
+                rows_by_email[email] = normalized_row
+    except (OSError, UnicodeError, csv.Error) as exc:
+        result["failed_predicates"].append(
+            f"csv_readable:{type(exc).__name__}"
+        )
+        return result
+
+    result["headers"] = headers
+    result["ordered_emails"] = ordered_emails
+    result["rows_by_email"] = rows_by_email
+    result["fingerprint"] = _email_fingerprint(ordered_emails)
+    result["failed_predicates"] = list(
+        dict.fromkeys(result["failed_predicates"])
+    )
+    result["safe"] = not result["failed_predicates"]
+    return result
+
+
+def _emergency_terminal_outcomes(
+    path: Path,
+    removed_emails: list[str],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "safe": False,
+        "sent_rows": 0,
+        "authoritative_skip_rows": 0,
+        "missing_rows": 0,
+        "generic_rows": 0,
+        "ambiguous_rows": 0,
+        "failed_predicates": [],
+    }
+    if not path.is_file():
+        result["failed_predicates"].append("terminal_log_exists")
+        return result
+
+    removed = set(removed_emails)
+    outcomes: dict[str, list[str]] = {
+        email: []
+        for email in removed_emails
+    }
+    authoritative_skip = re.compile(
+        r"(?:^|\s)event_type="
+        r"SKIPPED_ALREADY_SENT_AUTHORITATIVE(?:\s|$)"
+    )
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream, strict=True)
+            headers = [str(name or "").strip() for name in (reader.fieldnames or [])]
+            lowered = [name.casefold() for name in headers]
+            if not headers or any(not name for name in headers):
+                result["failed_predicates"].append(
+                    "terminal_log_headers_present"
+                )
+                return result
+            if len(set(lowered)) != len(lowered):
+                result["failed_predicates"].append(
+                    "terminal_log_headers_unique"
+                )
+                return result
+            field_map = dict(zip(lowered, headers))
+            missing = {
+                name
+                for name in ("email", "status", "info")
+                if name not in field_map
+            }
+            if missing:
+                result["failed_predicates"].append(
+                    "terminal_log_required_columns"
+                )
+                return result
+
+            for row in reader:
+                if None in row and row[None]:
+                    result["failed_predicates"].append(
+                        "terminal_log_no_extra_columns"
+                    )
+                    continue
+                email = str(
+                    row.get(field_map["email"]) or ""
+                ).strip().lower()
+                if email and not EMAIL_RE.fullmatch(email):
+                    result["failed_predicates"].append(
+                        "terminal_log_valid_emails"
+                    )
+                    continue
+                if email not in removed:
+                    continue
+                status = str(
+                    row.get(field_map["status"]) or ""
+                ).strip().upper()
+                info = str(row.get(field_map["info"]) or "").strip()
+                if status == "SENT":
+                    outcomes[email].append("SENT")
+                elif status == "SKIP" and authoritative_skip.search(info):
+                    outcomes[email].append(
+                        "SKIPPED_ALREADY_SENT_AUTHORITATIVE"
+                    )
+                else:
+                    outcomes[email].append("NON_AUTHORITATIVE")
+    except (OSError, UnicodeError, csv.Error) as exc:
+        result["failed_predicates"].append(
+            f"terminal_log_readable:{type(exc).__name__}"
+        )
+        return result
+
+    for email in removed_emails:
+        history = outcomes[email]
+        if not history:
+            result["missing_rows"] += 1
+            continue
+        terminal = history[-1]
+        if terminal == "NON_AUTHORITATIVE":
+            result["generic_rows"] += 1
+            continue
+        if terminal == "SENT":
+            result["sent_rows"] += 1
+        elif terminal == "SKIPPED_ALREADY_SENT_AUTHORITATIVE":
+            result["authoritative_skip_rows"] += 1
+        else:
+            result["ambiguous_rows"] += 1
+
+    if result["missing_rows"]:
+        result["failed_predicates"].append(
+            "every_removed_recipient_has_terminal_result"
+        )
+    if result["generic_rows"]:
+        result["failed_predicates"].append(
+            "no_generic_or_non_authoritative_results"
+        )
+    if result["ambiguous_rows"]:
+        result["failed_predicates"].append(
+            "no_ambiguous_terminal_results"
+        )
+    result["failed_predicates"] = list(
+        dict.fromkeys(result["failed_predicates"])
+    )
+    result["safe"] = not result["failed_predicates"]
+    return result
+
+
+def _source_record_matches(
+    runtime_root: Path,
+    record: dict[str, Any] | None,
+    source_path: Path,
+    source_rows: dict[str, Any],
+) -> bool:
+    if not isinstance(record, dict):
+        return False
+    recorded_path = _resolve_runtime_path(
+        runtime_root,
+        record.get("path") or record.get("relative_path"),
+    )
+    if recorded_path is None or recorded_path.resolve() != source_path.resolve():
+        return False
+    try:
+        recorded_size = int(record.get("size"))
+        recorded_rows = int(record.get("row_count"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        recorded_size == source_path.stat().st_size
+        and recorded_rows == len(source_rows["ordered_emails"])
+        and str(record.get("sha256") or "").strip() == sha256_file(source_path)
+        and str(record.get("email_fingerprint") or "").strip()
+        == str(source_rows["fingerprint"])
+    )
+
+
 def _emergency_queue_progress_match(
     runtime_root: Path,
     *,
@@ -1181,13 +1425,22 @@ def _emergency_queue_progress_match(
     intended_record: dict[str, Any] | None,
     provenance: dict[str, Any],
     queue_state: dict[str, Any],
+    generated: dict[str, Any],
+    validated: dict[str, Any],
+    failed: dict[str, Any],
+    summary: dict[str, Any],
+    expected_mode: str,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "safe": False,
+        "verified_emergency_queue_progress": False,
         "original_rows": 0,
+        "preview_rows": 0,
         "current_rows": 0,
         "removed_rows": 0,
-        "missing_sent_rows": 0,
+        "terminal_sent_rows": 0,
+        "terminal_authoritative_skip_rows": 0,
+        "unresolved_terminal_rows": 0,
         "failed_predicates": [],
     }
 
@@ -1208,26 +1461,164 @@ def _emergency_queue_progress_match(
     intended_path = _resolve_runtime_path(runtime_root, intended_path_value)
     queue_path = _resolve_runtime_path(runtime_root, queue_path_value)
 
-    original_emails = _read_ordered_emails(intended_path)
-    current_emails = _read_ordered_emails(queue_path)
+    original = _read_ordered_recipient_rows(intended_path)
+    current = _read_ordered_recipient_rows(queue_path)
+    original_emails = list(original["ordered_emails"])
+    current_emails = list(current["ordered_emails"])
+    preview_emails = list(generated.get("ordered_emails") or [])
 
     result["original_rows"] = len(original_emails)
+    result["preview_rows"] = len(preview_emails)
     result["current_rows"] = len(current_emails)
 
-    if not original_emails:
-        result["failed_predicates"].append("original_queue_readable")
-
-    if not current_emails:
-        result["failed_predicates"].append("current_queue_readable")
+    if not original["safe"] or not original_emails:
+        result["failed_predicates"].append(
+            "immutable_source_rows_valid"
+        )
+    if not current["safe"] or not current_emails:
+        result["failed_predicates"].append(
+            "current_queue_rows_valid"
+        )
 
     if result["failed_predicates"]:
         return result
 
-    if len(set(original_emails)) != len(original_emails):
-        result["failed_predicates"].append("original_queue_unique")
+    provenance_sources = provenance.get("generated_sources")
+    provenance_intended = (
+        provenance_sources.get("intended_source")
+        if isinstance(provenance_sources, dict)
+        else None
+    )
+    if not _source_record_matches(
+        runtime_root,
+        intended_record,
+        intended_path,
+        original,
+    ):
+        result["failed_predicates"].append(
+            "snapshot_immutable_source_metadata_match"
+        )
+    if not _source_record_matches(
+        runtime_root,
+        provenance_intended,
+        intended_path,
+        original,
+    ):
+        result["failed_predicates"].append(
+            "provenance_immutable_source_metadata_match"
+        )
+    if (
+        str(provenance.get("queue_fingerprint") or "").strip()
+        != str(original["fingerprint"])
+    ):
+        result["failed_predicates"].append(
+            "provenance_original_queue_fingerprint_match"
+        )
+    try:
+        provenance_rows = int(provenance.get("queue_row_count"))
+    except (TypeError, ValueError):
+        provenance_rows = -1
+    if provenance_rows != len(original_emails):
+        result["failed_predicates"].append(
+            "provenance_original_queue_count_match"
+        )
 
-    if len(set(current_emails)) != len(current_emails):
-        result["failed_predicates"].append("current_queue_unique")
+    preview_validation_failures = []
+    for label, report in (
+        ("generated", generated),
+        ("validated", validated),
+        ("failed", failed),
+    ):
+        if (
+            not report.get("exists")
+            or report.get("parse_error")
+            or report.get("missing_fields")
+            or report.get("duplicate_headers")
+            or int(report.get("extra_column_rows") or 0)
+            or int(report.get("blank_email_rows") or 0)
+            or int(report.get("malformed_email_rows") or 0)
+            or int(report.get("conflicting_email_rows") or 0)
+            or int(report.get("duplicate_email_rows") or 0)
+        ):
+            preview_validation_failures.append(label)
+    if preview_validation_failures:
+        result["failed_predicates"].append(
+            "preview_artifacts_structurally_valid"
+        )
+    if int(validated.get("non_pass_rows") or 0):
+        result["failed_predicates"].append(
+            "validated_preview_all_pass"
+        )
+    if int(failed.get("row_count") or 0):
+        result["failed_predicates"].append(
+            "failed_preview_has_zero_rows"
+        )
+    if (
+        int(generated.get("row_count") or 0)
+        != int(validated.get("row_count") or 0)
+        or set(generated.get("emails") or set())
+        != set(validated.get("emails") or set())
+        or str(generated.get("fingerprint") or "")
+        != str(validated.get("fingerprint") or "")
+        or list(generated.get("ordered_emails") or [])
+        != list(validated.get("ordered_emails") or [])
+    ):
+        result["failed_predicates"].append(
+            "generated_validated_preview_match"
+        )
+    else:
+        generated_headers = {
+            str(header).casefold(): str(header)
+            for header in generated.get("headers") or []
+        }
+        validated_headers = {
+            str(header).casefold(): str(header)
+            for header in validated.get("headers") or []
+        }
+        shared_preview_fields = (
+            PREVIEW_GENERATED_REQUIRED_FIELDS
+            & set(generated_headers)
+            & set(validated_headers)
+        )
+        generated_rows = generated.get("rows_by_email") or {}
+        validated_rows = validated.get("rows_by_email") or {}
+        preview_content_mismatch = False
+        for email in generated.get("ordered_emails") or []:
+            generated_row = generated_rows.get(email)
+            validated_row = validated_rows.get(email)
+            if not isinstance(generated_row, dict) or not isinstance(
+                validated_row,
+                dict,
+            ):
+                preview_content_mismatch = True
+                break
+            if any(
+                str(generated_row.get(generated_headers[field]) or "")
+                != str(validated_row.get(validated_headers[field]) or "")
+                for field in shared_preview_fields
+            ):
+                preview_content_mismatch = True
+                break
+        if preview_content_mismatch:
+            result["failed_predicates"].append(
+                "generated_validated_preview_match"
+            )
+    summary_counts = dict(summary.get("counts") or {})
+    if (
+        not summary.get("exists")
+        or summary.get("parse_error")
+        or summary.get("missing_fields")
+        or summary.get("duplicate_fields")
+        or summary_counts.get("total")
+        != int(generated.get("row_count") or 0)
+        or summary_counts.get("passed")
+        != int(validated.get("row_count") or 0)
+        or summary_counts.get("failed") != 0
+        or str(summary.get("mode") or "") != expected_mode
+    ):
+        result["failed_predicates"].append(
+            "preview_summary_matches_artifacts"
+        )
 
     if len(current_emails) >= len(original_emails):
         result["failed_predicates"].append("queue_was_reduced")
@@ -1238,6 +1629,16 @@ def _emergency_queue_progress_match(
     if not current_set.issubset(original_set):
         result["failed_predicates"].append("no_new_recipients_added")
 
+    preview_set = set(preview_emails)
+    if not preview_emails or not preview_set.issubset(original_set):
+        result["failed_predicates"].append(
+            "preview_is_subset_of_immutable_source"
+        )
+    if not current_set.issubset(preview_set):
+        result["failed_predicates"].append(
+            "current_queue_is_subset_of_validated_preview"
+        )
+
     ordered_remaining = [
         email for email in original_emails
         if email in current_set
@@ -1247,6 +1648,60 @@ def _emergency_queue_progress_match(
         result["failed_predicates"].append(
             "remaining_queue_order_preserved"
         )
+
+    ordered_preview = [
+        email for email in original_emails
+        if email in preview_set
+    ]
+    if ordered_preview != preview_emails:
+        result["failed_predicates"].append(
+            "preview_order_matches_immutable_source"
+        )
+    ordered_current_preview = [
+        email for email in preview_emails
+        if email in current_set
+    ]
+    if ordered_current_preview != current_emails:
+        result["failed_predicates"].append(
+            "current_queue_order_matches_validated_preview"
+        )
+
+    if [
+        header.casefold()
+        for header in original["headers"]
+    ] != [
+        header.casefold()
+        for header in current["headers"]
+    ]:
+        result["failed_predicates"].append(
+            "surviving_queue_headers_unchanged"
+        )
+    else:
+        original_headers = {
+            header.casefold(): header
+            for header in original["headers"]
+        }
+        current_headers = {
+            header.casefold(): header
+            for header in current["headers"]
+        }
+        changed_rows = 0
+        for email in current_emails:
+            if email not in original["rows_by_email"]:
+                changed_rows += 1
+                continue
+            original_row = original["rows_by_email"][email]
+            current_row = current["rows_by_email"][email]
+            if any(
+                original_row[original_headers[key]]
+                != current_row[current_headers[key]]
+                for key in original_headers
+            ):
+                changed_rows += 1
+        if changed_rows:
+            result["failed_predicates"].append(
+                "surviving_queue_rows_unchanged"
+            )
 
     removed_emails = [
         email for email in original_emails
@@ -1260,17 +1715,22 @@ def _emergency_queue_progress_match(
         / "logs"
         / f"{profile}_log.csv"
     )
-    successfully_sent = _read_successfully_sent_emails(log_path)
-
-    missing_sent = [
-        email for email in removed_emails
-        if email not in successfully_sent
+    terminal = _emergency_terminal_outcomes(
+        log_path,
+        removed_emails,
+    )
+    result["terminal_sent_rows"] = terminal["sent_rows"]
+    result["terminal_authoritative_skip_rows"] = terminal[
+        "authoritative_skip_rows"
     ]
-    result["missing_sent_rows"] = len(missing_sent)
-
-    if missing_sent:
-        result["failed_predicates"].append(
-            "every_removed_recipient_has_sent_record"
+    result["unresolved_terminal_rows"] = (
+        int(terminal["missing_rows"])
+        + int(terminal["generic_rows"])
+        + int(terminal["ambiguous_rows"])
+    )
+    if not terminal["safe"]:
+        result["failed_predicates"].extend(
+            terminal["failed_predicates"]
         )
 
     try:
@@ -1293,7 +1753,11 @@ def _emergency_queue_progress_match(
             "current_queue_fingerprint_matches_runtime"
         )
 
+    result["failed_predicates"] = list(
+        dict.fromkeys(result["failed_predicates"])
+    )
     result["safe"] = not result["failed_predicates"]
+    result["verified_emergency_queue_progress"] = result["safe"]
     return result
 
 def _preview_campaign_match(
@@ -1302,6 +1766,11 @@ def _preview_campaign_match(
     profile: str,
     queue_state: dict[str, Any],
     preview_paths: Iterable[Path],
+    generated: dict[str, Any],
+    validated: dict[str, Any],
+    failed: dict[str, Any],
+    summary: dict[str, Any],
+    expected_mode: str,
 ) -> dict[str, Any]:
     state_path = runtime_root / QUEUE_SAFETY_MANIFEST
     result: dict[str, Any] = {
@@ -1309,6 +1778,7 @@ def _preview_campaign_match(
         "snapshot_type": "",
         "takeover_id": "",
         "provenance_path": "",
+        "verified_emergency_queue_progress": False,
         "failed_predicates": [],
     }
     if not state_path.is_file():
@@ -1459,6 +1929,11 @@ def _preview_campaign_match(
                 ),
                 provenance=provenance,
                 queue_state=queue_state,
+                generated=generated,
+                validated=validated,
+                failed=failed,
+                summary=summary,
+                expected_mode=expected_mode,
             )
             result["emergency_queue_progress"] = progress_match
 
@@ -1487,6 +1962,12 @@ def _preview_campaign_match(
                 f"preview_artifact_current:{path.name}"
             )
     result["safe"] = not result["failed_predicates"]
+    progress = result.get("emergency_queue_progress")
+    result["verified_emergency_queue_progress"] = bool(
+        result["safe"]
+        and isinstance(progress, dict)
+        and progress.get("verified_emergency_queue_progress") is True
+    )
     return result
 
 
@@ -1528,6 +2009,11 @@ def _preview_safety(
         profile=profile,
         queue_state=queue_state,
         preview_paths=(preview_path, validated_path, failed_path, summary_path),
+        generated=generated,
+        validated=validated,
+        failed=failed,
+        summary=summary,
+        expected_mode=expected_mode,
     )
     failed_predicates: list[str] = []
     for label, report in (
@@ -1604,6 +2090,23 @@ def _preview_safety(
     if not expected_mode:
         failed_predicates.append("profile_validation_mode_known")
     failed_predicates.extend(campaign["failed_predicates"])
+    verified_emergency_queue_progress = bool(
+        campaign.get("verified_emergency_queue_progress")
+    )
+    if verified_emergency_queue_progress:
+        progress_compatible_predicates = {
+            "generated_row_count_matches_queue",
+            "validated_row_count_matches_queue",
+            "generated_email_set_matches_queue",
+            "validated_email_set_matches_queue",
+            "generated_fingerprint_matches_queue",
+            "validated_fingerprint_matches_queue",
+        }
+        failed_predicates = [
+            predicate
+            for predicate in failed_predicates
+            if predicate not in progress_compatible_predicates
+        ]
     failed_predicates = list(dict.fromkeys(failed_predicates))
     exact_match = not failed_predicates
     return {
@@ -1624,14 +2127,23 @@ def _preview_safety(
         "summary_counts": summary_counts,
         "summary_mode": summary["mode"],
         "expected_summary_mode": expected_mode,
+        "verified_emergency_queue_progress": (
+            verified_emergency_queue_progress
+        ),
         "generated_validation": {
-            key: value for key, value in generated.items() if key != "emails"
+            key: value
+            for key, value in generated.items()
+            if key not in {"emails", "ordered_emails", "rows_by_email"}
         },
         "validated_validation": {
-            key: value for key, value in validated.items() if key != "emails"
+            key: value
+            for key, value in validated.items()
+            if key not in {"emails", "ordered_emails", "rows_by_email"}
         },
         "failed_validation": {
-            key: value for key, value in failed.items() if key != "emails"
+            key: value
+            for key, value in failed.items()
+            if key not in {"emails", "ordered_emails", "rows_by_email"}
         },
         "campaign_match": campaign,
         "failed_predicates": failed_predicates,
@@ -1882,6 +2394,47 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
         "intended_source_fingerprint": _email_fingerprint(intended_emails),
         "triaged_reject_path": str(reject_path or ""),
         "triaged_reject_fingerprint": _email_fingerprint(reject_emails),
+    }
+
+
+def preflight_queue_safety(
+    runtime_root: Path,
+    *,
+    profile: str,
+) -> dict[str, Any]:
+    """Return the same final queue-safety decision used by activation."""
+    safety = recompute_queue_safety(runtime_root)
+    matching = [
+        report
+        for report in safety.get("profiles", [])
+        if isinstance(report, dict)
+        and str(report.get("profile") or "").strip() == profile
+    ]
+    if len(matching) != 1:
+        return {
+            "safe": False,
+            "profile": profile,
+            "verified_emergency_queue_progress": False,
+            "failed_predicates": ["active_profile_report_present"],
+            "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
+        }
+    preview = matching[0].get("preview")
+    if not isinstance(preview, dict):
+        return {
+            "safe": False,
+            "profile": profile,
+            "verified_emergency_queue_progress": False,
+            "failed_predicates": ["profile_preview_report_present"],
+            "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
+        }
+    return {
+        "safe": bool(safety.get("safe")),
+        "profile": profile,
+        "verified_emergency_queue_progress": bool(
+            preview.get("verified_emergency_queue_progress")
+        ),
+        "failed_predicates": list(preview.get("failed_predicates") or []),
+        "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
     }
 
 

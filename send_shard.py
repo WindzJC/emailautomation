@@ -4497,6 +4497,35 @@ def main():
             return
 
     if args.preflight:
+        if str(args.profile or "").strip() == "private_jc":
+            try:
+                from tools.runtime_handoff import preflight_queue_safety
+
+                runtime_safety = preflight_queue_safety(
+                    ROOT,
+                    profile="private_jc",
+                )
+            except Exception as exc:
+                print(
+                    "PREFLIGHT: blocked (runtime queue safety check failed: "
+                    f"{type(exc).__name__})."
+                )
+                return
+            if not runtime_safety["safe"]:
+                failed = ",".join(
+                    str(predicate)
+                    for predicate in runtime_safety["failed_predicates"]
+                ) or "runtime_queue_safety"
+                print(
+                    "PREFLIGHT: blocked (runtime queue safety failed; "
+                    f"failed_predicates={failed})."
+                )
+                return
+            print(
+                "PREFLIGHT SAFETY:"
+                " verified_emergency_queue_progress="
+                f"{str(bool(runtime_safety['verified_emergency_queue_progress'])).lower()}"
+            )
         if args.provider in ("private", "sendgrid") and args.max_messages_1h:
             print(f"DOMAIN LOG: {domain_log_path.name} | cap_1h={args.max_messages_1h}")
         print("PREFLIGHT: ok (no sending).")

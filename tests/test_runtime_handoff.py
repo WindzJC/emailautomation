@@ -426,6 +426,196 @@ def _emergency_run(fixture: dict, **overrides):
     )
 
 
+def _write_emergency_progress_runtime(
+    tmp_path: Path,
+    *,
+    source_rows: int = 8,
+    preview_removed: int = 1,
+    progress_removed: int = 2,
+) -> dict[str, object]:
+    repo = tmp_path / "emergency-progress-repo"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "fixture")
+
+    emails = [
+        f"recipient-{index:04d}@example.test"
+        for index in range(source_rows)
+    ]
+    _write_runtime(repo, emails)
+    queue_path = repo / "data/shards/recipients_private_jc.csv"
+    source_bytes = queue_path.read_bytes()
+    takeover_id = "emergency_progress_fixture"
+    takeover_root = (
+        repo
+        / "data/state/emergency_takeovers"
+        / takeover_id
+    )
+    takeover_root.mkdir(parents=True)
+    source_paths = {
+        "checked": takeover_root / "checked.csv",
+        "intended_source": takeover_root / "intended_source.csv",
+        "triaged_keep": takeover_root / "triaged_keep.csv",
+        "triaged_reject": takeover_root / "triaged_reject.csv",
+    }
+    for key in ("checked", "intended_source", "triaged_keep"):
+        source_paths[key].write_bytes(source_bytes)
+    source_paths["triaged_reject"].write_text(
+        "Email,FirstName,BookTitle\n",
+        encoding="utf-8",
+    )
+
+    def source_record(path: Path) -> dict[str, object]:
+        return {
+            "path": path.relative_to(repo).as_posix(),
+            "sha256": runtime_handoff.sha256_file(path),
+            "size": path.stat().st_size,
+            "row_count": runtime_handoff._csv_count(path),
+            "email_fingerprint": runtime_handoff._email_fingerprint(
+                runtime_handoff._read_email_set(path)
+            ),
+        }
+
+    source_files = {
+        key: source_record(path)
+        for key, path in source_paths.items()
+    }
+    provenance_path = takeover_root / "provenance_manifest.json"
+    provenance = {
+        "schema_version": 1,
+        "takeover_id": takeover_id,
+        "machine_id": "mac",
+        "profile": "private_jc",
+        "status": "awaiting_preview_validation",
+        "preview_validation_mode": "astra_visual",
+        "queue_path": "data/shards/recipients_private_jc.csv",
+        "queue_row_count": source_rows,
+        "queue_unique_count": source_rows,
+        "queue_fingerprint": source_files["intended_source"][
+            "email_fingerprint"
+        ],
+        "generated_sources": source_files,
+    }
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    snapshot = {
+        "schema_version": 2,
+        "snapshot_type": "emergency_takeover",
+        "takeover_id": takeover_id,
+        "profile": "private_jc",
+        "status": "awaiting_preview_validation",
+        "checked_path": source_files["checked"]["path"],
+        "intended_source_path": source_files["intended_source"]["path"],
+        "triaged_keep_path": source_files["triaged_keep"]["path"],
+        "triaged_reject_path": source_files["triaged_reject"]["path"],
+        "provenance_manifest_path": (
+            provenance_path.relative_to(repo).as_posix()
+        ),
+        "files": source_files,
+    }
+    (repo / "data/state/active_campaign_snapshot.json").write_text(
+        json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    preview_emails = emails[preview_removed:]
+    current_emails = preview_emails[progress_removed:]
+    _write_preview_fixture(repo, preview_emails)
+    queue_path.write_text(
+        "Email,FirstName,BookTitle\n"
+        + "".join(
+            f"{email},Test,Book\n"
+            for email in current_emails
+        ),
+        encoding="utf-8",
+    )
+    removed_emails = emails[: preview_removed + progress_removed]
+    terminal_lines = []
+    for index, email in enumerate(removed_emails):
+        if index >= len(removed_emails) - 2:
+            terminal_lines.append(
+                "2026-07-30T18:10:05Z,"
+                f"{email},SKIP,"
+                "event_type=SKIPPED_ALREADY_SENT_AUTHORITATIVE\n"
+            )
+        else:
+            terminal_lines.append(
+                f"2026-07-30T18:10:04Z,{email},SENT,"
+                "campaign_type=cold\n"
+            )
+    (repo / "data/logs/private_jc_log.csv").write_text(
+        "TimestampUTC,Email,Status,Info\n"
+        + "".join(terminal_lines),
+        encoding="utf-8",
+    )
+    return {
+        "repo": repo,
+        "emails": emails,
+        "preview_emails": preview_emails,
+        "current_emails": current_emails,
+        "removed_emails": removed_emails,
+        "queue_path": queue_path,
+        "preview_dir": repo / "data/message_previews",
+        "log_path": repo / "data/logs/private_jc_log.csv",
+    }
+
+
+def _run_private_jc_preflight(repo: Path) -> str:
+    shards = repo / "data/shards"
+    logs = repo / "data/logs"
+    state = repo / "data/state"
+    output = io.StringIO()
+    with (
+        patch.object(settings, "APP_ROOT", repo),
+        patch.object(settings, "SHARDS_DIR", shards),
+        patch.object(settings, "LOGS_DIR", logs),
+        patch.object(settings, "STATE_DIR", state),
+        patch.object(send_shard, "ROOT", repo),
+        patch.object(send_shard, "SHARDS_DIR", shards),
+        patch.object(send_shard, "LOGS_DIR", logs),
+        patch.object(send_shard, "STATE_DIR", state),
+        patch.object(
+            send_shard,
+            "DEFAULT_UNSUB_CSV",
+            state / "unsubscribed.csv",
+        ),
+        patch.object(
+            send_shard,
+            "DEFAULT_SUPPRESS_CSV",
+            state / "suppressed.csv",
+        ),
+        patch.object(
+            send_shard,
+            "DEFAULT_SENDGRID_SUPPRESSION_CSV",
+            state / "sendgrid_suppressions.csv",
+        ),
+        patch.object(
+            send_shard,
+            "send_via_sendgrid",
+            side_effect=AssertionError("preflight must not submit"),
+        ),
+        patch.object(
+            send_shard,
+            "smtp_login",
+            side_effect=AssertionError("preflight must not authenticate"),
+        ),
+        patch.object(
+            sys,
+            "argv",
+            ["send_shard.py", "--profile", "private_jc", "--preflight"],
+        ),
+        redirect_stdout(output),
+    ):
+        send_shard.main()
+    return output.getvalue()
+
+
 def test_emergency_verified_bundle_matching_queue_creates_immutable_source_snapshot(
     emergency_fixture,
 ):
@@ -1415,6 +1605,245 @@ def test_valid_emergency_takeover_preview_allows_initialization(emergency_fixtur
     assert safety["safe"] is True
     assert safety["profiles"][0]["preview"]["campaign_match"]["safe"] is True
     assert safety["profiles"][0]["preview"]["failed_predicates"] == []
+
+
+def test_verified_emergency_progress_2574_to_2508_allows_activation_and_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _write_emergency_progress_runtime(
+        tmp_path,
+        source_rows=2574,
+        preview_removed=2,
+        progress_removed=64,
+    )
+    repo = fixture["repo"]
+    queue_before = fixture["queue_path"].read_bytes()
+    preview_before = {
+        path.name: path.read_bytes()
+        for path in fixture["preview_dir"].iterdir()
+        if path.is_file()
+    }
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    monkeypatch.setenv("ASTRA_MACHINE_ID", "mac")
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+    preview = safety["profiles"][0]["preview"]
+    progress = preview["campaign_match"]["emergency_queue_progress"]
+
+    assert safety["safe"] is True
+    assert preview["safe"] is True
+    assert preview["verified_emergency_queue_progress"] is True
+    assert preview["failed_predicates"] == []
+    assert progress["verified_emergency_queue_progress"] is True
+    assert progress["original_rows"] == 2574
+    assert progress["preview_rows"] == 2572
+    assert progress["current_rows"] == 2508
+    assert progress["removed_rows"] == 66
+    assert progress["terminal_sent_rows"] == 64
+    assert progress["terminal_authoritative_skip_rows"] == 2
+    assert progress["unresolved_terminal_rows"] == 0
+
+    authority = runtime_handoff.initialize_authority(
+        repo,
+        machine="mac",
+    )
+    status = runtime_handoff.status(repo, machine="mac")
+    preflight = _run_private_jc_preflight(repo)
+
+    assert authority["authorized_machine"] == "mac"
+    assert status["real_send_authorized"] is True
+    assert status["process_blockers"] == []
+    assert "verified_emergency_queue_progress=true" in preflight
+    assert "PREFLIGHT: ok (no sending)." in preflight
+    assert fixture["queue_path"].read_bytes() == queue_before
+    assert {
+        path.name: path.read_bytes()
+        for path in fixture["preview_dir"].iterdir()
+        if path.is_file()
+    } == preview_before
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_predicate"),
+    [
+        (
+            "missing_terminal",
+            "every_removed_recipient_has_terminal_result",
+        ),
+        (
+            "generic_skip",
+            "no_generic_or_non_authoritative_results",
+        ),
+        (
+            "changed_survivor",
+            "surviving_queue_rows_unchanged",
+        ),
+        (
+            "reordered_survivor",
+            "remaining_queue_order_preserved",
+        ),
+        (
+            "inserted_recipient",
+            "no_new_recipients_added",
+        ),
+        (
+            "generated_validated_mismatch",
+            "generated_validated_preview_match",
+        ),
+        (
+            "failed_preview_row",
+            "failed_preview_has_zero_rows",
+        ),
+    ],
+)
+def test_invalid_emergency_progress_refuses_activation(
+    tmp_path,
+    monkeypatch,
+    case,
+    expected_predicate,
+):
+    fixture = _write_emergency_progress_runtime(tmp_path)
+    repo = fixture["repo"]
+    queue_path = fixture["queue_path"]
+    log_path = fixture["log_path"]
+    preview_dir = fixture["preview_dir"]
+
+    if case == "missing_terminal":
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        log_path.write_text(
+            "\n".join([lines[0], *lines[2:]]) + "\n",
+            encoding="utf-8",
+        )
+    elif case == "generic_skip":
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        fields = lines[1].split(",", 3)
+        lines[1] = ",".join(
+            [fields[0], fields[1], "SKIP", "event_type=SKIPPED_SUPPRESSED"]
+        )
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    elif case == "changed_survivor":
+        queue_path.write_text(
+            queue_path.read_text(encoding="utf-8").replace(
+                ",Test,Book\n",
+                ",Changed,Book\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "reordered_survivor":
+        lines = queue_path.read_text(encoding="utf-8").splitlines()
+        lines[1], lines[2] = lines[2], lines[1]
+        queue_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    elif case == "inserted_recipient":
+        queue_path.write_text(
+            queue_path.read_text(encoding="utf-8")
+            + "inserted@example.test,Test,Book\n",
+            encoding="utf-8",
+        )
+    elif case == "generated_validated_mismatch":
+        validated = (
+            preview_dir
+            / "private_jc_message_preview_validated.csv"
+        )
+        validated.write_text(
+            validated.read_text(encoding="utf-8").replace(
+                ",Opening,Subject,Body,PASS,",
+                ",Opening,Subject,Changed body,PASS,",
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif case == "failed_preview_row":
+        failed = preview_dir / "private_jc_message_preview_failed.csv"
+        failed.write_text(
+            failed.read_text(encoding="utf-8")
+            + "recipient-0001@example.test,recipient-0001@example.test,"
+            "Test Author,Test,Book,Opening,Subject,Body,FAIL,synthetic\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    before = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+    preview = safety["profiles"][0]["preview"]
+    progress = preview["campaign_match"].get(
+        "emergency_queue_progress",
+        {},
+    )
+
+    assert safety["safe"] is False
+    assert runtime_handoff.preflight_queue_safety(
+        repo,
+        profile="private_jc",
+    )["safe"] is False
+    assert preview["verified_emergency_queue_progress"] is False
+    assert expected_predicate in ",".join(
+        [
+            *preview["failed_predicates"],
+            *progress.get("failed_predicates", []),
+        ]
+    )
+    with pytest.raises(runtime_handoff.HandoffError):
+        runtime_handoff.initialize_authority(repo, machine="mac")
+
+    after = {
+        path.relative_to(repo): path.read_bytes()
+        for path in repo.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not runtime_authority.authority_path(repo).exists()
+
+
+def test_non_emergency_queue_preview_mismatch_remains_fail_closed(tmp_path):
+    repo = tmp_path / "repo"
+    emails = ["first@example.test", "second@example.test"]
+    _write_runtime(repo, emails)
+    (repo / "data/shards/recipients_private_jc.csv").write_text(
+        "Email,FirstName,BookTitle\n"
+        "second@example.test,Test,Book\n",
+        encoding="utf-8",
+    )
+    (repo / "data/logs/private_jc_log.csv").write_text(
+        "TimestampUTC,Email,Status,Info\n"
+        "2026-07-30T18:10:04Z,first@example.test,SENT,"
+        "campaign_type=cold\n",
+        encoding="utf-8",
+    )
+
+    preview = runtime_handoff.recompute_queue_safety(repo)["profiles"][0][
+        "preview"
+    ]
+
+    assert preview["safe"] is False
+    assert preview["verified_emergency_queue_progress"] is False
+    assert "generated_row_count_matches_queue" in preview["failed_predicates"]
+
+
+def test_exact_match_behavior_does_not_claim_emergency_progress(tmp_path):
+    repo = tmp_path / "repo"
+    _write_runtime(repo, ["current@example.test"])
+
+    safety = runtime_handoff.recompute_queue_safety(repo)
+    preview = safety["profiles"][0]["preview"]
+    preflight = runtime_handoff.preflight_queue_safety(
+        repo,
+        profile="private_jc",
+    )
+
+    assert safety["safe"] is True
+    assert preview["safe"] is True
+    assert preview["verified_emergency_queue_progress"] is False
+    assert preflight["safe"] is True
+    assert preflight["verified_emergency_queue_progress"] is False
 
 
 def test_sender_authority_enforcement_and_preflight_inspection(repos):
