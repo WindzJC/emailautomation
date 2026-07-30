@@ -166,6 +166,391 @@ def _rewrite_bundle(
     return output
 
 
+def _legacy_bundle(
+    tmp_path: Path,
+    queue_bytes: bytes,
+    *,
+    expected_commit: str = "legacy-source-commit",
+) -> tuple[Path, str]:
+    bundle = tmp_path / "legacy-runtime.tgz"
+    queue_relative = "data/shards/recipients_private_jc.csv"
+    queue_rows = max(0, len(queue_bytes.decode("utf-8").splitlines()) - 1)
+    manifest = {
+        "schema_version": 1,
+        "created_at_utc": "2026-07-28T21:10:05+00:00",
+        "source_root": "/home/jc/email-automation",
+        "target_root": "/Users/test/emailautomation",
+        "expected_commit": expected_commit,
+        "files": [
+            {
+                "path": queue_relative,
+                "classification": "REQUIRED_RUNTIME",
+                "size": len(queue_bytes),
+                "sha256": runtime_handoff.hashlib.sha256(queue_bytes).hexdigest(),
+                "source_sha256": runtime_handoff.hashlib.sha256(queue_bytes).hexdigest(),
+                "method": "byte_copy",
+            }
+        ],
+        "queue_row_counts": {"recipients_private_jc.csv": queue_rows},
+    }
+    with tarfile.open(bundle, "w:gz") as archive:
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        manifest_info = tarfile.TarInfo("manifest.json")
+        manifest_info.size = len(manifest_bytes)
+        archive.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        for name in ("runtime", "runtime/data", "runtime/data/shards"):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
+        queue_info = tarfile.TarInfo(f"runtime/{queue_relative}")
+        queue_info.size = len(queue_bytes)
+        archive.addfile(queue_info, io.BytesIO(queue_bytes))
+    return bundle, runtime_handoff.sha256_file(bundle)
+
+
+@pytest.fixture
+def emergency_fixture(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run(repo, "git", "init", "-q")
+    _run(repo, "git", "config", "user.email", "test@example.test")
+    _run(repo, "git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    _run(repo, "git", "add", "README.md")
+    _run(repo, "git", "commit", "-qm", "fixture")
+    emails = [
+        "one@example.test",
+        "two@example.test",
+        "three@example.test",
+    ]
+    _write_runtime(repo, emails)
+    stale_snapshot = {
+        "checked_path": (
+            "data/state/backups/staged_batches/dispatch_20260720_194207/leads.csv"
+        ),
+        "intended_source_path": (
+            "data/state/backups/staged_batches/dispatch_20260720_194207/"
+            "leads_triaged_keep.csv"
+        ),
+        "triaged_keep_path": (
+            "data/state/backups/staged_batches/dispatch_20260720_194207/"
+            "leads_triaged_keep.csv"
+        ),
+        "triaged_reject_path": (
+            "data/state/backups/staged_batches/dispatch_20260720_194207/"
+            "leads_triaged_reject.csv"
+        ),
+        "preview_id": "stale-preview",
+    }
+    snapshot_path = repo / "data/state/active_campaign_snapshot.json"
+    snapshot_path.write_text(json.dumps(stale_snapshot), encoding="utf-8")
+    for name in (
+        "private_jc_message_preview.csv",
+        "private_jc_message_preview_validated.csv",
+    ):
+        path = repo / "data/message_previews" / name
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+    (repo / "data/message_previews/private_jc_message_preview_summary.txt").write_text(
+        "total rows: 1\npassed rows: 1\nfailed rows: 0\n",
+        encoding="utf-8",
+    )
+    queue_path = repo / "data/shards/recipients_private_jc.csv"
+    bundle, bundle_sha = _legacy_bundle(tmp_path, queue_path.read_bytes())
+    fingerprint = runtime_handoff._read_queue_state(
+        queue_path, "private_jc"
+    )["fingerprint"]
+    monkeypatch.setenv("ASTRA_MACHINE_ID", "mac")
+    monkeypatch.setattr(runtime_handoff.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [])
+    monkeypatch.setattr(runtime_handoff, "active_job_files", lambda _repo: [])
+    return {
+        "repo": repo,
+        "bundle": bundle,
+        "bundle_sha": bundle_sha,
+        "commit": "legacy-source-commit",
+        "rows": len(emails),
+        "fingerprint": fingerprint,
+        "queue_path": queue_path,
+        "snapshot_path": snapshot_path,
+        "stale_snapshot": stale_snapshot,
+    }
+
+
+def _emergency_run(fixture: dict, **overrides):
+    arguments = {
+        "machine": "mac",
+        "profile": "private_jc",
+        "reason": "WSL source machine inaccessible",
+        "expected_bundle_sha256": fixture["bundle_sha"],
+        "expected_source_commit": fixture["commit"],
+        "expected_rows": fixture["rows"],
+        "expected_queue_fingerprint": fixture["fingerprint"],
+    }
+    arguments.update(overrides)
+    return runtime_handoff.emergency_takeover(
+        fixture["repo"],
+        fixture["bundle"],
+        **arguments,
+    )
+
+
+def test_emergency_verified_bundle_matching_queue_creates_immutable_source_snapshot(
+    emergency_fixture,
+):
+    fixture = emergency_fixture
+    queue_bytes = fixture["queue_path"].read_bytes()
+    log_before = (fixture["repo"] / "data/logs/private_jc_log.csv").read_bytes()
+    suppressed_before = (fixture["repo"] / "data/state/suppressed.csv").read_bytes()
+
+    result = _emergency_run(fixture)
+
+    assert result["status"] == "awaiting_preview_validation"
+    assert result["authority_initialized"] is False
+    assert result["sender_started"] is False
+    assert result["activation_allowed"] is False
+    assert result["next_required_action"] == runtime_handoff.EMERGENCY_NEXT_ACTION
+    takeover_root = Path(result["takeover_root"])
+    snapshot = json.loads(fixture["snapshot_path"].read_text(encoding="utf-8"))
+    assert snapshot["snapshot_type"] == "emergency_takeover"
+    assert snapshot["status"] == "awaiting_preview_validation"
+    for key in (
+        "checked_path",
+        "intended_source_path",
+        "triaged_keep_path",
+    ):
+        assert (fixture["repo"] / snapshot[key]).read_bytes() == queue_bytes
+        assert str(snapshot[key]).startswith(
+            "data/state/emergency_takeovers/"
+        )
+    reject = fixture["repo"] / snapshot["triaged_reject_path"]
+    assert reject.read_text(encoding="utf-8") == "Email\n"
+    provenance = json.loads(
+        (takeover_root / "provenance_manifest.json").read_text(encoding="utf-8")
+    )
+    assert provenance["status"] == "awaiting_preview_validation"
+    assert provenance["queue_match_mode"] == "byte_for_byte"
+    assert provenance["previous_campaign_snapshot_fingerprint"]
+    assert (
+        takeover_root / "previous_campaign/active_campaign_snapshot.json"
+    ).is_file()
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+    assert (fixture["repo"] / "data/logs/private_jc_log.csv").read_bytes() == log_before
+    assert (fixture["repo"] / "data/state/suppressed.csv").read_bytes() == suppressed_before
+
+
+def test_emergency_bundle_checksum_mismatch_refuses_without_writes(emergency_fixture):
+    fixture = emergency_fixture
+    snapshot_before = fixture["snapshot_path"].read_bytes()
+    with pytest.raises(runtime_handoff.HandoffError, match="SHA-256 mismatch"):
+        _emergency_run(fixture, expected_bundle_sha256="0" * 64)
+    assert fixture["snapshot_path"].read_bytes() == snapshot_before
+    assert not (fixture["repo"] / runtime_handoff.EMERGENCY_TAKEOVER_ROOT).exists()
+
+
+def test_emergency_current_queue_differs_from_verified_bundle(emergency_fixture):
+    fixture = emergency_fixture
+    fixture["queue_path"].write_text(
+        "Email,FirstName,BookTitle\n"
+        "one@example.test,Test,Book\n"
+        "two@example.test,Test,Book\n"
+        "different@example.test,Test,Book\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="fingerprint mismatch"):
+        _emergency_run(fixture)
+    assert not (fixture["repo"] / runtime_handoff.EMERGENCY_TAKEOVER_ROOT).exists()
+
+
+def test_emergency_authority_already_exists_refuses(emergency_fixture):
+    fixture = emergency_fixture
+    path = runtime_authority.authority_path(fixture["repo"])
+    path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(runtime_handoff.HandoffError, match="authority already exists"):
+        _emergency_run(fixture)
+
+
+def test_emergency_process_blocker_refuses(emergency_fixture, monkeypatch):
+    fixture = emergency_fixture
+    monkeypatch.setattr(
+        runtime_handoff,
+        "process_blockers",
+        lambda: ["123 workflow: important_leads_workflow.py"],
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="still running"):
+        _emergency_run(fixture)
+
+
+def test_emergency_duplicate_recipient_refuses(emergency_fixture, tmp_path):
+    fixture = emergency_fixture
+    duplicate = (
+        "Email,FirstName,BookTitle\n"
+        "one@example.test,Test,Book\n"
+        "one@example.test,Test,Book\n"
+        "three@example.test,Test,Book\n"
+    ).encode("utf-8")
+    fixture["queue_path"].write_bytes(duplicate)
+    bundle, bundle_sha = _legacy_bundle(tmp_path, duplicate)
+    fixture["bundle"] = bundle
+    fixture["bundle_sha"] = bundle_sha
+    fixture["fingerprint"] = runtime_handoff._read_queue_state(
+        fixture["queue_path"], "private_jc"
+    )["fingerprint"]
+    with pytest.raises(runtime_handoff.HandoffError, match="unique recipient rows"):
+        _emergency_run(fixture)
+
+
+@pytest.mark.parametrize(
+    ("state_file", "error_field"),
+    [
+        ("suppressed.csv", "suppression_overlap_count=1"),
+        ("unsubscribed.csv", "unsubscribe_overlap_count=1"),
+    ],
+)
+def test_emergency_suppression_and_unsubscribe_overlap_refuse(
+    emergency_fixture,
+    state_file,
+    error_field,
+):
+    fixture = emergency_fixture
+    (fixture["repo"] / "data/state" / state_file).write_text(
+        "Email\none@example.test\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match=error_field):
+        _emergency_run(fixture)
+
+
+def test_emergency_authoritative_sent_log_overlap_refuses(emergency_fixture):
+    fixture = emergency_fixture
+    (fixture["repo"] / "data/logs/private_jc_log.csv").write_text(
+        "TimestampUTC,Email,Status,Info\n"
+        "2026-07-01T00:00:00Z,one@example.test,SENT,ok\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        runtime_handoff.HandoffError,
+        match="authoritative_sent_overlap_count=1",
+    ):
+        _emergency_run(fixture)
+
+
+def test_emergency_current_idempotency_and_active_reservation_refuse(
+    emergency_fixture,
+):
+    fixture = emergency_fixture
+    database = fixture["repo"] / "data/state/send_idempotency.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(
+            """
+            CREATE TABLE send_reservations (
+                campaign_id TEXT,
+                provider TEXT,
+                email TEXT,
+                profile TEXT,
+                status TEXT
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO send_reservations VALUES (?, ?, ?, ?, ?)",
+            ("cold", "private", "one@example.test", "private_jc", "reserved"),
+        )
+    with pytest.raises(
+        runtime_handoff.HandoffError,
+        match=(
+            "current_campaign_idempotency_overlap_count=1.*"
+            "active_reservation_overlap_count=1"
+        ),
+    ):
+        _emergency_run(fixture)
+
+
+def test_emergency_role_filter_violation_refuses(emergency_fixture, tmp_path):
+    fixture = emergency_fixture
+    role_queue = (
+        "Email,FirstName,BookTitle\n"
+        "info@example.test,Test,Book\n"
+        "two@example.test,Test,Book\n"
+        "three@example.test,Test,Book\n"
+    ).encode("utf-8")
+    fixture["queue_path"].write_bytes(role_queue)
+    bundle, bundle_sha = _legacy_bundle(tmp_path, role_queue)
+    fixture["bundle"] = bundle
+    fixture["bundle_sha"] = bundle_sha
+    fixture["fingerprint"] = runtime_handoff._read_queue_state(
+        fixture["queue_path"], "private_jc"
+    )["fingerprint"]
+    with pytest.raises(
+        runtime_handoff.HandoffError,
+        match="role_filter_violation_count=1",
+    ):
+        _emergency_run(fixture)
+
+
+def test_emergency_valid_reject_source_overlap_refuses(emergency_fixture):
+    fixture = emergency_fixture
+    (fixture["repo"] / "_important/leads_triaged_reject.csv").write_text(
+        "Email\none@example.test\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="reject_overlap_count=1"):
+        _emergency_run(fixture)
+
+
+def test_emergency_success_leaves_stale_preview_as_only_blocker(emergency_fixture):
+    fixture = emergency_fixture
+    result = _emergency_run(fixture)
+    safety = runtime_handoff.recompute_queue_safety(fixture["repo"])
+    assert safety["unsafe_reasons"] == [
+        "active profile preview is stale or invalid"
+    ]
+    assert safety["profiles"][0]["preview"]["queue_row_count"] == fixture["rows"]
+    assert safety["profiles"][0]["preview"]["preview_row_count"] == 1
+    assert result["activation_allowed"] is False
+
+
+def test_emergency_partial_write_failure_rolls_back_snapshot_and_directory(
+    emergency_fixture,
+):
+    fixture = emergency_fixture
+    snapshot_before = fixture["snapshot_path"].read_bytes()
+
+    def fail_after_snapshot(phase, _path):
+        if phase == "after_snapshot_replace":
+            raise OSError("synthetic emergency partial write")
+
+    with pytest.raises(OSError, match="synthetic emergency partial"):
+        _emergency_run(fixture, write_hook=fail_after_snapshot)
+    assert fixture["snapshot_path"].read_bytes() == snapshot_before
+    takeover_parent = fixture["repo"] / runtime_handoff.EMERGENCY_TAKEOVER_ROOT
+    assert not takeover_parent.exists() or not list(takeover_parent.iterdir())
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+
+
+def test_emergency_never_starts_sender_or_initializes_authority(
+    emergency_fixture,
+    monkeypatch,
+):
+    fixture = emergency_fixture
+    initialize = patch.object(
+        runtime_handoff,
+        "initialize_authority",
+        side_effect=AssertionError("must not initialize authority"),
+    )
+    write_authority = patch.object(
+        runtime_handoff,
+        "write_authority",
+        side_effect=AssertionError("must not write authority"),
+    )
+    with initialize as initialize_mock, write_authority as write_mock:
+        result = _emergency_run(fixture)
+    initialize_mock.assert_not_called()
+    write_mock.assert_not_called()
+    assert result["sender_started"] is False
+    assert not runtime_authority.authority_path(fixture["repo"]).exists()
+
+
 def test_windows_to_mac_handoff_carries_changed_queue_logs_suppressions_and_db(
     repos, tmp_path
 ):

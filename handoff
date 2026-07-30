@@ -65,12 +65,16 @@ case "${1:-}" in
     shift
     runtime_handoff activate "$@"
     ;;
+  emergency-takeover)
+    shift
+    runtime_handoff emergency-takeover "$@"
+    ;;
   rollback)
     shift
     runtime_handoff rollback "$@"
     ;;
   *)
-    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|status|verify|activate|rollback}" >&2
+    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|status|verify|activate|emergency-takeover|rollback}" >&2
     exit 2
     ;;
 esac

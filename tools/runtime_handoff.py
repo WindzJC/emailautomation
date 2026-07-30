@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -58,6 +59,12 @@ PROCESS_MARKERS = {
     "dispatch": ("dispatch",),
     "check": ("check_pending.py", "check_1hr.py", "check_24h.py"),
     "triage": ("triage",),
+    "workflow": (
+        "important_leads_workflow.py",
+        "leads_workflow.py",
+        "precheck_leads.py",
+    ),
+    "handoff": ("runtime_handoff.py", "mac_runtime_migration.py"),
 }
 ACTIVE_JOB_STATES = {"queued", "running", "checking", "verifying", "dispatching", "triaging"}
 JOB_ROOTS = (
@@ -89,6 +96,20 @@ QUEUE_SAFETY_FALLBACKS = {
     "triaged_keep": Path("_important/leads_triaged_keep.csv"),
     "triaged_reject": Path("_important/leads_triaged_reject.csv"),
 }
+EMERGENCY_EXPECTED_BUNDLE_SHA256 = (
+    "e23c636baecdd74c3233078256acf18ceedd7bac97302df731edbea398625375"
+)
+EMERGENCY_EXPECTED_SOURCE_COMMIT = "006d10eec45c2156595fe1203e07de33ce64fdbb"
+EMERGENCY_EXPECTED_PRIVATE_JC_ROWS = 2574
+EMERGENCY_EXPECTED_PRIVATE_JC_FINGERPRINT = (
+    "644d003718e09d3be1d57044d24ba514d2de58d6e8e4e2dd615384d1c6515c90"
+)
+EMERGENCY_TAKEOVER_ROOT = Path("data/state/emergency_takeovers")
+EMERGENCY_NEXT_ACTION = (
+    "./.venv/bin/python send_shard.py --profile private_jc --preview_messages && "
+    "./.venv/bin/python tools/validate_message_preview.py --profile private_jc "
+    "--pitch-mode consignment --fail-on-errors"
+)
 
 
 class HandoffError(RuntimeError):
@@ -170,22 +191,31 @@ def runtime_files(repo: Path) -> list[Path]:
 
 def process_blockers() -> list[str]:
     result = subprocess.run(
-        ["ps", "-eo", "pid=,args="], text=True, capture_output=True, check=False
+        ["ps", "-eo", "pid=,ppid=,args="],
+        text=True,
+        capture_output=True,
+        check=False,
     )
     if result.returncode:
         raise HandoffError("Could not inspect running processes")
     own_pid = os.getpid()
-    blockers: list[str] = []
+    processes: dict[int, tuple[int, str]] = {}
     for line in result.stdout.splitlines():
-        match = re.match(r"\s*(\d+)\s+(.*)", line)
-        if not match or int(match.group(1)) == own_pid:
-            continue
-        command = match.group(2)
-        if "runtime_handoff.py" in command:
+        match = re.match(r"\s*(\d+)\s+(\d+)\s+(.*)", line)
+        if match:
+            processes[int(match.group(1))] = (int(match.group(2)), match.group(3))
+    ignored_pids = {own_pid}
+    ancestor = processes.get(own_pid, (os.getppid(), ""))[0]
+    while ancestor > 0 and ancestor not in ignored_pids:
+        ignored_pids.add(ancestor)
+        ancestor = processes.get(ancestor, (0, ""))[0]
+    blockers: list[str] = []
+    for pid, (_ppid, command) in processes.items():
+        if pid in ignored_pids:
             continue
         for category, markers in PROCESS_MARKERS.items():
             if any(marker in command for marker in markers):
-                blockers.append(f"{match.group(1)} {category}: {command}")
+                blockers.append(f"{pid} {category}: {command}")
                 break
     return blockers
 
@@ -1155,6 +1185,678 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
     }
 
 
+def _atomic_replace_bytes(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _sender_role_blocklist() -> set[str]:
+    source_path = Path(__file__).resolve().parents[1] / "send_shard.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "ROLE_LOCALPART_BLOCKLIST"
+                for target in node.targets
+            )
+        ):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, set):
+                return {str(item).strip().lower() for item in value if str(item).strip()}
+    raise HandoffError(f"Could not read sender role-recipient policy: {source_path}")
+
+
+def _validated_email_state(path: Path, label: str) -> set[str]:
+    if not path.is_file():
+        return set()
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        field_map = {
+            str(field or "").strip().lower(): str(field or "")
+            for field in (reader.fieldnames or [])
+        }
+        email_field = field_map.get("email") or field_map.get("authoremail")
+        if not email_field:
+            raise HandoffError(
+                f"Emergency validation failed: {label} lacks an Email header: {path}"
+            )
+        emails: set[str] = set()
+        invalid = 0
+        for row in reader:
+            email = str(row.get(email_field) or "").strip().lower()
+            if not email:
+                continue
+            if not EMAIL_RE.match(email):
+                invalid += 1
+            else:
+                emails.add(email)
+    if invalid:
+        raise HandoffError(
+            f"Emergency validation failed: {label} has {invalid} malformed email row(s): {path}"
+        )
+    return emails
+
+
+def _verify_legacy_emergency_bundle(
+    bundle: Path,
+    *,
+    expected_sha256: str,
+    expected_commit: str,
+    queue_relative: str,
+    expected_rows: int,
+    extraction_root: Path,
+) -> tuple[dict[str, Any], Path]:
+    from tools import mac_runtime_migration as legacy_migration
+
+    if not bundle.is_file():
+        raise HandoffError(f"Emergency bundle does not exist: {bundle}")
+    actual_bundle_sha256 = sha256_file(bundle)
+    if actual_bundle_sha256 != expected_sha256:
+        raise HandoffError(
+            "Emergency bundle SHA-256 mismatch: "
+            f"expected={expected_sha256} actual={actual_bundle_sha256}"
+        )
+    try:
+        manifest = legacy_migration.verify_bundle(bundle)
+    except (legacy_migration.MigrationError, OSError, tarfile.TarError, KeyError, TypeError) as exc:
+        raise HandoffError(f"Emergency bundle verification failed: {exc}") from exc
+    if manifest.get("schema_version") != 1:
+        raise HandoffError("Emergency bundle manifest schema_version must be 1")
+    if manifest.get("expected_commit") != expected_commit:
+        raise HandoffError(
+            "Emergency bundle expected commit mismatch: "
+            f"expected={expected_commit} actual={manifest.get('expected_commit')!r}"
+        )
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise HandoffError("Emergency bundle manifest has no file inventory")
+    queue_entries = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("path") == queue_relative
+    ]
+    if len(queue_entries) != 1:
+        raise HandoffError(
+            f"Emergency bundle must contain exactly one {queue_relative} entry"
+        )
+    queue_entry = queue_entries[0]
+    if (
+        not isinstance(queue_entry.get("size"), int)
+        or queue_entry["size"] < 1
+        or not re.fullmatch(r"[0-9a-f]{64}", str(queue_entry.get("sha256") or ""))
+    ):
+        raise HandoffError("Emergency queue manifest entry is malformed")
+    manifest_counts = manifest.get("queue_row_counts")
+    if isinstance(manifest_counts, dict):
+        declared = manifest_counts.get(Path(queue_relative).name)
+        if declared is not None and declared != expected_rows:
+            raise HandoffError(
+                "Emergency bundle queue count mismatch: "
+                f"expected={expected_rows} manifest={declared}"
+            )
+    extraction_root.mkdir(parents=True, exist_ok=True)
+    queue_output = extraction_root / Path(queue_relative).name
+    try:
+        with tarfile.open(bundle, "r:gz") as archive:
+            legacy_migration.safe_members(archive)
+            member = archive.getmember(
+                legacy_migration.runtime_archive_name(queue_relative)
+            )
+            handle = archive.extractfile(member)
+            if handle is None:
+                raise HandoffError("Emergency bundle queue is unreadable")
+            queue_bytes = handle.read()
+    except (KeyError, OSError, tarfile.TarError) as exc:
+        raise HandoffError("Could not extract emergency queue from verified bundle") from exc
+    _atomic_replace_bytes(queue_output, queue_bytes)
+    if (
+        queue_output.stat().st_size != queue_entry["size"]
+        or sha256_file(queue_output) != queue_entry["sha256"]
+    ):
+        raise HandoffError("Extracted emergency queue does not match its manifest")
+    return manifest, queue_output
+
+
+def _emergency_idempotency_state(
+    repo: Path,
+    *,
+    profile: str,
+    provider: str,
+    queue_state: dict[str, Any],
+) -> tuple[set[str], set[str]]:
+    database = repo / "data/state/send_idempotency.sqlite3"
+    if not database.is_file():
+        return set(), set()
+    current_overlap = _idempotency_overlap(
+        repo,
+        profile,
+        provider,
+        queue_state,
+    )
+    try:
+        with sqlite3.connect(
+            f"file:{database.resolve().as_posix()}?mode=ro",
+            uri=True,
+        ) as db:
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='send_reservations'"
+            ).fetchone()
+            if not table:
+                return current_overlap, set()
+            columns = {
+                str(row[1]).strip().lower()
+                for row in db.execute("PRAGMA table_info(send_reservations)")
+            }
+            if not {"email", "status"} <= columns:
+                return current_overlap, set()
+            active_rows = db.execute(
+                """
+                SELECT email FROM send_reservations
+                WHERE lower(coalesce(status, '')) IN
+                      ('reserved', 'attempting', 'submitted', 'ambiguous')
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise HandoffError(
+            f"Emergency validation failed: unreadable idempotency database: {exc}"
+        ) from exc
+    queue_emails = set(queue_state["emails"])
+    active = {
+        str(row[0] or "").strip().lower()
+        for row in active_rows
+        if str(row[0] or "").strip().lower() in queue_emails
+    }
+    return current_overlap, active
+
+
+def _emergency_reject_source(repo: Path) -> tuple[Path | None, set[str]]:
+    sources = _queue_safety_sources(repo)
+    candidates = [
+        sources.get("triaged_reject"),
+        repo / QUEUE_SAFETY_FALLBACKS["triaged_reject"],
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, Path) or candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        return candidate, _validated_email_state(candidate, "triaged reject source")
+    return None, set()
+
+
+def _emergency_queue_validation(
+    repo: Path,
+    *,
+    profile: str,
+    queue_path: Path,
+    queue_state: dict[str, Any],
+) -> dict[str, Any]:
+    queue_emails = set(queue_state["emails"])
+    role_blocklist = _sender_role_blocklist()
+    role_violations = {
+        email
+        for email in queue_emails
+        if email.partition("@")[0].strip().lower() in role_blocklist
+    }
+    suppressed_path = repo / "data/state/suppressed.csv"
+    sendgrid_suppression_path = repo / "data/state/sendgrid_suppressions.csv"
+    unsubscribed_path = repo / "data/state/unsubscribed.csv"
+    suppressed = _validated_email_state(suppressed_path, "global suppression state")
+    sendgrid_suppressed = _validated_email_state(
+        sendgrid_suppression_path,
+        "SendGrid suppression state",
+    )
+    unsubscribed = _validated_email_state(unsubscribed_path, "unsubscribe state")
+    suppression_overlap = queue_emails & (suppressed | sendgrid_suppressed)
+    unsubscribe_overlap = queue_emails & unsubscribed
+    profiles = _profile_runtime_layout()
+    config = profiles.get(profile)
+    if not isinstance(config, dict):
+        raise HandoffError(f"Unknown emergency profile: {profile}")
+    provider = str(config.get("provider") or "").strip().lower()
+    log_paths = _profile_log_paths(repo, profiles, profile)
+    sent_overlap = queue_emails & _authoritative_sent_emails(log_paths)
+    current_idempotency, active_reservations = _emergency_idempotency_state(
+        repo,
+        profile=profile,
+        provider=provider,
+        queue_state=queue_state,
+    )
+    reject_path, reject_emails = _emergency_reject_source(repo)
+    reject_overlap = queue_emails & reject_emails
+    violations = {
+        "duplicate_recipient_count": int(queue_state["duplicate_count"]),
+        "malformed_recipient_count": int(queue_state["invalid_count"]),
+        "role_filter_violation_count": len(role_violations),
+        "suppression_overlap_count": len(suppression_overlap),
+        "unsubscribe_overlap_count": len(unsubscribe_overlap),
+        "authoritative_sent_overlap_count": len(sent_overlap),
+        "current_campaign_idempotency_overlap_count": len(current_idempotency),
+        "active_reservation_overlap_count": len(active_reservations),
+        "reject_overlap_count": len(reject_overlap),
+    }
+    if any(violations.values()):
+        fingerprints = {
+            "role_filter_fingerprint": _email_fingerprint(role_violations),
+            "suppression_overlap_fingerprint": _email_fingerprint(suppression_overlap),
+            "unsubscribe_overlap_fingerprint": _email_fingerprint(unsubscribe_overlap),
+            "authoritative_sent_overlap_fingerprint": _email_fingerprint(sent_overlap),
+            "idempotency_overlap_fingerprint": _email_fingerprint(current_idempotency),
+            "active_reservation_fingerprint": _email_fingerprint(active_reservations),
+            "reject_overlap_fingerprint": _email_fingerprint(reject_overlap),
+        }
+        raise HandoffError(
+            "Emergency queue validation refused: "
+            + " ".join(f"{key}={value}" for key, value in violations.items())
+            + " "
+            + " ".join(f"{key}={value or 'none'}" for key, value in fingerprints.items())
+        )
+    return {
+        **violations,
+        "queue_path": str(queue_path),
+        "queue_row_count": int(queue_state["row_count"]),
+        "queue_unique_count": len(queue_emails),
+        "queue_fingerprint": queue_state["fingerprint"],
+        "suppression_record_count": len(suppressed | sendgrid_suppressed),
+        "unsubscribe_record_count": len(unsubscribed),
+        "authoritative_sent_record_count": len(
+            _authoritative_sent_emails(log_paths)
+        ),
+        "current_campaign_idempotency_record_count": len(current_idempotency),
+        "active_reservation_record_count": len(active_reservations),
+        "reject_record_count": len(reject_emails),
+        "reject_source_path": str(reject_path or ""),
+        "authoritative_log_paths": [str(path) for path in log_paths],
+    }
+
+
+def _copy_previous_campaign_metadata(
+    repo: Path,
+    destination: Path,
+    previous_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    archived: dict[str, Any] = {}
+    sources = _queue_safety_sources(repo)
+    source_dir = destination / "sources"
+    metadata_dir = destination / "metadata"
+    copied_sources: set[Path] = set()
+    for key in ("checked", "intended", "triaged_keep", "triaged_reject"):
+        source = sources.get(key)
+        if not isinstance(source, Path):
+            archived[key] = {"status": "missing"}
+            continue
+        record: dict[str, Any] = {"source_path": str(source)}
+        if source.is_file():
+            resolved = source.resolve()
+            if resolved not in copied_sources:
+                copied_sources.add(resolved)
+                target = source_dir / f"{key}_{source.name}"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                record.update(
+                    {
+                        "status": "archived",
+                        "archived_path": target.name,
+                        "sha256": sha256_file(target),
+                    }
+                )
+            else:
+                record["status"] = "duplicate_reference"
+        else:
+            record["status"] = "missing"
+        archived[key] = record
+    for name in (
+        "leads_dashboard_state.json",
+        "dashboard_run_settings.json",
+        "dispatch_run_history.json",
+    ):
+        source = repo / "data/state" / name
+        if not source.is_file():
+            continue
+        target = metadata_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        archived[name] = {
+            "status": "archived",
+            "source_path": str(source),
+            "archived_path": target.name,
+            "sha256": sha256_file(target),
+        }
+    return archived
+
+
+def _make_takeover_immutable(path: Path) -> None:
+    for child in path.rglob("*"):
+        os.chmod(child, 0o500 if child.is_dir() else 0o400)
+    os.chmod(path, 0o500)
+
+
+def emergency_takeover(
+    repo: Path,
+    bundle: Path,
+    *,
+    machine: str,
+    profile: str,
+    reason: str,
+    expected_bundle_sha256: str = EMERGENCY_EXPECTED_BUNDLE_SHA256,
+    expected_source_commit: str = EMERGENCY_EXPECTED_SOURCE_COMMIT,
+    expected_rows: int = EMERGENCY_EXPECTED_PRIVATE_JC_ROWS,
+    expected_queue_fingerprint: str = EMERGENCY_EXPECTED_PRIVATE_JC_FINGERPRINT,
+    write_hook=None,
+) -> dict[str, Any]:
+    repo = repo.resolve()
+    bundle = bundle.resolve()
+    if os.environ.get("ASTRA_MACHINE_ID", "").strip().lower() != "mac":
+        raise HandoffError("Emergency takeover requires ASTRA_MACHINE_ID=mac")
+    if machine != "mac" or platform.system() != "Darwin":
+        raise HandoffError("Emergency takeover is restricted to a physical Mac host")
+    if profile != "private_jc":
+        raise HandoffError("Emergency takeover supports only profile=private_jc")
+    if not reason.strip():
+        raise HandoffError("Emergency takeover requires a non-empty operator reason")
+    assert_processes_stopped(repo)
+    if authority_path(repo).exists():
+        raise HandoffError("Emergency takeover refused because runtime authority already exists")
+
+    profiles = _profile_runtime_layout()
+    config = profiles.get(profile)
+    queue_name = str(config.get("csv") or "") if isinstance(config, dict) else ""
+    if not queue_name:
+        raise HandoffError(f"Emergency profile has no configured queue: {profile}")
+    queue_relative = f"data/shards/{queue_name}"
+    queue_path = repo / queue_relative
+    if not queue_path.is_file():
+        raise HandoffError(f"Restored emergency queue is missing: {queue_path}")
+
+    state_dir = repo / "data/state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="emergency-bundle-", dir=repo.parent) as temp:
+        manifest, bundled_queue = _verify_legacy_emergency_bundle(
+            bundle,
+            expected_sha256=expected_bundle_sha256,
+            expected_commit=expected_source_commit,
+            queue_relative=queue_relative,
+            expected_rows=expected_rows,
+            extraction_root=Path(temp),
+        )
+        bundled_state = _read_queue_state(bundled_queue, profile)
+        current_state = _read_queue_state(queue_path, profile)
+        for label, state in (
+            ("bundled", bundled_state),
+            ("current restored", current_state),
+        ):
+            if (
+                int(state["row_count"]) != expected_rows
+                or len(state["emails"]) != expected_rows
+            ):
+                raise HandoffError(
+                    f"Emergency {label} queue must contain exactly {expected_rows} "
+                    f"unique recipient rows: rows={state['row_count']} "
+                    f"unique={len(state['emails'])}"
+                )
+            if state["duplicate_count"] or state["invalid_count"]:
+                raise HandoffError(
+                    f"Emergency {label} queue is invalid: "
+                    f"duplicates={state['duplicate_count']} malformed={state['invalid_count']}"
+                )
+            if state["fingerprint"] != expected_queue_fingerprint:
+                raise HandoffError(
+                    f"Emergency {label} queue fingerprint mismatch: "
+                    f"expected={expected_queue_fingerprint} actual={state['fingerprint']}"
+                )
+        byte_identical = queue_path.read_bytes() == bundled_queue.read_bytes()
+        set_identical = current_state["emails"] == bundled_state["emails"]
+        if not byte_identical and not set_identical:
+            raise HandoffError(
+                "Current restored private_jc queue differs from the verified bundle: "
+                f"current_fingerprint={current_state['fingerprint']} "
+                f"bundled_fingerprint={bundled_state['fingerprint']}"
+            )
+        validation = _emergency_queue_validation(
+            repo,
+            profile=profile,
+            queue_path=queue_path,
+            queue_state=current_state,
+        )
+
+        snapshot_path = repo / QUEUE_SAFETY_MANIFEST
+        previous_snapshot_bytes = (
+            snapshot_path.read_bytes() if snapshot_path.is_file() else None
+        )
+        previous_snapshot_fingerprint = (
+            hashlib.sha256(previous_snapshot_bytes).hexdigest()
+            if previous_snapshot_bytes is not None
+            else ""
+        )
+        try:
+            previous_snapshot = (
+                json.loads(previous_snapshot_bytes)
+                if previous_snapshot_bytes is not None
+                else {}
+            )
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HandoffError(
+                f"Existing campaign snapshot is unreadable: {snapshot_path}"
+            ) from exc
+        if not isinstance(previous_snapshot, dict):
+            raise HandoffError("Existing campaign snapshot must be a JSON object")
+
+        created_utc = utc_now()
+        takeover_id = (
+            "emergency_"
+            + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            + "_"
+            + uuid.uuid4().hex[:12]
+        )
+        staging = Path(
+            tempfile.mkdtemp(prefix=f".{takeover_id}.", dir=state_dir)
+        )
+        final_root = repo / EMERGENCY_TAKEOVER_ROOT / takeover_id
+        takeover_parent = final_root.parent
+        parent_preexisted = takeover_parent.exists()
+        final_installed = False
+        snapshot_replaced = False
+        snapshot_temporary: Path | None = None
+        try:
+            checked = staging / "checked_source.csv"
+            intended = staging / "intended_source.csv"
+            keep = staging / "triaged_keep.csv"
+            reject = staging / "triaged_reject.csv"
+            source_bytes = bundled_queue.read_bytes()
+            for target in (checked, intended, keep):
+                _atomic_replace_bytes(target, source_bytes)
+            _atomic_replace_bytes(reject, b"Email\n")
+            previous_dir = staging / "previous_campaign"
+            previous_dir.mkdir(parents=True, exist_ok=True)
+            archived_snapshot = previous_dir / "active_campaign_snapshot.json"
+            if previous_snapshot_bytes is not None:
+                _atomic_replace_bytes(archived_snapshot, previous_snapshot_bytes)
+            archived_metadata = _copy_previous_campaign_metadata(
+                repo,
+                previous_dir,
+                previous_snapshot,
+            )
+
+            relative_root = final_root.relative_to(repo)
+            source_paths = {
+                "checked": relative_root / checked.name,
+                "intended_source": relative_root / intended.name,
+                "triaged_keep": relative_root / keep.name,
+                "triaged_reject": relative_root / reject.name,
+            }
+            source_files = {
+                key: {
+                    "path": path.as_posix(),
+                    "sha256": sha256_file(staging / Path(path).name),
+                    "size": (staging / Path(path).name).stat().st_size,
+                    "row_count": _csv_count(staging / Path(path).name),
+                    "email_fingerprint": _email_fingerprint(
+                        _read_email_set(staging / Path(path).name)
+                    ),
+                }
+                for key, path in source_paths.items()
+            }
+            provenance_path = relative_root / "provenance_manifest.json"
+            provenance = {
+                "schema_version": 1,
+                "takeover_id": takeover_id,
+                "created_utc": created_utc,
+                "machine_id": machine,
+                "profile": profile,
+                "operator_reason": reason.strip(),
+                "bundle_path": str(bundle),
+                "bundle_sha256": expected_bundle_sha256,
+                "bundle_expected_commit": manifest["expected_commit"],
+                "current_application_commit": git(repo, "rev-parse", "HEAD"),
+                "queue_path": queue_relative,
+                "queue_row_count": current_state["row_count"],
+                "queue_unique_count": len(current_state["emails"]),
+                "queue_fingerprint": current_state["fingerprint"],
+                "queue_match_mode": (
+                    "byte_for_byte" if byte_identical else "canonical_email_set"
+                ),
+                "generated_sources": source_files,
+                "validation": validation,
+                "previous_campaign_snapshot_path": (
+                    (
+                        relative_root
+                        / "previous_campaign"
+                        / "active_campaign_snapshot.json"
+                    ).as_posix()
+                    if previous_snapshot_bytes is not None
+                    else ""
+                ),
+                "previous_campaign_snapshot_fingerprint": previous_snapshot_fingerprint,
+                "previous_campaign_metadata": archived_metadata,
+                "emergency_source_decision": (
+                    "The checked and intended sources are canonical copies of the exact "
+                    "verified bundled private_jc queue. This is emergency provenance "
+                    "reconstruction, not a normal lead check or triage result."
+                ),
+                "status": "awaiting_preview_validation",
+            }
+            _write_json(staging / "provenance_manifest.json", provenance)
+            new_snapshot = {
+                "schema_version": 2,
+                "snapshot_type": "emergency_takeover",
+                "takeover_id": takeover_id,
+                "created_utc": created_utc,
+                "profile": profile,
+                "status": "awaiting_preview_validation",
+                "checked_path": source_paths["checked"].as_posix(),
+                "intended_source_path": source_paths["intended_source"].as_posix(),
+                "triaged_keep_path": source_paths["triaged_keep"].as_posix(),
+                "triaged_reject_path": source_paths["triaged_reject"].as_posix(),
+                "provenance_manifest_path": provenance_path.as_posix(),
+                "files": source_files,
+            }
+            snapshot_payload = (
+                json.dumps(new_snapshot, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=".active_campaign_snapshot.",
+                dir=state_dir,
+            )
+            snapshot_temporary = Path(temporary_name)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(snapshot_payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(snapshot_temporary, 0o600)
+
+            takeover_parent.mkdir(parents=True, exist_ok=True)
+            if final_root.exists():
+                raise HandoffError(f"Emergency takeover ID collision: {final_root}")
+            os.replace(staging, final_root)
+            final_installed = True
+            _fsync_directory(takeover_parent)
+            if write_hook is not None:
+                write_hook("after_takeover_directory", final_root)
+            os.replace(snapshot_temporary, snapshot_path)
+            snapshot_temporary = None
+            snapshot_replaced = True
+            _fsync_directory(state_dir)
+            if write_hook is not None:
+                write_hook("after_snapshot_replace", snapshot_path)
+
+            safety = recompute_queue_safety(repo)
+            expected_blockers = ["active profile preview is stale or invalid"]
+            if safety.get("unsafe_reasons") != expected_blockers:
+                raise HandoffError(
+                    "Emergency post-write safety validation failed: "
+                    f"unsafe_reasons={safety.get('unsafe_reasons')} "
+                    f"details={safety.get('failure_details')}"
+                )
+            profile_reports = safety.get("profiles") or []
+            preview = (
+                profile_reports[0].get("preview", {})
+                if len(profile_reports) == 1 and isinstance(profile_reports[0], dict)
+                else {}
+            )
+            if preview.get("safe") is not False:
+                raise HandoffError(
+                    "Emergency takeover requires preview validation to remain blocked"
+                )
+            if authority_path(repo).exists():
+                raise HandoffError("Emergency takeover unexpectedly created authority")
+            _make_takeover_immutable(final_root)
+            return {
+                "takeover_id": takeover_id,
+                "status": "awaiting_preview_validation",
+                "takeover_root": str(final_root),
+                "active_campaign_snapshot": str(snapshot_path),
+                "queue_row_count": current_state["row_count"],
+                "queue_fingerprint": current_state["fingerprint"],
+                "preview": preview,
+                "authority_initialized": False,
+                "sender_started": False,
+                "activation_allowed": False,
+                "next_required_action": EMERGENCY_NEXT_ACTION,
+            }
+        except Exception:
+            if snapshot_replaced:
+                if previous_snapshot_bytes is None:
+                    snapshot_path.unlink(missing_ok=True)
+                    _fsync_directory(snapshot_path.parent)
+                else:
+                    _atomic_replace_bytes(snapshot_path, previous_snapshot_bytes)
+            if final_installed and final_root.exists():
+                try:
+                    os.chmod(final_root, 0o700)
+                except OSError:
+                    pass
+                for child in final_root.rglob("*"):
+                    try:
+                        os.chmod(child, 0o700 if child.is_dir() else 0o600)
+                    except OSError:
+                        pass
+                shutil.rmtree(final_root)
+            elif staging.exists():
+                shutil.rmtree(staging)
+            if not parent_preexisted and takeover_parent.exists():
+                try:
+                    takeover_parent.rmdir()
+                except OSError:
+                    pass
+            raise
+        finally:
+            if snapshot_temporary is not None:
+                snapshot_temporary.unlink(missing_ok=True)
+
+
 def _archive_existing_runtime(repo: Path, bundle_id: str) -> Path:
     backup_dir = repo / LOCAL_STATE_DIR / BACKUP_DIR_NAME
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1470,6 +2172,20 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     activate_parser = commands.add_parser("activate")
     activate_parser.add_argument("--initialize", action="store_true")
     activate_parser.add_argument("--force", action="store_true")
+    emergency_parser = commands.add_parser("emergency-takeover")
+    emergency_parser.add_argument("--bundle", type=Path, required=True)
+    emergency_parser.add_argument(
+        "--machine",
+        dest="emergency_machine",
+        choices=("mac",),
+        required=True,
+    )
+    emergency_parser.add_argument(
+        "--profile",
+        choices=("private_jc",),
+        required=True,
+    )
+    emergency_parser.add_argument("--reason", required=True)
     rollback_parser = commands.add_parser("rollback")
     rollback_parser.add_argument("--backup", type=Path)
     return parser.parse_args(argv)
@@ -1515,6 +2231,16 @@ def main(argv: Iterable[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
+        elif args.command == "emergency-takeover":
+            result = emergency_takeover(
+                repo,
+                args.bundle,
+                machine=args.emergency_machine,
+                profile=args.profile,
+                reason=args.reason,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            print(f"NEXT REQUIRED ACTION: {result['next_required_action']}")
         elif args.command == "rollback":
             print(
                 json.dumps(

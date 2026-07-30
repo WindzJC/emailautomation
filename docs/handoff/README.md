@@ -28,6 +28,27 @@ Windows PowerShell operators can use:
 
 The PowerShell wrapper invokes the WSL repository through `wsl.exe`.
 
+## Emergency Mac provenance takeover
+
+Use this only when WSL is inaccessible, the specified verified legacy bundle
+has already been restored, and Mac has no runtime authority:
+
+```bash
+ASTRA_MACHINE_ID=mac ./handoff emergency-takeover \
+  --bundle /Users/windellereboquio/AstraHandoff/_incoming/emailautomation_runtime_20260728T211005Z.tgz \
+  --machine mac \
+  --profile private_jc \
+  --reason "WSL source machine inaccessible"
+```
+
+This command is deliberately pinned to the expected bundle SHA-256, source
+commit, 2,574-recipient count, and queue fingerprint recorded for that incident.
+It creates immutable checked/intended/reject provenance from the verified
+bundled queue and replaces only the active campaign-source snapshot. It does
+not initialize authority or start anything. A new matching private-JC preview
+must still be generated and validated before normal authority initialization
+can succeed.
+
 If export succeeds but transfer/import fails, do not reactivate the source.
 Both sides remain unable to send. Correct the failure and retry import with the
 same bundle only if target activation never succeeded. Use `rollback` only to
