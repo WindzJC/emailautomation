@@ -152,7 +152,7 @@ def _validate_repair(
                 raise ValueError(f"Warm queue row {index} changed protected non-message field {field}.")
         subject = str(repaired.get("EmailSubject") or "")
         body = str(repaired.get("EmailBody") or "")
-        if not subject.startswith("A presentation direction for"):
+        if not subject.startswith("A focused direction for"):
             raise ValueError(f"Warm queue row {index} has an unexpected subject.")
         if "Founder & CEO, Astra Productions" not in body:
             raise ValueError(f"Warm queue row {index} is missing the approved signature.")

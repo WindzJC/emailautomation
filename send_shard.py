@@ -1388,28 +1388,12 @@ def normalize_warm_book_title_or_project(value: object) -> str:
 
 def format_warm_recommended_service_phrase(value: object) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
-    key = text.casefold()
-    if not text or key in {"recommendedservice", "service", "synthetic service"}:
+    if not text:
         return WARM_RECOMMENDED_SERVICE_FALLBACK
-    mapped = WARM_RECOMMENDED_SERVICE_PHRASES.get(key)
-    if mapped:
-        return mapped
-    if (
-        len(text) > 160
-        or WARM_INTERNAL_PERSONALIZATION_LABEL_RE.search(text)
-        or WARM_PERSONALIZATION_URL_RE.search(text)
-        or WARM_PERSONALIZATION_EMAIL_RE.search(text)
-    ):
-        return WARM_RECOMMENDED_SERVICE_FALLBACK
-    phrase = text[:1].lower() + text[1:]
-    if phrase.casefold().startswith(
-        ("a ", "an ", "the ", "stronger ", "clearer ", "focused ", "improved ", "polished ")
-    ):
-        return phrase
-    if "+" in phrase or " and " in phrase.casefold() or phrase.casefold().endswith(("visuals", "clips", "pages")):
-        return phrase
-    article = "an" if phrase[:1].casefold() in {"a", "e", "i", "o", "u"} else "a"
-    return f"{article} {phrase}"
+    return WARM_RECOMMENDED_SERVICE_PHRASES.get(
+        text.casefold(),
+        WARM_RECOMMENDED_SERVICE_FALLBACK,
+    )
 
 
 def render_warm_email_copy(

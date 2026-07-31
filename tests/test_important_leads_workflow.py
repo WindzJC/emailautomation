@@ -241,19 +241,23 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(2, report["warm_email_preview_rows"])
             self.assertFalse(report["dispatch_enabled"])
             self.assertEqual(list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), list(rows[0].keys()))
-            self.assertEqual("A presentation direction for The Silent Garden", rows[0]["EmailSubject"])
+            self.assertEqual("A focused direction for The Silent Garden", rows[0]["EmailSubject"])
             self.assertIn("Hi Sarah,", rows[0]["EmailBody"])
             self.assertEqual(
-                "A presentation direction for your author platform",
+                "A focused direction for your author platform",
                 rows[1]["EmailSubject"],
             )
             self.assertIn("Hi there,", rows[1]["EmailBody"])
             self.assertIn(
-                "I came across your author platform and wanted to reach out with one focused idea.",
+                "I reviewed the available information about your author platform and identified "
+                "one focused opportunity to strengthen how the project is presented.",
                 rows[1]["EmailBody"],
             )
-            self.assertNotIn("{FirstName}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
-            self.assertNotIn("{BookTitleOrProject}", rows[0]["EmailBody"] + rows[1]["EmailBody"])
+            combined_body = rows[0]["EmailBody"] + rows[1]["EmailBody"]
+            self.assertIn("a focused launch presentation", combined_body)
+            self.assertNotRegex(combined_body, r"\{[A-Za-z][A-Za-z0-9_]*\}")
+            self.assertIn('reply “unsubscribe.”', rows[0]["EmailBody"])
+            self.assertIn('reply “unsubscribe.”', rows[1]["EmailBody"])
 
     def test_warm_email_preview_uses_safe_personalization_without_raw_research_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -294,7 +298,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 "without replacing the parts of the launch that already work.",
                 body,
             )
-            self.assertIn("The clearest fit I see is a custom author website.", body)
+            self.assertIn(
+                "Based on what you shared, the clearest next step is a custom author website.",
+                body,
+            )
             self.assertNotIn(need_signal, body)
             self.assertNotIn(outreach_angle, body)
             self.assertIn(
@@ -302,7 +309,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 body,
             )
             self.assertTrue(
-                body.endswith("P.S. If you’d rather not hear from me again, just reply unsub.\n")
+                body.endswith(
+                    'P.S. If you would rather not hear from me again, reply “unsubscribe.”\n'
+                )
             )
 
     def test_warm_email_copy_uses_fallback_for_missing_blank_or_internal_personalization(self) -> None:
@@ -339,13 +348,20 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual("fallback", rendered["template"])
                 self.assertIn(
-                    "I came across The Silent Garden and wanted to reach out with one focused idea.",
+                    "I reviewed the available information about The Silent Garden and identified "
+                    "one focused opportunity to strengthen how the project is presented.",
                     rendered["body"],
                 )
                 self.assertNotIn("Explicit Need", rendered["body"])
                 self.assertNotIn("NeedSignal:", rendered["body"])
                 self.assertNotIn("OutreachAngle:", rendered["body"])
                 self.assertNotIn("https://example.test", rendered["body"])
+                self.assertNotIn("author@example.test", rendered["body"])
+                self.assertNotRegex(
+                    rendered["subject"] + rendered["body"],
+                    r"\{[A-Za-z][A-Za-z0-9_]*\}",
+                )
+                self.assertIn('reply “unsubscribe.”', rendered["body"])
         self.assertEqual(
             "I saw your recent launch update!",
             send_shard.normalize_warm_personalization_line(
@@ -353,7 +369,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             ),
         )
 
-    def test_warm_recommended_service_values_render_as_natural_phrases(self) -> None:
+    def test_warm_recommended_service_values_use_allowlist_or_fallback(self) -> None:
         expected = {
             "Custom author website": "a custom author website",
             "Cinematic book trailer": "a cinematic book trailer",
@@ -363,13 +379,31 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "Launch visuals + landing page + trailer clips": (
                 "launch visuals, a landing page, and trailer clips"
             ),
-            "Premium campaign page": "a premium campaign page",
-            "": "a focused launch presentation",
         }
         for value, phrase in expected.items():
             with self.subTest(service=value):
                 self.assertEqual(
                     phrase,
+                    send_shard.format_warm_recommended_service_phrase(value),
+                )
+        unsupported_values = (
+            None,
+            "",
+            "   ",
+            "Premium campaign page",
+            "Unsupported campaign service",
+            "RecommendedService",
+            "Synthetic service",
+            "NeedSignal: launch copy needs work",
+            "https://example.test/service",
+            "service@example.test",
+            "{RecommendedService}",
+            "x" * 161,
+        )
+        for value in unsupported_values:
+            with self.subTest(unsupported_service=value):
+                self.assertEqual(
+                    "a focused launch presentation",
                     send_shard.format_warm_recommended_service_phrase(value),
                 )
         rendered = send_shard.render_warm_email_copy(
@@ -379,7 +413,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             personalization_line="I saw how your recent launch gives readers a clear path into the story.",
         )
         self.assertIn(
-            "The clearest fit I see is a stronger author-platform presentation.",
+            "Based on what you shared, the clearest next step is "
+            "a stronger author-platform presentation.",
             rendered["body"],
         )
 
@@ -535,11 +570,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     personalization_line="",
                 )
                 self.assertEqual(
-                    "A presentation direction for your author platform",
+                    "A focused direction for your author platform",
                     rendered["subject"],
                 )
                 self.assertIn(
-                    "I came across your author platform and wanted to reach out with one focused idea.",
+                    "I reviewed the available information about your author platform and identified "
+                    "one focused opportunity to strengthen how the project is presented.",
                     rendered["body"],
                 )
                 if title:
@@ -553,7 +589,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             personalization_line="",
         )
         self.assertEqual(
-            "A presentation direction for The Silent Garden",
+            "A focused direction for The Silent Garden",
             clean["subject"],
         )
 

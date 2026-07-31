@@ -120,7 +120,7 @@ def test_apply_backs_up_and_rehashes_exact_pending_queue(tmp_path: Path) -> None
     assert len(repaired) == 22
     assert len(manifest["approved_rows"]) == 22
     assert [row["Email"] for row in repaired] == [row["Email"] for row in rows]
-    assert all(row["EmailSubject"].startswith("A presentation direction for") for row in repaired)
+    assert all(row["EmailSubject"].startswith("A focused direction for") for row in repaired)
     assert all("Founder & CEO, Astra Productions" in row["EmailBody"] for row in repaired)
     assert all("Quick idea for" not in row["EmailBody"] for row in repaired)
     assert all("Creative Director, Astra Productions" not in row["EmailBody"] for row in repaired)
