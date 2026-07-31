@@ -1,0 +1,33 @@
+// Permit only the unprivileged Astra dashboard account to start or stop
+// explicitly configured sender-template instances.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units" ||
+        subject.user !== "astra") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var verb = action.lookup("verb");
+    if (verb !== "start" && verb !== "stop") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var unit = action.lookup("unit");
+    var allowed = [
+        "astra-sender@private_alison.service",
+        "astra-sender@private_annette.service",
+        "astra-sender@private_fiorela.service",
+        "astra-sender@private_jc.service",
+        "astra-sender@private_jc_warm.service",
+        "astra-sender@private_jodi.service",
+        "astra-sender@private_jordan.service",
+        "astra-sender@sendgrid_alison.service",
+        "astra-sender@sendgrid_annette.service",
+        "astra-sender@sendgrid_fiorela.service",
+        "astra-sender@sendgrid_jodi.service",
+        "astra-sender@sendgrid_jordan.service"
+    ];
+    if (allowed.indexOf(unit) !== -1) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

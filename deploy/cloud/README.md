@@ -9,7 +9,9 @@ The packaged paths assume:
 
 - repository: `/opt/astra/emailautomation`
 - service account: `astra`
-- protected environment: `/etc/astra-emailautomation/astra.env`
+- protected dashboard/backup environment: `/etc/astra-emailautomation/astra.env`
+- protected per-profile sender environments:
+  `/etc/astra-emailautomation/profiles/PROFILE.env`
 - dashboard listener: `127.0.0.1:8000`
 
 Do not run bootstrap, pull a new commit into the live Mac checkout, stop the Mac
@@ -48,6 +50,41 @@ from the secret manager or password vault. Keep the restic password in the
 separate file named by `RESTIC_PASSWORD_FILE`, owned by `root:astra` and mode
 `0640`. The systemd units set `ASTRA_DISABLE_DOTENV=1`, so application settings
 cannot fall back to repository-local `.env` files.
+
+Each sender instance loads only its own profile environment, never the
+dashboard environment or another sender's credentials. Create the selected
+profile file from the mapping in `profile-env.example`:
+
+```bash
+sudoedit /etc/astra-emailautomation/profiles/private_jc.env
+sudo chown root:astra /etc/astra-emailautomation/profiles/private_jc.env
+sudo chmod 0640 /etc/astra-emailautomation/profiles/private_jc.env
+```
+
+Every profile file contains the exact deployed commit and exactly one
+credential variable. Do not consolidate credentials into a shared sender
+environment.
+
+## Configured sender profiles
+
+| Profile | Provider | Queue | Preview | Credential variable |
+| --- | --- | --- | --- | --- |
+| `private_alison` | private SMTP | `recipients_4.csv` | `private_alison_message_preview.csv` | `PRIVATE_ALISON_APP_PW` |
+| `private_annette` | private SMTP | `recipients_1.csv` | `private_annette_message_preview.csv` | `PRIVATE_ANNETTE_APP_PW` |
+| `private_fiorela` | private SMTP | `recipients_5.csv` | `private_fiorela_message_preview.csv` | `PRIVATE_FIORELA_APP_PW` |
+| `private_jc` | private SMTP | `recipients_private_jc.csv` | `private_jc_message_preview.csv` | `PRIVATE_JC_PASSWORD` |
+| `private_jc_warm` | private SMTP, pre-rendered | `recipients_private_jc_warm.csv` | `private_jc_warm_message_preview.csv` | `PRIVATE_JC_PASSWORD` |
+| `private_jodi` | private SMTP | `recipients_3.csv` | `private_jodi_message_preview.csv` | `PRIVATE_JODI_APP_PW` |
+| `private_jordan` | private SMTP | `recipients_2.csv` | `private_jordan_message_preview.csv` | `PRIVATE_JORDAN_APP_PW` |
+| `sendgrid_alison` | SendGrid API | `recipients_sendgrid_4.csv` | `sendgrid_alison_message_preview.csv` | `SENDGRID_API_KEY` |
+| `sendgrid_annette` | SendGrid API | `recipients_sendgrid_1.csv` | `sendgrid_annette_message_preview.csv` | `SENDGRID_API_KEY` |
+| `sendgrid_fiorela` | SendGrid API | `recipients_sendgrid_5.csv` | `sendgrid_fiorela_message_preview.csv` | `SENDGRID_API_KEY` |
+| `sendgrid_jodi` | SendGrid API | `recipients_sendgrid_3.csv` | `sendgrid_jodi_message_preview.csv` | `SENDGRID_API_KEY` |
+| `sendgrid_jordan` | SendGrid API | `recipients_sendgrid_2.csv` | `sendgrid_jordan_message_preview.csv` | `SENDGRID_API_KEY` |
+
+The unit, verifier, dashboard backend, and sender CLI all independently reject
+unknown profile identifiers. A profile cannot silently fall back to
+`private_jc`.
 
 ## Runtime transfer and authority cutover
 
@@ -104,22 +141,30 @@ During the reviewed cutover window only:
    sudo -u astra env \
      ASTRA_MACHINE_ID=cloud \
      ASTRA_EXPECTED_GIT_COMMIT="$(git rev-parse HEAD)" \
-     deploy/cloud/verify.sh --require-authority
+     deploy/cloud/verify.sh --profile private_jc --require-authority
    ```
 
 5. Review `./handoff status` and service logs. Enabling or starting the sender is
-   a separate explicit operator action:
+   a separate explicit, profile-specific operator action:
 
    ```bash
    sudo systemctl enable astra-dashboard.service
    sudo systemctl start astra-dashboard.service
-   sudo systemctl enable astra-sender.service
-   sudo systemctl start astra-sender.service
+   sudo systemctl enable astra-sender@private_jc.service
+   sudo systemctl start astra-sender@private_jc.service
    ```
 
-The sender unit holds a systemd `flock` and the application also holds its
-profile runtime lock, preventing concurrent `private_jc` instances. Exit code
-75 means another instance owns the service lock and is not restarted.
+`astra-sender@.service` requires an explicit instance name. Each instance loads
+only `/etc/astra-emailautomation/profiles/PROFILE.env`, runs
+`send_shard.py --profile PROFILE`, holds a profile-specific systemd `flock`,
+and then acquires the application's profile runtime lock. Exit code 75 means
+another instance owns that profile's service lock and is not restarted.
+
+The root-owned polkit rule grants the `astra` dashboard account permission to
+start or stop only the 12 configured sender instances. The dashboard uses the
+systemd runtime backend on cloud, so per-profile Start, Stop, active status, and
+delivery-guard stops all address the selected template instance. Bulk cloud
+startup is intentionally refused.
 
 ## Dashboard and tunnel
 
@@ -135,10 +180,11 @@ publishing the hostname.
 
 ## Verification
 
-`verify.sh` is inspection-only. It requires a clean tracked checkout and exact
-`ASTRA_EXPECTED_GIT_COMMIT`, checks Python/system dependencies, reads handoff
-status, compares canonical queue/generated/validated preview fingerprints, and
-runs:
+`verify.sh` is inspection-only and requires `--profile`; there is no default.
+It requires a clean tracked checkout and exact `ASTRA_EXPECTED_GIT_COMMIT`,
+checks Python/system dependencies, reads handoff status, resolves only the
+selected profile's queue/preview/credential mapping, applies the same strict
+preview decision as activation, and runs:
 
 ```bash
 python send_shard.py --profile private_jc --preflight
@@ -146,13 +192,17 @@ python send_shard.py --profile private_jc --preflight
 
 Preflight bypasses send authority and cannot submit a message. Passing
 `--require-authority` additionally requires active cloud authority and is used
-as the sender unit's `ExecCondition`.
+as the sender instance's `ExecCondition`; in that mode the selected credential
+must also exist in the selected protected profile environment.
 
 ## Backups
 
 Restic provides encrypted, content-addressed, checksummed backups. The backup
 includes `data/`, `_important/`, and `.runtime_handoff/` and explicitly excludes
-environment files, virtual environments, source, and handoff archives.
+environment files, virtual environments, source, and handoff archives. All
+profile queues, previews, logs, suppressions, ledgers, and authority state are
+included as runtime data; no `/etc/astra-emailautomation` credential file is
+inside the repository backup scope.
 
 `backup.sh` refuses unless every sender/dashboard/tunnel/dispatch/check/triage
 process and active job is stopped. This protects SQLite, queues, logs, and
@@ -175,8 +225,16 @@ never replace a higher local generation floor.
 Rollback means transferring the complete updated cloud runtime back to Mac, not
 merely starting the old Mac queue.
 
-1. Stop all cloud runtime services/jobs and confirm
+1. Stop every active sender instance, the dashboard, and other cloud runtime
+   services/jobs, then confirm
    `ASTRA_MACHINE_ID=cloud ./handoff status` has no blockers.
+   Inventory instances explicitly:
+
+   ```bash
+   systemctl list-units 'astra-sender@*.service'
+   systemctl list-unit-files 'astra-sender@*.service'
+   ```
+
 2. Put Mac and cloud on the same exact reviewed commit.
 3. Configure `HANDOFF_MAC_HOST` and `HANDOFF_MAC_REPO`.
 4. From cloud:

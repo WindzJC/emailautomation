@@ -1,5 +1,5 @@
 [Unit]
-Description=Astra private_jc email sender
+Description=Astra email sender profile %i
 After=network-online.target
 Wants=network-online.target
 
@@ -8,13 +8,14 @@ Type=simple
 User=astra
 Group=astra
 WorkingDirectory=/opt/astra/emailautomation
-EnvironmentFile=/etc/astra-emailautomation/astra.env
+EnvironmentFile=/etc/astra-emailautomation/profiles/%i.env
 Environment=ASTRA_MACHINE_ID=cloud
 Environment=ASTRA_DISABLE_DOTENV=1
 RuntimeDirectory=astra-emailautomation
 RuntimeDirectoryMode=0700
-ExecCondition=/opt/astra/emailautomation/deploy/cloud/verify.sh --require-authority
-ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/astra-emailautomation/private_jc.lock /opt/astra/emailautomation/.venv/bin/python send_shard.py --profile private_jc
+RuntimeDirectoryPreserve=yes
+ExecCondition=/opt/astra/emailautomation/deploy/cloud/verify.sh --profile %i --require-authority
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 /run/astra-emailautomation/sender-%i.lock /opt/astra/emailautomation/.venv/bin/python send_shard.py --profile %i
 Restart=on-failure
 RestartPreventExitStatus=75
 RestartSec=30s

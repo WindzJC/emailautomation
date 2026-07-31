@@ -3857,7 +3857,16 @@ def _build_automation_status() -> dict[str, object]:
 
 
 def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
-    snapshot = build_dashboard_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
+    profile_snapshots = None
+    if runtime_control.backend_name() == "systemd":
+        profile_snapshots = runtime_control.list_sender_snapshots(
+            tail_lines=tail_lines
+        )
+    snapshot = build_dashboard_snapshot(
+        activity_hours=activity_hours,
+        tail_lines=tail_lines,
+        profile_snapshots=profile_snapshots,
+    )
     snapshot["automation"] = _build_automation_status()
     if not bool(snapshot["automation"].get("auto_start_allowed")):
         alerts = snapshot.setdefault("alerts", [])

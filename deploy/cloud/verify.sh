@@ -6,13 +6,30 @@ REPO_ROOT="${ASTRA_REPO_ROOT:-/opt/astra/emailautomation}"
 PYTHON_BIN="${ASTRA_PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
 EXPECTED_COMMIT="${ASTRA_EXPECTED_GIT_COMMIT:-}"
 REQUIRE_AUTHORITY=0
+PROFILE=""
 
-if [[ "${1:-}" == "--require-authority" ]]; then
-  REQUIRE_AUTHORITY=1
-  shift
-fi
-if [[ "$#" -ne 0 ]]; then
-  echo "Usage: verify.sh [--require-authority]" >&2
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --require-authority)
+      REQUIRE_AUTHORITY=1
+      shift
+      ;;
+    --profile)
+      if [[ "$#" -lt 2 || -z "${2}" || -n "${PROFILE}" ]]; then
+        echo "Usage: verify.sh --profile PROFILE [--require-authority]" >&2
+        exit 2
+      fi
+      PROFILE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Usage: verify.sh --profile PROFILE [--require-authority]" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -z "${PROFILE}" ]]; then
+  echo "REFUSED: --profile is required; no sender profile is selected by default." >&2
   exit 2
 fi
 if [[ -z "${EXPECTED_COMMIT}" ]]; then
@@ -69,46 +86,62 @@ print(
 )
 PY
 
-"${PYTHON_BIN}" - "${REPO_ROOT}" <<'PY'
+"${PYTHON_BIN}" - "${REPO_ROOT}" "${PROFILE}" "${REQUIRE_AUTHORITY}" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 repo = Path(sys.argv[1]).resolve()
+profile = sys.argv[2]
+require_authority = sys.argv[3] == "1"
 sys.path.insert(0, str(repo))
+from send_shard import PROFILES
 from tools import runtime_handoff
 
-profiles = runtime_handoff._profile_runtime_layout()
-config = profiles.get("private_jc")
-if not isinstance(config, dict) or not config.get("csv"):
-    raise SystemExit("REFUSED: private_jc profile has no configured queue.")
-queue = repo / "data/shards" / str(config["csv"])
+config = PROFILES.get(profile)
+if not isinstance(config, dict):
+    raise SystemExit("REFUSED: unknown sender profile.")
+queue_name = str(config.get("csv") or "").strip()
+if not queue_name or Path(queue_name).name != queue_name:
+    raise SystemExit("REFUSED: selected profile has an unsafe queue mapping.")
+provider = str(config.get("provider") or "").strip().lower()
+credential_env = (
+    "SENDGRID_API_KEY"
+    if provider == "sendgrid"
+    else str(config.get("password_env") or "").strip()
+)
+if not credential_env:
+    raise SystemExit("REFUSED: selected profile has no credential mapping.")
+if require_authority and not str(os.environ.get(credential_env) or "").strip():
+    raise SystemExit(
+        "REFUSED: selected profile credential is absent from the protected environment."
+    )
+queue = repo / "data/shards" / queue_name
 if not queue.is_file():
-    raise SystemExit(f"REFUSED: private_jc queue is missing: {queue}")
-queue_state = runtime_handoff._read_queue_state(queue, "private_jc")
+    raise SystemExit("REFUSED: selected profile queue is missing.")
+queue_state = runtime_handoff._read_queue_state(queue, profile)
+if int(queue_state["row_count"]) <= 0:
+    raise SystemExit("REFUSED: selected profile queue has no data rows.")
 preview = runtime_handoff._preview_safety(
     repo,
-    "private_jc",
+    profile,
     queue,
     queue_state,
 )
 if not preview["safe"]:
     predicates = ",".join(preview.get("failed_predicates") or ["unknown"])
     raise SystemExit(f"REFUSED: queue/preview verification failed: {predicates}")
-fingerprints = {
-    str(queue_state["fingerprint"]),
-    str(preview["preview_fingerprint"]),
-    str(preview["validated_fingerprint"]),
-}
-if len(fingerprints) != 1 or "" in fingerprints:
-    raise SystemExit("REFUSED: queue/generated/validated fingerprints differ.")
 print(
-    "Queue/preview fingerprints: "
-    f"rows={queue_state['row_count']} sha256={queue_state['fingerprint']}"
+    "Profile verification: "
+    f"profile={profile} provider={provider} queue={queue_name} "
+    f"credential_variable={credential_env} rows={queue_state['row_count']} "
+    f"verified_emergency_queue_progress="
+    f"{bool(preview.get('verified_emergency_queue_progress'))}"
 )
 PY
 
 ASTRA_MACHINE_ID=cloud "${PYTHON_BIN}" send_shard.py \
-  --profile private_jc \
+  --profile "${PROFILE}" \
   --preflight
 
-echo "Cloud deployment verification passed. No sender was started and no message was submitted."
+echo "Cloud deployment verification passed for ${PROFILE}. No sender was started and no message was submitted."

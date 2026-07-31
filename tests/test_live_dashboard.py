@@ -7073,6 +7073,81 @@ class LiveDashboardTests(unittest.TestCase):
     def test_start_all_profile_set_does_not_include_warm_lane(self) -> None:
         self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
 
+    def test_systemd_dashboard_snapshot_uses_backend_profile_status(self) -> None:
+        profile_snapshots = [object(), object()]
+        base_snapshot = {"profiles": []}
+        with patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "list_sender_snapshots",
+            return_value=profile_snapshots,
+        ) as list_snapshots, patch.object(
+            live_dashboard,
+            "build_dashboard_snapshot",
+            return_value=base_snapshot,
+        ) as build_snapshot, patch.object(
+            live_dashboard,
+            "_build_automation_status",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "build_warm_private_jc_live_status",
+            return_value={"running": False},
+        ):
+            live_dashboard._build_live_snapshot(activity_hours=6, tail_lines=5)
+
+        list_snapshots.assert_called_once_with(tail_lines=5)
+        build_snapshot.assert_called_once_with(
+            activity_hours=6,
+            tail_lines=5,
+            profile_snapshots=profile_snapshots,
+        )
+
+    def test_selected_dashboard_start_and_stop_target_same_profile(self) -> None:
+        profile = "sendgrid_jodi"
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value={"ok": True, "warning_reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "started"),
+        ) as start_sender, patch.object(
+            live_dashboard.runtime_control,
+            "stop_sender",
+            return_value=(True, "stopped"),
+        ) as stop_sender, patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value={"profiles": []},
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+        ), patch.object(live_dashboard.time, "sleep"):
+            start_response = live_dashboard.start_profile(profile)
+            stop_response = live_dashboard.stop_profile(profile)
+
+        self.assertEqual(200, start_response.status_code)
+        self.assertEqual(200, stop_response.status_code)
+        start_sender.assert_called_once_with(profile)
+        stop_sender.assert_called_once_with(profile)
+
 
 if __name__ == "__main__":
     unittest.main()

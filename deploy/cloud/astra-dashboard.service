@@ -11,6 +11,8 @@ WorkingDirectory=/opt/astra/emailautomation
 EnvironmentFile=/etc/astra-emailautomation/astra.env
 Environment=ASTRA_MACHINE_ID=cloud
 Environment=ASTRA_DISABLE_DOTENV=1
+Environment=RUNTIME_BACKEND=systemd
+Environment=ASTRA_SYSTEMCTL_BIN=/usr/bin/systemctl
 Environment=DASHBOARD_ENABLE_LIVE_ACTIONS=1
 Environment=DASHBOARD_ALLOW_AUTO_START=0
 Environment=LIVE_DASHBOARD_HOST=127.0.0.1

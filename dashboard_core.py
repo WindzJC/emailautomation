@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parseaddr
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import settings
@@ -67,11 +67,19 @@ DEFAULT_AUTO_START_LOCAL_TIME = "18:00"
 SENDGRID_PROFILES = [
     name for name, cfg in PROFILES.items() if str(cfg.get("provider") or "") == "sendgrid"
 ]
-DASHBOARD_PROFILES = [
-    name
-    for name, cfg in PROFILES.items()
-    if str(cfg.get("provider") or "") == "sendgrid" or bool(cfg.get("dashboard_enabled"))
-]
+SYSTEMD_RUNTIME_BACKEND = (
+    os.environ.get("RUNTIME_BACKEND", "").strip().lower() == "systemd"
+)
+DASHBOARD_PROFILES = (
+    list(PROFILES)
+    if SYSTEMD_RUNTIME_BACKEND
+    else [
+        name
+        for name, cfg in PROFILES.items()
+        if str(cfg.get("provider") or "") == "sendgrid"
+        or bool(cfg.get("dashboard_enabled"))
+    ]
+)
 START_ALL_PROFILES = [
     name
     for name in SENDGRID_PROFILES
@@ -3833,6 +3841,7 @@ def apply_profile_delivery_guards(
     attempts: Sequence[SendAttempt],
     events: Sequence[Dict[str, str]],
     session: str = TMUX_SESSION_NAME,
+    stop_profile: Optional[Callable[[str], tuple[bool, str]]] = None,
 ) -> List[Dict[str, object]]:
     decisions = evaluate_profile_delivery_guards(snapshots, attempts, events)
     applied: List[Dict[str, object]] = []
@@ -3845,7 +3854,14 @@ def apply_profile_delivery_guards(
                 applied.append(dict(current))
                 continue
         pane_index = int(decision.get("pane_index") or 0)
-        ok, stop_message = stop_sendgrid_profile(profile, pane_index, session=session)
+        if stop_profile is None:
+            ok, stop_message = stop_sendgrid_profile(
+                profile,
+                pane_index,
+                session=session,
+            )
+        else:
+            ok, stop_message = stop_profile(profile)
         event_payload = {
             "profile": profile,
             "severity": str(decision.get("severity") or "critical"),
@@ -3874,8 +3890,17 @@ def apply_profile_delivery_guards(
     return applied
 
 
-def evaluate_and_apply_profile_delivery_guards(session: str = TMUX_SESSION_NAME) -> List[Dict[str, object]]:
-    snapshots = load_sendgrid_profile_snapshots(session=session, tail_lines=12)
+def evaluate_and_apply_profile_delivery_guards(
+    session: str = TMUX_SESSION_NAME,
+    *,
+    snapshots: Optional[Sequence[ProfileSnapshot]] = None,
+    stop_profile: Optional[Callable[[str], tuple[bool, str]]] = None,
+) -> List[Dict[str, object]]:
+    selected_snapshots = (
+        list(snapshots)
+        if snapshots is not None
+        else load_sendgrid_profile_snapshots(session=session, tail_lines=12)
+    )
     attempts = collect_send_attempts(SENDGRID_PROFILES)
     email_to_profile = unique_send_profile_by_email(attempts)
     message_id_to_profile = latest_send_profile_by_message_id(attempts)
@@ -3890,15 +3915,30 @@ def evaluate_and_apply_profile_delivery_guards(session: str = TMUX_SESSION_NAME)
         shard_to_profile,
         attempts_for_email,
     )
-    return apply_profile_delivery_guards(snapshots, attempts, events, session=session)
+    return apply_profile_delivery_guards(
+        selected_snapshots,
+        attempts,
+        events,
+        session=session,
+        stop_profile=stop_profile,
+    )
 
 
-def build_dashboard_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> Dict[str, object]:
+def build_dashboard_snapshot(
+    activity_hours: int = 24,
+    tail_lines: int = 12,
+    *,
+    profile_snapshots: Optional[Sequence[ProfileSnapshot]] = None,
+) -> Dict[str, object]:
     activity_path = ACTIVITY_LOG_PATH
     suppression_path = SUPPRESSION_CSV
     normalize_report_path = NORMALIZE_REPORT_PATH
 
-    snapshots = load_dashboard_profile_snapshots(tail_lines=tail_lines)
+    snapshots = (
+        list(profile_snapshots)
+        if profile_snapshots is not None
+        else load_dashboard_profile_snapshots(tail_lines=tail_lines)
+    )
     # Fallback: if send_shard processes were started outside the dashboard's
     # tmux session, detect them via the process table and mark the matching
     # snapshots as running so the UI reflects actual live senders.

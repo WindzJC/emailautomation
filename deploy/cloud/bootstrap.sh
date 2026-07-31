@@ -11,6 +11,7 @@ SERVICE_USER="${ASTRA_SERVICE_USER:-astra}"
 SERVICE_GROUP="${ASTRA_SERVICE_GROUP:-astra}"
 ENV_DIR="/etc/astra-emailautomation"
 ENV_FILE="${ENV_DIR}/astra.env"
+PROFILE_ENV_DIR="${ENV_DIR}/profiles"
 UNIT_DIR="/etc/systemd/system"
 BACKUP_DIR="/var/lib/astra-backups"
 
@@ -32,6 +33,7 @@ apt-get install -y --no-install-recommends \
   python3 \
   python3-pip \
   python3-venv \
+  policykit-1 \
   restic \
   rsync \
   sqlite3 \
@@ -55,8 +57,12 @@ install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 "${REPO_ROOT}/data
 install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 "${REPO_ROOT}/_important"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0700 "${REPO_ROOT}/.runtime_handoff"
 install -d -o root -g "${SERVICE_GROUP}" -m 0750 "${ENV_DIR}"
+install -d -o root -g "${SERVICE_GROUP}" -m 0750 "${PROFILE_ENV_DIR}"
 install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0700 "${BACKUP_DIR}"
 install -m 0640 "${REPO_ROOT}/deploy/cloud/env.example" "${ENV_DIR}/astra.env.example"
+install -m 0640 \
+  "${REPO_ROOT}/deploy/cloud/profile-env.example" \
+  "${PROFILE_ENV_DIR}/profile.env.example"
 if [[ ! -e "${ENV_FILE}" ]]; then
   install -o root -g "${SERVICE_GROUP}" -m 0640 /dev/null "${ENV_FILE}"
   echo "Created empty ${ENV_FILE}; populate it out of band before starting services."
@@ -66,9 +72,25 @@ python3 -m venv "${REPO_ROOT}/.venv"
 "${REPO_ROOT}/.venv/bin/python" -m pip install --upgrade pip
 "${REPO_ROOT}/.venv/bin/python" -m pip install -r "${REPO_ROOT}/requirements.txt"
 
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/cloud/50-astra-sender.rules" \
+  /etc/polkit-1/rules.d/50-astra-sender.rules
+
+LEGACY_SENDER_UNIT="${UNIT_DIR}/astra-sender.service"
+if [[ -e "${LEGACY_SENDER_UNIT}" ]]; then
+  if systemctl is-active --quiet astra-sender.service \
+    || systemctl is-enabled --quiet astra-sender.service
+  then
+    echo "REFUSED: legacy astra-sender.service is active or enabled." >&2
+    echo "Stop and disable it in a reviewed maintenance window before rerunning bootstrap." >&2
+    exit 1
+  fi
+  rm -f "${LEGACY_SENDER_UNIT}"
+fi
+
 for unit in \
   astra-dashboard.service \
-  astra-sender.service \
+  astra-sender@.service \
   astra-backup.service \
   astra-backup.timer
 do

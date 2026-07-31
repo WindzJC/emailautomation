@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from typing import List, Protocol
 
-import runtime_backend_tmux
-
 
 class RuntimeBackend(Protocol):
     def backend_name(self) -> str: ...
@@ -24,7 +22,13 @@ class RuntimeBackend(Protocol):
 def _load_backend() -> RuntimeBackend:
     backend_name = os.environ.get("RUNTIME_BACKEND", "tmux").strip().lower() or "tmux"
     if backend_name == "tmux":
+        import runtime_backend_tmux
+
         return runtime_backend_tmux
+    if backend_name == "systemd":
+        import runtime_backend_systemd
+
+        return runtime_backend_systemd
     raise ValueError(f"Unsupported runtime backend: {backend_name}")
 
 

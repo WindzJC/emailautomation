@@ -1,0 +1,22 @@
+# Create one protected file per sender at:
+# /etc/astra-emailautomation/profiles/PROFILE.env
+#
+# Every file must contain only:
+# ASTRA_EXPECTED_GIT_COMMIT=REPLACE_WITH_DEPLOYED_COMMIT
+# and the single credential variable mapped below.
+#
+# private_alison.env: PRIVATE_ALISON_APP_PW
+# private_annette.env: PRIVATE_ANNETTE_APP_PW
+# private_fiorela.env: PRIVATE_FIORELA_APP_PW
+# private_jc.env: PRIVATE_JC_PASSWORD
+# private_jc_warm.env: PRIVATE_JC_PASSWORD
+# private_jodi.env: PRIVATE_JODI_APP_PW
+# private_jordan.env: PRIVATE_JORDAN_APP_PW
+# sendgrid_alison.env: SENDGRID_API_KEY
+# sendgrid_annette.env: SENDGRID_API_KEY
+# sendgrid_fiorela.env: SENDGRID_API_KEY
+# sendgrid_jodi.env: SENDGRID_API_KEY
+# sendgrid_jordan.env: SENDGRID_API_KEY
+#
+# Own each file as root:astra with mode 0640. Never put multiple profile
+# credentials in one file. The sender template loads only the selected file.
