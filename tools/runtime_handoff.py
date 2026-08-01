@@ -18,6 +18,7 @@ import platform
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
@@ -118,10 +119,34 @@ PITCH_VALIDATION_MODES = {
     "pitch5": "consignment",
     "pitch_jc": "astra_visual",
 }
+COMMIT_COMPATIBILITY_FILE_ENV = "ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE"
+COMMIT_COMPATIBILITY_ROOT_KEY = "commit_compatibility_mappings"
+COMMIT_COMPATIBILITY_FIELDS = {
+    "source_machine",
+    "target_machine",
+    "source_commit",
+    "source_tree",
+    "approved_destination_commit",
+}
+FULL_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+APPROVED_LEGACY_COMMIT_COMPATIBILITY = {
+    "source_machine": "mac",
+    "target_machine": "cloud",
+    "source_commit": "14c3eaf79507cc33fab06ba107fe128ba251a9dc",
+    "source_tree": "9dc901637974651e05f0c2550d4f08f91839ef91",
+    "approved_destination_commit": "7649cc2f30924188636914e189b7798d1b08b09a",
+}
+APPROVED_LEGACY_CLEANED_EQUIVALENT_COMMIT = (
+    "c5e9af123b7a2c66fd83323ce3e8f3e6484f6759"
+)
 
 
 class HandoffError(RuntimeError):
     """A fail-closed operator-readable refusal."""
+
+
+class _DuplicateConfigurationKey(ValueError):
+    """Internal signal for duplicate JSON configuration keys."""
 
 
 def _default_peer_machine(identity: str) -> str:
@@ -507,6 +532,177 @@ def read_bundle_metadata(bundle: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise HandoffError(f"Unreadable handoff archive: {bundle}") from exc
 
 
+def _reject_duplicate_configuration_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateConfigurationKey(key)
+        result[key] = value
+    return result
+
+
+def _load_commit_compatibility_mappings() -> list[dict[str, str]]:
+    configured_path = os.environ.get(COMMIT_COMPATIBILITY_FILE_ENV, "").strip()
+    if not configured_path:
+        raise HandoffError(
+            "Target Git commit does not exactly match bundle and commit compatibility "
+            "is not configured"
+        )
+    path = Path(configured_path)
+    if not path.is_absolute():
+        raise HandoffError("Commit compatibility file path must be absolute")
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise HandoffError("Commit compatibility requires platform O_NOFOLLOW support")
+    close_exec = getattr(os, "O_CLOEXEC", None)
+    if close_exec is None:
+        raise HandoffError("Commit compatibility requires platform O_CLOEXEC support")
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | close_exec | no_follow)
+        except OSError as exc:
+            raise HandoffError(
+                f"Commit compatibility file is unavailable or unsafe: {path}"
+            ) from exc
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise HandoffError("Commit compatibility file must be a regular file")
+        if metadata.st_uid not in {0, os.geteuid()}:
+            raise HandoffError("Commit compatibility file has an untrusted owner")
+        if stat.S_IMODE(metadata.st_mode) & 0o037:
+            raise HandoffError(
+                "Commit compatibility file must not be group-writable, "
+                "group-executable, or accessible by others"
+            )
+        try:
+            handle = os.fdopen(descriptor, "r", encoding="utf-8")
+        except OSError as exc:
+            raise HandoffError("Commit compatibility configuration is unreadable") from exc
+        descriptor = None
+        try:
+            with handle:
+                payload = json.load(
+                    handle,
+                    object_pairs_hook=_reject_duplicate_configuration_keys,
+                )
+        except _DuplicateConfigurationKey as exc:
+            raise HandoffError(
+                f"Commit compatibility configuration has duplicate key: {exc}"
+            ) from exc
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise HandoffError("Commit compatibility configuration is malformed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if not isinstance(payload, dict) or set(payload) != {COMMIT_COMPATIBILITY_ROOT_KEY}:
+        raise HandoffError("Commit compatibility configuration is malformed")
+    raw_mappings = payload.get(COMMIT_COMPATIBILITY_ROOT_KEY)
+    if not isinstance(raw_mappings, list) or not raw_mappings:
+        raise HandoffError("Commit compatibility mapping is absent")
+
+    mappings: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    routes: dict[tuple[str, str, str], tuple[str, ...]] = {}
+    for raw_mapping in raw_mappings:
+        if not isinstance(raw_mapping, dict) or set(raw_mapping) != COMMIT_COMPATIBILITY_FIELDS:
+            raise HandoffError("Commit compatibility mapping is incomplete or malformed")
+        if not all(isinstance(raw_mapping[field], str) for field in COMMIT_COMPATIBILITY_FIELDS):
+            raise HandoffError("Commit compatibility mapping values must be strings")
+        mapping = {field: raw_mapping[field] for field in COMMIT_COMPATIBILITY_FIELDS}
+        if (
+            mapping["source_machine"] not in MACHINES
+            or mapping["target_machine"] not in MACHINES
+            or mapping["source_machine"] == mapping["target_machine"]
+        ):
+            raise HandoffError("Commit compatibility mapping has invalid machines")
+        for field in (
+            "source_commit",
+            "source_tree",
+            "approved_destination_commit",
+        ):
+            if not FULL_GIT_SHA_RE.fullmatch(mapping[field]):
+                raise HandoffError(
+                    f"Commit compatibility {field} must be a full lowercase Git SHA"
+                )
+        identity = tuple(mapping[field] for field in sorted(COMMIT_COMPATIBILITY_FIELDS))
+        if identity in seen:
+            raise HandoffError("Commit compatibility mapping is duplicated")
+        seen.add(identity)
+        route = (
+            mapping["source_machine"],
+            mapping["target_machine"],
+            mapping["source_commit"],
+        )
+        if route in routes and routes[route] != identity:
+            raise HandoffError("Commit compatibility mappings conflict")
+        routes[route] = identity
+        mappings.append(mapping)
+
+    if any(mapping != APPROVED_LEGACY_COMMIT_COMPATIBILITY for mapping in mappings):
+        raise HandoffError("Commit compatibility mapping is not approved")
+    return mappings
+
+
+def validate_bundle_commit_compatibility(
+    repo: Path,
+    manifest: dict[str, Any],
+    bundled_authority: dict[str, Any],
+    *,
+    machine: str | None = None,
+) -> dict[str, Any]:
+    identity = machine or current_machine()
+    source_machine = manifest.get("source_machine")
+    target_machine = manifest.get("target_machine")
+    source_commit = manifest.get("expected_git_commit")
+    if source_machine != bundled_authority.get("source_machine"):
+        raise HandoffError("Bundle source_machine metadata mismatch")
+    if target_machine != bundled_authority.get("target_machine"):
+        raise HandoffError("Bundle target_machine metadata mismatch")
+    if source_commit != bundled_authority.get("expected_git_commit"):
+        raise HandoffError("Bundle expected_git_commit metadata mismatch")
+    if target_machine != identity:
+        raise HandoffError(f"Bundle targets {target_machine}, not {identity}")
+
+    destination_commit = git(repo, "rev-parse", "HEAD")
+    if source_commit == destination_commit:
+        return {
+            "mode": "exact_commit",
+            "source_commit": source_commit,
+            "destination_commit": destination_commit,
+        }
+
+    mappings = _load_commit_compatibility_mappings()
+    matches = [
+        mapping
+        for mapping in mappings
+        if mapping["source_machine"] == source_machine
+        and mapping["target_machine"] == target_machine
+        and mapping["source_commit"] == source_commit
+        and mapping["approved_destination_commit"] == destination_commit
+    ]
+    if len(matches) != 1:
+        raise HandoffError("Bundle does not match the configured commit compatibility mapping")
+    mapping = matches[0]
+    cleaned_tree = git(
+        repo,
+        "rev-parse",
+        f"{APPROVED_LEGACY_CLEANED_EQUIVALENT_COMMIT}^{{tree}}",
+    )
+    if cleaned_tree != mapping["source_tree"]:
+        raise HandoffError("Approved legacy source tree does not match its cleaned equivalent")
+    return {
+        "mode": "approved_legacy_source",
+        "source_machine": source_machine,
+        "target_machine": target_machine,
+        "source_commit": source_commit,
+        "source_tree": mapping["source_tree"],
+        "destination_commit": destination_commit,
+    }
+
+
 def _sqlite_integrity(path: Path) -> None:
     try:
         with sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True) as db:
@@ -589,10 +785,26 @@ def extract_and_verify(bundle: Path, staging: Path) -> tuple[dict[str, Any], dic
     return manifest, bundled_authority, report
 
 
-def verify_runtime_bundle(bundle: Path) -> dict[str, Any]:
+def verify_runtime_bundle(
+    repo: Path,
+    bundle: Path,
+    *,
+    machine: str | None = None,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="handoff-verify-") as temp:
         manifest, authority, report = extract_and_verify(bundle, Path(temp))
-    return {"manifest": manifest, "authority": authority, "verification": report}
+        compatibility = validate_bundle_commit_compatibility(
+            repo,
+            manifest,
+            authority,
+            machine=machine,
+        )
+    return {
+        "manifest": manifest,
+        "authority": authority,
+        "verification": report,
+        "commit_compatibility": compatibility,
+    }
 
 
 def _read_used_bundles(repo: Path) -> set[str]:
@@ -3194,6 +3406,7 @@ def activate_import(
     bundled_authority: dict[str, Any],
     *,
     machine: str | None = None,
+    expected_git_commit: str | None = None,
 ) -> dict[str, Any]:
     identity = machine or current_machine()
     floor = load_generation_floor(repo)
@@ -3204,6 +3417,8 @@ def activate_import(
         "authorized_machine": identity,
         "generation": new_generation,
         "created_utc": utc_now(),
+        "expected_git_commit": expected_git_commit
+        or bundled_authority["expected_git_commit"],
         "status": ACTIVE_STATUS,
     }
     write_authority(repo, active)
@@ -3246,11 +3461,6 @@ def import_runtime(
         raise HandoffError(
             f"Bundle targets {manifest_hint.get('target_machine')}, not {identity}"
         )
-    if git(repo, "rev-parse", "HEAD") != manifest_hint.get("expected_git_commit"):
-        mark_target_disabled(
-            repo, status="import_failed", metadata=manifest_hint, machine=identity
-        )
-        raise HandoffError("Target Git commit does not exactly match bundle")
     bundle_id = str(manifest_hint.get("bundle_id") or "")
     used = _read_used_bundles(repo)
     if bundle_id in used:
@@ -3277,6 +3487,12 @@ def import_runtime(
         replacement_attempted = False
         try:
             manifest, bundled_authority, verification = extract_and_verify(bundle, staging)
+            compatibility = validate_bundle_commit_compatibility(
+                repo,
+                manifest,
+                bundled_authority,
+                machine=identity,
+            )
             safety = recompute_queue_safety(staging / RUNTIME_ROOT)
             if not safety["safe"]:
                 raise HandoffError(
@@ -3288,7 +3504,12 @@ def import_runtime(
                 replace_hook(repo, staging / RUNTIME_ROOT)
             else:
                 _atomic_replace_runtime(repo, staging / RUNTIME_ROOT)
-            active = activate_import(repo, bundled_authority, machine=identity)
+            active = activate_import(
+                repo,
+                bundled_authority,
+                machine=identity,
+                expected_git_commit=compatibility["destination_commit"],
+            )
             used.add(bundle_id)
             _write_used_bundles(repo, used)
             result = {
@@ -3300,7 +3521,7 @@ def import_runtime(
                 "sender_started": False,
             }
             _write_json(repo / LOCAL_STATE_DIR / LAST_IMPORT_NAME, result)
-            return result
+            return {**result, "commit_compatibility": compatibility}
         except Exception:
             if replacement_attempted and backup is not None:
                 try:
@@ -3486,7 +3707,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         elif args.command == "verify":
             print(
                 json.dumps(
-                    verify_runtime_bundle(args.bundle.resolve()),
+                    verify_runtime_bundle(
+                        repo,
+                        args.bundle.resolve(),
+                        machine=args.machine,
+                    ),
                     indent=2,
                     sort_keys=True,
                 )

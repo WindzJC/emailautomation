@@ -194,6 +194,101 @@ def _rewrite_bundle(
     return output
 
 
+def _rewrite_bundle_identity(
+    bundle: Path,
+    output: Path,
+    *,
+    source_machine: str = "mac",
+    target_machine: str = "cloud",
+    source_commit: str = "14c3eaf79507cc33fab06ba107fe128ba251a9dc",
+) -> Path:
+    def mutate(stage: Path) -> None:
+        manifest_path = stage / runtime_handoff.MANIFEST_NAME
+        authority_path = stage / runtime_handoff.BUNDLE_AUTHORITY_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        manifest["source_machine"] = source_machine
+        manifest["target_machine"] = target_machine
+        manifest["expected_git_commit"] = source_commit
+        authority["source_machine"] = source_machine
+        authority["target_machine"] = target_machine
+        authority["authorized_machine"] = source_machine
+        authority["expected_git_commit"] = source_commit
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    return _rewrite_bundle(bundle, output, mutate)
+
+
+def _write_commit_compatibility(
+    path: Path,
+    mappings: list[dict[str, str]],
+) -> Path:
+    path.write_text(
+        json.dumps(
+            {runtime_handoff.COMMIT_COMPATIBILITY_ROOT_KEY: mappings},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
+
+
+def _approved_mapping(**overrides: str) -> dict[str, str]:
+    mapping = dict(runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY)
+    mapping.update(overrides)
+    return mapping
+
+
+def _cloud_target(repos, tmp_path: Path) -> tuple[Path, Path]:
+    windows, _mac = repos
+    cloud = tmp_path / "cloud"
+    _run(tmp_path, "git", "clone", "-q", str(windows), str(cloud))
+    _write_runtime(cloud, ["old-cloud@example.test"])
+    _set_inactive(cloud, "cloud")
+    bundle = _export(windows, tmp_path, "cloud", "windows-wsl")
+    return cloud, bundle
+
+
+def _use_approved_destination_git(monkeypatch, cloud: Path) -> None:
+    real_git = runtime_handoff.git
+
+    def compatible_git(repo: Path, *args: str) -> str:
+        if repo == cloud and args == ("rev-parse", "HEAD"):
+            return runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY[
+                "approved_destination_commit"
+            ]
+        if repo == cloud and args == (
+            "rev-parse",
+            f"{runtime_handoff.APPROVED_LEGACY_CLEANED_EQUIVALENT_COMMIT}^{{tree}}",
+        ):
+            return runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY["source_tree"]
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(runtime_handoff, "git", compatible_git)
+
+
+@pytest.fixture
+def legacy_compatibility_case(repos, tmp_path: Path, monkeypatch):
+    cloud, bundle = _cloud_target(repos, tmp_path)
+    legacy_bundle = _rewrite_bundle_identity(
+        bundle,
+        tmp_path / "legacy-mac-to-cloud.tgz",
+    )
+    _use_approved_destination_git(monkeypatch, cloud)
+    config = tmp_path / "commit-compatibility.json"
+    monkeypatch.setenv(
+        runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV,
+        str(config),
+    )
+    return {
+        "cloud": cloud,
+        "bundle": legacy_bundle,
+        "config": config,
+    }
+
+
 @pytest.mark.parametrize(
     "relative",
     [
@@ -1007,6 +1102,421 @@ def test_emergency_never_starts_sender_or_initializes_authority(
     write_mock.assert_not_called()
     assert result["sender_started"] is False
     assert not runtime_authority.authority_path(fixture["repo"]).exists()
+
+
+def test_verify_normal_exact_commit_succeeds_without_compatibility_mapping(
+    repos,
+    tmp_path,
+    monkeypatch,
+):
+    windows, mac = repos
+    monkeypatch.setenv(
+        runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV,
+        "relative-path-must-not-be-read.json",
+    )
+    monkeypatch.setattr(
+        runtime_handoff,
+        "_load_commit_compatibility_mappings",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("exact commit must not read compatibility configuration")
+        ),
+    )
+    bundle = _export(windows, tmp_path, "mac", "windows-wsl")
+
+    result = runtime_handoff.verify_runtime_bundle(mac, bundle, machine="mac")
+
+    assert result["commit_compatibility"]["mode"] == "exact_commit"
+
+
+def test_legacy_compatibility_blank_environment_refuses(
+    legacy_compatibility_case,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    monkeypatch.setenv(runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV, "   ")
+
+    with pytest.raises(runtime_handoff.HandoffError, match="not configured"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_relative_path_refuses(
+    legacy_compatibility_case,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    monkeypatch.setenv(
+        runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV,
+        "relative-compatibility.json",
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match="path must be absolute"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_directory_path_refuses(
+    legacy_compatibility_case,
+    tmp_path,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    monkeypatch.setenv(runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV, str(tmp_path))
+
+    with pytest.raises(runtime_handoff.HandoffError, match="regular file"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_direct_symlink_refuses(
+    legacy_compatibility_case,
+    tmp_path,
+):
+    case = legacy_compatibility_case
+    target = _write_commit_compatibility(
+        tmp_path / "secure-target.json",
+        [_approved_mapping()],
+    )
+    case["config"].symlink_to(target)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="unavailable or unsafe"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [0o620, 0o610, 0o604],
+    ids=["group-writable", "group-executable", "world-accessible"],
+)
+def test_legacy_compatibility_insecure_permissions_refuse(
+    legacy_compatibility_case,
+    mode,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    case["config"].chmod(mode)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="group-writable"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_requires_o_nofollow(
+    legacy_compatibility_case,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    monkeypatch.delattr(runtime_handoff.os, "O_NOFOLLOW")
+
+    with pytest.raises(runtime_handoff.HandoffError, match="O_NOFOLLOW support"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_path_replacement_uses_same_open_file_object(
+    legacy_compatibility_case,
+    tmp_path,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text("{malformed replacement", encoding="utf-8")
+    replacement.chmod(0o666)
+    real_open = runtime_handoff.os.open
+    opened_descriptors: list[int] = []
+
+    def open_then_replace(path, flags, *args, **kwargs):
+        if Path(path) != case["config"]:
+            return real_open(path, flags, *args, **kwargs)
+        descriptor = real_open(path, flags, *args, **kwargs)
+        opened_descriptors.append(descriptor)
+        case["config"].unlink()
+        case["config"].symlink_to(replacement)
+        return descriptor
+
+    monkeypatch.setattr(runtime_handoff.os, "open", open_then_replace)
+
+    result = runtime_handoff.verify_runtime_bundle(
+        case["cloud"], case["bundle"], machine="cloud"
+    )
+
+    assert result["commit_compatibility"]["mode"] == "approved_legacy_source"
+    assert case["config"].is_symlink()
+    assert len(opened_descriptors) == 1
+    with pytest.raises(OSError):
+        runtime_handoff.os.fstat(opened_descriptors[0])
+
+
+def test_verify_normal_commit_mismatch_refuses_without_mapping(
+    repos,
+    tmp_path,
+    monkeypatch,
+):
+    windows, mac = repos
+    bundle = _export(windows, tmp_path, "mac", "windows-wsl")
+    real_git = runtime_handoff.git
+
+    def mismatched_git(repo: Path, *args: str) -> str:
+        if repo == mac and args == ("rev-parse", "HEAD"):
+            return "f" * 40
+        return real_git(repo, *args)
+
+    monkeypatch.setattr(runtime_handoff, "git", mismatched_git)
+    monkeypatch.delenv(runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV, raising=False)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="not configured"):
+        runtime_handoff.verify_runtime_bundle(mac, bundle, machine="mac")
+
+
+def test_approved_legacy_source_with_valid_secure_file_uses_identical_rules(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], [_approved_mapping()])
+
+    verified = runtime_handoff.verify_runtime_bundle(
+        case["cloud"],
+        case["bundle"],
+        machine="cloud",
+    )
+    received = runtime_handoff.import_runtime(
+        case["cloud"],
+        case["bundle"],
+        machine="cloud",
+    )
+
+    assert verified["commit_compatibility"] == received["commit_compatibility"]
+    assert received["commit_compatibility"]["mode"] == "approved_legacy_source"
+    assert received["authority"]["expected_git_commit"] == (
+        runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY[
+            "approved_destination_commit"
+        ]
+    )
+    assert received["sender_started"] is False
+    audit = json.loads(
+        (
+            case["cloud"]
+            / runtime_handoff.LOCAL_STATE_DIR
+            / runtime_handoff.LAST_IMPORT_NAME
+        ).read_text(encoding="utf-8")
+    )
+    assert "commit_compatibility" not in audit
+
+
+@pytest.mark.parametrize(
+    ("mapping_overrides", "bundle_overrides", "error"),
+    [
+        ({}, {"source_commit": "f" * 40}, "does not match"),
+        ({"source_tree": "f" * 40}, {}, "not approved"),
+        ({"approved_destination_commit": "f" * 40}, {}, "not approved"),
+        ({"source_machine": "windows-wsl"}, {}, "not approved"),
+        ({"target_machine": "mac"}, {}, "invalid machines"),
+    ],
+    ids=[
+        "wrong-source-commit",
+        "wrong-source-tree",
+        "wrong-destination-commit",
+        "wrong-source-machine",
+        "wrong-target-machine",
+    ],
+)
+def test_legacy_compatibility_requires_every_exact_mapping_value(
+    legacy_compatibility_case,
+    tmp_path,
+    mapping_overrides,
+    bundle_overrides,
+    error,
+):
+    case = legacy_compatibility_case
+    bundle = case["bundle"]
+    if bundle_overrides:
+        bundle = _rewrite_bundle_identity(
+            bundle,
+            tmp_path / "wrong-bundle-identity.tgz",
+            **bundle_overrides,
+        )
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(**mapping_overrides)],
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match=error):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"],
+            bundle,
+            machine="cloud",
+        )
+
+
+def test_legacy_compatibility_absent_mapping_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], [])
+
+    with pytest.raises(runtime_handoff.HandoffError, match="mapping is absent"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_incomplete_mapping_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    mapping = _approved_mapping()
+    del mapping["source_tree"]
+    _write_commit_compatibility(case["config"], [mapping])
+
+    with pytest.raises(runtime_handoff.HandoffError, match="incomplete or malformed"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_extra_json_field_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    mapping = _approved_mapping()
+    mapping["unexpected_field"] = "refuse"
+    _write_commit_compatibility(case["config"], [mapping])
+
+    with pytest.raises(runtime_handoff.HandoffError, match="incomplete or malformed"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_partial_sha_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    mapping = _approved_mapping(source_commit="14c3eaf79507")
+    _write_commit_compatibility(case["config"], [mapping])
+
+    with pytest.raises(runtime_handoff.HandoffError, match="full lowercase Git SHA"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_malformed_mapping_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    case["config"].write_text("{not-json", encoding="utf-8")
+    case["config"].chmod(0o600)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="malformed"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_legacy_compatibility_duplicate_json_key_refuses(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    mapping = json.dumps(_approved_mapping())
+    case["config"].write_text(
+        "{"
+        f'"{runtime_handoff.COMMIT_COMPATIBILITY_ROOT_KEY}":[{mapping}],'
+        f'"{runtime_handoff.COMMIT_COMPATIBILITY_ROOT_KEY}":[{mapping}]'
+        "}",
+        encoding="utf-8",
+    )
+    case["config"].chmod(0o600)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="duplicate key"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+@pytest.mark.parametrize(
+    ("mappings", "error"),
+    [
+        ([_approved_mapping(), _approved_mapping()], "duplicated"),
+        (
+            [
+                _approved_mapping(),
+                _approved_mapping(source_tree="f" * 40),
+            ],
+            "conflict",
+        ),
+    ],
+    ids=["duplicated-mapping", "conflicting-mapping"],
+)
+def test_legacy_compatibility_duplicate_or_conflicting_mapping_refuses(
+    legacy_compatibility_case,
+    mappings,
+    error,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(case["config"], mappings)
+
+    with pytest.raises(runtime_handoff.HandoffError, match=error):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
+def test_arbitrary_same_tree_source_commit_refuses(
+    legacy_compatibility_case,
+    tmp_path,
+):
+    case = legacy_compatibility_case
+    arbitrary_commit = "f" * 40
+    bundle = _rewrite_bundle_identity(
+        case["bundle"],
+        tmp_path / "arbitrary-same-tree.tgz",
+        source_commit=arbitrary_commit,
+    )
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(source_commit=arbitrary_commit)],
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match="not approved"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], bundle, machine="cloud"
+        )
+
+
+def test_approved_legacy_receive_rolls_back_runtime_if_activation_fails(
+    legacy_compatibility_case,
+    monkeypatch,
+):
+    case = legacy_compatibility_case
+    original = (case["cloud"] / "data/shards/recipients_private_jc.csv").read_bytes()
+    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    monkeypatch.setattr(
+        runtime_handoff,
+        "activate_import",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic activation failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic activation failure"):
+        runtime_handoff.import_runtime(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+    assert (
+        case["cloud"] / "data/shards/recipients_private_jc.csv"
+    ).read_bytes() == original
+    assert runtime_authority.load_authority(case["cloud"])["status"] == "import_failed"
 
 
 def test_windows_to_mac_handoff_carries_changed_queue_logs_suppressions_and_db(

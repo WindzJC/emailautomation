@@ -88,8 +88,8 @@ unknown profile identifiers. A profile cannot silently fall back to
 
 ## Runtime transfer and authority cutover
 
-Both source and target must be on the exact reviewed Git commit. The normal
-handoff archive contains queues, logs, previews, suppressions, unsubscribe
+Both source and target must be on the exact reviewed Git commit during normal
+operation. The handoff archive contains queues, logs, previews, suppressions, unsubscribe
 state, campaign state, counters, consistent SQLite snapshots, idempotency state,
 and the handoff authority metadata. It excludes `.env`, virtual environments,
 caches, source code, and secrets. Every runtime file has a SHA-256 and size in
@@ -99,6 +99,62 @@ Import checks the target generation floor and used-bundle ledger, rejects stale
 generations and reused archives, archives the prior target runtime, restores
 atomically, and never starts a sender. Export first marks the source
 `handoff_in_progress`, so a failed transfer leaves both machines unable to send.
+
+### Temporary Mac-to-cloud commit compatibility
+
+The final migration has one temporary, migration-specific exception to normal
+exact-commit matching. Compatibility remains disabled unless
+`ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE` names an absolute, protected JSON file.
+The file must be owned by root or the receiving account, must not be a symlink,
+must not be group-writable, and must have no permissions for other users. Store
+it outside the repository, for example at
+`/etc/astra-emailautomation/handoff-commit-compatibility.json`, owned by
+`root:astra` with mode `0640`.
+
+The protected configuration key names are
+`commit_compatibility_mappings`, `source_machine`, `target_machine`,
+`source_commit`, `source_tree`, and `approved_destination_commit`. For this
+migration the complete file must contain exactly these values:
+
+```json
+{
+  "commit_compatibility_mappings": [
+    {
+      "source_machine": "mac",
+      "target_machine": "cloud",
+      "source_commit": "14c3eaf79507cc33fab06ba107fe128ba251a9dc",
+      "source_tree": "9dc901637974651e05f0c2550d4f08f91839ef91",
+      "approved_destination_commit": "7649cc2f30924188636914e189b7798d1b08b09a"
+    }
+  ]
+}
+```
+
+All SHA values are full and exact. The receiver also anchors the approved
+source tree to cleaned equivalent commit
+`c5e9af123b7a2c66fd83323ce3e8f3e6484f6759`; tree equality alone never permits
+a different source commit. Missing, extra, malformed, duplicate, conflicting,
+or unapproved mappings are refused. The bundle manifest and its source commit
+must not be edited.
+
+Pass the protected file explicitly to both verification and atomic receive:
+
+```bash
+sudo -u astra env \
+  ASTRA_MACHINE_ID=cloud \
+  ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE=/etc/astra-emailautomation/handoff-commit-compatibility.json \
+  ./handoff verify /absolute/path/to/runtime_handoff_mac_to_cloud.tgz
+sudo -u astra env \
+  ASTRA_MACHINE_ID=cloud \
+  ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE=/etc/astra-emailautomation/handoff-commit-compatibility.json \
+  ./handoff receive /absolute/path/to/runtime_handoff_mac_to_cloud.tgz
+```
+
+Receive still imports runtime and activates cloud authority as one atomic
+operation. It does not start the dashboard or any sender. After cutover and the
+rollback window are complete, remove the environment key from operator commands
+and delete the protected mapping file. Normal exact-commit matching then remains
+the only accepted behavior.
 
 During the reviewed cutover window only:
 
