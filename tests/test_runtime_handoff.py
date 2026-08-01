@@ -235,8 +235,14 @@ def _write_commit_compatibility(
     return path
 
 
-def _approved_mapping(**overrides: str) -> dict[str, str]:
-    mapping = dict(runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY)
+def _approved_mapping(
+    destination_commit: str,
+    **overrides: str,
+) -> dict[str, str]:
+    mapping = {
+        **runtime_handoff.APPROVED_LEGACY_SOURCE_IDENTITY,
+        "approved_destination_commit": destination_commit,
+    }
     mapping.update(overrides)
     return mapping
 
@@ -251,19 +257,15 @@ def _cloud_target(repos, tmp_path: Path) -> tuple[Path, Path]:
     return cloud, bundle
 
 
-def _use_approved_destination_git(monkeypatch, cloud: Path) -> None:
+def _use_approved_source_tree_git(monkeypatch, cloud: Path) -> None:
     real_git = runtime_handoff.git
 
     def compatible_git(repo: Path, *args: str) -> str:
-        if repo == cloud and args == ("rev-parse", "HEAD"):
-            return runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY[
-                "approved_destination_commit"
-            ]
         if repo == cloud and args == (
             "rev-parse",
             f"{runtime_handoff.APPROVED_LEGACY_CLEANED_EQUIVALENT_COMMIT}^{{tree}}",
         ):
-            return runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY["source_tree"]
+            return runtime_handoff.APPROVED_LEGACY_SOURCE_IDENTITY["source_tree"]
         return real_git(repo, *args)
 
     monkeypatch.setattr(runtime_handoff, "git", compatible_git)
@@ -272,11 +274,12 @@ def _use_approved_destination_git(monkeypatch, cloud: Path) -> None:
 @pytest.fixture
 def legacy_compatibility_case(repos, tmp_path: Path, monkeypatch):
     cloud, bundle = _cloud_target(repos, tmp_path)
+    destination_commit = runtime_handoff.git(cloud, "rev-parse", "HEAD")
     legacy_bundle = _rewrite_bundle_identity(
         bundle,
         tmp_path / "legacy-mac-to-cloud.tgz",
     )
-    _use_approved_destination_git(monkeypatch, cloud)
+    _use_approved_source_tree_git(monkeypatch, cloud)
     config = tmp_path / "commit-compatibility.json"
     monkeypatch.setenv(
         runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV,
@@ -286,6 +289,7 @@ def legacy_compatibility_case(repos, tmp_path: Path, monkeypatch):
         "cloud": cloud,
         "bundle": legacy_bundle,
         "config": config,
+        "destination_commit": destination_commit,
     }
 
 
@@ -1178,7 +1182,7 @@ def test_legacy_compatibility_direct_symlink_refuses(
     case = legacy_compatibility_case
     target = _write_commit_compatibility(
         tmp_path / "secure-target.json",
-        [_approved_mapping()],
+        [_approved_mapping(case["destination_commit"])],
     )
     case["config"].symlink_to(target)
 
@@ -1198,7 +1202,10 @@ def test_legacy_compatibility_insecure_permissions_refuse(
     mode,
 ):
     case = legacy_compatibility_case
-    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(case["destination_commit"])],
+    )
     case["config"].chmod(mode)
 
     with pytest.raises(runtime_handoff.HandoffError, match="group-writable"):
@@ -1212,7 +1219,10 @@ def test_legacy_compatibility_requires_o_nofollow(
     monkeypatch,
 ):
     case = legacy_compatibility_case
-    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(case["destination_commit"])],
+    )
     monkeypatch.delattr(runtime_handoff.os, "O_NOFOLLOW")
 
     with pytest.raises(runtime_handoff.HandoffError, match="O_NOFOLLOW support"):
@@ -1227,7 +1237,10 @@ def test_legacy_compatibility_path_replacement_uses_same_open_file_object(
     monkeypatch,
 ):
     case = legacy_compatibility_case
-    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(case["destination_commit"])],
+    )
     replacement = tmp_path / "replacement.json"
     replacement.write_text("{malformed replacement", encoding="utf-8")
     replacement.chmod(0o666)
@@ -1279,9 +1292,21 @@ def test_verify_normal_commit_mismatch_refuses_without_mapping(
 
 def test_approved_legacy_source_with_valid_secure_file_uses_identical_rules(
     legacy_compatibility_case,
+    monkeypatch,
 ):
     case = legacy_compatibility_case
-    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    real_run = runtime_handoff.subprocess.run
+    commands: list[object] = []
+
+    def recording_run(command, *args, **kwargs):
+        commands.append(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_handoff.subprocess, "run", recording_run)
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(case["destination_commit"])],
+    )
 
     verified = runtime_handoff.verify_runtime_bundle(
         case["cloud"],
@@ -1296,12 +1321,17 @@ def test_approved_legacy_source_with_valid_secure_file_uses_identical_rules(
 
     assert verified["commit_compatibility"] == received["commit_compatibility"]
     assert received["commit_compatibility"]["mode"] == "approved_legacy_source"
-    assert received["authority"]["expected_git_commit"] == (
-        runtime_handoff.APPROVED_LEGACY_COMMIT_COMPATIBILITY[
-            "approved_destination_commit"
-        ]
-    )
+    assert received["authority"]["expected_git_commit"] == case["destination_commit"]
     assert received["sender_started"] is False
+    rendered_commands = "\n".join(
+        " ".join(str(part) for part in command)
+        if isinstance(command, (list, tuple))
+        else str(command)
+        for command in commands
+    )
+    assert "send_shard.py" not in rendered_commands
+    assert "live_dashboard" not in rendered_commands
+    assert "systemctl start" not in rendered_commands
     audit = json.loads(
         (
             case["cloud"]
@@ -1313,20 +1343,50 @@ def test_approved_legacy_source_with_valid_secure_file_uses_identical_rules(
 
 
 @pytest.mark.parametrize(
+    "configured_destination",
+    [
+        "7649cc2f30924188636914e189b7798d1b08b09a",
+        "f" * 40,
+    ],
+    ids=["old-hardcoded-destination", "different-destination"],
+)
+def test_legacy_compatibility_destination_must_equal_current_head(
+    legacy_compatibility_case,
+    configured_destination,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(configured_destination)],
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match="current HEAD"):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"],
+            case["bundle"],
+            machine="cloud",
+        )
+
+
+@pytest.mark.parametrize(
     ("mapping_overrides", "bundle_overrides", "error"),
     [
         ({}, {"source_commit": "f" * 40}, "does not match"),
-        ({"source_tree": "f" * 40}, {}, "not approved"),
-        ({"approved_destination_commit": "f" * 40}, {}, "not approved"),
-        ({"source_machine": "windows-wsl"}, {}, "not approved"),
-        ({"target_machine": "mac"}, {}, "invalid machines"),
+        ({"source_tree": "f" * 40}, {}, "source identity is not approved"),
+        ({"source_machine": "windows-wsl"}, {}, "source identity is not approved"),
+        ({"target_machine": "windows-wsl"}, {}, "source identity is not approved"),
+        (
+            {"source_machine": "cloud", "target_machine": "mac"},
+            {},
+            "source identity is not approved",
+        ),
     ],
     ids=[
         "wrong-source-commit",
         "wrong-source-tree",
-        "wrong-destination-commit",
         "wrong-source-machine",
         "wrong-target-machine",
+        "wrong-direction",
     ],
 )
 def test_legacy_compatibility_requires_every_exact_mapping_value(
@@ -1346,7 +1406,7 @@ def test_legacy_compatibility_requires_every_exact_mapping_value(
         )
     _write_commit_compatibility(
         case["config"],
-        [_approved_mapping(**mapping_overrides)],
+        [_approved_mapping(case["destination_commit"], **mapping_overrides)],
     )
 
     with pytest.raises(runtime_handoff.HandoffError, match=error):
@@ -1369,12 +1429,18 @@ def test_legacy_compatibility_absent_mapping_refuses(
         )
 
 
+@pytest.mark.parametrize(
+    "missing_field",
+    ["source_tree", "approved_destination_commit"],
+    ids=["missing-source-tree", "missing-destination"],
+)
 def test_legacy_compatibility_incomplete_mapping_refuses(
     legacy_compatibility_case,
+    missing_field,
 ):
     case = legacy_compatibility_case
-    mapping = _approved_mapping()
-    del mapping["source_tree"]
+    mapping = _approved_mapping(case["destination_commit"])
+    del mapping[missing_field]
     _write_commit_compatibility(case["config"], [mapping])
 
     with pytest.raises(runtime_handoff.HandoffError, match="incomplete or malformed"):
@@ -1387,7 +1453,7 @@ def test_legacy_compatibility_extra_json_field_refuses(
     legacy_compatibility_case,
 ):
     case = legacy_compatibility_case
-    mapping = _approved_mapping()
+    mapping = _approved_mapping(case["destination_commit"])
     mapping["unexpected_field"] = "refuse"
     _write_commit_compatibility(case["config"], [mapping])
 
@@ -1397,11 +1463,25 @@ def test_legacy_compatibility_extra_json_field_refuses(
         )
 
 
-def test_legacy_compatibility_partial_sha_refuses(
+@pytest.mark.parametrize(
+    ("sha_field", "malformed_sha"),
+    [
+        ("source_commit", "14c3eaf79507"),
+        ("approved_destination_commit", "14c3eaf79507"),
+        ("approved_destination_commit", "A" * 40),
+    ],
+    ids=["partial-source-commit", "partial-destination", "uppercase-destination"],
+)
+def test_legacy_compatibility_malformed_sha_refuses(
     legacy_compatibility_case,
+    sha_field,
+    malformed_sha,
 ):
     case = legacy_compatibility_case
-    mapping = _approved_mapping(source_commit="14c3eaf79507")
+    mapping = _approved_mapping(
+        case["destination_commit"],
+        **{sha_field: malformed_sha},
+    )
     _write_commit_compatibility(case["config"], [mapping])
 
     with pytest.raises(runtime_handoff.HandoffError, match="full lowercase Git SHA"):
@@ -1427,7 +1507,7 @@ def test_legacy_compatibility_duplicate_json_key_refuses(
     legacy_compatibility_case,
 ):
     case = legacy_compatibility_case
-    mapping = json.dumps(_approved_mapping())
+    mapping = json.dumps(_approved_mapping(case["destination_commit"]))
     case["config"].write_text(
         "{"
         f'"{runtime_handoff.COMMIT_COMPATIBILITY_ROOT_KEY}":[{mapping}],'
@@ -1444,13 +1524,13 @@ def test_legacy_compatibility_duplicate_json_key_refuses(
 
 
 @pytest.mark.parametrize(
-    ("mappings", "error"),
+    ("mapping_overrides", "error"),
     [
-        ([_approved_mapping(), _approved_mapping()], "duplicated"),
+        ([{}, {}], "duplicated"),
         (
             [
-                _approved_mapping(),
-                _approved_mapping(source_tree="f" * 40),
+                {},
+                {"source_tree": "f" * 40},
             ],
             "conflict",
         ),
@@ -1459,10 +1539,14 @@ def test_legacy_compatibility_duplicate_json_key_refuses(
 )
 def test_legacy_compatibility_duplicate_or_conflicting_mapping_refuses(
     legacy_compatibility_case,
-    mappings,
+    mapping_overrides,
     error,
 ):
     case = legacy_compatibility_case
+    mappings = [
+        _approved_mapping(case["destination_commit"], **overrides)
+        for overrides in mapping_overrides
+    ]
     _write_commit_compatibility(case["config"], mappings)
 
     with pytest.raises(runtime_handoff.HandoffError, match=error):
@@ -1484,7 +1568,12 @@ def test_arbitrary_same_tree_source_commit_refuses(
     )
     _write_commit_compatibility(
         case["config"],
-        [_approved_mapping(source_commit=arbitrary_commit)],
+        [
+            _approved_mapping(
+                case["destination_commit"],
+                source_commit=arbitrary_commit,
+            )
+        ],
     )
 
     with pytest.raises(runtime_handoff.HandoffError, match="not approved"):
@@ -1499,7 +1588,10 @@ def test_approved_legacy_receive_rolls_back_runtime_if_activation_fails(
 ):
     case = legacy_compatibility_case
     original = (case["cloud"] / "data/shards/recipients_private_jc.csv").read_bytes()
-    _write_commit_compatibility(case["config"], [_approved_mapping()])
+    _write_commit_compatibility(
+        case["config"],
+        [_approved_mapping(case["destination_commit"])],
+    )
     monkeypatch.setattr(
         runtime_handoff,
         "activate_import",

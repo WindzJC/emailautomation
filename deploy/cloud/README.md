@@ -113,8 +113,24 @@ it outside the repository, for example at
 
 The protected configuration key names are
 `commit_compatibility_mappings`, `source_machine`, `target_machine`,
-`source_commit`, `source_tree`, and `approved_destination_commit`. For this
-migration the complete file must contain exactly these values:
+`source_commit`, `source_tree`, and `approved_destination_commit`. Source code
+fixes the only approved legacy identity and direction to these values:
+
+- source machine: `mac`
+- target machine: `cloud`
+- source commit: `14c3eaf79507cc33fab06ba107fe128ba251a9dc`
+- source tree: `9dc901637974651e05f0c2550d4f08f91839ef91`
+- cleaned equivalent commit: `c5e9af123b7a2c66fd83323ce3e8f3e6484f6759`
+
+The destination is not hardcoded in source code. The protected file explicitly
+approves the exact deployed cloud commit, and `approved_destination_commit` must
+be the full lowercase SHA returned by
+`git -C /opt/astra/emailautomation rev-parse HEAD`. This avoids an impossible
+self-reference in which committing a hardcoded destination creates a different
+destination commit.
+
+After replacing the placeholder with that exact current cloud HEAD, the
+complete file must have this structure and no other fields:
 
 ```json
 {
@@ -124,18 +140,18 @@ migration the complete file must contain exactly these values:
       "target_machine": "cloud",
       "source_commit": "14c3eaf79507cc33fab06ba107fe128ba251a9dc",
       "source_tree": "9dc901637974651e05f0c2550d4f08f91839ef91",
-      "approved_destination_commit": "7649cc2f30924188636914e189b7798d1b08b09a"
+      "approved_destination_commit": "REPLACE_WITH_CURRENT_CLOUD_HEAD_FULL_SHA"
     }
   ]
 }
 ```
 
-All SHA values are full and exact. The receiver also anchors the approved
-source tree to cleaned equivalent commit
-`c5e9af123b7a2c66fd83323ce3e8f3e6484f6759`; tree equality alone never permits
-a different source commit. Missing, extra, malformed, duplicate, conflicting,
-or unapproved mappings are refused. The bundle manifest and its source commit
-must not be edited.
+All configured SHA values must be full and exact. The receiver independently
+anchors the approved source tree to the cleaned equivalent commit; tree
+equality alone never permits a different source commit. It also requires the
+configured destination to equal the receiving repository's current HEAD.
+Missing, extra, malformed, duplicate, conflicting, or unapproved mappings are
+refused. The bundle manifest and its source commit must not be edited.
 
 Pass the protected file explicitly to both verification and atomic receive:
 
@@ -153,8 +169,8 @@ sudo -u astra env \
 Receive still imports runtime and activates cloud authority as one atomic
 operation. It does not start the dashboard or any sender. After cutover and the
 rollback window are complete, remove the environment key from operator commands
-and delete the protected mapping file. Normal exact-commit matching then remains
-the only accepted behavior.
+and service configuration, then delete the protected mapping file. Normal
+exact-commit matching then remains the only accepted behavior.
 
 During the reviewed cutover window only:
 

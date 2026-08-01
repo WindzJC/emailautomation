@@ -129,12 +129,11 @@ COMMIT_COMPATIBILITY_FIELDS = {
     "approved_destination_commit",
 }
 FULL_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-APPROVED_LEGACY_COMMIT_COMPATIBILITY = {
+APPROVED_LEGACY_SOURCE_IDENTITY = {
     "source_machine": "mac",
     "target_machine": "cloud",
     "source_commit": "14c3eaf79507cc33fab06ba107fe128ba251a9dc",
     "source_tree": "9dc901637974651e05f0c2550d4f08f91839ef91",
-    "approved_destination_commit": "7649cc2f30924188636914e189b7798d1b08b09a",
 }
 APPROVED_LEGACY_CLEANED_EQUIVALENT_COMMIT = (
     "c5e9af123b7a2c66fd83323ce3e8f3e6484f6759"
@@ -641,8 +640,15 @@ def _load_commit_compatibility_mappings() -> list[dict[str, str]]:
         routes[route] = identity
         mappings.append(mapping)
 
-    if any(mapping != APPROVED_LEGACY_COMMIT_COMPATIBILITY for mapping in mappings):
-        raise HandoffError("Commit compatibility mapping is not approved")
+    if any(
+        {
+            field: mapping[field]
+            for field in APPROVED_LEGACY_SOURCE_IDENTITY
+        }
+        != APPROVED_LEGACY_SOURCE_IDENTITY
+        for mapping in mappings
+    ):
+        raise HandoffError("Commit compatibility source identity is not approved")
     return mappings
 
 
@@ -681,11 +687,14 @@ def validate_bundle_commit_compatibility(
         if mapping["source_machine"] == source_machine
         and mapping["target_machine"] == target_machine
         and mapping["source_commit"] == source_commit
-        and mapping["approved_destination_commit"] == destination_commit
     ]
     if len(matches) != 1:
         raise HandoffError("Bundle does not match the configured commit compatibility mapping")
     mapping = matches[0]
+    if mapping["approved_destination_commit"] != destination_commit:
+        raise HandoffError(
+            "Configured approved destination commit does not match current HEAD"
+        )
     cleaned_tree = git(
         repo,
         "rev-parse",
