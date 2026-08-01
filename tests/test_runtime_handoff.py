@@ -1766,6 +1766,102 @@ def test_corrupt_checksum_is_rejected_and_both_sides_remain_disabled(repos, tmp_
     assert runtime_authority.load_authority(mac)["status"] == "import_failed"
 
 
+def test_sqlite_integrity_is_non_mutating_for_wal_mode_database(tmp_path):
+    database = tmp_path / "wal-mode.sqlite3"
+    db = sqlite3.connect(database)
+    try:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        db.execute("CREATE TABLE items (value TEXT)")
+        db.execute("INSERT INTO items VALUES (?)", ("intact",))
+        db.commit()
+    finally:
+        db.close()
+
+    sidecars = [
+        database.with_name(database.name + suffix)
+        for suffix in ("-wal", "-shm", "-journal")
+    ]
+    assert not any(path.exists() for path in sidecars)
+
+    runtime_handoff._sqlite_integrity(database)
+
+    assert not any(path.exists() for path in sidecars)
+
+
+def test_complete_bundle_verifier_preserves_extracted_inventory(repos, tmp_path):
+    windows, _mac = repos
+    exported = _export(windows, tmp_path, "mac", "windows-wsl")
+
+    def set_wal_mode_and_rehash(stage: Path) -> None:
+        manifest_path = stage / runtime_handoff.MANIFEST_NAME
+        authority_path = stage / runtime_handoff.BUNDLE_AUTHORITY_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        entry = next(
+            item for item in manifest["files"] if item["path"].endswith(".sqlite3")
+        )
+        database = stage / runtime_handoff.RUNTIME_ROOT / entry["path"]
+        db = sqlite3.connect(database)
+        try:
+            assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        finally:
+            db.close()
+        entry["size"] = database.stat().st_size
+        entry["sha256"] = runtime_handoff.sha256_file(database)
+        runtime_hash = runtime_handoff.manifest_hash(manifest["files"])
+        manifest["runtime_manifest_hash"] = runtime_hash
+        authority["runtime_manifest_hash"] = runtime_hash
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    bundle = _rewrite_bundle(
+        exported,
+        tmp_path / "wal-mode-bundle.tgz",
+        set_wal_mode_and_rehash,
+    )
+    with tarfile.open(bundle, "r:gz") as archive:
+        expected = {
+            member.name
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+
+    staging = tmp_path / "verified-extraction"
+    runtime_handoff.extract_and_verify(bundle, staging)
+    actual = {
+        path.relative_to(staging).as_posix()
+        for path in staging.rglob("*")
+        if path.is_file()
+    }
+
+    assert actual == expected
+    assert not any(
+        name.endswith(("-wal", "-shm", "-journal"))
+        for name in actual
+    )
+
+
+def test_bundle_verifier_rejects_archived_sqlite_sidecar(repos, tmp_path):
+    windows, _mac = repos
+    bundle = _export(windows, tmp_path, "mac", "windows-wsl")
+
+    def add_unexpected_sidecar(stage: Path) -> None:
+        sidecar = stage / "runtime/data/state/send_idempotency.sqlite3-shm"
+        sidecar.write_bytes(b"unexpected archived SQLite sidecar")
+
+    bad = _rewrite_bundle(
+        bundle,
+        tmp_path / "unexpected-sidecar.tgz",
+        add_unexpected_sidecar,
+    )
+
+    with pytest.raises(
+        runtime_handoff.HandoffError,
+        match=r"Unexpected runtime file: .*send_idempotency\.sqlite3-shm",
+    ):
+        runtime_handoff.extract_and_verify(bad, tmp_path / "sidecar-extraction")
+
+
 def test_sqlite_integrity_failure_is_rejected_even_with_matching_checksum(repos, tmp_path):
     windows, mac = repos
     bundle = _export(windows, tmp_path, "mac", "windows-wsl")

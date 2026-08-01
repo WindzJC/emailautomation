@@ -714,7 +714,10 @@ def validate_bundle_commit_compatibility(
 
 def _sqlite_integrity(path: Path) -> None:
     try:
-        with sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True) as db:
+        with sqlite3.connect(
+            f"file:{path.resolve().as_posix()}?mode=ro&immutable=1",
+            uri=True,
+        ) as db:
             result = db.execute("PRAGMA integrity_check").fetchall()
     except sqlite3.DatabaseError as exc:
         raise HandoffError(f"SQLite integrity failure: {path}") from exc
