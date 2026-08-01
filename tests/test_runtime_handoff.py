@@ -271,6 +271,95 @@ def _use_approved_source_tree_git(monkeypatch, cloud: Path) -> None:
     monkeypatch.setattr(runtime_handoff, "git", compatible_git)
 
 
+def test_process_classifier_ignores_networkd_dispatcher_service():
+    assert (
+        runtime_handoff.classify_process_command(
+            "/usr/bin/networkd-dispatcher --run-startup-triggers"
+        )
+        is None
+    )
+    assert (
+        runtime_handoff.classify_process_command(
+            "/usr/lib/systemd/networkd-dispatcher.service"
+        )
+        is None
+    )
+
+
+def test_process_classifier_ignores_unrelated_dispatch_text():
+    command = (
+        "/usr/local/bin/report-dispatch-health "
+        "--service networkd-dispatcher.service "
+        "--user dispatch --directory /srv/dispatch --environment=dispatch"
+    )
+
+    assert runtime_handoff.classify_process_command(command) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "category"),
+    [
+        (
+            "/opt/astra/emailautomation/.venv/bin/python "
+            "/opt/astra/emailautomation/dispatch.py",
+            "dispatch",
+        ),
+        ("python3 /opt/astra/emailautomation/check_pending.py", "check"),
+        ("python3 /opt/astra/emailautomation/triage.py", "triage"),
+        (
+            "python3 /opt/astra/emailautomation/important_leads_verify.py",
+            "verification",
+        ),
+        (
+            "python3 /opt/astra/emailautomation/important_leads_workflow.py",
+            "workflow",
+        ),
+        (
+            "python3 /opt/astra/emailautomation/tools/runtime_handoff.py status",
+            "handoff",
+        ),
+        (
+            "python3 /opt/astra/emailautomation/send_shard.py --profile private_jc",
+            "sender",
+        ),
+        (
+            "python3 -m uvicorn live_dashboard:app --host 127.0.0.1",
+            "dashboard",
+        ),
+        ("/usr/bin/cloudflared tunnel run astra", "tunnel"),
+        ("bash /opt/astra/emailautomation/run_tunnel_tmux.sh", "tunnel"),
+    ],
+)
+def test_process_classifier_detects_exact_astra_entrypoints(command, category):
+    assert runtime_handoff.classify_process_command(command) == category
+
+
+def test_process_blockers_classifies_entrypoints_not_incidental_text(monkeypatch):
+    process_listing = "\n".join(
+        [
+            "1 0 /sbin/init",
+            "50 1 bash -lc python3 tools/runtime_handoff.py status",
+            "100 50 python3 tools/runtime_handoff.py status",
+            "200 1 /usr/bin/networkd-dispatcher --run-startup-triggers",
+            "201 1 /usr/local/bin/report-dispatch-health --user dispatch",
+            "202 1 python3 /opt/astra/emailautomation/dispatch.py",
+        ]
+    )
+    completed = subprocess.CompletedProcess(
+        args=["ps"],
+        returncode=0,
+        stdout=process_listing,
+        stderr="",
+    )
+    monkeypatch.setattr(runtime_handoff.subprocess, "run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr(runtime_handoff.os, "getpid", lambda: 100)
+    monkeypatch.setattr(runtime_handoff.os, "getppid", lambda: 50)
+
+    assert runtime_handoff.process_blockers() == [
+        "202 dispatch: python3 /opt/astra/emailautomation/dispatch.py"
+    ]
+
+
 @pytest.fixture
 def legacy_compatibility_case(repos, tmp_path: Path, monkeypatch):
     cloud, bundle = _cloud_target(repos, tmp_path)
@@ -1709,6 +1798,32 @@ def test_import_refuses_target_process(repos, tmp_path, monkeypatch):
     with pytest.raises(runtime_handoff.HandoffError, match="still running"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
     assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+
+
+def test_blocker_result_is_shared_by_status_export_verify_and_receive(
+    repos,
+    tmp_path,
+    monkeypatch,
+):
+    windows, mac = repos
+    bundle = _export(windows, tmp_path, "mac", "windows-wsl")
+    blocker = "202 dispatch: python3 /opt/astra/emailautomation/dispatch.py"
+    monkeypatch.setattr(runtime_handoff, "process_blockers", lambda: [blocker])
+
+    assert runtime_handoff.status(mac, machine="mac")["process_blockers"] == [
+        blocker
+    ]
+    with pytest.raises(runtime_handoff.HandoffError, match="still running"):
+        runtime_handoff.export_runtime(
+            mac,
+            tmp_path / "blocked-export",
+            "windows-wsl",
+            machine="mac",
+        )
+    with pytest.raises(runtime_handoff.HandoffError, match="still running"):
+        runtime_handoff.verify_runtime_bundle(mac, bundle, machine="mac")
+    with pytest.raises(runtime_handoff.HandoffError, match="still running"):
+        runtime_handoff.import_runtime(mac, bundle, machine="mac")
 
 
 def test_stale_generation_is_rejected_and_target_is_disabled(repos, tmp_path):

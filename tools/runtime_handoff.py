@@ -58,20 +58,43 @@ LOCAL_STATE_DIR = ".runtime_handoff"
 USED_BUNDLES_NAME = "used_bundles.json"
 LAST_IMPORT_NAME = "last_import.json"
 BACKUP_DIR_NAME = "backups"
-PROCESS_MARKERS = {
-    "sender": ("send_shard.py",),
-    "dashboard": ("live_dashboard.py", "uvicorn live_dashboard:app", "streamlit_monitor.py"),
-    "tunnel": ("cloudflared", "run_tunnel_tmux.sh"),
-    "dispatch": ("dispatch",),
-    "check": ("check_pending.py", "check_1hr.py", "check_24h.py"),
-    "triage": ("triage",),
-    "workflow": (
-        "important_leads_workflow.py",
-        "leads_workflow.py",
-        "precheck_leads.py",
-    ),
-    "handoff": ("runtime_handoff.py", "mac_runtime_migration.py"),
+PROCESS_ENTRYPOINT_CATEGORIES = {
+    "send_shard.py": "sender",
+    "live_dashboard.py": "dashboard",
+    "streamlit_monitor.py": "dashboard",
+    "run_dashboard_tmux.sh": "dashboard",
+    "run_live_dashboard.sh": "dashboard",
+    "cloudflared": "tunnel",
+    "run_tunnel_tmux.sh": "tunnel",
+    "dispatch.py": "dispatch",
+    "check_pending.py": "check",
+    "check_1hr.py": "check",
+    "check_24h.py": "check",
+    "check_important_leads.py": "check",
+    "triage.py": "triage",
+    "important_leads_verify.py": "verification",
+    "verification.py": "verification",
+    "important_leads_workflow.py": "workflow",
+    "leads_workflow.py": "workflow",
+    "precheck_leads.py": "workflow",
+    "handoff": "handoff",
+    "runtime_handoff.py": "handoff",
+    "mac_runtime_migration.py": "handoff",
+    "package_campaign_handoff.py": "handoff",
 }
+PROCESS_MODULE_CATEGORIES = {
+    "send_shard": "sender",
+    "live_dashboard": "dashboard",
+    "important_leads_verify": "verification",
+    "important_leads_workflow": "workflow",
+    "leads_workflow": "workflow",
+    "precheck_leads": "workflow",
+    "tools.runtime_handoff": "handoff",
+    "tools.mac_runtime_migration": "handoff",
+    "tools.package_campaign_handoff": "handoff",
+}
+PYTHON_ENTRYPOINT_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?$")
+SHELL_ENTRYPOINTS = {"bash", "dash", "sh", "zsh"}
 ACTIVE_JOB_STATES = {"queued", "running", "checking", "verifying", "dispatching", "triaging"}
 JOB_ROOTS = (
     "_important/check_runs/jobs",
@@ -234,6 +257,88 @@ def runtime_files(repo: Path) -> list[Path]:
     return sorted(files, key=lambda path: path.relative_to(repo).as_posix())
 
 
+def _entrypoint_basename(value: str) -> str:
+    return PurePosixPath(value).name
+
+
+def _python_process_category(arguments: list[str]) -> str | None:
+    index = 1
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token == "-m":
+            if index + 1 >= len(arguments):
+                return None
+            module = arguments[index + 1]
+            remaining = arguments[index + 2 :]
+            if module == "uvicorn" and "live_dashboard:app" in remaining:
+                return "dashboard"
+            if module == "streamlit" and any(
+                _entrypoint_basename(value) == "streamlit_monitor.py"
+                for value in remaining
+            ):
+                return "dashboard"
+            return PROCESS_MODULE_CATEGORIES.get(module)
+        if token in {"-c", "-"}:
+            return None
+        if token in {"-W", "-X"}:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return PROCESS_ENTRYPOINT_CATEGORIES.get(
+        _entrypoint_basename(arguments[index])
+    )
+
+
+def _shell_process_category(arguments: list[str]) -> str | None:
+    index = 1
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "--":
+            index += 1
+            break
+        if token in {"-c", "--command"}:
+            return None
+        if token in {"-o", "+o"}:
+            index += 2
+            continue
+        if token.startswith(("-", "+")):
+            index += 1
+            continue
+        break
+    if index >= len(arguments):
+        return None
+    return PROCESS_ENTRYPOINT_CATEGORIES.get(
+        _entrypoint_basename(arguments[index])
+    )
+
+
+def classify_process_command(command: str) -> str | None:
+    arguments = command.split()
+    if not arguments:
+        return None
+    entrypoint = _entrypoint_basename(arguments[0])
+    if PYTHON_ENTRYPOINT_RE.fullmatch(entrypoint):
+        return _python_process_category(arguments)
+    if entrypoint in SHELL_ENTRYPOINTS:
+        return _shell_process_category(arguments)
+    if entrypoint == "uvicorn" and "live_dashboard:app" in arguments[1:]:
+        return "dashboard"
+    if entrypoint == "streamlit" and any(
+        _entrypoint_basename(value) == "streamlit_monitor.py"
+        for value in arguments[1:]
+    ):
+        return "dashboard"
+    return PROCESS_ENTRYPOINT_CATEGORIES.get(entrypoint)
+
+
 def process_blockers() -> list[str]:
     result = subprocess.run(
         ["ps", "-eo", "pid=,ppid=,args="],
@@ -258,10 +363,9 @@ def process_blockers() -> list[str]:
     for pid, (_ppid, command) in processes.items():
         if pid in ignored_pids:
             continue
-        for category, markers in PROCESS_MARKERS.items():
-            if any(marker in command for marker in markers):
-                blockers.append(f"{pid} {category}: {command}")
-                break
+        category = classify_process_command(command)
+        if category is not None:
+            blockers.append(f"{pid} {category}: {command}")
     return blockers
 
 
@@ -803,6 +907,7 @@ def verify_runtime_bundle(
     *,
     machine: str | None = None,
 ) -> dict[str, Any]:
+    assert_processes_stopped(repo)
     with tempfile.TemporaryDirectory(prefix="handoff-verify-") as temp:
         manifest, authority, report = extract_and_verify(bundle, Path(temp))
         compatibility = validate_bundle_commit_compatibility(

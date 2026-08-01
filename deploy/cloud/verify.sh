@@ -77,6 +77,13 @@ if status.get("machine") != "cloud":
     raise SystemExit("REFUSED: handoff status did not resolve machine=cloud.")
 if status.get("head") != expected_commit:
     raise SystemExit("REFUSED: handoff status commit mismatch.")
+blockers = status.get("process_blockers")
+if not isinstance(blockers, list):
+    raise SystemExit("REFUSED: handoff process-blocker status is malformed.")
+if blockers:
+    raise SystemExit(
+        f"REFUSED: runtime process blockers remain ({len(blockers)})."
+    )
 if require_authority == "1" and status.get("real_send_authorized") is not True:
     raise SystemExit("REFUSED: cloud runtime authority is not active and valid.")
 print(

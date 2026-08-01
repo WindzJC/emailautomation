@@ -354,6 +354,8 @@ def test_profile_verifier_requires_explicit_profile_and_is_preflight_only() -> N
     verify = (CLOUD / "verify.sh").read_text(encoding="utf-8")
 
     assert 'REFUSED: --profile is required' in verify
+    assert 'status.get("process_blockers")' in verify
+    assert "runtime process blockers remain" in verify
     assert '--profile "${PROFILE}"' in verify
     assert "--preflight" in verify
     assert "No sender was started and no message was submitted." in verify
