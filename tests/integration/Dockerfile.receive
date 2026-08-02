@@ -1,0 +1,49 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        git \
+        procps \
+        python3 \
+        python3-pip \
+        python3-venv \
+        sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 2000 astra \
+    && useradd --uid 2000 --gid astra --create-home --shell /bin/bash astra \
+    && install -d -o root -g astra -m 0750 /opt/astra
+
+COPY . /opt/astra/emailautomation
+
+RUN cd /opt/astra/emailautomation \
+    && git init -q \
+    && git config user.email synthetic@example.test \
+    && git config user.name "Synthetic Integration" \
+    && git add . \
+    && git commit -qm "synthetic integration image" \
+    && python3 -m venv .venv \
+    && .venv/bin/pip install --no-cache-dir -q -r requirements.txt \
+    && chown -R astra:astra /opt/astra/emailautomation \
+    && chmod 0750 /opt/astra/emailautomation \
+    && install -d -o astra -g astra -m 0700 \
+        /opt/astra/emailautomation/.runtime_handoff \
+        /opt/astra/emailautomation/.runtime_handoff/import-staging \
+        /opt/astra/emailautomation/.runtime_handoff/receive-transactions \
+        /opt/astra/emailautomation/.runtime_handoff/backups \
+    && install -d -o root -g astra -m 0750 /etc/astra-emailautomation \
+    && printf '{"commit_compatibility_mappings":[]}\n' \
+        > /etc/astra-emailautomation/handoff-commit-compatibility.json \
+    && chown root:astra /etc/astra-emailautomation/handoff-commit-compatibility.json \
+    && chmod 0640 /etc/astra-emailautomation/handoff-commit-compatibility.json
+
+USER astra
+WORKDIR /opt/astra/emailautomation
+
+ENTRYPOINT ["/opt/astra/emailautomation/.venv/bin/python", "/opt/astra/emailautomation/tests/integration/receive_permission_parity.py"]

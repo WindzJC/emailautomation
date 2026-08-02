@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -71,8 +72,55 @@ def generation_floor_path(repo: Path) -> Path:
     return repo / GENERATION_FLOOR_RELATIVE
 
 
+def _open_protected_json(path: Path, *, label: str) -> int:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise AuthorityError(f"{label} is unsafe: {path}")
+    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+        raise AuthorityError(f"{label} has the wrong owner: {path}")
+    if stat.S_IMODE(before.st_mode) != 0o600:
+        raise AuthorityError(f"{label} must use mode 0600: {path}")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise AuthorityError(f"{label} requires O_NOFOLLOW support")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError as exc:
+        raise AuthorityError(f"{label} could not be opened safely: {path}") from exc
+    opened = os.fstat(descriptor)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        os.close(descriptor)
+        raise AuthorityError(f"{label} changed while opening: {path}")
+    return descriptor
+
+
 def _atomic_json_write(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_parent = path.parent.name == GENERATION_FLOOR_RELATIVE.parent.name
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if private_parent else 0o755)
+    parent_metadata = path.parent.lstat()
+    if stat.S_ISLNK(parent_metadata.st_mode) or not stat.S_ISDIR(parent_metadata.st_mode):
+        raise AuthorityError(f"Authority parent must be a regular directory: {path.parent}")
+    if private_parent:
+        if parent_metadata.st_uid != os.geteuid() or parent_metadata.st_gid != os.getegid():
+            raise AuthorityError("Machine-local authority state has the wrong owner")
+        if stat.S_IMODE(parent_metadata.st_mode) != 0o700:
+            raise AuthorityError("Machine-local authority state must use mode 0700")
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+            raise AuthorityError(f"Authority path must be a regular file: {path}")
+        if existing.st_uid != os.geteuid() or existing.st_gid != os.getegid():
+            raise AuthorityError(f"Authority path has the wrong owner: {path}")
+        if stat.S_IMODE(existing.st_mode) != mode:
+            raise AuthorityError(
+                f"Authority path must use mode {mode:04o}: {path}"
+            )
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -96,11 +144,14 @@ def _atomic_json_write(path: Path, payload: dict[str, Any], mode: int = 0o600) -
 
 def load_authority(repo: Path) -> dict[str, Any]:
     path = authority_path(repo)
-    if not path.is_file():
+    try:
+        descriptor = _open_protected_json(path, label="Authority file")
+    except FileNotFoundError:
         raise AuthorityError(f"Authority file is missing: {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, UnicodeError, ValueError) as exc:
         raise AuthorityError(f"Authority file is unreadable: {path}") from exc
     if not isinstance(payload, dict):
         raise AuthorityError("Authority file must contain a JSON object")
@@ -127,12 +178,15 @@ def load_authority(repo: Path) -> dict[str, Any]:
 
 def load_generation_floor(repo: Path) -> int:
     path = generation_floor_path(repo)
-    if not path.exists():
+    try:
+        descriptor = _open_protected_json(path, label="Generation floor")
+    except FileNotFoundError:
         return 0
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
         value = payload["generation"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
         raise AuthorityError(f"Generation floor is unreadable: {path}") from exc
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise AuthorityError("Generation floor must be an integer >= 1")

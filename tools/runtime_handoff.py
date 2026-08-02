@@ -24,9 +24,10 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -58,6 +59,12 @@ LOCAL_STATE_DIR = ".runtime_handoff"
 USED_BUNDLES_NAME = "used_bundles.json"
 LAST_IMPORT_NAME = "last_import.json"
 BACKUP_DIR_NAME = "backups"
+IMPORT_STAGING_DIR_NAME = "import-staging"
+RECEIVE_TRANSACTION_DIR_NAME = "receive-transactions"
+RECEIVE_TRANSACTION_SCHEMA_VERSION = 1
+RECEIVE_TRANSACTION_INTEGRITY_FIELD = "transaction_integrity_hash"
+INTERRUPTED_BUNDLE_SHA_ENV = "ASTRA_INTERRUPTED_RECEIVE_BUNDLE_SHA256"
+INTERRUPTED_BASELINE_ENV = "ASTRA_INTERRUPTED_RECEIVE_BASELINE_SHA256"
 PROCESS_ENTRYPOINT_CATEGORIES = {
     "send_shard.py": "sender",
     "live_dashboard.py": "dashboard",
@@ -144,14 +151,22 @@ PITCH_VALIDATION_MODES = {
 }
 COMMIT_COMPATIBILITY_FILE_ENV = "ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE"
 COMMIT_COMPATIBILITY_ROOT_KEY = "commit_compatibility_mappings"
-COMMIT_COMPATIBILITY_FIELDS = {
+COMMIT_COMPATIBILITY_REQUIRED_FIELDS = {
     "source_machine",
     "target_machine",
     "source_commit",
     "source_tree",
     "approved_destination_commit",
 }
+COMMIT_COMPATIBILITY_OPTIONAL_FIELDS = {
+    "approved_interrupted_destination_commits",
+}
+COMMIT_COMPATIBILITY_FIELDS = (
+    COMMIT_COMPATIBILITY_REQUIRED_FIELDS | COMMIT_COMPATIBILITY_OPTIONAL_FIELDS
+)
 FULL_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 APPROVED_LEGACY_SOURCE_IDENTITY = {
     "source_machine": "mac",
     "target_machine": "cloud",
@@ -197,6 +212,281 @@ def sha256_file(path: Path) -> str:
 def canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _secure_directory(
+    path: Path,
+    *,
+    create: bool,
+    expected_device: int | None = None,
+) -> os.stat_result:
+    """Create/open a private directory without following a symlink."""
+    if not path.is_absolute():
+        raise HandoffError(f"Private handoff path must be absolute: {path}")
+    if create and not path.exists():
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+    try:
+        before = path.lstat()
+    except FileNotFoundError as exc:
+        raise HandoffError(f"Private handoff directory is missing: {path}") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise HandoffError(f"Private handoff path must be a regular directory: {path}")
+    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+        raise HandoffError(f"Private handoff directory has the wrong owner: {path}")
+    if stat.S_IMODE(before.st_mode) != 0o700:
+        raise HandoffError(f"Private handoff directory must use mode 0700: {path}")
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise HandoffError("Secure handoff directories require O_NOFOLLOW support")
+    fd = os.open(path, flags | nofollow)
+    try:
+        opened = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        raise HandoffError(f"Private handoff directory changed while opening: {path}")
+    if expected_device is not None and opened.st_dev != expected_device:
+        raise HandoffError(
+            f"Private handoff directory is on a different filesystem: {path}"
+        )
+    return opened
+
+
+def _private_handoff_layout(repo: Path) -> dict[str, Path]:
+    try:
+        repo_stat = repo.lstat()
+    except FileNotFoundError as exc:
+        raise HandoffError(f"Repository path is missing: {repo}") from exc
+    if stat.S_ISLNK(repo_stat.st_mode) or not stat.S_ISDIR(repo_stat.st_mode):
+        raise HandoffError("Repository path must be a regular directory, not a symlink")
+    if repo_stat.st_uid != os.geteuid() or repo_stat.st_gid != os.getegid():
+        raise HandoffError("Repository must be owned by the handoff service account")
+    root = repo / LOCAL_STATE_DIR
+    if not root.exists():
+        try:
+            os.mkdir(root, 0o700)
+        except FileExistsError:
+            pass
+    _secure_directory(root, create=False, expected_device=repo_stat.st_dev)
+    layout = {
+        "root": root,
+        "staging": root / IMPORT_STAGING_DIR_NAME,
+        "transactions": root / RECEIVE_TRANSACTION_DIR_NAME,
+        "backups": root / BACKUP_DIR_NAME,
+    }
+    for name in ("staging", "transactions", "backups"):
+        path = layout[name]
+        if not path.exists():
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:
+                pass
+        _secure_directory(path, create=False, expected_device=repo_stat.st_dev)
+    return layout
+
+
+def _open_private_file(
+    path: Path, *, required: bool = True
+) -> tuple[int, os.stat_result] | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise HandoffError(f"Private handoff file is missing: {path}")
+        return None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise HandoffError(f"Private handoff path must be a regular file: {path}")
+    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+        raise HandoffError(f"Private handoff file has the wrong owner: {path}")
+    if stat.S_IMODE(before.st_mode) != 0o600:
+        raise HandoffError(f"Private handoff file must use mode 0600: {path}")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise HandoffError("Secure handoff files require O_NOFOLLOW support")
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow)
+    except OSError as exc:
+        raise HandoffError(f"Private handoff file could not be opened safely: {path}") from exc
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise HandoffError(f"Private handoff file changed while opening: {path}")
+    return fd, opened
+
+
+def _validate_private_file(path: Path, *, required: bool = True) -> os.stat_result | None:
+    opened_file = _open_private_file(path, required=required)
+    if opened_file is None:
+        return None
+    fd, opened = opened_file
+    try:
+        return opened
+    finally:
+        os.close(fd)
+
+
+def _read_private_json(path: Path, *, label: str) -> Any:
+    opened_file = _open_private_file(path)
+    assert opened_file is not None
+    descriptor, _metadata = opened_file
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HandoffError(f"{label} is unreadable: {path}") from exc
+
+
+@contextmanager
+def _open_private_tar(path: Path) -> Iterator[tarfile.TarFile]:
+    opened_file = _open_private_file(path)
+    assert opened_file is not None
+    descriptor, _metadata = opened_file
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            with tarfile.open(fileobj=handle, mode="r:gz") as archive:
+                yield archive
+    except (OSError, tarfile.TarError) as exc:
+        raise HandoffError(f"Private runtime backup is unreadable: {path}") from exc
+
+
+def _atomic_private_json_write(path: Path, payload: dict[str, Any]) -> None:
+    _secure_directory(path.parent, create=False)
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        if path.exists() or path.is_symlink():
+            _validate_private_file(path)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _private_staging_directory(repo: Path, *, prefix: str) -> Iterator[Path]:
+    layout = _private_handoff_layout(repo)
+    parent = layout["staging"]
+    name = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    staging = Path(name)
+    try:
+        _secure_directory(
+            staging,
+            create=False,
+            expected_device=repo.lstat().st_dev,
+        )
+        yield staging
+    finally:
+        if staging.exists():
+            current = staging.lstat()
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+                raise HandoffError(f"Refusing unsafe staging cleanup: {staging}")
+            shutil.rmtree(staging)
+            _fsync_directory(parent)
+
+
+def _runtime_baseline_fingerprint(repo: Path) -> str:
+    authority = authority_path(repo)
+    inventory: list[dict[str, Any]] = []
+    for root_name in ("data", "_important"):
+        root = repo / root_name
+        if not root.exists():
+            continue
+        if root.is_symlink() or not root.is_dir():
+            raise HandoffError(f"Runtime root must be a regular directory: {root}")
+        for path in sorted(root.rglob("*")):
+            if path == authority:
+                continue
+            if path.is_symlink():
+                raise HandoffError(
+                    f"Runtime baseline contains a symlink: {path.relative_to(repo)}"
+                )
+            if path.is_file() and not _contains_secret_name(path.relative_to(repo)):
+                inventory.append(
+                    {
+                        "path": path.relative_to(repo).as_posix(),
+                        "size": path.stat().st_size,
+                        "sha256": sha256_file(path),
+                    }
+                )
+    return canonical_hash(inventory)
+
+
+def _archive_expanded_size(bundle: Path) -> int:
+    try:
+        with tarfile.open(bundle, "r:gz") as archive:
+            return sum(member.size for member in safe_members(archive) if member.isfile())
+    except (OSError, tarfile.TarError) as exc:
+        raise HandoffError(f"Unreadable handoff archive: {bundle}") from exc
+
+
+def _assert_import_disk_space(repo: Path, bundle: Path) -> dict[str, int]:
+    layout = _private_handoff_layout(repo)
+    expanded = _archive_expanded_size(bundle)
+    current = 0
+    for root_name in ("data", "_important"):
+        root = repo / root_name
+        if root.exists():
+            current += sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    required = expanded + current + max(16 * 1024 * 1024, (expanded + current) // 10)
+    free = shutil.disk_usage(layout["root"]).free
+    if free < required:
+        raise HandoffError(
+            f"Insufficient free space for receive staging: required={required} available={free}"
+        )
+    return {"required": required, "available": free}
+
+
+def _transaction_path(repo: Path, bundle_id: str) -> Path:
+    token = hashlib.sha256(bundle_id.encode("utf-8")).hexdigest()
+    return _private_handoff_layout(repo)["transactions"] / f"receive_{token}.json"
+
+
+def _receive_transaction_integrity_hash(payload: dict[str, Any]) -> str:
+    protected = {
+        key: value
+        for key, value in payload.items()
+        if key != RECEIVE_TRANSACTION_INTEGRITY_FIELD
+    }
+    return canonical_hash(protected)
+
+
+def _load_receive_transaction(path: Path) -> dict[str, Any]:
+    payload = _read_private_json(path, label="Receive transaction")
+    if not isinstance(payload, dict) or payload.get("schema_version") != RECEIVE_TRANSACTION_SCHEMA_VERSION:
+        raise HandoffError("Receive transaction metadata is malformed")
+    recorded_integrity = payload.get(RECEIVE_TRANSACTION_INTEGRITY_FIELD)
+    if (
+        not isinstance(recorded_integrity, str)
+        or not SHA256_RE.fullmatch(recorded_integrity)
+        or recorded_integrity != _receive_transaction_integrity_hash(payload)
+    ):
+        raise HandoffError("Receive transaction integrity check failed")
+    return payload
+
+
+def _write_receive_transaction(repo: Path, payload: dict[str, Any]) -> Path:
+    bundle_id = str(payload.get("bundle_id") or "")
+    if not bundle_id:
+        raise HandoffError("Receive transaction requires a bundle identity")
+    payload[RECEIVE_TRANSACTION_INTEGRITY_FIELD] = (
+        _receive_transaction_integrity_hash(payload)
+    )
+    path = _transaction_path(repo, bundle_id)
+    _atomic_private_json_write(path, payload)
+    return path
 
 
 def _fsync_directory(path: Path) -> None:
@@ -484,6 +774,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+    path.chmod(0o600)
 
 
 def export_runtime(
@@ -646,7 +937,7 @@ def _reject_duplicate_configuration_keys(
     return result
 
 
-def _load_commit_compatibility_mappings() -> list[dict[str, str]]:
+def _load_commit_compatibility_mappings() -> list[dict[str, Any]]:
     configured_path = os.environ.get(COMMIT_COMPATIBILITY_FILE_ENV, "").strip()
     if not configured_path:
         raise HandoffError(
@@ -706,15 +997,35 @@ def _load_commit_compatibility_mappings() -> list[dict[str, str]]:
     if not isinstance(raw_mappings, list) or not raw_mappings:
         raise HandoffError("Commit compatibility mapping is absent")
 
-    mappings: list[dict[str, str]] = []
-    seen: set[tuple[str, ...]] = set()
-    routes: dict[tuple[str, str, str], tuple[str, ...]] = {}
+    mappings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    routes: dict[tuple[str, str, str], str] = {}
     for raw_mapping in raw_mappings:
-        if not isinstance(raw_mapping, dict) or set(raw_mapping) != COMMIT_COMPATIBILITY_FIELDS:
+        if (
+            not isinstance(raw_mapping, dict)
+            or not COMMIT_COMPATIBILITY_REQUIRED_FIELDS.issubset(raw_mapping)
+            or not set(raw_mapping).issubset(COMMIT_COMPATIBILITY_FIELDS)
+        ):
             raise HandoffError("Commit compatibility mapping is incomplete or malformed")
-        if not all(isinstance(raw_mapping[field], str) for field in COMMIT_COMPATIBILITY_FIELDS):
+        if not all(
+            isinstance(raw_mapping[field], str)
+            for field in COMMIT_COMPATIBILITY_REQUIRED_FIELDS
+        ):
             raise HandoffError("Commit compatibility mapping values must be strings")
-        mapping = {field: raw_mapping[field] for field in COMMIT_COMPATIBILITY_FIELDS}
+        interrupted = raw_mapping.get("approved_interrupted_destination_commits", [])
+        if (
+            not isinstance(interrupted, list)
+            or not all(isinstance(value, str) for value in interrupted)
+            or len(set(interrupted)) != len(interrupted)
+        ):
+            raise HandoffError(
+                "Approved interrupted destination commits must be a unique list"
+            )
+        mapping: dict[str, Any] = {
+            field: raw_mapping[field]
+            for field in COMMIT_COMPATIBILITY_REQUIRED_FIELDS
+        }
+        mapping["approved_interrupted_destination_commits"] = interrupted
         if (
             mapping["source_machine"] not in MACHINES
             or mapping["target_machine"] not in MACHINES
@@ -730,7 +1041,11 @@ def _load_commit_compatibility_mappings() -> list[dict[str, str]]:
                 raise HandoffError(
                     f"Commit compatibility {field} must be a full lowercase Git SHA"
                 )
-        identity = tuple(mapping[field] for field in sorted(COMMIT_COMPATIBILITY_FIELDS))
+        if not all(FULL_GIT_SHA_RE.fullmatch(value) for value in interrupted):
+            raise HandoffError(
+                "Approved interrupted destination commits must be full lowercase Git SHAs"
+            )
+        identity = canonical_hash(mapping)
         if identity in seen:
             raise HandoffError("Commit compatibility mapping is duplicated")
         seen.add(identity)
@@ -813,6 +1128,9 @@ def validate_bundle_commit_compatibility(
         "source_commit": source_commit,
         "source_tree": mapping["source_tree"],
         "destination_commit": destination_commit,
+        "approved_interrupted_destination_commits": list(
+            mapping["approved_interrupted_destination_commits"]
+        ),
     }
 
 
@@ -908,8 +1226,8 @@ def verify_runtime_bundle(
     machine: str | None = None,
 ) -> dict[str, Any]:
     assert_processes_stopped(repo)
-    with tempfile.TemporaryDirectory(prefix="handoff-verify-") as temp:
-        manifest, authority, report = extract_and_verify(bundle, Path(temp))
+    with _private_staging_directory(repo, prefix="verify-") as staging:
+        manifest, authority, report = extract_and_verify(bundle, staging)
         compatibility = validate_bundle_commit_compatibility(
             repo,
             manifest,
@@ -925,13 +1243,13 @@ def verify_runtime_bundle(
 
 
 def _read_used_bundles(repo: Path) -> set[str]:
-    path = repo / LOCAL_STATE_DIR / USED_BUNDLES_NAME
-    if not path.exists():
+    path = _private_handoff_layout(repo)["root"] / USED_BUNDLES_NAME
+    if not path.exists() and not path.is_symlink():
         return set()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = _read_private_json(path, label="Used-bundle ledger")
         values = payload.get("bundle_ids", [])
-    except (OSError, ValueError, AttributeError) as exc:
+    except AttributeError as exc:
         raise HandoffError(f"Used-bundle ledger is unreadable: {path}") from exc
     if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
         raise HandoffError("Used-bundle ledger is malformed")
@@ -939,8 +1257,8 @@ def _read_used_bundles(repo: Path) -> set[str]:
 
 
 def _write_used_bundles(repo: Path, values: set[str]) -> None:
-    _write_json(
-        repo / LOCAL_STATE_DIR / USED_BUNDLES_NAME,
+    _atomic_private_json_write(
+        _private_handoff_layout(repo)["root"] / USED_BUNDLES_NAME,
         {"bundle_ids": sorted(values), "updated_utc": utc_now()},
     )
 
@@ -3445,61 +3763,349 @@ def emergency_takeover(
                 snapshot_temporary.unlink(missing_ok=True)
 
 
+def _validate_bundle_metadata_hint(
+    manifest: dict[str, Any], bundled_authority: dict[str, Any]
+) -> None:
+    for field in (
+        "bundle_id",
+        "source_machine",
+        "target_machine",
+        "expected_git_commit",
+        "runtime_manifest_hash",
+    ):
+        value = manifest.get(field)
+        if not isinstance(value, str) or not value or value != bundled_authority.get(field):
+            raise HandoffError(f"Bundle {field} metadata mismatch")
+    if not BUNDLE_ID_RE.fullmatch(manifest["bundle_id"]):
+        raise HandoffError("Bundle identity is unsafe")
+    if (
+        manifest["source_machine"] not in MACHINES
+        or manifest["target_machine"] not in MACHINES
+        or manifest["source_machine"] == manifest["target_machine"]
+    ):
+        raise HandoffError("Bundle machine direction is invalid")
+    if not FULL_GIT_SHA_RE.fullmatch(manifest["expected_git_commit"]):
+        raise HandoffError("Bundle expected Git commit is malformed")
+    if not SHA256_RE.fullmatch(manifest["runtime_manifest_hash"]):
+        raise HandoffError("Bundle runtime manifest hash is malformed")
+    source_generation = manifest.get("source_generation")
+    if (
+        isinstance(source_generation, bool)
+        or not isinstance(source_generation, int)
+        or source_generation < 1
+        or source_generation != bundled_authority.get("generation")
+    ):
+        raise HandoffError("Bundle generation metadata mismatch")
+    if bundled_authority.get("status") != "handoff_in_progress":
+        raise HandoffError("Bundled source authority is not handoff_in_progress")
+    if bundled_authority.get("authorized_machine") != manifest.get("source_machine"):
+        raise HandoffError("Bundled authority is not assigned to its source")
+
+
+def _receive_generation(source_generation: int, floor: int) -> int:
+    if floor == 0:
+        return max(1, source_generation)
+    return max(source_generation, floor) + 1
+
+
+def _receive_authority_payload(
+    transaction: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "authorized_machine": transaction["machine"],
+        "generation": transaction["authority_generation"],
+        "bundle_id": transaction["bundle_id"],
+        "source_machine": transaction["source_machine"],
+        "target_machine": transaction["target_machine"],
+        "created_utc": transaction["authority_created_utc"],
+        "expected_git_commit": transaction["destination_commit"],
+        "runtime_manifest_hash": manifest["runtime_manifest_hash"],
+        "status": "import_in_progress",
+    }
+
+
+def _active_receive_transactions(repo: Path) -> list[Path]:
+    directory = _private_handoff_layout(repo)["transactions"]
+    active: list[Path] = []
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file():
+            raise HandoffError(f"Unsafe receive transaction entry: {path}")
+        payload = _load_receive_transaction(path)
+        if payload.get("status") not in {"completed", "rolled_back"}:
+            active.append(path)
+    return active
+
+
+def _assert_staging_empty(repo: Path) -> None:
+    staging = _private_handoff_layout(repo)["staging"]
+    residue = list(staging.iterdir())
+    if residue:
+        raise HandoffError("Receive staging contains residue from a partial transaction")
+
+
+def _validate_resume_commit(
+    interrupted_commit: str,
+    current_commit: str,
+    compatibility: dict[str, Any],
+) -> None:
+    if interrupted_commit == current_commit:
+        return
+    approved = compatibility.get("approved_interrupted_destination_commits", [])
+    if compatibility.get("destination_commit") != current_commit or interrupted_commit not in approved:
+        raise HandoffError(
+            "Interrupted receive commit is not explicitly approved for the current code"
+        )
+
+
+def _prepare_receive_transaction(
+    repo: Path,
+    bundle: Path,
+    manifest: dict[str, Any],
+    bundled_authority: dict[str, Any],
+    compatibility: dict[str, Any],
+    *,
+    identity: str,
+    resume_expected_bundle_sha256: str | None,
+    resume_expected_baseline_fingerprint: str | None,
+) -> tuple[dict[str, Any], bool]:
+    layout = _private_handoff_layout(repo)
+    _assert_staging_empty(repo)
+    bundle_id = str(manifest["bundle_id"])
+    bundle_sha256 = sha256_file(bundle)
+    baseline = _runtime_baseline_fingerprint(repo)
+    current_commit = git(repo, "rev-parse", "HEAD")
+    transaction_path = _transaction_path(repo, bundle_id)
+    backup_path = layout["backups"] / f"pre_import_{bundle_id}.tgz"
+    if backup_path.exists() or backup_path.is_symlink():
+        raise HandoffError("Receive transaction has a partial or conflicting backup")
+    try:
+        current_authority = load_authority(repo)
+    except AuthorityError:
+        current_authority = None
+
+    if transaction_path.exists() or transaction_path.is_symlink():
+        transaction = _load_receive_transaction(transaction_path)
+        expected = {
+            "bundle_id": bundle_id,
+            "bundle_sha256": bundle_sha256,
+            "manifest_hash": manifest["runtime_manifest_hash"],
+            "source_machine": manifest["source_machine"],
+            "target_machine": manifest["target_machine"],
+            "source_generation": manifest["source_generation"],
+            "runtime_baseline_fingerprint": baseline,
+            "machine": identity,
+        }
+        for field, value in expected.items():
+            if transaction.get(field) != value:
+                raise HandoffError(f"Interrupted receive transaction changed: {field}")
+        if transaction.get("backup_created") or transaction.get("replacement_started"):
+            raise HandoffError("Interrupted receive already reached mutation state")
+        authority_missing = current_authority is None
+        if authority_missing:
+            if transaction.get("status") != "prepared":
+                raise HandoffError("Interrupted receive authority is missing")
+        else:
+            if current_authority.get("status") != "import_in_progress":
+                raise HandoffError("Interrupted receive authority status changed")
+            if canonical_hash(current_authority) != transaction.get("authority_fingerprint"):
+                raise HandoffError("Interrupted receive authority changed")
+        _validate_resume_commit(
+            str(transaction["destination_commit"]), current_commit, compatibility
+        )
+        if current_commit != transaction["destination_commit"]:
+            transaction["interrupted_destination_commit"] = transaction[
+                "destination_commit"
+            ]
+            transaction["destination_commit"] = current_commit
+        if authority_missing:
+            # A crash after the prepared transaction was made durable but before
+            # the disabled authority was written is safe to resume. Keep the
+            # transaction prepared until the authority write has completed.
+            authority_payload = _receive_authority_payload(transaction, manifest)
+            transaction["authority_fingerprint"] = canonical_hash(authority_payload)
+            transaction["updated_utc"] = utc_now()
+            _write_receive_transaction(repo, transaction)
+            write_authority(repo, authority_payload)
+        # If authority already exists, preserve it exactly. In particular, a
+        # compatible code update must not rewrite the original interrupted
+        # authority commit before the final active authority write.
+        transaction["status"] = "import_in_progress"
+        transaction["resume_count"] = int(transaction.get("resume_count", 0)) + 1
+        transaction["updated_utc"] = utc_now()
+        _write_receive_transaction(repo, transaction)
+        return transaction, True
+
+    active_transactions = _active_receive_transactions(repo)
+    if active_transactions:
+        raise HandoffError("A different interrupted receive transaction already exists")
+
+    legacy_resume = bool(
+        current_authority
+        and current_authority.get("status") == "import_in_progress"
+        and current_authority.get("target_machine") == identity
+    )
+    if legacy_resume:
+        expected_bundle = (
+            resume_expected_bundle_sha256
+            or os.environ.get(INTERRUPTED_BUNDLE_SHA_ENV, "")
+        ).strip().lower()
+        expected_baseline = (
+            resume_expected_baseline_fingerprint
+            or os.environ.get(INTERRUPTED_BASELINE_ENV, "")
+        ).strip().lower()
+        if not SHA256_RE.fullmatch(expected_bundle) or expected_bundle != bundle_sha256:
+            raise HandoffError(
+                "Legacy interrupted receive requires the exact reviewed bundle SHA-256"
+            )
+        if not SHA256_RE.fullmatch(expected_baseline) or expected_baseline != baseline:
+            raise HandoffError(
+                "Legacy interrupted receive requires the exact reviewed runtime baseline fingerprint"
+            )
+        if (
+            current_authority.get("generation") != 1
+            or current_authority.get("authorized_machine") != identity
+            or current_authority.get("source_machine") != manifest["source_machine"]
+            or current_authority.get("runtime_manifest_hash") != "import-not-verified"
+            or load_generation_floor(repo) != 0
+        ):
+            raise HandoffError("Legacy interrupted receive authority is not resumable")
+        _validate_resume_commit(
+            str(current_authority.get("expected_git_commit")),
+            current_commit,
+            compatibility,
+        )
+        generation = 1
+        interrupted_commit = current_authority["expected_git_commit"]
+        legacy_authority_fingerprint = canonical_hash(current_authority)
+    else:
+        if current_authority and current_authority.get("status") == "active":
+            raise HandoffError("Target authority is active; refusing runtime replacement")
+        generation = _receive_generation(
+            int(manifest["source_generation"]), load_generation_floor(repo)
+        )
+        interrupted_commit = current_commit
+        legacy_authority_fingerprint = ""
+
+    transaction = {
+        "schema_version": RECEIVE_TRANSACTION_SCHEMA_VERSION,
+        "transaction_id": str(uuid.uuid4()),
+        "status": "prepared",
+        "machine": identity,
+        "authority_generation": generation,
+        "authority_created_utc": utc_now(),
+        "interrupted_destination_commit": interrupted_commit,
+        "destination_commit": current_commit,
+        "bundle_id": bundle_id,
+        "bundle_sha256": bundle_sha256,
+        "manifest_hash": manifest["runtime_manifest_hash"],
+        "source_machine": manifest["source_machine"],
+        "target_machine": manifest["target_machine"],
+        "source_generation": manifest["source_generation"],
+        "source_commit": manifest["expected_git_commit"],
+        "runtime_baseline_fingerprint": baseline,
+        "backup_created": False,
+        "replacement_started": False,
+        "replacement_completed": False,
+        "legacy_resume": legacy_resume,
+        "legacy_authority_fingerprint": legacy_authority_fingerprint,
+        "resume_count": 1 if legacy_resume else 0,
+        "created_utc": utc_now(),
+        "updated_utc": utc_now(),
+    }
+    if legacy_resume:
+        # The old receiver wrote a placeholder disabled authority before it
+        # failed. Preserve that exact state until activation; the reviewed SHA,
+        # baseline and compatibility mapping bind it to this transaction.
+        transaction["authority_fingerprint"] = legacy_authority_fingerprint
+        _write_receive_transaction(repo, transaction)
+    else:
+        authority_payload = _receive_authority_payload(transaction, manifest)
+        transaction["authority_fingerprint"] = canonical_hash(authority_payload)
+        _write_receive_transaction(repo, transaction)
+        write_authority(repo, authority_payload)
+    transaction["status"] = "import_in_progress"
+    transaction["updated_utc"] = utc_now()
+    _write_receive_transaction(repo, transaction)
+    return transaction, legacy_resume
+
+
 def _archive_existing_runtime(repo: Path, bundle_id: str) -> Path:
-    backup_dir = repo / LOCAL_STATE_DIR / BACKUP_DIR_NAME
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir = _private_handoff_layout(repo)["backups"]
     destination = backup_dir / f"pre_import_{bundle_id}.tgz"
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         raise HandoffError(f"Target backup already exists: {destination}")
-    with tarfile.open(destination, "x:gz") as archive:
-        for root_name in ("data", "_important"):
-            root = repo / root_name
-            if root.exists():
-                archive.add(
-                    root,
-                    arcname=root_name,
-                    filter=lambda member: (
-                        None
-                        if _contains_secret_name(PurePosixPath(member.name))
-                        else member
-                    ),
-                )
-    destination.chmod(0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise HandoffError("Secure runtime backups require O_NOFOLLOW support")
+    descriptor = os.open(destination, flags | nofollow, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            with tarfile.open(fileobj=handle, mode="w:gz") as archive:
+                for root_name in ("data", "_important"):
+                    root = repo / root_name
+                    if root.exists():
+                        archive.add(
+                            root,
+                            arcname=root_name,
+                            filter=lambda member: (
+                                None
+                                if _contains_secret_name(PurePosixPath(member.name))
+                                else member
+                            ),
+                        )
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        destination.unlink(missing_ok=True)
+        _fsync_directory(backup_dir)
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    _validate_private_file(destination)
+    _fsync_directory(backup_dir)
     return destination
 
 
 def _atomic_replace_runtime(repo: Path, extracted_runtime: Path) -> None:
-    transaction = Path(tempfile.mkdtemp(prefix=".handoff-swap-", dir=repo.parent))
-    moved_old: list[tuple[Path, Path]] = []
-    installed: list[Path] = []
-    try:
-        for root_name in ("data", "_important"):
-            source = extracted_runtime / root_name
-            source.mkdir(parents=True, exist_ok=True)
-            target = repo / root_name
-            old = transaction / f"{root_name}.old"
-            if target.exists():
-                os.replace(target, old)
-                moved_old.append((old, target))
-            os.replace(source, target)
-            installed.append(target)
-        _fsync_directory(repo)
-    except Exception:
-        for target in reversed(installed):
-            if target.exists():
-                shutil.rmtree(target)
-        for old, target in reversed(moved_old):
-            if old.exists():
-                os.replace(old, target)
-        raise
-    finally:
-        shutil.rmtree(transaction, ignore_errors=True)
+    with _private_staging_directory(repo, prefix="swap-") as transaction:
+        moved_old: list[tuple[Path, Path]] = []
+        installed: list[Path] = []
+        try:
+            for root_name in ("data", "_important"):
+                source = extracted_runtime / root_name
+                source.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target = repo / root_name
+                if target.is_symlink():
+                    raise HandoffError(f"Runtime destination is a symlink: {target}")
+                if source.stat().st_dev != repo.stat().st_dev:
+                    raise HandoffError("Runtime staging and destination cross filesystems")
+                old = transaction / f"{root_name}.old"
+                if target.exists():
+                    os.replace(target, old)
+                    moved_old.append((old, target))
+                os.replace(source, target)
+                installed.append(target)
+            _fsync_directory(transaction)
+            _fsync_directory(extracted_runtime)
+            _fsync_directory(repo)
+        except Exception:
+            for target in reversed(installed):
+                if target.exists():
+                    shutil.rmtree(target)
+            for old, target in reversed(moved_old):
+                if old.exists():
+                    os.replace(old, target)
+            _fsync_directory(transaction)
+            _fsync_directory(repo)
+            raise
 
 
 def _restore_runtime_backup(repo: Path, backup: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="handoff-recover-", dir=repo.parent) as temp:
-        staging = Path(temp)
-        with tarfile.open(backup, "r:gz") as archive:
+    with _private_staging_directory(repo, prefix="recover-") as staging:
+        with _open_private_tar(backup) as archive:
             members = archive.getmembers()
             for member in members:
                 path = PurePosixPath(member.name)
@@ -3524,22 +4130,28 @@ def activate_import(
     *,
     machine: str | None = None,
     expected_git_commit: str | None = None,
+    generation: int | None = None,
+    created_utc: str | None = None,
 ) -> dict[str, Any]:
     identity = machine or current_machine()
     floor = load_generation_floor(repo)
     source_generation = int(bundled_authority["generation"])
-    new_generation = max(floor, source_generation) + 1
+    new_generation = generation or _receive_generation(source_generation, floor)
+    if new_generation < floor:
+        raise HandoffError("Import activation generation is below the local floor")
     active = {
         **bundled_authority,
         "authorized_machine": identity,
         "generation": new_generation,
-        "created_utc": utc_now(),
+        "created_utc": created_utc or utc_now(),
         "expected_git_commit": expected_git_commit
         or bundled_authority["expected_git_commit"],
         "status": ACTIVE_STATUS,
     }
-    write_authority(repo, active)
+    # Advancing the floor first can only leave the target disabled if the final
+    # authority write fails. The active authority is the last durable write.
     write_generation_floor(repo, new_generation, active["bundle_id"])
+    write_authority(repo, active)
     return active
 
 
@@ -3549,41 +4161,23 @@ def import_runtime(
     *,
     machine: str | None = None,
     replace_hook=None,
+    resume_expected_bundle_sha256: str | None = None,
+    resume_expected_baseline_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     identity = machine or current_machine()
-    try:
-        assert_processes_stopped(repo)
-    except Exception:
-        mark_target_disabled(repo, status="import_failed", machine=identity)
-        raise
-    mark_target_disabled(repo, status="import_in_progress", machine=identity)
+    assert_processes_stopped(repo)
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
-        mark_target_disabled(repo, status="import_failed", machine=identity)
         raise HandoffError("Tracked target worktree is dirty")
-    try:
-        manifest_hint, _authority_hint = read_bundle_metadata(bundle)
-    except Exception:
-        mark_target_disabled(repo, status="import_failed", machine=identity)
-        raise
-    mark_target_disabled(
-        repo,
-        status="import_in_progress",
-        metadata=manifest_hint,
-        machine=identity,
-    )
+    layout = _private_handoff_layout(repo)
+    manifest_hint, authority_hint = read_bundle_metadata(bundle)
+    _validate_bundle_metadata_hint(manifest_hint, authority_hint)
     if manifest_hint.get("target_machine") != identity:
-        mark_target_disabled(
-            repo, status="import_failed", metadata=manifest_hint, machine=identity
-        )
         raise HandoffError(
             f"Bundle targets {manifest_hint.get('target_machine')}, not {identity}"
         )
     bundle_id = str(manifest_hint.get("bundle_id") or "")
     used = _read_used_bundles(repo)
     if bundle_id in used:
-        mark_target_disabled(
-            repo, status="import_failed", metadata=manifest_hint, machine=identity
-        )
         raise HandoffError(f"Bundle has already been used: {bundle_id}")
     floor = load_generation_floor(repo)
     source_generation = manifest_hint.get("source_generation")
@@ -3592,74 +4186,147 @@ def import_runtime(
         or not isinstance(source_generation, int)
         or source_generation < floor
     ):
-        mark_target_disabled(
-            repo, status="import_failed", metadata=manifest_hint, machine=identity
-        )
         raise HandoffError(
             f"Stale generation {source_generation!r}; local floor is {floor}"
         )
-    with tempfile.TemporaryDirectory(prefix="handoff-import-", dir=repo.parent) as temp:
-        staging = Path(temp)
-        backup: Path | None = None
-        replacement_attempted = False
-        try:
+    compatibility = validate_bundle_commit_compatibility(
+        repo,
+        manifest_hint,
+        authority_hint,
+        machine=identity,
+    )
+    transaction, resumed = _prepare_receive_transaction(
+        repo,
+        bundle,
+        manifest_hint,
+        authority_hint,
+        compatibility,
+        identity=identity,
+        resume_expected_bundle_sha256=resume_expected_bundle_sha256,
+        resume_expected_baseline_fingerprint=resume_expected_baseline_fingerprint,
+    )
+    backup: Path | None = None
+    replacement_attempted = False
+    previous_used = set(used)
+    stage = "pre_extraction"
+    try:
+        disk_space = _assert_import_disk_space(repo, bundle)
+        with _private_staging_directory(repo, prefix="receive-") as staging:
+            stage = "verification"
             manifest, bundled_authority, verification = extract_and_verify(bundle, staging)
-            compatibility = validate_bundle_commit_compatibility(
+            verified_compatibility = validate_bundle_commit_compatibility(
                 repo,
                 manifest,
                 bundled_authority,
                 machine=identity,
             )
+            if verified_compatibility != compatibility:
+                raise HandoffError("Commit compatibility changed during receive")
+            if sha256_file(bundle) != transaction["bundle_sha256"]:
+                raise HandoffError("Bundle SHA-256 changed during receive")
+            if manifest["runtime_manifest_hash"] != transaction["manifest_hash"]:
+                raise HandoffError("Runtime manifest hash changed during receive")
             safety = recompute_queue_safety(staging / RUNTIME_ROOT)
             if not safety["safe"]:
                 raise HandoffError(
                     "Queue safety failure: " + ", ".join(safety["unsafe_reasons"])
                 )
+            if _runtime_baseline_fingerprint(repo) != transaction[
+                "runtime_baseline_fingerprint"
+            ]:
+                raise HandoffError("Target runtime baseline changed during receive")
+            fsync_runtime(staging / RUNTIME_ROOT)
+            stage = "backup"
             backup = _archive_existing_runtime(repo, bundle_id)
+            transaction["backup_created"] = True
+            transaction["backup_path"] = backup.relative_to(repo).as_posix()
+            transaction["backup_sha256"] = sha256_file(backup)
+            transaction["updated_utc"] = utc_now()
+            _write_receive_transaction(repo, transaction)
+            stage = "replacement"
             replacement_attempted = True
+            transaction["replacement_started"] = True
+            transaction["updated_utc"] = utc_now()
+            _write_receive_transaction(repo, transaction)
             if replace_hook is not None:
                 replace_hook(repo, staging / RUNTIME_ROOT)
             else:
                 _atomic_replace_runtime(repo, staging / RUNTIME_ROOT)
+            transaction["replacement_completed"] = True
+            transaction["installed_runtime_fingerprint"] = _runtime_baseline_fingerprint(
+                repo
+            )
+            transaction["status"] = "ready_to_activate"
+            transaction["updated_utc"] = utc_now()
+            _write_receive_transaction(repo, transaction)
+            stage = "activation"
+            used.add(bundle_id)
+            _write_used_bundles(repo, used)
+            predicted_authority = {
+                **bundled_authority,
+                "authorized_machine": identity,
+                "generation": transaction["authority_generation"],
+                "created_utc": transaction["authority_created_utc"],
+                "expected_git_commit": compatibility["destination_commit"],
+                "status": ACTIVE_STATUS,
+            }
+            result = {
+                "bundle_id": bundle_id,
+                "backup": str(backup),
+                "authority": predicted_authority,
+                "verification": verification,
+                "queue_safety": safety,
+                "disk_space": disk_space,
+                "resumed": resumed,
+                "transaction_id": transaction["transaction_id"],
+                "sender_started": False,
+            }
+            _atomic_private_json_write(layout["root"] / LAST_IMPORT_NAME, result)
+            transaction["status"] = "completed"
+            transaction["updated_utc"] = utc_now()
+            _write_receive_transaction(repo, transaction)
             active = activate_import(
                 repo,
                 bundled_authority,
                 machine=identity,
                 expected_git_commit=compatibility["destination_commit"],
+                generation=transaction["authority_generation"],
+                created_utc=transaction["authority_created_utc"],
             )
-            used.add(bundle_id)
-            _write_used_bundles(repo, used)
-            result = {
-                "bundle_id": bundle_id,
-                "backup": str(backup),
+            return {
+                **result,
                 "authority": active,
-                "verification": verification,
-                "queue_safety": safety,
-                "sender_started": False,
+                "commit_compatibility": compatibility,
             }
-            _write_json(repo / LOCAL_STATE_DIR / LAST_IMPORT_NAME, result)
-            return {**result, "commit_compatibility": compatibility}
-        except Exception:
-            if replacement_attempted and backup is not None:
-                try:
-                    _restore_runtime_backup(repo, backup)
-                except Exception as recovery_exc:
-                    mark_target_disabled(
-                        repo,
-                        status="rollback_failed",
-                        metadata=manifest_hint,
-                        machine=identity,
-                    )
-                    raise HandoffError(
-                        f"Import failed and target rollback also failed: {recovery_exc}"
-                    ) from recovery_exc
+    except Exception:
+        if replacement_attempted and backup is not None:
+            try:
+                _restore_runtime_backup(repo, backup)
+                _write_used_bundles(repo, previous_used)
+            except Exception as recovery_exc:
+                mark_target_disabled(
+                    repo,
+                    status="rollback_failed",
+                    metadata=manifest_hint,
+                    machine=identity,
+                )
+                raise HandoffError(
+                    f"Import failed and target rollback also failed: {recovery_exc}"
+                ) from recovery_exc
+            transaction["status"] = "import_failed"
+            transaction["rollback_completed"] = True
             mark_target_disabled(
                 repo,
                 status="import_failed",
                 metadata=manifest_hint,
                 machine=identity,
             )
-            raise
+        else:
+            transaction["status"] = "import_in_progress"
+        transaction["last_failure_stage"] = stage
+        transaction["updated_utc"] = utc_now()
+        _write_receive_transaction(repo, transaction)
+        raise
 
 
 def initialize_authority(
@@ -3701,15 +4368,15 @@ def initialize_authority(
 
 def rollback(repo: Path, backup: Path | None = None) -> dict[str, Any]:
     assert_processes_stopped(repo)
-    backup_dir = repo / LOCAL_STATE_DIR / BACKUP_DIR_NAME
+    backup_dir = _private_handoff_layout(repo)["backups"]
     candidates = sorted(backup_dir.glob("pre_import_*.tgz"), key=lambda p: p.stat().st_mtime)
     selected = backup or (candidates[-1] if candidates else None)
     if selected is None or not selected.is_file():
         raise HandoffError("No runtime backup is available for rollback")
+    _validate_private_file(selected)
     mark_target_disabled(repo, status="rollback_in_progress")
-    with tempfile.TemporaryDirectory(prefix="handoff-rollback-", dir=repo.parent) as temp:
-        staging = Path(temp)
-        with tarfile.open(selected, "r:gz") as archive:
+    with _private_staging_directory(repo, prefix="rollback-") as staging:
+        with _open_private_tar(selected) as archive:
             for member in archive.getmembers():
                 path = PurePosixPath(member.name)
                 if (
@@ -3785,6 +4452,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     verify_parser.add_argument("bundle", type=Path)
     import_parser = commands.add_parser("import")
     import_parser.add_argument("bundle", type=Path)
+    import_parser.add_argument("--resume-expected-bundle-sha256")
+    import_parser.add_argument("--resume-expected-runtime-baseline-sha256")
     activate_parser = commands.add_parser("activate")
     activate_parser.add_argument("--initialize", action="store_true")
     activate_parser.add_argument("--force", action="store_true")
@@ -3836,7 +4505,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         elif args.command == "import":
             print(
                 json.dumps(
-                    import_runtime(repo, args.bundle.resolve(), machine=args.machine),
+                    import_runtime(
+                        repo,
+                        args.bundle.resolve(),
+                        machine=args.machine,
+                        resume_expected_bundle_sha256=(
+                            args.resume_expected_bundle_sha256
+                        ),
+                        resume_expected_baseline_fingerprint=(
+                            args.resume_expected_runtime_baseline_sha256
+                        ),
+                    ),
                     indent=2,
                     sort_keys=True,
                 )

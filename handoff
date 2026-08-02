@@ -64,8 +64,9 @@ case "${1:-}" in
     runtime_handoff status
     ;;
   receive)
-    [[ $# -eq 2 ]] || { echo "Usage: ./handoff receive BUNDLE" >&2; exit 2; }
-    runtime_handoff import "$2"
+    [[ $# -ge 2 ]] || { echo "Usage: ./handoff receive BUNDLE [RESUME OPTIONS]" >&2; exit 2; }
+    shift
+    runtime_handoff import "$@"
     ;;
   verify)
     [[ $# -eq 2 ]] || { echo "Usage: ./handoff verify BUNDLE" >&2; exit 2; }
