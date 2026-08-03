@@ -3,12 +3,15 @@ from __future__ import annotations
 import csv
 import json
 import io
+import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
-from contextlib import redirect_stdout
+import uuid
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1431,6 +1434,80 @@ def test_approved_legacy_source_with_valid_secure_file_uses_identical_rules(
     assert "commit_compatibility" not in audit
 
 
+def test_legacy_interrupted_destination_requires_explicit_compatibility(
+    legacy_compatibility_case,
+):
+    case = legacy_compatibility_case
+    interrupted_commit = "e" * 40
+    _write_commit_compatibility(
+        case["config"],
+        [
+            _approved_mapping(
+                case["destination_commit"],
+                approved_interrupted_destination_commits=[interrupted_commit],
+            )
+        ],
+    )
+    runtime_authority.authority_path(case["cloud"]).unlink(missing_ok=True)
+    runtime_authority.generation_floor_path(case["cloud"]).unlink(missing_ok=True)
+    manifest, _authority = runtime_handoff.read_bundle_metadata(case["bundle"])
+    runtime_authority.write_authority(
+        case["cloud"],
+        {
+            "authorized_machine": "cloud",
+            "generation": 1,
+            "bundle_id": "legacy-placeholder-transaction",
+            "source_machine": manifest["source_machine"],
+            "target_machine": "cloud",
+            "created_utc": runtime_authority.utc_now(),
+            "expected_git_commit": interrupted_commit,
+            "runtime_manifest_hash": "import-not-verified",
+            "status": "import_in_progress",
+        },
+    )
+    bundle_sha = runtime_handoff.sha256_file(case["bundle"])
+    baseline = runtime_handoff._runtime_baseline_fingerprint(case["cloud"])
+
+    result = runtime_handoff.import_runtime(
+        case["cloud"],
+        case["bundle"],
+        machine="cloud",
+        resume_expected_bundle_sha256=bundle_sha,
+        resume_expected_baseline_fingerprint=baseline,
+    )
+
+    assert result["resumed"] is True
+    assert result["authority"]["generation"] == 1
+    assert result["authority"]["expected_git_commit"] == case["destination_commit"]
+    assert result["commit_compatibility"][
+        "approved_interrupted_destination_commits"
+    ] == [interrupted_commit]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["not-a-list", ["short"], ["e" * 40, "e" * 40]],
+)
+def test_interrupted_destination_compatibility_is_strict(
+    legacy_compatibility_case,
+    invalid,
+):
+    case = legacy_compatibility_case
+    _write_commit_compatibility(
+        case["config"],
+        [
+            _approved_mapping(
+                case["destination_commit"],
+                approved_interrupted_destination_commits=invalid,
+            )
+        ],
+    )
+    with pytest.raises(runtime_handoff.HandoffError):
+        runtime_handoff.verify_runtime_bundle(
+            case["cloud"], case["bundle"], machine="cloud"
+        )
+
+
 @pytest.mark.parametrize(
     "configured_destination",
     [
@@ -1760,6 +1837,440 @@ def test_windows_to_cloud_handoff_activates_only_cloud_authority(repos, tmp_path
     )["status"] == "active"
 
 
+def _fresh_cloud_receive_target(repos, tmp_path: Path) -> tuple[Path, Path, bytes]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    windows, _mac = repos
+    cloud = tmp_path / "fresh-cloud"
+    _run(tmp_path, "git", "clone", "-q", str(windows), str(cloud))
+    _write_runtime(cloud, ["old-cloud@example.test"])
+    original = (cloud / "data/shards/recipients_private_jc.csv").read_bytes()
+    runtime_authority.authority_path(cloud).unlink(missing_ok=True)
+    runtime_authority.generation_floor_path(cloud).unlink(missing_ok=True)
+    bundle = _export(windows, tmp_path, "cloud", "windows-wsl")
+    return cloud, bundle, original
+
+
+def _force_pre_extraction_failure(monkeypatch):
+    real_staging = runtime_handoff._private_staging_directory
+    failed = {"value": False}
+
+    @contextmanager
+    def controlled(repo: Path, *, prefix: str):
+        if prefix == "receive-" and not failed["value"]:
+            failed["value"] = True
+            raise PermissionError("synthetic pre-extraction staging failure")
+        with real_staging(repo, prefix=prefix) as staging:
+            yield staging
+
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", controlled)
+    return real_staging
+
+
+def test_interrupted_receive_resumes_same_transaction_and_generation(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+
+    with pytest.raises(PermissionError, match="pre-extraction"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+    interrupted = runtime_authority.load_authority(cloud)
+    assert interrupted["status"] == "import_in_progress"
+    assert interrupted["generation"] == 1
+    with pytest.raises(runtime_authority.AuthorityError, match="import_in_progress"):
+        runtime_authority.assert_send_authorized(cloud, machine="cloud")
+    assert (cloud / "data/shards/recipients_private_jc.csv").read_bytes() == original
+    layout = runtime_handoff._private_handoff_layout(cloud)
+    assert not list(layout["staging"].iterdir())
+    assert not list(layout["backups"].iterdir())
+    transaction_path = runtime_handoff._transaction_path(
+        cloud, interrupted["bundle_id"]
+    )
+    transaction = runtime_handoff._load_receive_transaction(transaction_path)
+    transaction_id = transaction["transaction_id"]
+    baseline = transaction["runtime_baseline_fingerprint"]
+
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+    result = runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+    assert result["resumed"] is True
+    assert result["transaction_id"] == transaction_id
+    assert result["authority"]["status"] == "active"
+    assert result["authority"]["generation"] == 1
+    assert runtime_authority.assert_send_authorized(
+        cloud, machine="cloud"
+    )["status"] == "active"
+    final_transaction = runtime_handoff._load_receive_transaction(transaction_path)
+    assert final_transaction["status"] == "completed"
+    assert final_transaction["runtime_baseline_fingerprint"] == baseline
+    assert final_transaction["backup_created"] is True
+    assert final_transaction["replacement_completed"] is True
+    assert not list(layout["staging"].iterdir())
+    assert Path(result["backup"]).is_file()
+
+
+def test_legacy_interrupted_receive_requires_reviewed_bundle_and_baseline(
+    repos, tmp_path
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    head = _run(cloud, "git", "rev-parse", "HEAD")
+    manifest, _bundled = runtime_handoff.read_bundle_metadata(bundle)
+    legacy_authority = {
+        "authorized_machine": "cloud",
+        "generation": 1,
+        "bundle_id": "legacy-placeholder-transaction",
+        "source_machine": manifest["source_machine"],
+        "target_machine": "cloud",
+        "created_utc": runtime_authority.utc_now(),
+        "expected_git_commit": head,
+        "runtime_manifest_hash": "import-not-verified",
+        "status": "import_in_progress",
+    }
+    runtime_authority.write_authority(cloud, legacy_authority)
+    bundle_sha = runtime_handoff.sha256_file(bundle)
+    baseline = runtime_handoff._runtime_baseline_fingerprint(cloud)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="reviewed bundle SHA"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    assert runtime_authority.load_authority(cloud)["status"] == "import_in_progress"
+
+    authority_during_replacement = {}
+
+    def replace(repo: Path, extracted: Path) -> None:
+        authority_during_replacement.update(runtime_authority.load_authority(repo))
+        runtime_handoff._atomic_replace_runtime(repo, extracted)
+
+    result = runtime_handoff.import_runtime(
+        cloud,
+        bundle,
+        machine="cloud",
+        replace_hook=replace,
+        resume_expected_bundle_sha256=bundle_sha,
+        resume_expected_baseline_fingerprint=baseline,
+    )
+    assert result["resumed"] is True
+    assert result["authority"]["generation"] == 1
+    assert result["authority"]["status"] == "active"
+    assert authority_during_replacement == legacy_authority
+
+
+def test_interrupted_receive_rejects_different_or_changed_bundle(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+
+    changed_sha = tmp_path / "same-identity-changed-sha.tgz"
+    changed_sha.write_bytes(bundle.read_bytes() + b"synthetic trailing change")
+    changed_sha.chmod(0o600)
+    with pytest.raises(runtime_handoff.HandoffError, match="bundle_sha256"):
+        runtime_handoff.import_runtime(cloud, changed_sha, machine="cloud")
+
+    def change_bundle_id(stage: Path) -> None:
+        for name in (
+            runtime_handoff.MANIFEST_NAME,
+            runtime_handoff.BUNDLE_AUTHORITY_NAME,
+        ):
+            path = stage / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["bundle_id"] = "different-synthetic-bundle"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+    different = _rewrite_bundle(
+        bundle, tmp_path / "different-bundle.tgz", change_bundle_id
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="different interrupted"):
+        runtime_handoff.import_runtime(cloud, different, machine="cloud")
+
+
+def test_receive_rejects_bundle_identity_path_traversal(repos, tmp_path):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+
+    def unsafe_bundle_id(stage: Path) -> None:
+        for name in (
+            runtime_handoff.MANIFEST_NAME,
+            runtime_handoff.BUNDLE_AUTHORITY_NAME,
+        ):
+            path = stage / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["bundle_id"] = "../../outside"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+    unsafe = _rewrite_bundle(bundle, tmp_path / "unsafe-bundle-id.tgz", unsafe_bundle_id)
+    with pytest.raises(runtime_handoff.HandoffError, match="identity is unsafe"):
+        runtime_handoff.import_runtime(cloud, unsafe, machine="cloud")
+    assert not (cloud.parent / "outside").exists()
+
+
+def test_interrupted_receive_rejects_changed_manifest_generation_and_runtime(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+
+    def change_manifest(stage: Path) -> None:
+        manifest_path = stage / runtime_handoff.MANIFEST_NAME
+        authority_path = stage / runtime_handoff.BUNDLE_AUTHORITY_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        manifest["runtime_manifest_hash"] = "f" * 64
+        authority["runtime_manifest_hash"] = "f" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    changed_manifest = _rewrite_bundle(
+        bundle, tmp_path / "changed-manifest.tgz", change_manifest
+    )
+    interrupted = runtime_authority.load_authority(cloud)
+    transaction_path = runtime_handoff._transaction_path(
+        cloud, interrupted["bundle_id"]
+    )
+    transaction = runtime_handoff._load_receive_transaction(transaction_path)
+    original_bundle_sha = transaction["bundle_sha256"]
+    transaction["bundle_sha256"] = runtime_handoff.sha256_file(changed_manifest)
+    runtime_handoff._write_receive_transaction(cloud, transaction)
+    with pytest.raises(runtime_handoff.HandoffError, match="manifest_hash"):
+        runtime_handoff.import_runtime(cloud, changed_manifest, machine="cloud")
+
+    def change_generation(stage: Path) -> None:
+        manifest_path = stage / runtime_handoff.MANIFEST_NAME
+        authority_path = stage / runtime_handoff.BUNDLE_AUTHORITY_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        authority = json.loads(authority_path.read_text(encoding="utf-8"))
+        manifest["source_generation"] += 1
+        authority["generation"] += 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        authority_path.write_text(json.dumps(authority), encoding="utf-8")
+
+    changed_generation = _rewrite_bundle(
+        bundle, tmp_path / "changed-generation.tgz", change_generation
+    )
+    transaction["bundle_sha256"] = runtime_handoff.sha256_file(changed_generation)
+    runtime_handoff._write_receive_transaction(cloud, transaction)
+    with pytest.raises(runtime_handoff.HandoffError, match="source_generation"):
+        runtime_handoff.import_runtime(cloud, changed_generation, machine="cloud")
+
+    transaction["bundle_sha256"] = original_bundle_sha
+    runtime_handoff._write_receive_transaction(cloud, transaction)
+    (cloud / "data/state/synthetic-change.txt").write_text(
+        "changed\n", encoding="utf-8"
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="runtime_baseline"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+
+def test_interrupted_receive_rejects_changed_authority(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+
+    authority = runtime_authority.load_authority(cloud)
+    authority["created_utc"] = "2099-01-01T00:00:00Z"
+    runtime_authority.write_authority(cloud, authority)
+
+    with pytest.raises(runtime_handoff.HandoffError, match="authority changed"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+
+def test_interrupted_receive_rejects_changed_transaction_metadata(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+
+    interrupted = runtime_authority.load_authority(cloud)
+    transaction_path = runtime_handoff._transaction_path(
+        cloud, interrupted["bundle_id"]
+    )
+    transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+    transaction["transaction_id"] = str(uuid.uuid4())
+    transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+
+    with pytest.raises(runtime_handoff.HandoffError, match="integrity check failed"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    assert runtime_authority.load_authority(cloud)["status"] == "import_in_progress"
+
+
+def test_authority_and_generation_metadata_require_private_owner_and_mode(
+    repos, monkeypatch
+):
+    repo, _mac = repos
+    authority = runtime_authority.authority_path(repo)
+    floor = runtime_authority.generation_floor_path(repo)
+
+    authority.chmod(0o644)
+    with pytest.raises(runtime_authority.AuthorityError, match="mode 0600"):
+        runtime_authority.load_authority(repo)
+    authority.chmod(0o600)
+
+    floor.chmod(0o640)
+    with pytest.raises(runtime_authority.AuthorityError, match="mode 0600"):
+        runtime_authority.load_generation_floor(repo)
+    floor.chmod(0o600)
+
+    owner = authority.stat().st_uid
+    monkeypatch.setattr(runtime_authority.os, "geteuid", lambda: owner + 1)
+    with pytest.raises(runtime_authority.AuthorityError, match="wrong owner"):
+        runtime_authority.load_authority(repo)
+    with pytest.raises(runtime_authority.AuthorityError, match="wrong owner"):
+        runtime_authority.load_generation_floor(repo)
+
+
+def test_preimport_backup_is_mode_0600_from_creation(repos, tmp_path, monkeypatch):
+    cloud, _bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_tar_open = runtime_handoff.tarfile.open
+    observed_modes: list[int] = []
+
+    def inspect_tar_open(*args, **kwargs):
+        file_object = kwargs.get("fileobj")
+        if file_object is not None and kwargs.get("mode") == "w:gz":
+            observed_modes.append(stat.S_IMODE(os.fstat(file_object.fileno()).st_mode))
+        return real_tar_open(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_handoff.tarfile, "open", inspect_tar_open)
+    backup = runtime_handoff._archive_existing_runtime(
+        cloud, "synthetic-private-backup"
+    )
+
+    assert observed_modes == [0o600]
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_receive_rejects_partial_backup_staging_residue_and_insecure_root(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+    manifest, _authority = runtime_handoff.read_bundle_metadata(bundle)
+    layout = runtime_handoff._private_handoff_layout(cloud)
+    backup = layout["backups"] / f"pre_import_{manifest['bundle_id']}.tgz"
+    backup.write_bytes(b"partial")
+    backup.chmod(0o600)
+    with pytest.raises(runtime_handoff.HandoffError, match="partial or conflicting backup"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    backup.unlink()
+
+    interrupted = runtime_authority.load_authority(cloud)
+    transaction_path = runtime_handoff._transaction_path(
+        cloud, interrupted["bundle_id"]
+    )
+    transaction = runtime_handoff._load_receive_transaction(transaction_path)
+    transaction["replacement_started"] = True
+    runtime_handoff._write_receive_transaction(cloud, transaction)
+    with pytest.raises(runtime_handoff.HandoffError, match="mutation state"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    transaction["replacement_started"] = False
+    runtime_handoff._write_receive_transaction(cloud, transaction)
+
+    residue = layout["staging"] / "partial-residue"
+    residue.mkdir(mode=0o700)
+    with pytest.raises(runtime_handoff.HandoffError, match="staging contains residue"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    residue.rmdir()
+
+    layout["root"].chmod(0o755)
+    with pytest.raises(runtime_handoff.HandoffError, match="mode 0700"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+
+
+def test_receive_rejects_cross_filesystem_staging_and_incompatible_resume_commit(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    layout = runtime_handoff._private_handoff_layout(cloud)
+    with pytest.raises(runtime_handoff.HandoffError, match="different filesystem"):
+        runtime_handoff._secure_directory(
+            layout["staging"],
+            create=False,
+            expected_device=cloud.stat().st_dev + 1,
+        )
+
+    real_staging = _force_pre_extraction_failure(monkeypatch)
+    with pytest.raises(PermissionError):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    monkeypatch.setattr(runtime_handoff, "_private_staging_directory", real_staging)
+    _run(cloud, "git", "config", "user.email", "test@example.test")
+    _run(cloud, "git", "config", "user.name", "Test")
+    marker = cloud / "resume-code-change.txt"
+    marker.write_text("synthetic code change\n", encoding="utf-8")
+    _run(cloud, "git", "add", marker.name)
+    _run(cloud, "git", "commit", "-qm", "synthetic incompatible receive code")
+    monkeypatch.delenv(runtime_handoff.COMMIT_COMPATIBILITY_FILE_ENV, raising=False)
+    with pytest.raises(runtime_handoff.HandoffError, match="not configured"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    assert runtime_authority.load_authority(cloud)["status"] == "import_in_progress"
+
+
+def test_receive_rejects_symlink_root_insufficient_space_and_process_blocker(
+    repos, tmp_path, monkeypatch
+):
+    cloud, bundle, _original = _fresh_cloud_receive_target(repos, tmp_path)
+    root = cloud / runtime_handoff.LOCAL_STATE_DIR
+    if root.exists():
+        shutil.rmtree(root)
+    outside = tmp_path / "outside-handoff"
+    outside.mkdir(mode=0o700)
+    root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(runtime_handoff.HandoffError, match="regular directory"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    root.unlink()
+
+    root.mkdir(mode=0o700)
+    staging_outside = tmp_path / "outside-staging"
+    staging_outside.mkdir(mode=0o700)
+    (root / runtime_handoff.IMPORT_STAGING_DIR_NAME).symlink_to(
+        staging_outside, target_is_directory=True
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="regular directory"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    (root / runtime_handoff.IMPORT_STAGING_DIR_NAME).unlink()
+    root.rmdir()
+
+    real_disk_usage = runtime_handoff.shutil.disk_usage
+    monkeypatch.setattr(
+        runtime_handoff.shutil,
+        "disk_usage",
+        lambda _path: shutil._ntuple_diskusage(total=1, used=1, free=0),
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="Insufficient free space"):
+        runtime_handoff.import_runtime(cloud, bundle, machine="cloud")
+    assert runtime_authority.load_authority(cloud)["status"] == "import_in_progress"
+
+    monkeypatch.setattr(runtime_handoff.shutil, "disk_usage", real_disk_usage)
+    windows, _mac = repos
+    blocked_parent = tmp_path / "blocked-case"
+    blocked_parent.mkdir()
+    blocked = blocked_parent / "fresh-cloud"
+    _run(blocked_parent, "git", "clone", "-q", str(windows), str(blocked))
+    _write_runtime(blocked, ["old-cloud@example.test"])
+    runtime_authority.authority_path(blocked).unlink(missing_ok=True)
+    runtime_authority.generation_floor_path(blocked).unlink(missing_ok=True)
+    monkeypatch.setattr(
+        runtime_handoff, "process_blockers", lambda: ["123 sender: send_shard.py"]
+    )
+    with pytest.raises(runtime_handoff.HandoffError, match="still running"):
+        runtime_handoff.import_runtime(blocked, bundle, machine="cloud")
+    with pytest.raises(runtime_authority.AuthorityError, match="missing"):
+        runtime_authority.load_authority(blocked)
+
+
 def test_mac_to_windows_return_handoff_increments_generation(repos, tmp_path):
     windows, mac = repos
     first = _export(windows, tmp_path, "mac", "windows-wsl")
@@ -1797,7 +2308,7 @@ def test_import_refuses_target_process(repos, tmp_path, monkeypatch):
     )
     with pytest.raises(runtime_handoff.HandoffError, match="still running"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "inactive"
 
 
 def test_blocker_result_is_shared_by_status_export_verify_and_receive(
@@ -1832,7 +2343,7 @@ def test_stale_generation_is_rejected_and_target_is_disabled(repos, tmp_path):
     runtime_authority.write_generation_floor(mac, 2, "newer")
     with pytest.raises(runtime_handoff.HandoffError, match="Stale generation"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "inactive"
 
 
 def test_reused_bundle_is_rejected_and_cannot_create_duplicate_authority(repos, tmp_path):
@@ -1841,7 +2352,7 @@ def test_reused_bundle_is_rejected_and_cannot_create_duplicate_authority(repos, 
     runtime_handoff.import_runtime(mac, bundle, machine="mac")
     with pytest.raises(runtime_handoff.HandoffError, match="already been used"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "active"
     assert runtime_authority.load_authority(windows)["status"] != "active"
 
 
@@ -1850,7 +2361,7 @@ def test_wrong_target_is_rejected(repos, tmp_path):
     bundle = _export(windows, tmp_path, "mac", "windows-wsl")
     with pytest.raises(runtime_handoff.HandoffError, match="targets mac"):
         runtime_handoff.import_runtime(mac, bundle, machine="windows-wsl")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "inactive"
 
 
 def test_wrong_git_commit_is_rejected(repos, tmp_path):
@@ -1863,7 +2374,7 @@ def test_wrong_git_commit_is_rejected(repos, tmp_path):
     _run(mac, "git", "commit", "-qm", "different")
     with pytest.raises(runtime_handoff.HandoffError, match="Git commit"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "inactive"
 
 
 def test_corrupt_checksum_is_rejected_and_both_sides_remain_disabled(repos, tmp_path):
@@ -1878,7 +2389,7 @@ def test_corrupt_checksum_is_rejected_and_both_sides_remain_disabled(repos, tmp_
     with pytest.raises(runtime_handoff.HandoffError, match="Checksum mismatch"):
         runtime_handoff.import_runtime(mac, bad, machine="mac")
     assert runtime_authority.load_authority(windows)["status"] == "handoff_in_progress"
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "import_in_progress"
 
 
 def test_sqlite_integrity_is_non_mutating_for_wal_mode_database(tmp_path):
@@ -2000,7 +2511,7 @@ def test_sqlite_integrity_failure_is_rejected_even_with_matching_checksum(repos,
     bad = _rewrite_bundle(bundle, tmp_path / "bad-sqlite.tgz", corrupt_sqlite_and_rehash)
     with pytest.raises(runtime_handoff.HandoffError, match="SQLite integrity"):
         runtime_handoff.import_runtime(mac, bad, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "import_in_progress"
 
 
 def test_partial_restore_rolls_back_target_runtime_and_stays_disabled(repos, tmp_path):
@@ -2029,7 +2540,7 @@ def test_queue_safety_failure_refuses_activation(repos, tmp_path):
     bundle = _export(windows, tmp_path, "mac", "windows-wsl")
     with pytest.raises(runtime_handoff.HandoffError, match="Queue safety failure"):
         runtime_handoff.import_runtime(mac, bundle, machine="mac")
-    assert runtime_authority.load_authority(mac)["status"] == "import_failed"
+    assert runtime_authority.load_authority(mac)["status"] == "import_in_progress"
 
 
 def test_fresh_queue_safety_ignores_contradictory_stale_dashboard_state(tmp_path):

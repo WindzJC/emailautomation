@@ -219,6 +219,9 @@ def test_bootstrap_creates_required_runtime_directories_before_units() -> None:
         "data": "0750",
         "_important": "0750",
         ".runtime_handoff": "0700",
+        ".runtime_handoff/import-staging": "0700",
+        ".runtime_handoff/receive-transactions": "0700",
+        ".runtime_handoff/backups": "0700",
     }
 
     for relative, mode in expected.items():
@@ -245,6 +248,9 @@ def test_runtime_directory_install_commands_are_restrictive_and_idempotent(
         "data": "0750",
         "_important": "0750",
         ".runtime_handoff": "0700",
+        ".runtime_handoff/import-staging": "0700",
+        ".runtime_handoff/receive-transactions": "0700",
+        ".runtime_handoff/backups": "0700",
     }
     runtime = tmp_path / ".runtime_handoff"
     for relative, mode in modes_by_path.items():
