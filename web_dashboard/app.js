@@ -149,7 +149,8 @@ const els = {
   messageBar: document.getElementById("message-bar"),
 };
 
-let socket = null;
+let snapshotPollTimer = null;
+let snapshotPollGeneration = 0;
 let lastSnapshot = null;
 let lastLeadsStatus = null;
 let lastShardPreview = null;
@@ -178,8 +179,6 @@ let lastSaferRecontactSummary = null;
 let lastSaferRecontactFeedback = null;
 let lastQuarantineReview = null;
 let lastQuarantineReviewLead = null;
-let socketReconnectTimer = null;
-let socketShouldReconnect = false;
 let quarantineInboxOpen = false;
 let quarantineToggleBtn = null;
 const selectedQuarantineLeadIds = new Set();
@@ -256,7 +255,7 @@ function setConnectionState(live) {
   socketLive = Boolean(live);
   els.wsIndicator.className = `dot ${live ? "dot-live" : "dot-off"}`;
   if (live) {
-    els.wsLabel.textContent = "Ops socket live";
+    els.wsLabel.textContent = "Connected";
   } else if (isLeadsTabVisible() && lastLeadsStatus) {
     els.wsLabel.textContent = "Live status";
   } else if (snapshotFallbackHealthy && lastSnapshot) {
@@ -9160,14 +9159,20 @@ async function fetchSnapshot() {
   const hours = currentActivityHours();
   const tail = currentTailLines();
   try {
-    const response = await fetch(`/api/snapshot?hours=${encodeURIComponent(hours)}&tail_lines=${encodeURIComponent(tail)}`);
-    const data = await response.json();
+    const response = await fetch(
+      `/api/snapshot?hours=${encodeURIComponent(hours)}&tail_lines=${encodeURIComponent(tail)}`,
+      { credentials: "same-origin" },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || data.detail || `Request failed (${response.status}).`);
+    }
     snapshotFallbackHealthy = response.ok;
     renderSnapshot(data);
     if (!socketLive) setConnectionState(false);
   } catch (err) {
     snapshotFallbackHealthy = false;
-    if (!socketLive) setConnectionState(false);
+    setConnectionState(false);
     throw err;
   }
 }
@@ -9554,68 +9559,55 @@ function connectSocket(forceReconnect = false) {
     stopSocket();
     return;
   }
-  socketShouldReconnect = true;
-  if (socket && !forceReconnect && socket.readyState !== WebSocket.CLOSING && socket.readyState !== WebSocket.CLOSED) {
+  if (snapshotPollTimer && !forceReconnect) {
     return;
   }
-  if (socketReconnectTimer) {
-    clearTimeout(socketReconnectTimer);
-    socketReconnectTimer = null;
+  if (snapshotPollTimer) {
+    clearTimeout(snapshotPollTimer);
+    snapshotPollTimer = null;
   }
-  if (socket) {
-    socketShouldReconnect = false;
-    socket.close();
-    socket = null;
+
+  const generation = ++snapshotPollGeneration;
+  const poll = async () => {
+    if (
+      generation !== snapshotPollGeneration
+      || (!authState.authenticated && authState.authEnabled)
+      || !isOpsTabVisible()
+    ) {
+      setConnectionState(false);
+      return;
+    }
+
+    try {
+      await fetchSnapshot();
+    } catch (err) {
+      // The connection indicator is updated by fetchSnapshot.
+    }
+
+    if (
+      generation !== snapshotPollGeneration
+      || (!authState.authenticated && authState.authEnabled)
+      || !isOpsTabVisible()
+    ) {
+      setConnectionState(false);
+      return;
+    }
+
+    snapshotPollTimer = setTimeout(poll, 10000);
+  };
+
+  if (forceReconnect) {
+    void poll();
+  } else {
+    snapshotPollTimer = setTimeout(poll, 10000);
   }
-  socketShouldReconnect = true;
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const hours = encodeURIComponent(currentActivityHours());
-  const tail = encodeURIComponent(currentTailLines());
-  const nextSocket = new WebSocket(`${protocol}://${location.host}/ws?hours=${hours}&tail_lines=${tail}`);
-  socket = nextSocket;
-
-  nextSocket.addEventListener("open", () => {
-    setConnectionState(true);
-  });
-
-  nextSocket.addEventListener("message", (event) => {
-    const payload = JSON.parse(event.data);
-    renderSnapshot(payload);
-  });
-
-  nextSocket.addEventListener("close", () => {
-    setConnectionState(false);
-    fetchSnapshot().catch(() => {});
-    if (socket === nextSocket) {
-      socket = null;
-    }
-    if (socketShouldReconnect && (authState.authenticated || !authState.authEnabled) && isOpsTabVisible()) {
-      socketReconnectTimer = setTimeout(connectSocket, 1500);
-    }
-  });
-
-  nextSocket.addEventListener("error", () => {
-    setConnectionState(false);
-    fetchSnapshot().catch(() => {});
-    if (socket === nextSocket) {
-      socket.close();
-    }
-  });
 }
 
 function stopSocket() {
-  socketShouldReconnect = false;
-  if (socketReconnectTimer) {
-    clearTimeout(socketReconnectTimer);
-    socketReconnectTimer = null;
-  }
-  if (socket) {
-    try {
-      socket.close();
-    } catch (err) {
-      // no-op
-    }
-    socket = null;
+  snapshotPollGeneration += 1;
+  if (snapshotPollTimer) {
+    clearTimeout(snapshotPollTimer);
+    snapshotPollTimer = null;
   }
   setConnectionState(false);
 }
