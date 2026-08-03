@@ -6767,7 +6767,16 @@ async def websocket_snapshot_stream(
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(_build_live_snapshot(activity_hours=hours, tail_lines=tail_lines))
-            await asyncio.sleep(1)
+            snapshot = await asyncio.to_thread(
+                _build_live_snapshot,
+                activity_hours=hours,
+                tail_lines=tail_lines,
+            )
+            await websocket.send_json(snapshot)
+            await asyncio.sleep(10)
     except WebSocketDisconnect:
         return
+    except RuntimeError as exc:
+        if "after sending 'websocket.close'" in str(exc):
+            return
+        raise
