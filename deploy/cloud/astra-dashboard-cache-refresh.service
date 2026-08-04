@@ -1,0 +1,23 @@
+[Unit]
+Description=Astra dashboard snapshot cache refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=astra
+Group=astra
+WorkingDirectory=/opt/astra/emailautomation
+EnvironmentFile=/etc/astra-emailautomation/astra.env
+Environment=PYTHONPATH=/opt/astra/emailautomation
+Environment=ASTRA_MACHINE_ID=cloud
+Environment=ASTRA_DISABLE_DOTENV=1
+Environment=RUNTIME_BACKEND=systemd
+Environment=ASTRA_SYSTEMCTL_BIN=/usr/bin/systemctl
+Environment=DASHBOARD_ENABLE_LIVE_ACTIONS=1
+Environment=DASHBOARD_ALLOW_AUTO_START=0
+ExecStart=/usr/bin/flock -n /opt/astra/emailautomation/data/.dashboard-cache-refresh.lock /opt/astra/emailautomation/.venv/bin/python /opt/astra/emailautomation/refresh_dashboard_snapshot_cache.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=5min

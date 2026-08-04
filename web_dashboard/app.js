@@ -9596,11 +9596,8 @@ function connectSocket(forceReconnect = false) {
     snapshotPollTimer = setTimeout(poll, 10000);
   };
 
-  if (forceReconnect) {
-    void poll();
-  } else {
-    snapshotPollTimer = setTimeout(poll, 10000);
-  }
+  // Load sender data immediately, then continue polling every 10 seconds.
+  void poll();
 }
 
 function stopSocket() {

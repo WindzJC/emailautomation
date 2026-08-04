@@ -4373,6 +4373,16 @@ def snapshot(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> dict[str, object]:
+    cache_path = Path(
+        "/opt/astra/emailautomation/data/live_dashboard_snapshot_cache.json"
+    )
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached_snapshot = payload.get("snapshot")
+        if isinstance(cached_snapshot, dict):
+            return cached_snapshot
+    except (OSError, TypeError, json.JSONDecodeError):
+        pass
     return _build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
 
 

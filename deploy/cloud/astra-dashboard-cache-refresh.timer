@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Astra dashboard snapshot cache every five minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Persistent=true
+Unit=astra-dashboard-cache-refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -70,3 +70,8 @@ audit*/
 /_migration/
 /.runtime_handoff/
 /runtime_handoff_bundles/
+
+# Dashboard snapshot cache generated on the cloud VM
+data/live_dashboard_snapshot_cache.json
+data/.live_dashboard_snapshot_cache.json.*.tmp
+data/.dashboard-cache-refresh.lock
