@@ -53,10 +53,34 @@ def _control(
     action: str,
     profile_name: str,
 ) -> subprocess.CompletedProcess[str]:
-    if action not in {"start", "stop", "is-active", "is-failed"}:
+    if action not in {
+        "start",
+        "stop",
+        "is-active",
+        "is-failed",
+        "show-active",
+    }:
         raise ValueError(f"Unsupported systemd sender action: {action}")
-    unit_name(profile_name)
-    command = [SYSTEMCTL_BIN, action, unit_name(profile_name)]
+
+    unit = unit_name(profile_name)
+
+    if action == "start":
+        command = [
+            SYSTEMCTL_BIN,
+            "--no-block",
+            "start",
+            unit,
+        ]
+    elif action == "show-active":
+        command = [
+            SYSTEMCTL_BIN,
+            "show",
+            unit,
+            "--property=ActiveState",
+            "--value",
+        ]
+    else:
+        command = [SYSTEMCTL_BIN, action, unit]
     try:
         return subprocess.run(
             command,
@@ -72,6 +96,13 @@ def _control(
             stdout="",
             stderr=f"systemd control unavailable: {type(exc).__name__}",
         )
+
+
+def _active_state(profile_name: str) -> str:
+    result = _control("show-active", profile_name)
+    if result.returncode != 0:
+        return "unknown"
+    return str(result.stdout or "").strip().lower() or "unknown"
 
 
 def _is_active(profile_name: str) -> bool:
@@ -91,7 +122,21 @@ def _profile_snapshot(profile_name: str, pane_index: int, tail_lines: int):
         session="systemd",
     )
     unit = unit_name(profile_name)
-    if _is_active(profile_name):
+    active_state = _active_state(profile_name)
+
+    if active_state == "activating":
+        return replace(
+            snapshot,
+            tmux_running=True,
+            tmux_dead=False,
+            tmux_command=unit,
+            tmux_tail="",
+            runtime_state="starting",
+            runtime_label="Starting",
+            runtime_note=f"{unit} is running startup verification.",
+        )
+
+    if active_state in {"active", "reloading"}:
         return replace(
             snapshot,
             tmux_running=True,
@@ -195,20 +240,32 @@ def start_sender(
     session: str = "systemd",
 ) -> tuple[bool, str]:
     del session
+
     if not is_known_profile(profile_name):
         return False, f"Unknown profile: {profile_name}"
-    if _is_active(profile_name):
-        return False, f"{unit_name(profile_name)} is already active."
+
+    state = _active_state(profile_name)
+    unit = unit_name(profile_name)
+
+    if state in {"active", "reloading"}:
+        return False, f"{unit} is already active."
+
+    if state == "activating":
+        return False, f"{unit} is already starting."
+
+    if state == "unknown":
+        return False, f"Unable to determine the state of {unit}."
+
     result = _control("start", profile_name)
+
     if result.returncode != 0:
         return (
             False,
-            f"Unable to start {unit_name(profile_name)} "
+            f"Unable to start {unit} "
             f"(systemctl exit {result.returncode}).",
         )
-    if not _is_active(profile_name):
-        return False, f"{unit_name(profile_name)} did not become active."
-    return True, f"Started {unit_name(profile_name)}."
+
+    return True, f"Start submitted for {unit}."
 
 
 def stop_sender(
@@ -216,20 +273,39 @@ def stop_sender(
     session: str = "systemd",
 ) -> tuple[bool, str]:
     del session
+
     if not is_known_profile(profile_name):
         return False, f"Unknown profile: {profile_name}"
-    if not _is_active(profile_name):
-        return True, f"{unit_name(profile_name)} is already stopped."
+
+    state = _active_state(profile_name)
+    unit = unit_name(profile_name)
+
+    if state == "unknown":
+        return False, f"Unable to determine the state of {unit}."
+
+    if state in {"inactive", "failed"}:
+        return True, f"{unit} is already stopped."
+
     result = _control("stop", profile_name)
+
     if result.returncode != 0:
         return (
             False,
-            f"Unable to stop {unit_name(profile_name)} "
+            f"Unable to stop {unit} "
             f"(systemctl exit {result.returncode}).",
         )
-    if _is_active(profile_name):
-        return False, f"{unit_name(profile_name)} remained active."
-    return True, f"Stopped {unit_name(profile_name)}."
+
+    final_state = _active_state(profile_name)
+
+    if final_state in {
+        "active",
+        "activating",
+        "reloading",
+        "deactivating",
+    }:
+        return False, f"{unit} remained active."
+
+    return True, f"Stopped {unit}."
 
 
 def archive_reset_logs(session: str = "systemd") -> tuple[bool, str]:
