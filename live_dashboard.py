@@ -3859,9 +3859,18 @@ def _build_automation_status() -> dict[str, object]:
 def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict[str, object]:
     profile_snapshots = None
     if runtime_control.backend_name() == "systemd":
-        profile_snapshots = runtime_control.list_sender_snapshots(
-            tail_lines=tail_lines
-        )
+        allowed_profiles = set(SENDGRID_PROFILES) | {
+            "private_jc",
+            "private_jc_warm",
+        }
+        profile_snapshots = [
+            snapshot
+            for snapshot in runtime_control.list_sender_snapshots(
+                tail_lines=tail_lines
+            )
+            if str(getattr(snapshot, "name", "") or "")
+            in allowed_profiles
+        ]
     snapshot = build_dashboard_snapshot(
         activity_hours=activity_hours,
         tail_lines=tail_lines,
