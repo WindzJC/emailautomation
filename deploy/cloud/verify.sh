@@ -66,11 +66,15 @@ STATUS_FILE="$(mktemp)"
 trap 'rm -f "${STATUS_FILE}"' EXIT
 ASTRA_MACHINE_ID=cloud HANDOFF_PYTHON="${PYTHON_BIN}" \
   ./handoff status >"${STATUS_FILE}"
-"${PYTHON_BIN}" - "${STATUS_FILE}" "${EXPECTED_COMMIT}" "${REQUIRE_AUTHORITY}" <<'PY'
+"${PYTHON_BIN}" - "${STATUS_FILE}" "${EXPECTED_COMMIT}" "${REQUIRE_AUTHORITY}" "${REPO_ROOT}" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-status_path, expected_commit, require_authority = sys.argv[1:]
+status_path, expected_commit, require_authority, repo_root = sys.argv[1:]
+sys.path.insert(0, str(Path(repo_root).resolve()))
+
+from tools.cloud_verify_policy import unsafe_runtime_blockers
 with open(status_path, encoding="utf-8") as handle:
     status = json.load(handle)
 if status.get("machine") != "cloud":
@@ -80,9 +84,18 @@ if status.get("head") != expected_commit:
 blockers = status.get("process_blockers")
 if not isinstance(blockers, list):
     raise SystemExit("REFUSED: handoff process-blocker status is malformed.")
-if blockers:
+
+try:
+    unsafe_blockers = unsafe_runtime_blockers(blockers)
+except ValueError as exc:
     raise SystemExit(
-        f"REFUSED: runtime process blockers remain ({len(blockers)})."
+        f"REFUSED: handoff process-blocker status is malformed: {exc}"
+    ) from exc
+
+if unsafe_blockers:
+    raise SystemExit(
+        "REFUSED: unsafe runtime process blockers remain "
+        f"({len(unsafe_blockers)})."
     )
 if require_authority == "1" and status.get("real_send_authorized") is not True:
     raise SystemExit("REFUSED: cloud runtime authority is not active and valid.")
