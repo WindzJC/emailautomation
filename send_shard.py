@@ -1835,6 +1835,64 @@ def is_external(addr: str, my_domains: Set[str]) -> bool:
     return addr.split("@", 1)[1] not in my_domains
 
 
+_ROW_CACHE_MISSING = object()
+
+
+class _CaseInsensitiveRow(dict):
+    """Dictionary with a cached normalized-key view for repeated lookups."""
+
+    __slots__ = ("_ci_values",)
+
+    def __init__(self, values: Dict[str, str]) -> None:
+        super().__init__(values)
+        self._refresh_ci_values()
+
+    def _refresh_ci_values(self) -> None:
+        self._ci_values = {
+            (key or "").strip().lower(): (value or "").strip()
+            for key, value in self.items()
+        }
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self._refresh_ci_values()
+
+    def __delitem__(self, key) -> None:
+        super().__delitem__(key)
+        self._refresh_ci_values()
+
+    def clear(self) -> None:
+        super().clear()
+        self._refresh_ci_values()
+
+    def pop(self, key, default=_ROW_CACHE_MISSING):
+        if default is _ROW_CACHE_MISSING:
+            result = super().pop(key)
+        else:
+            result = super().pop(key, default)
+        self._refresh_ci_values()
+        return result
+
+    def popitem(self):
+        result = super().popitem()
+        self._refresh_ci_values()
+        return result
+
+    def setdefault(self, key, default=None):
+        result = super().setdefault(key, default)
+        self._refresh_ci_values()
+        return result
+
+    def update(self, *args, **kwargs) -> None:
+        super().update(*args, **kwargs)
+        self._refresh_ci_values()
+
+    def __ior__(self, other):
+        super().__ior__(other)
+        self._refresh_ci_values()
+        return self
+
+
 def read_rows(path: Path) -> List[Dict[str, str]]:
     def clean(v) -> str:
         if v is None:
@@ -1852,7 +1910,7 @@ def read_rows(path: Path) -> List[Dict[str, str]]:
                     continue
                 key = str(k).strip().lstrip("\ufeff")
                 row[key] = clean(v)
-            rows.append(row)
+            rows.append(_CaseInsensitiveRow(row))
     return rows
 
 
@@ -2149,11 +2207,21 @@ def split_canonical_tokens(value: str) -> Set[str]:
 def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
     if not row or not col_names:
         return ""
-    lower_row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+
+    lower_row = (
+        row._ci_values
+        if isinstance(row, _CaseInsensitiveRow)
+        else {
+            (key or "").strip().lower(): (value or "").strip()
+            for key, value in row.items()
+        }
+    )
+
     for name in col_names:
         key = str(name or "").strip().lower()
         if key in lower_row:
             return lower_row[key]
+
     return ""
 
 
