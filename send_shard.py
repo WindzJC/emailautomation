@@ -4033,16 +4033,9 @@ def main():
         except Exception:
             pass
 
-    def request_stop(signum, _frame) -> None:
-        audit_worker(
-            "interrupted",
-            sent=0,
-            errors=0,
-            last_recipient=last_recipient_for_audit,
-            action=f"signal_{int(signum)}",
-            terminal=False,
-            force=True,
-        )
+    def request_stop(_signum, _frame) -> None:
+        # Signal handlers must avoid file I/O and lock acquisition.
+        # The KeyboardInterrupt cleanup block records the final stop.
         raise KeyboardInterrupt
 
     previous_sigint = signal.getsignal(signal.SIGINT)
