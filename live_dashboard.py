@@ -5663,6 +5663,179 @@ def cancel_verify_important_leads_job(job_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "message": "Stop requested for Verify Leads.", "job": _job_progress_payload(job)})
 
 
+def _run_manual_dispatch_preview_background(
+    *,
+    check_job_id: str,
+    master_path: Path,
+    rejected_path: Path,
+    verified_source_path: Path,
+    triaged_keep_source_path: Path,
+    source_path_for_mode: Path,
+    dispatch_source_mode: str,
+    dispatch_cap: str,
+    campaign_type: str,
+    preview_dir: Path,
+) -> None:
+    try:
+        job = _load_important_check_job(check_job_id)
+    except Exception:
+        return
+
+    try:
+        preview = preview_dispatch_master_leads(
+            master_path=master_path,
+            rejected_path=rejected_path,
+            verified_path=verified_source_path,
+            triaged_keep_path=triaged_keep_source_path,
+            dispatch_source_mode=dispatch_source_mode,
+            dispatch_cap=dispatch_cap,
+            campaign_type=campaign_type,
+            preview_dir=preview_dir,
+        )
+
+        completed_at = iso_utc()
+        summary = dict(preview)
+
+        summary["status"] = "previewed"
+        summary["generated_at_utc"] = str(
+            summary.get("generated_at_utc")
+            or summary.get("completed_at_utc")
+            or summary.get("archived_at_utc")
+            or completed_at
+        )
+        summary["completed_at_utc"] = str(
+            summary.get("completed_at_utc") or completed_at
+        )
+        summary["campaign_type"] = campaign_type
+        summary["dispatch_source_mode"] = dispatch_source_mode
+        summary["dispatch_cap"] = dispatch_cap
+
+        source_text = str(
+            summary.get("dispatch_source_path")
+            or summary.get("source_path")
+            or source_path_for_mode
+        )
+        summary["dispatch_source_path"] = source_text
+        summary["source_path"] = source_text
+
+        summary["dispatch_source_row_count"] = int(
+            summary.get("dispatch_source_row_count")
+            or summary.get("source_row_count")
+            or 0
+        )
+        summary["dispatch_eligible_row_count"] = int(
+            summary.get("dispatch_eligible_row_count")
+            or summary.get("eligible_row_count")
+            or 0
+        )
+        summary["dispatch_selected_row_count"] = int(
+            summary.get("dispatch_selected_row_count")
+            or summary.get("selected_row_count")
+            or 0
+        )
+        summary["total_rows_would_write"] = int(
+            summary.get("total_rows_would_write")
+            or summary.get("total_planned_queue_rows")
+            or 0
+        )
+
+        if "skipped_both" not in summary:
+            summary["skipped_both"] = int(summary.get("skipped_rows") or 0)
+
+        source_names = {
+            DISPATCH_SOURCE_TRIAGED_KEEP: "Fresh Cold Keep",
+            DISPATCH_SOURCE_STRICT_VERIFIED: "Strict Verified",
+            DISPATCH_SOURCE_CLEANED: "Checked Output",
+        }
+        summary["dispatch_source_name"] = str(
+            summary.get("dispatch_source_name")
+            or source_names.get(dispatch_source_mode)
+            or dispatch_source_mode
+        )
+
+        preview_id = str(summary.get("preview_id") or "").strip()
+        preview_path = str(summary.get("preview_path") or "").strip()
+
+        if not preview_id:
+            raise RuntimeError("Dispatch preview completed without a preview ID.")
+
+        job = _load_important_check_job(check_job_id)
+        job["auto_dispatch_preview_status"] = "completed"
+        job["auto_dispatch_preview_completed_at_utc"] = completed_at
+        job["auto_dispatch_preview_error"] = ""
+        job["auto_dispatch_preview_id"] = preview_id
+        job["auto_dispatch_preview_path"] = preview_path
+        job["auto_dispatch_preview"] = summary
+        job["message"] = "Dispatch preview complete."
+        _save_important_check_job(job)
+
+        save_state(latest_auto_dispatch_preview=summary)
+
+        _write_lead_ops_progress(
+            job,
+            phase="preview_complete",
+            status="preview_complete",
+            processed_rows=int(
+                job.get("auto_triage_processed_rows")
+                or job.get("processed_rows")
+                or 0
+            ),
+            total_rows=int(
+                job.get("auto_triage_total_rows")
+                or job.get("total_input_rows")
+                or 0
+            ),
+            percent=100,
+            current_message="Preview complete",
+            completed_at_utc=completed_at,
+            row_counts={
+                "planned_count": int(summary.get("total_rows_would_write") or 0),
+                "skipped_count": int(summary.get("skipped_rows") or 0),
+                "dispatch_source_row_count": int(
+                    summary.get("dispatch_source_row_count") or 0
+                ),
+                "dispatch_eligible_row_count": int(
+                    summary.get("dispatch_eligible_row_count") or 0
+                ),
+            },
+            safety_summary=dict(summary.get("queue_safety") or {}),
+            preview_path=preview_path,
+        )
+
+    except Exception as exc:
+        try:
+            job = _load_important_check_job(check_job_id)
+        except Exception:
+            return
+
+        completed_at = iso_utc()
+        job["auto_dispatch_preview_status"] = "failed"
+        job["auto_dispatch_preview_error"] = str(exc)
+        job["auto_dispatch_preview_completed_at_utc"] = completed_at
+        job["message"] = f"Dispatch preview failed: {exc}"
+        _save_important_check_job(job)
+
+        _write_lead_ops_progress(
+            job,
+            phase="failed",
+            status="failed",
+            processed_rows=int(
+                job.get("auto_triage_processed_rows")
+                or job.get("processed_rows")
+                or 0
+            ),
+            total_rows=int(
+                job.get("auto_triage_total_rows")
+                or job.get("total_input_rows")
+                or 0
+            ),
+            percent=0,
+            current_message="Failed — do not preview",
+            completed_at_utc=completed_at,
+            error_summary=str(exc),
+        )
+
+
 @app.post("/api/leads/dispatch-important/preview")
 def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     progress_job: dict[str, object] | None = None
@@ -5758,51 +5931,101 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 },
                 status_code=409,
             )
-        if progress_job:
-            _write_lead_ops_progress(
-                progress_job,
-                phase="previewing",
-                status="running",
-                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
-                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
-                percent=90,
-                current_message="Previewing dispatch",
+        if not progress_job:
+            preview = preview_dispatch_master_leads(
+                master_path=output_path,
+                rejected_path=rejected_path,
+                verified_path=verified_source_path,
+                triaged_keep_path=triaged_keep_source_path,
+                dispatch_source_mode=dispatch_source_mode,
+                dispatch_cap=dispatch_cap,
+                campaign_type=campaign_type,
+                preview_dir=preview_dir,
             )
-        preview = preview_dispatch_master_leads(
-            master_path=output_path,
-            rejected_path=rejected_path,
-            verified_path=verified_source_path,
-            triaged_keep_path=triaged_keep_source_path,
-            dispatch_source_mode=dispatch_source_mode,
-            dispatch_cap=dispatch_cap,
-            campaign_type=campaign_type,
-            preview_dir=preview_dir,
-        )
-        if progress_job:
-            preview_path = str(preview.get("preview_path") or "")
-            progress_job["auto_dispatch_preview_status"] = "completed"
-            progress_job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
-            progress_job["auto_dispatch_preview_id"] = str(preview.get("preview_id") or "")
-            progress_job["auto_dispatch_preview_path"] = preview_path
-            _save_important_check_job(progress_job)
-            _write_lead_ops_progress(
-                progress_job,
-                phase="preview_complete",
-                status="preview_complete",
-                processed_rows=int(progress_job.get("auto_triage_processed_rows") or progress_job.get("processed_rows") or 0),
-                total_rows=int(progress_job.get("auto_triage_total_rows") or progress_job.get("total_input_rows") or 0),
-                percent=100,
-                current_message="Preview complete",
-                completed_at_utc=str(progress_job.get("auto_dispatch_preview_completed_at_utc") or ""),
-                row_counts={
-                    "planned_count": int(preview.get("total_rows_would_write") or 0),
-                    "skipped_count": int(preview.get("skipped_rows") or 0),
-                    "dispatch_source_row_count": int(preview.get("dispatch_source_row_count") or 0),
-                    "dispatch_eligible_row_count": int(preview.get("dispatch_eligible_row_count") or 0),
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "message": "Dispatch preview ready.",
+                    "preview": preview,
+                    "status": _combined_leads_status(),
                 },
-                safety_summary=dict(preview.get("queue_safety") or {}),
-                preview_path=preview_path,
+                status_code=200,
             )
+
+        existing_preview_status = str(
+            progress_job.get("auto_dispatch_preview_status") or ""
+        ).strip().lower()
+
+        if existing_preview_status == "running":
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "accepted": True,
+                    "message": "Preview Dispatch is already running.",
+                    "job": _important_check_job_with_progress(progress_job),
+                    "status": _combined_leads_status(),
+                },
+                status_code=202,
+            )
+
+        progress_job["auto_dispatch_preview_status"] = "running"
+        progress_job["auto_dispatch_preview_started_at_utc"] = iso_utc()
+        progress_job["auto_dispatch_preview_completed_at_utc"] = ""
+        progress_job["auto_dispatch_preview_error"] = ""
+        progress_job["auto_dispatch_preview_id"] = ""
+        progress_job["auto_dispatch_preview_path"] = ""
+        progress_job.pop("auto_dispatch_preview", None)
+        progress_job["message"] = "Preview Dispatch is running."
+        _save_important_check_job(progress_job)
+
+        save_state(latest_auto_dispatch_preview={})
+
+        _write_lead_ops_progress(
+            progress_job,
+            phase="previewing",
+            status="running",
+            processed_rows=int(
+                progress_job.get("auto_triage_processed_rows")
+                or progress_job.get("processed_rows")
+                or 0
+            ),
+            total_rows=int(
+                progress_job.get("auto_triage_total_rows")
+                or progress_job.get("total_input_rows")
+                or 0
+            ),
+            percent=90,
+            current_message="Previewing dispatch",
+        )
+
+        thread = threading.Thread(
+            target=_run_manual_dispatch_preview_background,
+            kwargs={
+                "check_job_id": str(progress_job.get("job_id") or ""),
+                "master_path": output_path,
+                "rejected_path": rejected_path,
+                "verified_source_path": verified_source_path,
+                "triaged_keep_source_path": triaged_keep_source_path,
+                "source_path_for_mode": source_path_for_mode,
+                "dispatch_source_mode": dispatch_source_mode,
+                "dispatch_cap": dispatch_cap,
+                "campaign_type": campaign_type,
+                "preview_dir": preview_dir,
+            },
+            daemon=True,
+        )
+        thread.start()
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "accepted": True,
+                "message": "Preview Dispatch started.",
+                "job": _important_check_job_with_progress(progress_job),
+                "status": _combined_leads_status(),
+            },
+            status_code=202,
+        )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
     except ValueError as exc:

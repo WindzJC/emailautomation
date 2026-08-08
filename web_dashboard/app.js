@@ -1769,6 +1769,41 @@ function dispatchPreviewMatchesCurrentSelection() {
   return Boolean(lastImportantDispatchPreview && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey());
 }
 
+function persistedImportantDispatchPreviewKey(preview) {
+  if (!preview?.preview_id) return "";
+  return [
+    String(preview.dispatch_source_mode || ""),
+    String(preview.dispatch_source_path || ""),
+    String(preview.dispatch_source_exists ?? ""),
+    String(preview.dispatch_source_row_count ?? ""),
+    String(preview.dispatch_eligible_row_count ?? ""),
+    String(preview.verification_file_mtime || ""),
+    String(preview.dispatch_cap || "all"),
+    String(preview.campaign_type || "cold"),
+  ].join("|");
+}
+
+function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
+  if (selectedLeadUploadType() !== "cold") return false;
+
+  const preview = status?.latest_auto_dispatch_preview || null;
+  const persistedKey = persistedImportantDispatchPreviewKey(preview);
+  const currentKey = currentDispatchPlanKey();
+
+  if (!persistedKey || persistedKey !== currentKey) return false;
+
+  lastImportantDispatchPreview = {
+    ...(preview || {}),
+    _preview_key: persistedKey,
+  };
+  lastImportantDispatchPreviewState = "ready";
+  lastImportantDispatchPreviewFeedback = {
+    state: "ready",
+    message: "Preview ready.",
+  };
+  return true;
+}
+
 function dispatchSummaryMatchesCurrentSource(dispatch = lastImportantDispatch) {
   if (!dispatch?.generated_at_utc) return false;
   const selected = dispatchSourceForSelectedMode();
@@ -5752,6 +5787,7 @@ function renderLeadsStatus(status) {
   if (lastLeadsStatus?.safer_recontact_source_summary && typeof lastLeadsStatus.safer_recontact_source_summary === "object") {
     lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary;
   }
+  hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
   if (shouldResumeLeadJobs && !resumeImportantLeadCheckJob(activeCheckJob)) {
     renderImportantLeadCheck(lastImportantLeadCheck);
   } else if (!shouldResumeLeadJobs) {
@@ -6161,6 +6197,120 @@ function previewDispatchBlockedFeedback(payload = {}, fallbackMessage = "") {
   };
 }
 
+async function pollImportantLeadDispatchPreviewJob(jobId) {
+  if (!jobId) return;
+
+  try {
+    const data = await fetchJson(
+      `/api/leads/check-important/job/${encodeURIComponent(jobId)}`,
+    );
+    const job = data.job || {};
+    const previewStatus = String(
+      job.auto_dispatch_preview_status || "",
+    ).toLowerCase();
+
+    if (data.status) {
+      renderLeadsStatus(data.status || {});
+    }
+
+    if (previewStatus === "completed") {
+      const preview =
+        job.auto_dispatch_preview
+        || data.status?.latest_auto_dispatch_preview
+        || {};
+
+      importantLeadDispatchPreviewLoading = false;
+
+      if (preview?.preview_id) {
+        lastImportantDispatchPreview = {
+          ...(preview || {}),
+          _preview_key: currentDispatchPlanKey(),
+        };
+        lastImportantDispatchPreviewState = "ready";
+        lastImportantDispatchPreviewFeedback = {
+          state: "ready",
+          message: "Preview ready.",
+        };
+        renderImportantDispatch(lastImportantDispatch);
+        renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+        showMessage("Dispatch preview ready.", "success");
+      } else {
+        lastImportantDispatchPreviewState = "failed";
+        lastImportantDispatchPreviewFeedback = {
+          state: "failed",
+          message: "Preview completed but the saved preview could not be loaded.",
+        };
+        renderImportantDispatch(lastImportantDispatch);
+        renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+        showMessage(
+          "Preview completed but the saved preview could not be loaded.",
+          "error",
+        );
+      }
+
+      [
+        els.leadsImportantDispatchPreviewBtn,
+        els.leadsImportantDispatchPreviewTopBtn,
+      ].filter(Boolean).forEach((button) => {
+        setButtonBusy(button, false, "Preview Dispatch");
+      });
+
+      return;
+    }
+
+    if (previewStatus === "failed") {
+      importantLeadDispatchPreviewLoading = false;
+      lastImportantDispatchPreviewState = "failed";
+      lastImportantDispatchPreviewFeedback = {
+        state: "failed",
+        message:
+          job.auto_dispatch_preview_error
+          || "Preview Dispatch failed.",
+      };
+
+      renderImportantDispatch(lastImportantDispatch);
+      renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+
+      [
+        els.leadsImportantDispatchPreviewBtn,
+        els.leadsImportantDispatchPreviewTopBtn,
+      ].filter(Boolean).forEach((button) => {
+        setButtonBusy(button, false, "Preview Dispatch");
+      });
+
+      showMessage(lastImportantDispatchPreviewFeedback.message, "error");
+      return;
+    }
+
+    importantLeadDispatchPreviewLoading = true;
+    lastImportantDispatchPreviewState = "running";
+    lastImportantDispatchPreviewFeedback = {
+      state: "running",
+      message: "Preview Dispatch is running.",
+    };
+
+    renderImportantDispatch(lastImportantDispatch);
+    renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+
+    setTimeout(
+      () => pollImportantLeadDispatchPreviewJob(jobId),
+      1500,
+    );
+  } catch (err) {
+    lastImportantDispatchPreviewState = "running";
+    lastImportantDispatchPreviewFeedback = {
+      state: "running",
+      message: `Preview status check retrying: ${String(err || "")}`,
+    };
+
+    setTimeout(
+      () => pollImportantLeadDispatchPreviewJob(jobId),
+      2500,
+    );
+  }
+}
+
+
 async function previewImportantLeadDispatch() {
   if (warmResearchUploadMode()) {
     showMessage("Warm Research does not use Cold Dispatch Preview. Generate drafts and confirm Warm Private JC instead.", "error");
@@ -6200,6 +6350,25 @@ async function previewImportantLeadDispatch() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(importantLeadDispatchPayload(false)),
     });
+    if (data.accepted && data.job?.job_id) {
+      lastImportantDispatchPreviewState = "running";
+      lastImportantDispatchPreviewFeedback = {
+        state: "running",
+        message: data.message || "Preview Dispatch is running.",
+      };
+
+      if (data.status) {
+        renderLeadsStatus(data.status || {});
+      }
+
+      renderImportantDispatch(lastImportantDispatch);
+      renderLeadsWorkflowStatusBanner(lastLeadsStatus);
+      showMessage(data.message || "Preview Dispatch started.", "success");
+
+      void pollImportantLeadDispatchPreviewJob(data.job.job_id);
+      return;
+    }
+
     if (data.preview?.preview_id) {
       lastImportantDispatchPreview = {
         ...(data.preview || {}),
@@ -6235,11 +6404,25 @@ async function previewImportantLeadDispatch() {
       "error",
     );
   } finally {
-    importantLeadDispatchPreviewLoading = false;
+    const previewStillRunning =
+      lastImportantDispatchPreviewState === "running";
+
+    importantLeadDispatchPreviewLoading = previewStillRunning;
+
     if (els.leadsImportantDispatchPreviewBtn) {
-      const activeDispatch = isActiveImportantLeadCheckJob(lastImportantDispatchJob);
-      [els.leadsImportantDispatchPreviewBtn, els.leadsImportantDispatchPreviewTopBtn].filter(Boolean).forEach((button) => {
-        setButtonBusy(button, activeDispatch, "Preview Dispatch");
+      const activeDispatch =
+        isActiveImportantLeadCheckJob(lastImportantDispatchJob);
+      const previewBusy = previewStillRunning || activeDispatch;
+
+      [
+        els.leadsImportantDispatchPreviewBtn,
+        els.leadsImportantDispatchPreviewTopBtn,
+      ].filter(Boolean).forEach((button) => {
+        setButtonBusy(
+          button,
+          previewBusy,
+          previewStillRunning ? "Previewing..." : "Preview Dispatch",
+        );
       });
       renderDispatchConfirmGuard(dispatchSourceForSelectedMode().source || {}, dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null);
     }
@@ -9687,6 +9870,7 @@ if (els.leadsCurrentRunPanel) {
       if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
       if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
       syncImportantDispatchCampaignSource();
+      hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
       renderImportantDispatch(lastImportantDispatch);
     }
   });
@@ -9706,6 +9890,7 @@ if (els.leadsRecommendedNextAction) {
       if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
       if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
       syncImportantDispatchCampaignSource();
+      hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
       renderImportantDispatch(lastImportantDispatch);
     }
   });
@@ -9741,6 +9926,7 @@ if (els.leadsDispatchModeCards) {
       if (els.leadsRecontactRecencyOverride) els.leadsRecontactRecencyOverride.checked = false;
     }
     syncImportantDispatchCampaignSource();
+    hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
     renderImportantDispatch(lastImportantDispatch);
   });
 }
@@ -9755,14 +9941,21 @@ if (els.leadsImportantUploadFile) {
   els.leadsImportantUploadFile.addEventListener("change", () => updateImportantLeadUploadNote());
 }
 if (els.leadsImportantDispatchSourceMode) {
-  els.leadsImportantDispatchSourceMode.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+  els.leadsImportantDispatchSourceMode.addEventListener("change", () => {
+    hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
+    renderImportantDispatch(lastImportantDispatch);
+  });
 }
 if (els.leadsImportantDispatchCap) {
-  els.leadsImportantDispatchCap.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
+  els.leadsImportantDispatchCap.addEventListener("change", () => {
+    hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
+    renderImportantDispatch(lastImportantDispatch);
+  });
 }
 if (els.leadsImportantDispatchCampaignType) {
   els.leadsImportantDispatchCampaignType.addEventListener("change", () => {
     syncImportantDispatchCampaignSource();
+    hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
     renderImportantDispatch(lastImportantDispatch);
   });
 }

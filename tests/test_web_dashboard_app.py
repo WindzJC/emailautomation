@@ -201,6 +201,11 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
             "previewImportantLeadDispatch",
+            "pollImportantLeadDispatchPreviewJob",
+            "data.accepted && data.job?.job_id",
+            "job.auto_dispatch_preview_status",
+            "/api/leads/check-important/job/",
+            "Preview Dispatch is running.",
             "confirmImportantLeadDispatch",
             "dispatchPreviewMatchesCurrentSelection",
             "currentDispatchPlanKey",

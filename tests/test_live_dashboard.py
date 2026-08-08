@@ -5651,16 +5651,36 @@ class LiveDashboardTests(unittest.TestCase):
                 live_dashboard,
                 "_build_live_snapshot",
                 return_value={},
-            ):
+            ), patch.object(
+                live_dashboard.threading,
+                "Thread",
+            ) as thread_cls:
                 response = live_dashboard.preview_dispatch_important_leads(payload)
 
             body = json.loads(response.body)
-            self.assertEqual(200, response.status_code)
+            self.assertEqual(202, response.status_code)
             self.assertTrue(body["ok"])
-            kwargs = preview_dispatch_master_leads.call_args.kwargs
-            self.assertEqual(staged_keep_path, kwargs["triaged_keep_path"])
-            self.assertEqual(output_path, kwargs["master_path"])
-            self.assertEqual(rejected_path, kwargs["rejected_path"])
+            self.assertTrue(body["accepted"])
+            self.assertEqual(job["job_id"], body["job"]["job_id"])
+
+            thread_cls.assert_called_once()
+            thread_call = thread_cls.call_args.kwargs
+            self.assertIs(
+                live_dashboard._run_manual_dispatch_preview_background,
+                thread_call["target"],
+            )
+            self.assertTrue(thread_call["daemon"])
+
+            worker_kwargs = thread_call["kwargs"]
+            self.assertEqual(job["job_id"], worker_kwargs["check_job_id"])
+            self.assertEqual(staged_keep_path, worker_kwargs["triaged_keep_source_path"])
+            self.assertEqual(output_path, worker_kwargs["master_path"])
+            self.assertEqual(rejected_path, worker_kwargs["rejected_path"])
+            self.assertEqual("triaged_keep", worker_kwargs["dispatch_source_mode"])
+            self.assertEqual("all", worker_kwargs["dispatch_cap"])
+
+            thread_cls.return_value.start.assert_called_once_with()
+            preview_dispatch_master_leads.assert_not_called()
 
     def test_preview_dispatch_important_leads_blocks_empty_current_staged_keep(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
