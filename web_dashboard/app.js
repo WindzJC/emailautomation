@@ -1210,9 +1210,9 @@ function recipientQueueBookTitleStatus(status = lastLeadsStatus) {
 function leadsRunSafety(status = lastLeadsStatus, snapshot = lastSnapshot) {
   const backendCurrentSafety = status?.current_send_safety || {};
   const activeCheckJob = currentImportantCheckJob(status);
-  const checkRunning = isActiveImportantLeadCheckJob(activeCheckJob);
-  const activeSenders = activeSenderProfiles(snapshot);
   const leadCheck = currentLeadCheckStatus(status);
+  const checkRunning = leadCheckWorkflowStatus(leadCheck) === "running";
+  const activeSenders = activeSenderProfiles(snapshot);
   const latestCheck = selectedLeadCheckReport(status);
   const latestTriage = selectedLeadTriageReport(status, leadCheck);
   const latestPreview = selectedLeadUploadType() === "cold" ? (status?.latest_auto_dispatch_preview || {}) : {};
@@ -1790,12 +1790,14 @@ function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
   const persistedKey = persistedImportantDispatchPreviewKey(preview);
   const currentKey = currentDispatchPlanKey();
 
-  if (!persistedKey || persistedKey !== currentKey) return false;
+  if (!persistedKey) {
+    lastImportantDispatchPreview = null;
+    return false;
+  }
 
-  lastImportantDispatchPreview = {
-    ...(preview || {}),
-    _preview_key: persistedKey,
-  };
+  lastImportantDispatchPreview = { ...(preview || {}), _preview_key: persistedKey };
+  if (persistedKey !== currentKey) return false;
+
   lastImportantDispatchPreviewState = "ready";
   lastImportantDispatchPreviewFeedback = {
     state: "ready",
@@ -5769,7 +5771,11 @@ function renderLeadsStatus(status) {
       setNodeText(els.toolbarGeneratedAt, "Local snapshot");
     }
   }
-  const activeCheckJob = currentImportantCheckJob(lastLeadsStatus);
+  const selectedCheckIsRunning = leadCheckWorkflowStatus(currentLeadCheckStatus(lastLeadsStatus)) === "running";
+  const activeCheckJob = selectedCheckIsRunning ? currentImportantCheckJob(lastLeadsStatus) : null;
+  if (!selectedCheckIsRunning) {
+    stopImportantLeadCheckJobPolling();
+  }
   const coldWorkflow = selectedLeadUploadType() === "cold";
   const activeVerifyJob = coldWorkflow ? (lastLeadsStatus?.active_important_verify_job || null) : null;
   const activeDispatchJob = coldWorkflow ? (lastLeadsStatus?.active_important_dispatch_job || null) : null;

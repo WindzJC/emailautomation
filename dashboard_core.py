@@ -640,6 +640,11 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     if status == "PASS" and validation_status == "NOT RUN":
         status = "NOT RUN"
         reasons.append("Preview validation has not run.")
+    if status == "PASS" and not pre_rendered_message and preview_exists and preview_row_count != row_count:
+        status = "STALE"
+        reasons.append(
+            f"Preview row count {preview_row_count} does not match recipient queue row count {row_count}."
+        )
     if status == "PASS" and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
         status = "STALE"
         reasons.append("Preview CSV is older than the recipient queue.")

@@ -106,8 +106,16 @@ class DashboardCoreTests(unittest.TestCase):
                 writer.writerow({"Email": "reader1@example.com", "FirstName": "Ava", "BookTitle": "Launch One"})
                 writer.writerow({"Email": "reader2@example.com", "FirstName": "Ben", "BookTitle": ""})
             preview = previews / "sendgrid_annette_message_preview.csv"
-            preview.write_text("Email,FirstName,BookTitle,Subject,Body\nreader1@example.com,Ava,Launch One,Subject,Body\n", encoding="utf-8")
-            (previews / "sendgrid_annette_message_preview_validated.csv").write_text("Email\nreader1@example.com\n", encoding="utf-8")
+            preview.write_text(
+                "Email,FirstName,BookTitle,Subject,Body\n"
+                "reader1@example.com,Ava,Launch One,Subject,Body\n"
+                "reader2@example.com,Ben,,Subject,Body\n",
+                encoding="utf-8",
+            )
+            (previews / "sendgrid_annette_message_preview_validated.csv").write_text(
+                "Email\nreader1@example.com\nreader2@example.com\n",
+                encoding="utf-8",
+            )
             (previews / "sendgrid_annette_message_preview_failed.csv").write_text("Email\n", encoding="utf-8")
             (previews / "sendgrid_annette_message_preview_summary.txt").write_text("failed rows: 0\n", encoding="utf-8")
 
@@ -129,6 +137,48 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(1, readiness["fallback_row_count"])
         self.assertEqual("consignment", readiness["pitch_mode_expected"])
         self.assertEqual("consignment", readiness["actual_profile_mode"])
+
+    def test_profile_message_readiness_marks_partial_preview_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            shards.mkdir()
+            previews.mkdir()
+            queue = shards / "recipients_private_jc.csv"
+            with queue.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
+                writer.writeheader()
+                writer.writerow({"Email": "reader1@example.com", "FirstName": "Ava", "BookTitle": "Launch One"})
+                writer.writerow({"Email": "reader2@example.com", "FirstName": "Ben", "BookTitle": "Launch Two"})
+            preview = previews / "private_jc_message_preview.csv"
+            preview.write_text(
+                "Email,FirstName,BookTitle,Subject,Body\nreader1@example.com,Ava,Launch One,Subject,Body\n",
+                encoding="utf-8",
+            )
+            (previews / "private_jc_message_preview_validated.csv").write_text(
+                "Email\nreader1@example.com\n",
+                encoding="utf-8",
+            )
+            (previews / "private_jc_message_preview_failed.csv").write_text("Email\n", encoding="utf-8")
+            (previews / "private_jc_message_preview_summary.txt").write_text("failed rows: 0\n", encoding="utf-8")
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "dashboard_enabled": True,
+                    "csv": str(queue),
+                    "log": str(base / "private_jc_log.csv"),
+                    "pitch": "pitch_jc",
+                }
+            }
+
+            with patch.multiple(dashboard_core, SHARDS_DIR=shards, MESSAGE_PREVIEW_DIR=previews, PROFILES=profiles):
+                readiness = dashboard_core.build_profile_message_readiness("private_jc")
+
+        self.assertEqual("STALE", readiness["status"])
+        self.assertEqual(2, readiness["recipient_row_count"])
+        self.assertEqual(1, readiness["preview_row_count"])
+        self.assertIn("does not match recipient queue row count", " ".join(readiness["reasons"]))
 
     def test_profile_message_readiness_flags_missing_booktitle_not_run_and_stale_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -6001,6 +6001,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 campaign_type=campaign_type,
                 preview_dir=preview_dir,
             )
+            save_state(latest_auto_dispatch_preview=preview)
             return JSONResponse(
                 {
                     "ok": True,

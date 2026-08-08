@@ -5486,6 +5486,12 @@ class LiveDashboardTests(unittest.TestCase):
                 kwargs["verified_path"],
             )
             save_state.assert_called()
+            self.assertTrue(
+                any(
+                    call.kwargs == {"latest_auto_dispatch_preview": fake_preview}
+                    for call in save_state.call_args_list
+                )
+            )
 
     def test_preview_dispatch_important_leads_uses_cleaned_source_for_recontact_cold(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:

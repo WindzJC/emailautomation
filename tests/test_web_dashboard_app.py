@@ -515,6 +515,12 @@ class WebDashboardAppTests(unittest.TestCase):
         hydrate_start = persisted_end
         hydrate_end = source.index("function dispatchSummaryMatchesCurrentSource", hydrate_start)
         hydrate_body = source[hydrate_start:hydrate_end]
+        self.assertIn("if (!persistedKey)", hydrate_body)
+        self.assertIn("lastImportantDispatchPreview = null", hydrate_body)
+        self.assertLess(
+            hydrate_body.index("lastImportantDispatchPreview = {"),
+            hydrate_body.index("persistedKey !== currentKey"),
+        )
         self.assertIn("persistedKey !== currentKey", hydrate_body)
         self.assertNotIn("persistedKey == currentKey", hydrate_body)
 
@@ -639,6 +645,25 @@ class WebDashboardAppTests(unittest.TestCase):
             ".leads-pipeline-step-stale",
         ]:
             self.assertIn(expected, styles)
+
+    def test_stale_check_status_stops_raw_running_job_poll_and_safety_state(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        safety_start = source.index("function leadsRunSafety")
+        safety_end = source.index("function dispatchActionBlockReason", safety_start)
+        safety_body = source[safety_start:safety_end]
+        self.assertIn('const checkRunning = leadCheckWorkflowStatus(leadCheck) === "running";', safety_body)
+        self.assertNotIn("const checkRunning = isActiveImportantLeadCheckJob(activeCheckJob);", safety_body)
+
+        render_start = source.index("function renderLeadsStatus")
+        render_end = source.index("async function fetchLeadsStatus", render_start)
+        render_body = source[render_start:render_end]
+        self.assertIn(
+            'const selectedCheckIsRunning = leadCheckWorkflowStatus(currentLeadCheckStatus(lastLeadsStatus)) === "running";',
+            render_body,
+        )
+        self.assertIn("const activeCheckJob = selectedCheckIsRunning ? currentImportantCheckJob(lastLeadsStatus) : null;", render_body)
+        self.assertIn("if (!selectedCheckIsRunning)", render_body)
+        self.assertIn("stopImportantLeadCheckJobPolling();", render_body)
 
     def test_leads_funnel_table_rows_keep_three_native_cells(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
