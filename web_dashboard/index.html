@@ -593,7 +593,6 @@
                   <span class="leads-source-actions-label">Next source action</span>
                   <button id="leads-important-check-btn" class="btn btn-secondary" type="button">Check Leads</button>
                   <button id="leads-important-upload-check-btn" class="btn btn-secondary" type="button">Upload &amp; Check</button>
-                  <button id="leads-important-dispatch-preview-top-btn" class="btn btn-secondary leads-preview-duplicate" type="button">Preview Dispatch</button>
                 </div>
               </section>
               <div id="leads-workflow-status-banner" class="leads-workflow-status-banner" aria-live="polite"></div>
@@ -611,7 +610,7 @@
                         <span class="muted">Changing source changes the eligible count.</span>
                       </div>
                     </div>
-                    <div id="leads-dispatch-current-queue-note" class="leads-dispatch-current-queue-note" hidden>Finish current JC queue before preparing the next dispatch.</div>
+                    <div id="leads-dispatch-current-queue-note" class="leads-dispatch-current-queue-note" hidden>Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch.</div>
                     <div id="leads-dispatch-mode-cards" class="dispatch-mode-cards" role="group" aria-label="Dispatch mode"></div>
                     <div class="leads-dispatch-grid leads-command-controls">
                       <div class="leads-quick-file dispatch-technical-select">
@@ -621,7 +620,10 @@
                           <option value="strict_verified">Strict Public Proof</option>
                           <option value="cleaned">Recontact Pool / Checked Output</option>
                         </select>
-                        <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Changing source changes the eligible count. Fresh Cold Keep reads <strong>_important/leads_triaged_keep.csv</strong>. Strict reads <strong>_important/leads_verified.csv</strong>. Recontact uses checked output.</span>
+                        <details class="campaign-control-details">
+                          <summary>Source details</summary>
+                          <span id="leads-dispatch-source-note" class="toolbar-field-note muted">Changing source changes the eligible count. Fresh Cold Keep reads <strong>_important/leads_triaged_keep.csv</strong>. Strict reads <strong>_important/leads_verified.csv</strong>. Recontact uses checked output.</span>
+                        </details>
                       </div>
                       <div class="leads-quick-file">
                         <span class="label">Preview cap</span>
@@ -634,7 +636,10 @@
                           <option value="cold">Fresh Cold — excludes prior contacts</option>
                           <option value="recontact_cold">Recontact — allows prior contacts</option>
                         </select>
-                        <span class="toolbar-field-note muted">Recontact allows prior sends/contact while keeping suppressions and bad outcomes blocked.</span>
+                        <details class="campaign-control-details">
+                          <summary>Campaign details</summary>
+                          <span class="toolbar-field-note muted">Recontact allows prior sends/contact while keeping suppressions and bad outcomes blocked.</span>
+                        </details>
                       </div>
                     </div>
                   </div>

@@ -1355,3 +1355,259 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Final Lead Ops hierarchy: presentation only; controller safety state remains authoritative. */
+.react-leads-page .react-lead-canvas {
+  gap: 10px;
+  padding: 14px;
+}
+
+#leads-view.react-leads-page .react-lead-canvas > .panel-header {
+  display: none;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .leads-control-bar {
+  grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr);
+  grid-template-areas:
+    "source status"
+    "result actions";
+  gap: 10px;
+  padding: 12px;
+}
+
+.react-leads-page .leads-control-results {
+  align-self: start;
+  padding: 8px 2px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  min-height: 0;
+}
+
+.react-leads-page .leads-control-actions {
+  align-self: center;
+  flex-wrap: nowrap;
+}
+
+.react-leads-page .leads-source-actions-label {
+  flex-basis: auto;
+  margin-right: auto;
+}
+
+.react-leads-page .lead-check-details,
+.react-leads-page .current-run-details,
+.react-leads-page .dispatch-preview-details,
+.react-leads-page .dispatch-secondary-modes,
+.react-leads-page .campaign-control-details,
+.react-leads-page .warm-operations-details,
+.react-leads-page .previous-warm-run {
+  margin-top: 9px;
+  border-top: 1px solid rgba(148,163,184,.12);
+  padding-top: 8px;
+}
+
+.react-leads-page .lead-check-details > summary,
+.react-leads-page .current-run-details > summary,
+.react-leads-page .dispatch-preview-details > summary,
+.react-leads-page .dispatch-secondary-modes > summary,
+.react-leads-page .campaign-control-details > summary,
+.react-leads-page .warm-operations-details > summary,
+.react-leads-page .previous-warm-run > summary {
+  cursor: pointer;
+  color: #9eacc0;
+  font-size: .72rem;
+  font-weight: 750;
+}
+
+.react-leads-page .lead-check-details[open] > summary,
+.react-leads-page .current-run-details[open] > summary,
+.react-leads-page .dispatch-preview-details[open] > summary,
+.react-leads-page .dispatch-secondary-modes[open] > summary,
+.react-leads-page .campaign-control-details[open] > summary,
+.react-leads-page .warm-operations-details[open] > summary,
+.react-leads-page .previous-warm-run[open] > summary {
+  margin-bottom: 9px;
+  color: #d8e2f0;
+}
+
+.react-leads-page .lead-check-status-grid {
+  margin-top: 0;
+}
+
+.react-leads-page .react-stepper-shell {
+  gap: 5px;
+}
+
+.react-leads-page .workflow-tracker-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.react-leads-page .workflow-track-step {
+  min-height: 68px;
+  padding: 8px 9px;
+}
+
+.react-leads-page .workflow-track-copy small {
+  display: none;
+}
+
+.react-leads-page .leads-workflow-status-banner {
+  min-height: 0;
+  padding: 7px 10px;
+}
+
+.react-leads-page .workflow-banner-inline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.react-leads-page .workflow-banner-inline .eyebrow {
+  flex: 0 0 auto;
+}
+
+.react-leads-page .workflow-banner-inline strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-lead-workspace.leads-command-main {
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 10px;
+}
+
+.react-leads-page .leads-command-column-left {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.react-leads-page .current-run-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.react-leads-page .current-run-detail-grid,
+.react-leads-page .warm-live-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.react-leads-page .current-run-detail-grid > span,
+.react-leads-page .warm-live-summary > span {
+  border-radius: 999px;
+  padding: 6px 9px;
+  color: #aab8ca;
+  background: rgba(148,163,184,.06);
+  font-size: .72rem;
+}
+
+.react-leads-page .current-run-detail-grid strong,
+.react-leads-page .warm-live-summary strong {
+  color: #edf3fa;
+}
+
+.react-leads-page .leads-campaign-command {
+  padding: 12px;
+}
+
+.react-leads-page .leads-campaign-command .command-section-head {
+  margin-bottom: 8px;
+}
+
+.react-leads-page .leads-campaign-command .dispatch-mode-cards {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.react-leads-page .dispatch-secondary-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.react-leads-page .leads-command-controls {
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, .35fr) minmax(220px, 1fr);
+  gap: 8px;
+}
+
+.react-leads-page .campaign-control-details {
+  margin-top: 6px;
+  padding-top: 5px;
+}
+
+.react-leads-page .campaign-control-details .toolbar-field-note {
+  display: block;
+  padding-top: 4px;
+}
+
+.react-leads-page .leads-preview-command,
+.react-leads-page .leads-confirm-command,
+.react-leads-page .leads-start-command {
+  padding: 12px;
+}
+
+.react-leads-page .dispatch-preview-metrics-primary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.react-leads-page .dispatch-preview-technical-metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.react-leads-page .dispatch-preview-details .dispatch-skip-breakdown {
+  margin-top: 8px;
+}
+
+#leads-view.react-leads-page .leads-start-command {
+  display: none !important;
+}
+
+.react-leads-page.warm-research-mode .warm-private-action-panel {
+  gap: 9px;
+}
+
+.react-leads-page.warm-research-mode .warm-operations-details .warm-private-lane-group,
+.react-leads-page.warm-research-mode .warm-operations-details .warm-run-timeline {
+  margin-top: 8px;
+}
+
+@media (max-width: 960px) {
+  .react-leads-page .leads-command-controls,
+  .react-leads-page .dispatch-secondary-mode-grid,
+  .react-leads-page .dispatch-preview-technical-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  #leads-view.react-leads-page:not(.warm-research-mode) .leads-control-bar {
+    grid-template-columns: 1fr;
+    grid-template-areas: "source" "status" "result" "actions";
+  }
+
+  #leads-view.react-leads-page.warm-research-mode .leads-control-source { order: 0; }
+  #leads-view.react-leads-page.warm-research-mode .leads-control-results { order: 1; }
+  #leads-view.react-leads-page.warm-research-mode .leads-control-actions { order: 2; }
+  #leads-view.react-leads-page.warm-research-mode .lead-check-status-card { order: 3; }
+  #leads-view.react-leads-page.warm-research-mode .leads-current-run-panel { order: 4; }
+
+  .react-leads-page .leads-control-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .react-leads-page .workflow-tracker-row,
+  .react-leads-page .current-run-metrics,
+  .react-leads-page .dispatch-preview-metrics-primary {
+    grid-template-columns: 1fr;
+  }
+
+  .react-leads-page .workflow-banner-inline {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .react-leads-page .workflow-banner-inline strong {
+    white-space: normal;
+  }
+}

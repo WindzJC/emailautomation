@@ -149,13 +149,6 @@ export function CommandRail({ left, right }) {
     <div className="leads-command-main react-lead-workspace">
       <LegacyNode html={left} />
       <div className="react-command-rail-shell">
-        <div className="react-command-sequence" aria-label="Dispatch command sequence">
-          <span><b>1</b> Preview</span>
-          <i aria-hidden="true" />
-          <span><b>2</b> Confirm</span>
-          <i aria-hidden="true" />
-          <span><b>3</b> Start</span>
-        </div>
         <LegacyNode html={right} />
       </div>
     </div>

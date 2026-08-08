@@ -1651,22 +1651,25 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
       </div>
       ${processingStrip}
       ${progressModule}
-      <div class="lead-check-status-grid">
-        <div><span>Selected file</span><strong title="${escapeHtml(selectedFile || "-")}">${escapeHtml(selectedFile || "-")}</strong></div>
-        <div><span>Current job</span><strong title="${escapeHtml(jobId)}">${escapeHtml(jobId)}</strong></div>
-        <div><span>Current run</span><strong title="${escapeHtml(currentRunId)}">${escapeHtml(currentRunId)}</strong></div>
-        <div><span>leads.csv</span><strong>${escapeHtml(outputStatus)}</strong></div>
-        <div><span>leads_rejected.csv</span><strong>${escapeHtml(rejectedStatus)}</strong></div>
-        <div><span>Latest matches current upload</span><strong>${escapeHtml(matchStatus)}</strong></div>
-        <div><span>Cleaned rows</span><strong>${cleanedRows.toLocaleString()}</strong></div>
-        <div><span>Rejected rows</span><strong>${rejectedRows.toLocaleString()}</strong></div>
-        <div><span>Upload received</span><strong>${escapeHtml(uploadTime)}</strong></div>
-        <div><span>Check generated</span><strong>${escapeHtml(generatedTime)}</strong></div>
-        ${staleCopy ? `<div><span>Stale age</span><strong>${escapeHtml(staleCopy)}</strong></div>` : ""}
-        ${lastSuccessfulStep ? `<div><span>Last successful step</span><strong>${escapeHtml(lastSuccessfulStep)}</strong></div>` : ""}
-        ${typeof reuploadRequired === "boolean" ? `<div><span>Re-upload required</span><strong>${reuploadRequired ? "yes" : "no"}</strong></div>` : ""}
-      </div>
       <div class="lead-check-guidance lead-check-guidance-${escapeHtml(state)}">${escapeHtml(guidance)}</div>
+      <details class="lead-check-details">
+        <summary>Check details</summary>
+        <div class="lead-check-status-grid">
+          <div><span>Selected file</span><strong title="${escapeHtml(selectedFile || "-")}">${escapeHtml(selectedFile || "-")}</strong></div>
+          <div><span>Current job</span><strong title="${escapeHtml(jobId)}">${escapeHtml(jobId)}</strong></div>
+          <div><span>Current run</span><strong title="${escapeHtml(currentRunId)}">${escapeHtml(currentRunId)}</strong></div>
+          <div><span>leads.csv</span><strong>${escapeHtml(outputStatus)}</strong></div>
+          <div><span>leads_rejected.csv</span><strong>${escapeHtml(rejectedStatus)}</strong></div>
+          <div><span>Latest matches current upload</span><strong>${escapeHtml(matchStatus)}</strong></div>
+          <div><span>Cleaned rows</span><strong>${cleanedRows.toLocaleString()}</strong></div>
+          <div><span>Rejected rows</span><strong>${rejectedRows.toLocaleString()}</strong></div>
+          <div><span>Upload received</span><strong>${escapeHtml(uploadTime)}</strong></div>
+          <div><span>Check generated</span><strong>${escapeHtml(generatedTime)}</strong></div>
+          ${staleCopy ? `<div><span>Stale age</span><strong>${escapeHtml(staleCopy)}</strong></div>` : ""}
+          ${lastSuccessfulStep ? `<div><span>Last successful step</span><strong>${escapeHtml(lastSuccessfulStep)}</strong></div>` : ""}
+          ${typeof reuploadRequired === "boolean" ? `<div><span>Re-upload required</span><strong>${reuploadRequired ? "yes" : "no"}</strong></div>` : ""}
+        </div>
+      </details>
     `,
   );
 }
@@ -3130,23 +3133,28 @@ function renderDispatchModeCards(preview = null) {
         <small>${escapeHtml(freshAdvice)}</small>
         ${validColdPreview ? `<em>${escapeHtml(coldSafety.ready ? "Ready" : "Review")}</em>` : ""}
       </button>
-      <button class="dispatch-mode-card ${selectedCampaign === "recontact_cold" && !activeSaferPreview ? "is-selected" : ""} ${recency.highRisk ? "is-warn" : ""}" type="button" data-dispatch-mode-card="recontact">
-        <span class="label">Recontact Campaign</span>
-        <strong>Full Recontact Pool / Checked Output</strong>
-        <span>May include prior contacts/sends.</span>
-        <b>${recontactCount.toLocaleString()} total planned</b>
-        <small>${escapeHtml(recentHistoryLabel)}. ${escapeHtml(recontactRiskLabel)}${escapeHtml(recontactAdvice)}</small>
-      </button>
-      <button class="dispatch-mode-card dispatch-mode-card-action ${saferActive ? "is-selected" : lastSaferRecontactSummary?.output_path ? "is-ready" : ""}" type="button" data-dispatch-mode-card="safer-recontact" ${saferActive ? "disabled" : ""}>
-        <span class="label">Safer Recontact Campaign</span>
-        ${saferActive ? `<span class="mini-pill">Selected</span>` : ""}
-        <strong>Safer Recontact Pool</strong>
-        <span>Only planned recontact leads not found in active history.</span>
-        <b>${saferMetric}</b>
-        <small>${saferActive ? "Selected source: Safer recontact CSV — not found in active history." : lastSaferRecontactSummary?.output_path ? `Created separately: ${lastSaferRecontactSummary.output_path}` : "Recommended over full recontact when recent-contact risk is high."}</small>
-        ${saferFeedback}
-        <em>${escapeHtml(saferButtonLabel)}</em>
-      </button>
+      <details class="dispatch-secondary-modes" ${selectedCampaign === "recontact_cold" || saferActive ? "open" : ""}>
+        <summary>Recontact options</summary>
+        <div class="dispatch-secondary-mode-grid">
+          <button class="dispatch-mode-card ${selectedCampaign === "recontact_cold" && !activeSaferPreview ? "is-selected" : ""} ${recency.highRisk ? "is-warn" : ""}" type="button" data-dispatch-mode-card="recontact">
+            <span class="label">Recontact Campaign</span>
+            <strong>Full Recontact Pool / Checked Output</strong>
+            <span>May include prior contacts/sends.</span>
+            <b>${recontactCount.toLocaleString()} total planned</b>
+            <small>${escapeHtml(recentHistoryLabel)}. ${escapeHtml(recontactRiskLabel)}${escapeHtml(recontactAdvice)}</small>
+          </button>
+          <button class="dispatch-mode-card dispatch-mode-card-action ${saferActive ? "is-selected" : lastSaferRecontactSummary?.output_path ? "is-ready" : ""}" type="button" data-dispatch-mode-card="safer-recontact" ${saferActive ? "disabled" : ""}>
+            <span class="label">Safer Recontact Campaign</span>
+            ${saferActive ? `<span class="mini-pill">Selected</span>` : ""}
+            <strong>Safer Recontact Pool</strong>
+            <span>Only planned recontact leads not found in active history.</span>
+            <b>${saferMetric}</b>
+            <small>${saferActive ? "Selected source: Safer recontact CSV — not found in active history." : lastSaferRecontactSummary?.output_path ? `Created separately: ${lastSaferRecontactSummary.output_path}` : "Recommended over full recontact when recent-contact risk is high."}</small>
+            ${saferFeedback}
+            <em>${escapeHtml(saferButtonLabel)}</em>
+          </button>
+        </div>
+      </details>
     `,
   );
 }
@@ -3954,7 +3962,7 @@ function renderImportantLeadCheck(result) {
         els.leadsImportantCheckMeta,
         isWarmResearch
           ? "Choose a Warm Research CSV/XLSX file, then click Upload & Check. Cold dispatch remains disabled."
-          : "Ready. Put email-first leads in _important/leadschecker.csv, then click Check Leads. Keep FullName upstream when you have it.",
+          : "Choose the source file for this Cold campaign, then run Upload & Check.",
       );
     }
   }
@@ -4397,11 +4405,11 @@ function renderImportantDispatch(result) {
     els.leadsRecontactOverrideWrap.hidden = !showOverride;
   }
   if (els.leadsDispatchCurrentQueueNote) {
-    els.leadsDispatchCurrentQueueNote.hidden = !currentJcQueuePending;
+    els.leadsDispatchCurrentQueueNote.hidden = !currentJcQueuePending || Boolean(dispatchPreview);
     setNodeText(
       els.leadsDispatchCurrentQueueNote,
       currentJcQueuePending
-        ? "Finish current JC queue before preparing the next dispatch."
+        ? "Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch."
         : "",
     );
   }
@@ -4425,7 +4433,7 @@ function renderImportantDispatch(result) {
       setNodeText(
         els.leadsImportantDispatchMeta,
         dispatchBlockReason
-          ? `Dispatch is idle. Source ${idleName}. Preview and confirm are blocked: ${dispatchBlockReason}`
+          ? `Dispatch is idle. Source ${idleName}.`
           : `Dispatch is idle. Source ${idleName}. Check the selected source first, then dispatch while all senders are stopped.`,
       );
     }
@@ -4434,7 +4442,6 @@ function renderImportantDispatch(result) {
   if (!result?.generated_at_utc) {
     const previewRows = Array.isArray(dispatchPreview?.assigned_preview_rows) ? dispatchPreview.assigned_preview_rows : [];
     const previewFields = Array.isArray(dispatchPreview?.queue_headers) ? dispatchPreview.queue_headers : [];
-    const selectedSourceRows = Number(dispatchPreview?.dispatch_source_row_count || dispatchSource.dispatch_source_row_count || 0);
     const previewMetricsMarkup = dispatchPreview
       ? renderOperatorMetricStrip([
         { label: "Writable", value: previewRouteSummary.uniquePlanned },
@@ -4442,27 +4449,10 @@ function renderImportantDispatch(result) {
         {
           label: "SendGrid",
           value: previewRouteSummary.sendgridTotal,
-          note: previewRouteSummary.sendgridTotal ? previewRouteSummary.shardsSlash : (previewRouteSummary.sendgridZeroReason || "Review required: no zero reason"),
           tone: previewRouteSummary.sendgridTotal ? "good" : (previewRouteSummary.sendgridZeroReason ? "warn" : "bad"),
         },
-        { label: "SendGrid shards", value: previewRouteSummary.shardsSlash },
-        { label: "Unique", value: previewRouteSummary.uniquePlanned },
-        { label: "Duplicates", value: previewRouteSummary.duplicatePlanned, tone: previewRouteSummary.duplicatePlanned ? "bad" : "good" },
-        { label: "Already contacted", value: previewRouteSummary.skippedAlreadyContacted, tone: previewRouteSummary.skippedAlreadyContacted ? "warn" : "" },
-        { label: "Already sent", value: previewRouteSummary.skippedAlreadySent, tone: previewRouteSummary.skippedAlreadySent ? "warn" : "" },
-        { label: "Suppressed", value: previewRouteSummary.skippedSuppressed, tone: previewRouteSummary.skippedSuppressed ? "bad" : "" },
-        { label: "Invalid", value: previewRouteSummary.skippedInvalid, tone: previewRouteSummary.skippedInvalid ? "bad" : "" },
-        { label: "Skipped", value: previewRouteSummary.skippedFiltered, tone: previewRouteSummary.skippedFiltered ? "warn" : "" },
-        { label: "Sent-log overlap", value: previewRouteSummary.sentLogOverlap, tone: previewRouteSummary.sentLogOverlap ? "bad" : "good" },
-        { label: "Skipped math", value: previewRouteSummary.skippedMathMismatch ? "Mismatch" : "Valid", tone: previewRouteSummary.skippedMathMismatch ? "bad" : "good" },
-      ], "dispatch-metrics dispatch-preview-metrics")
-      : `
-        <section class="dispatch-preview-empty" aria-live="polite">
-          <strong>${escapeHtml(noPreviewTitle)}</strong>
-          <span>${escapeHtml(noPreviewMessage)}</span>
-          <span class="dispatch-preview-source-count">Selected source rows: <strong>${selectedSourceRows.toLocaleString()}</strong> · ${escapeHtml(sourceLabel)}</span>
-        </section>
-      `;
+      ], "dispatch-metrics dispatch-preview-metrics dispatch-preview-metrics-primary")
+      : "";
     setNodeHtml(
       els.leadsImportantDispatchResults,
       `
@@ -4479,8 +4469,22 @@ function renderImportantDispatch(result) {
               <span>${escapeHtml(dispatchPreview ? confirmSafety.message : noPreviewMessage)}</span>
             </section>
             ${previewMetricsMarkup}
-            ${dispatchPreview
-              ? `<div class="dispatch-skip-breakdown">
+            ${dispatchPreview ? `
+              <details class="dispatch-preview-details">
+                <summary>Preview details</summary>
+                ${renderOperatorMetricStrip([
+                  { label: "SendGrid shards", value: previewRouteSummary.shardsSlash },
+                  { label: "Unique", value: previewRouteSummary.uniquePlanned },
+                  { label: "Duplicates", value: previewRouteSummary.duplicatePlanned, tone: previewRouteSummary.duplicatePlanned ? "bad" : "good" },
+                  { label: "Already contacted", value: previewRouteSummary.skippedAlreadyContacted, tone: previewRouteSummary.skippedAlreadyContacted ? "warn" : "" },
+                  { label: "Already sent", value: previewRouteSummary.skippedAlreadySent, tone: previewRouteSummary.skippedAlreadySent ? "warn" : "" },
+                  { label: "Suppressed", value: previewRouteSummary.skippedSuppressed, tone: previewRouteSummary.skippedSuppressed ? "bad" : "" },
+                  { label: "Invalid", value: previewRouteSummary.skippedInvalid, tone: previewRouteSummary.skippedInvalid ? "bad" : "" },
+                  { label: "Skipped", value: previewRouteSummary.skippedFiltered, tone: previewRouteSummary.skippedFiltered ? "warn" : "" },
+                  { label: "Sent-log overlap", value: previewRouteSummary.sentLogOverlap, tone: previewRouteSummary.sentLogOverlap ? "bad" : "good" },
+                  { label: "Skipped math", value: previewRouteSummary.skippedMathMismatch ? "Mismatch" : "Valid", tone: previewRouteSummary.skippedMathMismatch ? "bad" : "good" },
+                ], "dispatch-metrics dispatch-preview-technical-metrics")}
+                <div class="dispatch-skip-breakdown">
                   <span>Already contacted: <strong>${previewRouteSummary.skippedAlreadyContacted.toLocaleString()}</strong></span>
                   <span>Already sent: <strong>${previewRouteSummary.skippedAlreadySent.toLocaleString()}</strong></span>
                   <span>Already queued: <strong>${previewRouteSummary.skippedAlreadyQueued.toLocaleString()}</strong></span>
@@ -4489,14 +4493,15 @@ function renderImportantDispatch(result) {
                   <span>Skipped rows: <strong>${previewRouteSummary.skippedRows.toLocaleString()}</strong></span>
                   <span>Skipped reasons: <strong>${previewRouteSummary.skippedReasonTotal.toLocaleString()}</strong></span>
                   <span>Sent-log overlap: <strong>${previewRouteSummary.sentLogOverlap.toLocaleString()}</strong></span>
-                </div>`
-              : ""}
-            ${dispatchPreview && (previewRouteSummary.skippedAlreadyContacted || previewRouteSummary.skippedAlreadySent)
-              ? `<section class="dispatch-skip-explainer">
-                  <h4>Why only ${previewRouteSummary.uniquePlanned.toLocaleString()}?</h4>
-                  <p>History filter excluded ${previewRouteSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${previewRouteSummary.uniquePlanned.toLocaleString()} cold-safe leads remain. Skipped reason: already_sent ${previewRouteSummary.skippedAlreadySent.toLocaleString()}.</p>
-                </section>`
-              : ""}
+                </div>
+                ${previewRouteSummary.skippedAlreadyContacted || previewRouteSummary.skippedAlreadySent
+                  ? `<section class="dispatch-skip-explainer">
+                      <h4>Why only ${previewRouteSummary.uniquePlanned.toLocaleString()}?</h4>
+                      <p>History filter excluded ${previewRouteSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${previewRouteSummary.uniquePlanned.toLocaleString()} cold-safe leads remain. Skipped reason: already_sent ${previewRouteSummary.skippedAlreadySent.toLocaleString()}.</p>
+                    </section>`
+                  : ""}
+              </details>
+            ` : ""}
           </section>
           ${confirmFeedbackTitle
             ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
@@ -5103,17 +5108,9 @@ function alertLooksLikeNewDispatchSourceWarning(alert = {}, currentSafety = {}, 
 
 function renderLeadsCurrentQueueNote(status = lastLeadsStatus) {
   if (!els.leadsCurrentQueueNote) return;
-  const live = currentLiveDispatchState(status);
-  if (!live.active || live.privatePending <= 0) {
-    setNodeText(els.leadsCurrentQueueNote, "");
-    els.leadsCurrentQueueNote.hidden = true;
-    return;
-  }
-  setNodeText(
-    els.leadsCurrentQueueNote,
-    `Current queue exists: Private JC ${live.privatePending.toLocaleString()} pending. Sender controls are on Dashboard.`,
-  );
-  els.leadsCurrentQueueNote.hidden = false;
+  void status;
+  setNodeText(els.leadsCurrentQueueNote, "");
+  els.leadsCurrentQueueNote.hidden = true;
 }
 
 function privateJcAuthIssueMessage(snapshot = lastSnapshot) {
@@ -5197,37 +5194,45 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
               <button class="btn ${warmRunning ? "btn-danger" : "btn-primary"}" type="button" data-leads-next-action="${escapeHtml(warmStartAction)}" ${warmStartDisabled ? "disabled" : ""}>${escapeHtml(warmStartLabel)}</button>
             </div>
             ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
-            <section class="warm-private-lane-group">
-              <div class="warm-panel-heading">
-                <p class="eyebrow">${checked ? "Warm Private JC Sender History" : "Previous Warm Outreach Run"}</p>
-                <span class="mini-pill">Historical / live lane</span>
-              </div>
-              <p class="muted">This sender history is separate from the current upload workflow and cannot unlock preview, confirmation, or Start.</p>
-              <div class="current-run-metrics warm-lane-metrics">
-                <div><span>Ready / Original</span><strong>${warmOriginal.toLocaleString()}</strong></div>
-                <div><span>Confirmed</span><strong>${laneConfirmed ? "Yes" : "No"}</strong></div>
-                <div><span>Running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
-                <div><span>Sent</span><strong>${warmSent.toLocaleString()}</strong></div>
-                <div><span>Remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
-                <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
-              </div>
-              <div class="warm-live-details">
-                <span><strong>Last sent</strong>${escapeHtml(formatWarmActivity(lane.last_sent_timestamp))}${lane.last_sent_email ? ` · <a href="mailto:${escapeHtml(lane.last_sent_email)}">${escapeHtml(lane.last_sent_email)}</a>` : ""}</span>
-                <span><strong>Next queued</strong>${escapeHtml(lane.next_queued_email || "None")}</span>
-              </div>
-            </section>
-            <section class="warm-run-timeline">
-              <div class="warm-panel-heading"><p class="eyebrow">Warm run timeline</p><span class="mini-pill">Live files</span></div>
-              <div class="warm-timeline-list">
-                ${warmTimeline.length ? warmTimeline.map((event) => `
-                  <div class="warm-timeline-event">
-                    <strong>${escapeHtml(event.type || "EVENT")}</strong>
-                    <span>${escapeHtml(event.email || event.reason || "Warm worker event")}</span>
-                    <time>${escapeHtml(formatWarmActivity(event.timestamp || ""))}</time>
-                  </div>
-                `).join("") : `<span class="muted">No warm run events yet.</span>`}
-              </div>
-            </section>
+            <div class="warm-live-summary" aria-label="Warm sender status">
+              <span>Sent <strong>${warmSent.toLocaleString()}</strong></span>
+              <span>Remaining <strong>${warmRemaining.toLocaleString()}</strong></span>
+              <span>Running <strong>${warmRunning ? "Yes" : "No"}</strong></span>
+            </div>
+            <details class="warm-operations-details">
+              <summary>Warm sender details</summary>
+              <section class="warm-private-lane-group">
+                <div class="warm-panel-heading">
+                  <p class="eyebrow">${checked ? "Warm Private JC Sender History" : "Previous Warm Outreach Run"}</p>
+                  <span class="mini-pill">Historical / live lane</span>
+                </div>
+                <p class="muted">This sender history is separate from the current upload workflow and cannot unlock preview, confirmation, or Start.</p>
+                <div class="current-run-metrics warm-lane-metrics">
+                  <div><span>Ready / Original</span><strong>${warmOriginal.toLocaleString()}</strong></div>
+                  <div><span>Confirmed</span><strong>${laneConfirmed ? "Yes" : "No"}</strong></div>
+                  <div><span>Running</span><strong>${warmRunning ? "Yes" : "No"}</strong></div>
+                  <div><span>Sent</span><strong>${warmSent.toLocaleString()}</strong></div>
+                  <div><span>Remaining</span><strong>${warmRemaining.toLocaleString()}</strong></div>
+                  <div><span>Cap</span><strong>${warmCap > 0 ? warmCap.toLocaleString() : "-"}</strong></div>
+                </div>
+                <div class="warm-live-details">
+                  <span><strong>Last sent</strong>${escapeHtml(formatWarmActivity(lane.last_sent_timestamp))}${lane.last_sent_email ? ` · <a href="mailto:${escapeHtml(lane.last_sent_email)}">${escapeHtml(lane.last_sent_email)}</a>` : ""}</span>
+                  <span><strong>Next queued</strong>${escapeHtml(lane.next_queued_email || "None")}</span>
+                </div>
+              </section>
+              <section class="warm-run-timeline">
+                <div class="warm-panel-heading"><p class="eyebrow">Warm run timeline</p><span class="mini-pill">Live files</span></div>
+                <div class="warm-timeline-list">
+                  ${warmTimeline.length ? warmTimeline.map((event) => `
+                    <div class="warm-timeline-event">
+                      <strong>${escapeHtml(event.type || "EVENT")}</strong>
+                      <span>${escapeHtml(event.email || event.reason || "Warm worker event")}</span>
+                      <time>${escapeHtml(formatWarmActivity(event.timestamp || ""))}</time>
+                    </div>
+                  `).join("") : `<span class="muted">No warm run events yet.</span>`}
+                </div>
+              </section>
+            </details>
           </section>
         </article>
       `,
@@ -5303,11 +5308,18 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
           <div><span>Input</span><strong>${inputRows.toLocaleString()}</strong></div>
           <div><span>Cleaned</span><strong>${cleanedRows.toLocaleString()}</strong></div>
           <div><span>Rejected</span><strong>${rejectedRows.toLocaleString()}</strong></div>
-          <div><span>Triage Keep</span><strong>${keepRows.toLocaleString()}</strong></div>
-          <div><span>Triage Reject</span><strong>${rejectRows.toLocaleString()}</strong></div>
-          <div><span>Quarantine</span><strong>${quarantineRows.toLocaleString()}</strong></div>
-          <div><span>Eligible checked output</span><strong>${checkedEligibleRows.toLocaleString()}</strong></div>
+          <div><span>Keep</span><strong>${keepRows.toLocaleString()}</strong></div>
+          <div><span>Dispatch eligible</span><strong>${checkedEligibleRows.toLocaleString()}</strong></div>
         </div>
+        ${checkReadyForCounts ? `
+          <details class="current-run-details">
+            <summary>Triage details</summary>
+            <div class="current-run-detail-grid">
+              <span>Triage reject <strong>${rejectRows.toLocaleString()}</strong></span>
+              <span>Quarantine <strong>${quarantineRows.toLocaleString()}</strong></span>
+            </div>
+          </details>
+        ` : ""}
         ${checkReadyForCounts ? "" : `<div class="operator-empty-state operator-empty-state-inline source-summary-empty"><strong>Source rows 0</strong><span>Upload and check the selected source before previewing dispatch.</span></div>`}
         ${authIssue ? `<div class="current-run-auth-warning">${escapeHtml(authIssue)}</div>` : ""}
         ${currentBlocker ? `<div class="current-run-summary-line current-run-blocker"><span>${escapeHtml(currentBlocker)}</span></div>` : ""}
@@ -5385,15 +5397,13 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
   const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
   const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
-  const confirmedQueue = confirmedDispatchQueueState(status);
-  const currentConfirmedQueueExists = confirmedQueue.liveMatches && confirmedQueue.totalQueued > 0;
   const hasUpload = Boolean(state.activeCheck?.job_id || latestCheck?.generated_at_utc);
   const checkFailed = state.checkStatus === "failed";
   const triageLocked = state.checkStatus !== "completed";
   const previewBlocked = currentRunPreviewBlockMessage(dispatchSource, state);
   const tasks = [
     {
-      step: "Upload",
+      step: "Source",
       status: hasUpload ? "Complete" : "Waiting",
       detail: hasUpload ? "A source is staged for the selected upload type." : "Choose a CSV/XLSX source.",
       tone: hasUpload ? "good" : "neutral",
@@ -5421,12 +5431,6 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
       status: confirmReady ? "Ready" : "Locked",
       detail: "Confirm writes queues only after preview passes.",
       tone: confirmReady ? "good" : "neutral",
-    },
-    {
-      step: "Start",
-      status: currentConfirmedQueueExists ? "Ready" : "Locked",
-      detail: currentConfirmedQueueExists ? "Start senders from the Dashboard sender table." : "No current workflow-scoped confirmed queue is ready to start.",
-      tone: currentConfirmedQueueExists ? "good" : "neutral",
     },
   ];
   setNodeHtml(
@@ -5473,15 +5477,11 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
             ${warmResearchMetricMarkup(report)}
             ${workflow.valid ? "" : `<p class="muted">Current metrics are cleared and actions remain locked until a valid current upload completes.</p>`}
             ${historicalReport?.generated_at_utc ? `
-              <section class="previous-warm-run">
-                <div class="warm-panel-heading">
-                  <div>
-                    <p class="eyebrow">Previous Warm Outreach Run</p>
-                    <strong>Historical results — not current workflow state</strong>
-                  </div>
-                </div>
+              <details class="previous-warm-run">
+                <summary>Previous Warm Outreach Run</summary>
+                <p class="muted">Historical results — not current workflow state</p>
                 ${warmResearchMetricMarkup(historicalReport)}
-              </section>
+              </details>
             ` : ""}
           </section>
           <aside class="warm-safety-card">
@@ -5499,16 +5499,12 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
     return;
   }
   const state = currentRunWorkflowState(status);
-  const latestTriage = state.latestTriage || {};
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
   const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
   const dispatchSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
   const confirmedQueue = confirmedDispatchQueueState(status);
   const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
     ? "New staged run not ready — previous dispatch is queued."
-    : "";
-  const triageCounts = state.checkStatus === "completed" && state.triageStatus === "completed" && latestTriage?.generated_at_utc
-    ? `input ${formatOperatorCount(latestTriage.total_input_rows)} · keep ${formatOperatorCount(latestTriage.keep_count)} · reject ${formatOperatorCount(latestTriage.reject_count)} · review ${formatOperatorCount(latestTriage.quarantine_count)}`
     : "";
   const headline = dispatchSummary.sentLogOverlap > 0
     ? `BLOCKED — Planned recipients overlap authoritative sent/contact logs: ${dispatchSummary.sentLogOverlap.toLocaleString()}.`
@@ -5523,14 +5519,9 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
     els.leadsWorkflowStatusBanner,
     `
       <div class="workflow-banner-inline">
-        <span class="eyebrow">Safety Banner</span>
+        <span class="eyebrow">Current step</span>
         <strong>${escapeHtml(headline)}</strong>
-        <span class="workflow-banner-chip">Check: ${escapeHtml(workflowStatusLabel(state.checkStatus))}</span>
-        <span class="workflow-banner-chip">Triage: ${escapeHtml(workflowStatusLabel(state.triageStatus))}</span>
-        <span class="workflow-banner-chip">Preview: ${escapeHtml(workflowStatusLabel(state.previewStatus))}</span>
-        <span class="workflow-banner-chip">Confirm: ${escapeHtml(workflowStatusLabel(state.confirmStatus))}</span>
       </div>
-      ${triageCounts ? `<div class="workflow-banner-meta">${escapeHtml(triageCounts)}</div>` : ""}
       ${stagedRunWarning ? `<div class="workflow-staged-warning">${escapeHtml(stagedRunWarning)}</div>` : ""}
     `,
   );

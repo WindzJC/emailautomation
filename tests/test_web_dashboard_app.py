@@ -10,6 +10,7 @@ import settings
 APP_JS = Path(__file__).resolve().parents[1] / "web_dashboard" / "app.js"
 INDEX_HTML = Path(__file__).resolve().parents[1] / "web_dashboard" / "index.html"
 STYLES_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "styles.css"
+TAILWIND_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "tailwind.css"
 LIVE_DASHBOARD_PY = Path(__file__).resolve().parents[1] / "live_dashboard.py"
 REACT_MAIN = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "main.jsx"
 
@@ -139,19 +140,17 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("Historical results — not current workflow state", banner_body)
         self.assertIn("workflow.valid && Number(report.warm_email_preview_rows || 0) > 0", banner_body)
 
-    def test_cold_start_requires_current_confirmed_matching_queue(self) -> None:
+    def test_cold_workflow_tracker_ends_at_confirm_without_changing_queue_safety(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         tracker_start = source.index("function renderLeadsWorkflowTaskList")
         tracker_end = source.index("function renderLeadsWorkflowStatusBanner", tracker_start)
         tracker_body = source[tracker_start:tracker_end]
 
-        self.assertIn("const confirmedQueue = confirmedDispatchQueueState(status)", tracker_body)
-        self.assertIn(
-            "const currentConfirmedQueueExists = confirmedQueue.liveMatches && confirmedQueue.totalQueued > 0",
-            tracker_body,
-        )
-        self.assertIn('status: currentConfirmedQueueExists ? "Ready" : "Locked"', tracker_body)
+        for step in ['step: "Source"', 'step: "Check"', 'step: "Triage"', 'step: "Preview"', 'step: "Confirm"']:
+            self.assertIn(step, tracker_body)
+        self.assertNotIn('step: "Start"', tracker_body)
         self.assertNotIn("const liveQueueExists = liveRecipientQueueTotal(status) > 0", tracker_body)
+        self.assertIn("function confirmedDispatchQueueState", source)
 
     def test_cold_and_warm_current_reports_remain_workflow_scoped(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -434,12 +433,11 @@ class WebDashboardAppTests(unittest.TestCase):
             "Preview locked",
             "button.classList.toggle(\"is-locked\"",
             "Locked until Check/Triage completes.",
-            "step: \"Upload\"",
+            "step: \"Source\"",
             "step: \"Check\"",
             "step: \"Triage\"",
             "step: \"Preview\"",
             "step: \"Confirm\"",
-            "step: \"Start\"",
         ]:
             self.assertIn(expected, source)
         self.assertNotIn('state === "processing" ? "Processing / checking" : "Not started"', source)
@@ -527,7 +525,7 @@ class WebDashboardAppTests(unittest.TestCase):
         render_start = source.index("function renderImportantDispatch")
         render_end = source.index("function renderLeadsShardResults", render_start)
         render_body = source[render_start:render_end]
-        self.assertIn("Selected source rows", render_body)
+        self.assertIn("dispatchPreviewRouteSummary(dispatchPreview, dispatchSource)", render_body)
         self.assertIn("Writable", render_body)
         html = INDEX_HTML.read_text(encoding="utf-8")
         self.assertIn("Dispatch Preview", html)
@@ -864,7 +862,7 @@ class WebDashboardAppTests(unittest.TestCase):
         leads_start = html.index('<section id="leads-view"')
         leads_end = html.index("</main>", leads_start)
         leads_html = html[leads_start:leads_end]
-        styles = STYLES_CSS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
 
         for expected in [
             "Leads Operations",
@@ -880,7 +878,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-important-upload-type",
             "leads-important-upload-check-btn",
             "leads-important-check-btn",
-            "leads-important-dispatch-preview-top-btn",
             "Check Leads",
             "leads-control-check-chips",
             "Select source and mode",
@@ -900,7 +897,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-page-title",
             "leads-current-queue-note",
             "leads-dispatch-current-queue-note",
-            "Finish current JC queue before preparing the next dispatch.",
+            "Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch.",
             "Changing source changes the eligible count.",
             "leads-operator-status-strip",
             "leads-workflow-status-banner",
@@ -964,7 +961,12 @@ class WebDashboardAppTests(unittest.TestCase):
         action_end = leads_html.index("</div>", action_start)
         action_html = leads_html[action_start:action_end]
         self.assertLess(action_html.index("Check Leads"), action_html.index("Upload &amp; Check"))
-        self.assertLess(action_html.index("Upload &amp; Check"), action_html.index("Preview Dispatch"))
+        self.assertLess(
+            leads_html.index('id="leads-important-upload-check-btn"'),
+            leads_html.index('id="leads-important-dispatch-preview-btn"'),
+        )
+        self.assertNotIn("leads-important-dispatch-preview-top-btn", leads_html)
+        self.assertIn('<details class="campaign-control-details">', leads_html)
 
         for expected in [
             "renderLeadsCurrentRunPanel",
@@ -992,17 +994,15 @@ class WebDashboardAppTests(unittest.TestCase):
             "Cleaned",
             "Rejected",
             "Triage Keep",
-            "Triage Reject",
-            "Eligible checked output",
+            "Triage reject",
+            "Dispatch eligible",
             "Check Leads",
             "Triage",
-            "Upload",
+            "Source",
             "Check",
             "Preview",
             "Confirm",
-            "Start",
             "Locked until Check/Triage completes.",
-            "No current workflow-scoped confirmed queue is ready to start.",
             "safer_recontact_source_summary",
             "lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary",
             "active history ·",
@@ -1014,8 +1014,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Counts below describe the current checked and triaged source only.",
             "Source rows 0 · Not ready for preview until Upload & Check completes.",
             "leadsControlCheckResult",
-            "Current queue exists: Private JC",
-            "Sender controls are on Dashboard.",
+            "Private JC has an unfinished recipient queue.",
             "Reason ledger and queues",
             "Selected source has",
             "broader than the confirmed safe source",
@@ -1024,7 +1023,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "Preview blocked: source file missing",
             "renderLeadsOperatorStatusStrip",
             "renderLeadsWorkflowStatusBanner",
-            "Safety Banner",
             "renderLeadsActiveAlerts",
             "leads-alert-summary-row",
             "Safety messages",
@@ -1046,7 +1044,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "SendGrid added 0 rows because the selected rows were excluded before queue write",
             "Advanced file details",
             "const previewMetricsMarkup = dispatchPreview",
-            "dispatch-preview-empty",
             "Sent-log overlap",
             "Skipped math",
             "Review required",
@@ -1055,10 +1052,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()}",
             "Use Safer Pool",
             "workflow-banner-inline",
-            "workflow-banner-chip",
+            "Current step",
             "leads-control-check-result",
-            "dispatch-preview-empty",
-            "Selected source rows:",
         ]:
             self.assertIn(expected, source)
 
@@ -1093,7 +1088,7 @@ class WebDashboardAppTests(unittest.TestCase):
             ".workflow-banner-meta",
             ".leads-control-check-chips",
             ".leads-source-actions-label",
-            ".dispatch-preview-empty",
+            "#leads-view.react-leads-page:not(.warm-research-mode) .react-lead-workspace.leads-command-main",
             ".btn.is-loading::before",
             ".btn.is-next-action:not(:disabled)",
             ".dispatch-next-step-banner",
