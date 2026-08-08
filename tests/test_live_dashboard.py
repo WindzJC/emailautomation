@@ -3159,6 +3159,138 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
 
+    def test_staged_status_enriches_matching_legacy_preview_source_exists(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            keep_path = tmp / "leads_triaged_keep.csv"
+            triage_reject_path = tmp / "leads_triaged_reject.csv"
+            quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            self._write_csv(input_path, ["Email"], [{"Email": "reader@example.test"}])
+            self._write_csv(rejected_path, ["Email"], [])
+            self._write_csv(
+                keep_path,
+                ["Email", "Status"],
+                [{"Email": "reader@example.test", "Status": "KEEP"}],
+            )
+            self._write_csv(triage_reject_path, ["Email"], [])
+            self._write_csv(quarantine_path, ["Email"], [])
+            source_status = live_dashboard._dispatch_source_status_for_path(
+                path=keep_path,
+                mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                source_resolution="latest_completed_staged_run",
+                run_id="check_current",
+            )
+            legacy_preview = {
+                "preview_id": "dispatch_preview_legacy",
+                "generated_at_utc": "2026-08-08T12:30:00+00:00",
+                "campaign_type": "cold",
+                "dispatch_source_mode": source_status["dispatch_source_mode"],
+                "dispatch_source_path": source_status["dispatch_source_path"],
+                "dispatch_source_row_count": source_status["dispatch_source_row_count"],
+                "dispatch_eligible_row_count": source_status["dispatch_eligible_row_count"],
+                "verification_file_mtime": source_status["verification_file_mtime"],
+                "dispatch_cap": "all",
+            }
+            job = {
+                "job_id": "check_current",
+                "status": "completed",
+                "completed_at_utc": "2026-08-08T12:00:00+00:00",
+                "output_path": str(input_path),
+                "rejected_path": str(rejected_path),
+                "auto_triage_status": "completed",
+                "auto_triage_keep_path": str(keep_path),
+                "auto_triage_rejected_path": str(triage_reject_path),
+                "auto_triage_quarantine_path": str(quarantine_path),
+                "auto_triage_report": {
+                    "generated_at_utc": "2026-08-08T12:00:00+00:00",
+                    "keep_count": 1,
+                    "reject_count": 0,
+                    "quarantine_count": 0,
+                },
+                "auto_dispatch_preview": legacy_preview,
+            }
+            staged_source = {
+                "source_resolution": "latest_completed_staged_run",
+                "run_id": job["job_id"],
+                "job": job,
+                "path": keep_path,
+                "paths": {
+                    "input": input_path,
+                    "rejected": rejected_path,
+                    "keep": keep_path,
+                    "triage_reject": triage_reject_path,
+                    "triage_quarantine": quarantine_path,
+                },
+            }
+            status = {
+                "dispatch_source_mode": important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                "dispatch_source_options": {},
+                "latest_master_check": {},
+                "latest_lead_triage": {},
+                "latest_auto_dispatch_preview": {},
+                "latest_dispatch": {},
+            }
+
+            with patch.object(
+                live_dashboard,
+                "_latest_fast_triage_keep_source",
+                return_value=staged_source,
+            ):
+                hydrated = live_dashboard._apply_latest_staged_run_status(status)
+
+            self.assertTrue(hydrated["latest_auto_dispatch_preview_current"])
+            self.assertIs(
+                True,
+                hydrated["latest_auto_dispatch_preview"]["dispatch_source_exists"],
+            )
+            self.assertEqual(
+                str(keep_path),
+                hydrated["latest_auto_dispatch_preview"]["dispatch_source_path"],
+            )
+            self.assertEqual(
+                "latest_completed_staged_run",
+                hydrated["dispatch_source"]["source_resolution"],
+            )
+
+    def test_legacy_preview_with_stale_source_path_is_not_enriched_or_current(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            keep_path = tmp / "current" / "leads_triaged_keep.csv"
+            keep_path.parent.mkdir(parents=True)
+            self._write_csv(
+                keep_path,
+                ["Email", "Status"],
+                [{"Email": "reader@example.test", "Status": "KEEP"}],
+            )
+            source_status = live_dashboard._dispatch_source_status_for_path(
+                path=keep_path,
+                mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                source_resolution="latest_completed_staged_run",
+                run_id="check_current",
+            )
+            stale_preview = {
+                "preview_id": "dispatch_preview_stale",
+                "generated_at_utc": "2026-08-08T12:30:00+00:00",
+                "campaign_type": "cold",
+                "dispatch_source_mode": source_status["dispatch_source_mode"],
+                "dispatch_source_path": str(tmp / "older" / "leads_triaged_keep.csv"),
+                "dispatch_source_row_count": source_status["dispatch_source_row_count"],
+                "dispatch_eligible_row_count": source_status["dispatch_eligible_row_count"],
+                "verification_file_mtime": source_status["verification_file_mtime"],
+                "dispatch_cap": "all",
+            }
+
+            candidate, current = live_dashboard._preview_summary_for_current_staged_source(
+                stale_preview,
+                source_status=source_status,
+                source_generated_at="2026-08-08T12:00:00+00:00",
+            )
+
+            self.assertFalse(current)
+            self.assertNotIn("dispatch_source_exists", candidate)
+
     def test_lead_check_status_running_state_when_job_is_active(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             run_dir = Path(tmpdir) / "check_active"
@@ -6946,6 +7078,14 @@ class LiveDashboardTests(unittest.TestCase):
             preview = {
                 "preview_id": "dispatch_preview_blocked",
                 "preview_path": str(tmp / "dispatch_preview_blocked.json"),
+                "campaign_type": "cold",
+                "dispatch_source_mode": important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                "dispatch_source_path": str(keep_path),
+                "dispatch_source_exists": True,
+                "dispatch_source_row_count": 2,
+                "dispatch_eligible_row_count": 2,
+                "dispatch_cap": "all",
+                "verification_file_mtime": "2026-08-08T12:00:00+00:00",
                 "rows_written_per_queue": {"private_jc": 2, "sendgrid_1": 1},
                 "suppressed_skipped": 0,
                 "suppression_summary": {},
@@ -6970,6 +7110,12 @@ class LiveDashboardTests(unittest.TestCase):
                 )
 
         self.assertTrue(summary["any_sender_running"])
+        self.assertIs(True, summary["dispatch_source_exists"])
+        self.assertEqual("all", summary["dispatch_cap"])
+        self.assertEqual(
+            "2026-08-08T12:00:00+00:00",
+            summary["verification_file_mtime"],
+        )
         self.assertEqual(["sendgrid_annette"], summary["active_profiles"])
         self.assertFalse(summary["manual_rebuild_allowed"])
         self.assertIn("active senders", summary["message"])

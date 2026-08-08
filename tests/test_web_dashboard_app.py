@@ -4,6 +4,8 @@ from pathlib import Path
 import re
 import unittest
 
+import settings
+
 
 APP_JS = Path(__file__).resolve().parents[1] / "web_dashboard" / "app.js"
 INDEX_HTML = Path(__file__).resolve().parents[1] / "web_dashboard" / "index.html"
@@ -497,9 +499,24 @@ class WebDashboardAppTests(unittest.TestCase):
             "source.dispatch_source_row_count",
             "source.dispatch_eligible_row_count",
             "source.verification_file_mtime",
+            "els.leadsImportantDispatchCap",
+            "selectedImportantDispatchCampaignType()",
         ]:
             self.assertIn(expected, plan_body)
         self.assertLess(plan_body.index("source.dispatch_source_path"), plan_body.index("els.leadsImportantDispatchCap"))
+
+        persisted_start = source.index("function persistedImportantDispatchPreviewKey")
+        persisted_end = source.index("function hydrateImportantDispatchPreviewFromStatus", persisted_start)
+        persisted_body = source[persisted_start:persisted_end]
+        self.assertIn("preview.dispatch_source_exists", persisted_body)
+        self.assertIn("preview.dispatch_cap", persisted_body)
+        self.assertIn("preview.campaign_type", persisted_body)
+
+        hydrate_start = persisted_end
+        hydrate_end = source.index("function dispatchSummaryMatchesCurrentSource", hydrate_start)
+        hydrate_body = source[hydrate_start:hydrate_end]
+        self.assertIn("persistedKey !== currentKey", hydrate_body)
+        self.assertNotIn("persistedKey == currentKey", hydrate_body)
 
         render_start = source.index("function renderImportantDispatch")
         render_end = source.index("function renderLeadsShardResults", render_start)

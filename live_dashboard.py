@@ -756,8 +756,11 @@ def _auto_dispatch_preview_summary(
         "campaign_type": str(preview.get("campaign_type") or CAMPAIGN_TYPE_COLD),
         "dispatch_source_path": str(preview.get("dispatch_source_path") or keep_path),
         "dispatch_source_mode": str(preview.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP),
+        "dispatch_source_exists": bool(preview.get("dispatch_source_exists")),
         "dispatch_source_row_count": int(preview.get("dispatch_source_row_count") or triage_report.get("keep_count") or 0),
         "dispatch_eligible_row_count": int(preview.get("dispatch_eligible_row_count") or triage_report.get("keep_count") or 0),
+        "dispatch_cap": str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL),
+        "verification_file_mtime": str(preview.get("verification_file_mtime") or ""),
         "total_keep_rows": int(triage_report.get("keep_count") or preview.get("dispatch_source_row_count") or 0),
         "rejected_rows": int(triage_report.get("reject_count") or 0),
         "quarantine_rows": int(triage_report.get("quarantine_count") or 0),
@@ -2916,6 +2919,50 @@ def _summary_current_for_staged_source(
     return True
 
 
+def _preview_summary_for_current_staged_source(
+    summary: dict[str, object],
+    *,
+    source_status: dict[str, object],
+    source_generated_at: object,
+) -> tuple[dict[str, object], bool]:
+    enriched = dict(summary)
+    source_path = Path(str(source_status.get("dispatch_source_path") or ""))
+    if not _summary_current_for_staged_source(
+        enriched,
+        source_path=source_path,
+        source_generated_at=source_generated_at,
+        timestamp_reader=_preview_summary_timestamp,
+    ):
+        return enriched, False
+
+    source_exists = bool(source_status.get("dispatch_source_exists"))
+    if not source_exists:
+        return enriched, False
+    if str(enriched.get("dispatch_source_mode") or "").strip().lower() != str(
+        source_status.get("dispatch_source_mode") or ""
+    ).strip().lower():
+        return enriched, False
+    if not _dashboard_paths_match(enriched.get("dispatch_source_path"), source_path):
+        return enriched, False
+    for key in ("dispatch_source_row_count", "dispatch_eligible_row_count"):
+        try:
+            if int(enriched.get(key)) != int(source_status.get(key)):
+                return enriched, False
+        except (TypeError, ValueError):
+            return enriched, False
+    if str(enriched.get("verification_file_mtime") or "") != str(
+        source_status.get("verification_file_mtime") or ""
+    ):
+        return enriched, False
+
+    if "dispatch_source_exists" in enriched:
+        if enriched.get("dispatch_source_exists") is not source_exists:
+            return enriched, False
+    else:
+        enriched["dispatch_source_exists"] = source_exists
+    return enriched, True
+
+
 def _read_dispatch_source_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     if not path.exists():
         return [], []
@@ -3055,11 +3102,10 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     source_options = dict(status.get("dispatch_source_options") or {})
     source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = source_status
     latest_preview = dict(job.get("auto_dispatch_preview") or status.get("latest_auto_dispatch_preview") or {})
-    latest_preview_current = _summary_current_for_staged_source(
+    latest_preview, latest_preview_current = _preview_summary_for_current_staged_source(
         latest_preview,
-        source_path=keep_path,
+        source_status=source_status,
         source_generated_at=triage_generated_at,
-        timestamp_reader=_preview_summary_timestamp,
     )
     latest_dispatch = status.get("latest_dispatch") if isinstance(status.get("latest_dispatch"), dict) else {}
     latest_dispatch_current = _summary_current_for_staged_source(

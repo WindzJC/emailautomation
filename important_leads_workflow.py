@@ -3448,6 +3448,7 @@ def _build_dispatch_plan(
             "dispatch_source_detail": dispatch_source_detail,
             "dispatch_source_path": str(source_path),
             "dispatch_source_label": str(source_state["dispatch_source_label"]),
+            "dispatch_source_exists": bool(source_state["dispatch_source_exists"]),
             "dispatch_source_row_count": int(source_state["dispatch_source_row_count"]),
             "dispatch_eligible_row_count": eligible_rows_total,
             "input_rows": eligible_rows_total,

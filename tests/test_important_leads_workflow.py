@@ -1883,13 +1883,17 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
             self.assertEqual("cold", preview["campaign_type"])
             self.assertEqual("triaged_keep", preview["dispatch_source_mode"])
+            self.assertIs(True, preview["dispatch_source_exists"])
             self.assertEqual(1, preview["private_jc_planned_count"])
             self.assertEqual(2, preview["sendgrid_planned_count"])
             self.assertEqual(3, preview["total_planned_unique_count"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
             self.assertEqual(3, preview["total_rows_that_would_be_written"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
-            self.assertTrue((preview_dir / f"{preview['preview_id']}.json").exists())
+            preview_path = preview_dir / f"{preview['preview_id']}.json"
+            self.assertTrue(preview_path.exists())
+            persisted_preview = json.loads(preview_path.read_text(encoding="utf-8"))
+            self.assertIs(True, persisted_preview["dispatch_source_exists"])
             self.assertEqual(jc_before, jc_queue.read_text(encoding="utf-8"))
             self.assertEqual(sg_before, [path.read_text(encoding="utf-8") for path in sg_queues])
 
