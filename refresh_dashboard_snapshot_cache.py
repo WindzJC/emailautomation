@@ -3,14 +3,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 from time import perf_counter
 
 import live_dashboard as dashboard
 
-CACHE_PATH = Path(
-    "/opt/astra/emailautomation/data/live_dashboard_snapshot_cache.json"
-)
+CACHE_PATH = dashboard.DASHBOARD_SNAPSHOT_CACHE_PATH
 
 
 def main() -> None:

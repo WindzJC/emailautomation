@@ -4423,22 +4423,35 @@ def auth_logout(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "message": message, **_dashboard_auth_response()})
 
 
-@app.get("/api/snapshot")
-def snapshot(
-    hours: int = Query(default=24, ge=1, le=168),
-    tail_lines: int = Query(default=12, ge=4, le=50),
-) -> dict[str, object]:
-    cache_path = Path(
-        "/opt/astra/emailautomation/data/live_dashboard_snapshot_cache.json"
-    )
+DASHBOARD_SNAPSHOT_CACHE_PATH = Path(
+    "/opt/astra/emailautomation/data/live_dashboard_snapshot_cache.json"
+)
+
+
+def _load_cached_live_snapshot() -> dict[str, object] | None:
     try:
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        payload = json.loads(DASHBOARD_SNAPSHOT_CACHE_PATH.read_text(encoding="utf-8"))
         cached_snapshot = payload.get("snapshot")
         if isinstance(cached_snapshot, dict):
             return cached_snapshot
     except (OSError, TypeError, json.JSONDecodeError):
         pass
-    return _build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
+    return None
+
+
+def _load_or_build_live_snapshot(*, activity_hours: int, tail_lines: int) -> dict[str, object]:
+    cached_snapshot = _load_cached_live_snapshot()
+    if cached_snapshot is not None:
+        return cached_snapshot
+    return _build_live_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
+
+
+@app.get("/api/snapshot")
+def snapshot(
+    hours: int = Query(default=24, ge=1, le=168),
+    tail_lines: int = Query(default=12, ge=4, le=50),
+) -> dict[str, object]:
+    return _load_or_build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
 
 
 def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
@@ -7056,7 +7069,7 @@ async def websocket_snapshot_stream(
     try:
         while True:
             snapshot = await asyncio.to_thread(
-                _build_live_snapshot,
+                _load_or_build_live_snapshot,
                 activity_hours=hours,
                 tail_lines=tail_lines,
             )

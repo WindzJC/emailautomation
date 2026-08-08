@@ -2819,6 +2819,81 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(row["EmailSubject"], message["Subject"])
         self.assertNotIn(send_shard.PITCH_JC_BODY, body)
 
+    def test_private_preview_skips_send_only_mime_and_signature_attachment_work(self) -> None:
+        merge_fields = {
+            "FirstName": "Synthetic",
+            "AuthorName": "Synthetic Author",
+            "AuthorEmail": "synthetic@example.test",
+            "BookTitle": "Synthetic Book",
+            "PersonalizedOpeningLine": "I reviewed the available information.",
+        }
+        pitch = send_shard.PITCHES["pitch_jc"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            signature_path = Path(tmpdir) / "signature.png"
+            signature_path.write_bytes(b"synthetic-signature")
+            with patch.object(send_shard, "build_message", side_effect=AssertionError("MIME build must not run")):
+                message, subject, body, html_body, cid = send_shard.build_message_for_runtime(
+                    "sender@example.test",
+                    "synthetic@example.test",
+                    "Synthetic",
+                    "Synthetic Book",
+                    pitch["subject"],
+                    pitch["body"],
+                    "sender@example.test",
+                    signature_file=signature_path,
+                    merge_fields=merge_fields,
+                    subject_fallback=pitch.get("subject_fallback", ""),
+                    body_fallback=pitch.get("body_fallback", ""),
+                    preview_only=True,
+                )
+
+        self.assertIsNone(message)
+        self.assertEqual("", html_body)
+        self.assertIsNone(cid)
+        self.assertIn("Synthetic Book", subject)
+        self.assertIn("Synthetic", body)
+
+    def test_private_preview_subject_and_body_match_real_message_rendering(self) -> None:
+        merge_fields = {
+            "FirstName": "Synthetic",
+            "AuthorName": "Synthetic Author",
+            "AuthorEmail": "synthetic@example.test",
+            "BookTitle": "Synthetic Book",
+            "PersonalizedOpeningLine": "I reviewed the available information.",
+        }
+        pitch = send_shard.PITCHES["pitch_jc"]
+        common_args = (
+            "sender@example.test",
+            "synthetic@example.test",
+            "Synthetic",
+            "Synthetic Book",
+            pitch["subject"],
+            pitch["body"],
+            "sender@example.test",
+        )
+        common_kwargs = {
+            "merge_fields": merge_fields,
+            "subject_fallback": pitch.get("subject_fallback", ""),
+            "body_fallback": pitch.get("body_fallback", ""),
+        }
+
+        _message, sent_subject, sent_body, _html, _cid = send_shard.build_message_for_runtime(
+            *common_args,
+            **common_kwargs,
+        )
+        preview_message, preview_subject, preview_body, preview_html, preview_cid = send_shard.build_message_for_runtime(
+            *common_args,
+            **common_kwargs,
+            preview_only=True,
+        )
+
+        self.assertIsNone(preview_message)
+        self.assertEqual("", preview_html)
+        self.assertIsNone(preview_cid)
+        self.assertEqual(sent_subject, preview_subject)
+        self.assertEqual(sent_body, preview_body)
+
     def test_warm_pre_rendered_build_failure_preserves_exact_queue_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

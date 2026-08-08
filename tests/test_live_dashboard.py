@@ -7240,7 +7240,10 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertNotIn("private_jc_warm", dashboard_core.START_ALL_PROFILES)
 
     def test_systemd_dashboard_snapshot_uses_backend_profile_status(self) -> None:
-        profile_snapshots = [object(), object()]
+        profile_snapshots = [
+            SimpleNamespace(name="private_jc"),
+            SimpleNamespace(name="sendgrid_annette"),
+        ]
         base_snapshot = {"profiles": []}
         with patch.object(
             live_dashboard.runtime_control,
@@ -7271,6 +7274,83 @@ class LiveDashboardTests(unittest.TestCase):
             tail_lines=5,
             profile_snapshots=profile_snapshots,
         )
+
+    def test_cached_snapshot_is_reused_without_full_rebuild(self) -> None:
+        cached_snapshot = {"profiles": [{"name": "private_jc"}], "source": "cache"}
+        with patch.object(
+            live_dashboard,
+            "_load_cached_live_snapshot",
+            return_value=cached_snapshot,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("full snapshot build must not run when cache is available"),
+        ):
+            snapshot = live_dashboard._load_or_build_live_snapshot(
+                activity_hours=24,
+                tail_lines=12,
+            )
+
+        self.assertIs(cached_snapshot, snapshot)
+
+    def test_missing_cached_snapshot_falls_back_to_full_rebuild(self) -> None:
+        rebuilt_snapshot = {"profiles": [], "source": "live"}
+        with patch.object(
+            live_dashboard,
+            "_load_cached_live_snapshot",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=rebuilt_snapshot,
+        ) as build_snapshot:
+            snapshot = live_dashboard._load_or_build_live_snapshot(
+                activity_hours=6,
+                tail_lines=5,
+            )
+
+        self.assertIs(rebuilt_snapshot, snapshot)
+        build_snapshot.assert_called_once_with(activity_hours=6, tail_lines=5)
+
+    def test_websocket_snapshot_stream_uses_cached_loader(self) -> None:
+        cached_snapshot = {"profiles": [{"name": "private_jc"}], "source": "cache"}
+
+        class DisconnectAfterFirstSnapshot:
+            accepted = False
+            payload = None
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+            async def send_json(self, payload) -> None:
+                self.payload = payload
+                raise live_dashboard.WebSocketDisconnect()
+
+        websocket = DisconnectAfterFirstSnapshot()
+        with patch.object(
+            live_dashboard,
+            "_dashboard_auth_disabled",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_load_or_build_live_snapshot",
+            return_value=cached_snapshot,
+        ) as load_snapshot, patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("WebSocket must use the cache-aware loader"),
+        ):
+            asyncio.run(
+                live_dashboard.websocket_snapshot_stream(
+                    websocket,
+                    hours=24,
+                    tail_lines=12,
+                )
+            )
+
+        self.assertTrue(websocket.accepted)
+        self.assertIs(cached_snapshot, websocket.payload)
+        load_snapshot.assert_called_once_with(activity_hours=24, tail_lines=12)
 
     def test_selected_dashboard_start_and_stop_target_same_profile(self) -> None:
         profile = "sendgrid_jodi"

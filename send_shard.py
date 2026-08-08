@@ -3013,6 +3013,51 @@ def build_message(
     return msg, subject_text, body_text, html_body, cid
 
 
+def build_message_for_runtime(
+    from_email: str,
+    to_email: str,
+    author: str,
+    book_title: str,
+    subject: str,
+    body_template: str,
+    unsub_email: str,
+    signature_file: Optional[Path] = None,
+    merge_fields: Optional[Dict[str, str]] = None,
+    subject_fallback: str = "",
+    body_fallback: str = "",
+    *,
+    preview_only: bool = False,
+) -> Tuple[Optional[EmailMessage], str, str, str, Optional[str]]:
+    """Render preview text without constructing send-only MIME payloads."""
+    if preview_only:
+        subject_text, body_text, _html_body, _cid = render_message_parts(
+            author,
+            book_title,
+            subject,
+            body_template,
+            unsub_email,
+            signature_file,
+            merge_fields=merge_fields,
+            subject_fallback=subject_fallback,
+            body_fallback=body_fallback,
+        )
+        return None, subject_text, body_text, "", None
+
+    return build_message(
+        from_email,
+        to_email,
+        author,
+        book_title,
+        subject,
+        body_template,
+        unsub_email,
+        signature_file=signature_file,
+        merge_fields=merge_fields,
+        subject_fallback=subject_fallback,
+        body_fallback=body_fallback,
+    )
+
+
 WARM_QUEUE_REQUIRED_HEADERS = {
     "AuthorName",
     "AuthorEmail",
@@ -5119,13 +5164,14 @@ def main():
                             unsub_email,
                         )
                     else:
-                        msg, subject_text, body_text, html_body, cid = build_message(
+                        msg, subject_text, body_text, html_body, cid = build_message_for_runtime(
                             from_user, to_email, author, book_title,
                             subject, body_template, unsub_email,
                             signature_file=sig_path,
                             merge_fields=merge_fields,
                             subject_fallback=subject_fallback,
                             body_fallback=body_fallback,
+                            preview_only=bool(args.preview_messages),
                         )
                 except Exception as build_exc:
                     error_count += 1
