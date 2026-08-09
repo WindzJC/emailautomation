@@ -4439,10 +4439,95 @@ def _load_cached_live_snapshot() -> dict[str, object] | None:
     return None
 
 
+def _reconcile_snapshot_runtime(snapshot: dict[str, object]) -> dict[str, object]:
+    if runtime_control.backend_name() != "systemd":
+        return snapshot
+
+    profiles = snapshot.get("profiles")
+    if not isinstance(profiles, list):
+        return snapshot
+
+    try:
+        overlays = runtime_control.runtime_profile_overlays(
+            profile_names=[
+                str(profile.get("name") or "")
+                for profile in profiles
+                if isinstance(profile, dict) and str(profile.get("name") or "")
+            ]
+        )
+    except Exception:
+        overlays = {}
+
+    unresolved_overlay = {
+        "tmux_running": False,
+        "tmux_dead": True,
+        "runtime_state": "error",
+        "runtime_label": "Unknown",
+        "runtime_note": "Unable to reconcile current systemd runtime state.",
+    }
+
+    reconciled_profiles: list[object] = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            reconciled_profiles.append(profile)
+            continue
+        overlay = overlays.get(str(profile.get("name") or ""), unresolved_overlay)
+        if not isinstance(overlay, dict):
+            reconciled_profiles.append(profile)
+            continue
+        reconciled_profile = dict(profile)
+        reconciled_profile.update(overlay)
+        runtime_active = (
+            str(reconciled_profile.get("runtime_state") or "")
+            in {"starting", "running", "cooldown", "sleeping"}
+            and not bool(reconciled_profile.get("tmux_dead"))
+        )
+        if "running" in reconciled_profile:
+            reconciled_profile["running"] = runtime_active
+        if "is_running" in reconciled_profile:
+            reconciled_profile["is_running"] = runtime_active
+        reconciled_profiles.append(reconciled_profile)
+
+    reconciled = dict(snapshot)
+    reconciled["profiles"] = reconciled_profiles
+    profile_dicts = [profile for profile in reconciled_profiles if isinstance(profile, dict)]
+    active_profiles = [
+        profile
+        for profile in profile_dicts
+        if str(profile.get("runtime_state") or "") in {"starting", "running", "cooldown", "sleeping"}
+        and not bool(profile.get("tmux_dead"))
+    ]
+    reconciled["session_label"] = (
+        "dead"
+        if any(bool(profile.get("tmux_dead")) for profile in profile_dicts)
+        else "running" if active_profiles else "stopped"
+    )
+    if isinstance(snapshot.get("summary"), dict):
+        summary = dict(snapshot["summary"])
+        summary["active_profiles"] = len(active_profiles)
+        reconciled["summary"] = summary
+    if isinstance(snapshot.get("controls"), dict):
+        controls = dict(snapshot["controls"])
+        controls["active_sender_count"] = sum(
+            1 for profile in active_profiles if str(profile.get("name") or "") in SENDGRID_PROFILES
+        )
+        reconciled["controls"] = controls
+    if isinstance(snapshot.get("private_bounce_guard"), dict):
+        guard = dict(snapshot["private_bounce_guard"])
+        private_profile = next(
+            (profile for profile in profile_dicts if str(profile.get("name") or "") == "private_jc"),
+            None,
+        )
+        if private_profile is not None:
+            guard["profile_active"] = private_profile in active_profiles
+        reconciled["private_bounce_guard"] = guard
+    return reconciled
+
+
 def _load_or_build_live_snapshot(*, activity_hours: int, tail_lines: int) -> dict[str, object]:
     cached_snapshot = _load_cached_live_snapshot()
     if cached_snapshot is not None:
-        return cached_snapshot
+        return _reconcile_snapshot_runtime(cached_snapshot)
     return _build_live_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
 
 
@@ -5126,11 +5211,12 @@ def start_profile(profile_name: str) -> JSONResponse:
                 status_code=409,
             )
         ok, message = runtime_control.start_sender(profile_name)
+        response_snapshot = _reconcile_snapshot_runtime(request_snapshot)
         return JSONResponse({
             "ok": ok,
             "message": message,
             "warm_private_jc_lane": warm_private_jc_lane_status(),
-            "snapshot": request_snapshot,
+            "snapshot": response_snapshot,
         })
     preconditions = _build_start_preconditions_report(
         profile_name=profile_name,
@@ -5149,10 +5235,11 @@ def start_profile(profile_name: str) -> JSONResponse:
     else:
         start_status = "BLOCKED"
         history_event = "start_profile_blocked"
+    response_snapshot = _reconcile_snapshot_runtime(request_snapshot)
     _append_campaign_history(
         history_event,
         profile=profile_name,
-        snapshot=request_snapshot,
+        snapshot=response_snapshot,
         blocked_reasons=[] if ok else [message],
     )
     return JSONResponse(
@@ -5164,7 +5251,7 @@ def start_profile(profile_name: str) -> JSONResponse:
             "message": message,
             "warnings": preconditions.get("warning_reasons") or [],
             "preconditions": preconditions,
-            "snapshot": request_snapshot,
+            "snapshot": response_snapshot,
         },
         status_code=200 if ok else 409,
     )
@@ -5173,7 +5260,8 @@ def start_profile(profile_name: str) -> JSONResponse:
 @app.post("/api/stop")
 def stop() -> JSONResponse:
     ok, message = runtime_control.stop_all_senders()
-    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
+    snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
+    return JSONResponse({"ok": ok, "message": message, "snapshot": snapshot})
 
 
 @app.post("/api/stop/{profile_name}")
@@ -5181,7 +5269,8 @@ def stop_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     ok, message = runtime_control.stop_sender(profile_name)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": _build_live_snapshot()})
+    snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
+    return JSONResponse({"ok": ok, "message": message, "snapshot": snapshot})
 
 
 @app.post("/api/archive-reset-logs")

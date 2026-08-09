@@ -154,6 +154,70 @@ def _verify_started_state(profile_name: str) -> tuple[bool, str]:
     )
 
 
+def _profile_runtime_fields(profile_name: str) -> dict[str, object]:
+    unit = unit_name(profile_name)
+    active_state = _active_state(profile_name)
+
+    if active_state == "activating":
+        return {
+            "tmux_running": True,
+            "tmux_dead": False,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "starting",
+            "runtime_label": "Starting",
+            "runtime_note": f"{unit} is running startup verification.",
+        }
+
+    if active_state in {"active", "reloading"}:
+        return {
+            "tmux_running": True,
+            "tmux_dead": False,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "running",
+            "runtime_label": "Running",
+            "runtime_note": f"Managed by {unit}.",
+        }
+
+    if _is_failed(profile_name):
+        return {
+            "tmux_running": False,
+            "tmux_dead": True,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "error",
+            "runtime_label": "Error",
+            "runtime_note": f"{unit} is in the failed state.",
+        }
+
+    return {
+        "tmux_running": False,
+        "tmux_dead": False,
+        "tmux_command": unit,
+        "tmux_tail": "",
+        "runtime_state": "stopped",
+        "runtime_label": "Stopped",
+        "runtime_note": f"{unit} is inactive.",
+    }
+
+
+def runtime_profile_overlays(
+    profile_names: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Return current systemd-only fields without loading queue/log metrics."""
+    requested = configured_profiles() if profile_names is None else profile_names
+    selected = list(dict.fromkeys(
+        profile_name
+        for profile_name in requested
+        if is_known_profile(profile_name)
+    ))
+    return {
+        profile_name: _profile_runtime_fields(profile_name)
+        for profile_name in selected
+    }
+
+
 def _profile_snapshot(profile_name: str, pane_index: int, tail_lines: int):
     snapshot = dashboard_core.load_profile_snapshot(
         profile_name,
@@ -162,53 +226,7 @@ def _profile_snapshot(profile_name: str, pane_index: int, tail_lines: int):
         tail_lines=tail_lines,
         session="systemd",
     )
-    unit = unit_name(profile_name)
-    active_state = _active_state(profile_name)
-
-    if active_state == "activating":
-        return replace(
-            snapshot,
-            tmux_running=True,
-            tmux_dead=False,
-            tmux_command=unit,
-            tmux_tail="",
-            runtime_state="starting",
-            runtime_label="Starting",
-            runtime_note=f"{unit} is running startup verification.",
-        )
-
-    if active_state in {"active", "reloading"}:
-        return replace(
-            snapshot,
-            tmux_running=True,
-            tmux_dead=False,
-            tmux_command=unit,
-            tmux_tail="",
-            runtime_state="running",
-            runtime_label="Running",
-            runtime_note=f"Managed by {unit}.",
-        )
-    if _is_failed(profile_name):
-        return replace(
-            snapshot,
-            tmux_running=False,
-            tmux_dead=True,
-            tmux_command=unit,
-            tmux_tail="",
-            runtime_state="error",
-            runtime_label="Error",
-            runtime_note=f"{unit} is in the failed state.",
-        )
-    return replace(
-        snapshot,
-        tmux_running=False,
-        tmux_dead=False,
-        tmux_command=unit,
-        tmux_tail="",
-        runtime_state="stopped",
-        runtime_label="Stopped",
-        runtime_note=f"{unit} is inactive.",
-    )
+    return replace(snapshot, **_profile_runtime_fields(profile_name))
 
 
 def list_sender_snapshots(

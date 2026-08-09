@@ -290,6 +290,52 @@ class AsyncSystemdStartTests(unittest.TestCase):
             snapshot.runtime_note,
         )
 
+    def test_runtime_profile_overlays_reuses_systemd_mapping_without_loading_metrics(self) -> None:
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc", "sendgrid_annette"],
+        ), patch.object(
+            backend,
+            "_active_state",
+            side_effect=["active", "inactive"],
+        ), patch.object(
+            backend,
+            "_is_failed",
+            return_value=False,
+        ) as is_failed, patch.object(
+            backend.dashboard_core,
+            "load_profile_snapshot",
+        ) as load_profile_snapshot:
+            overlays = backend.runtime_profile_overlays()
+
+        self.assertEqual("running", overlays["private_jc"]["runtime_state"])
+        self.assertTrue(overlays["private_jc"]["tmux_running"])
+        self.assertEqual("stopped", overlays["sendgrid_annette"]["runtime_state"])
+        self.assertFalse(overlays["sendgrid_annette"]["tmux_running"])
+        is_failed.assert_called_once_with("sendgrid_annette")
+        load_profile_snapshot.assert_not_called()
+
+    def test_runtime_profile_overlays_preserves_failed_mapping(self) -> None:
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc"],
+        ), patch.object(
+            backend,
+            "_active_state",
+            return_value="failed",
+        ), patch.object(
+            backend,
+            "_is_failed",
+            return_value=True,
+        ):
+            overlays = backend.runtime_profile_overlays()
+
+        self.assertEqual("error", overlays["private_jc"]["runtime_state"])
+        self.assertEqual("Error", overlays["private_jc"]["runtime_label"])
+        self.assertTrue(overlays["private_jc"]["tmux_dead"])
+
     def test_stop_sender_can_stop_activating_unit(
         self,
     ) -> None:

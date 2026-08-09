@@ -11,6 +11,7 @@ class RuntimeBackend(Protocol):
     def list_sender_snapshots(self, tail_lines: int = 12, session: str = ...) -> list[object]: ...
     def list_active_sender_snapshots(self, tail_lines: int = 12, session: str = ...) -> list[object]: ...
     def snapshot_runtime_status(self, tail_lines: int = 12, session: str = ...) -> dict[str, object]: ...
+    def runtime_profile_overlays(self, profile_names: list[str] | None = None) -> dict[str, dict[str, object]]: ...
     def start_all_senders(self) -> tuple[bool, str]: ...
     def stop_all_senders(self, session: str = ...) -> tuple[bool, str]: ...
     def start_sender(self, profile_name: str, session: str = ...) -> tuple[bool, str]: ...
@@ -63,6 +64,16 @@ def snapshot_runtime_status(tail_lines: int = 12, session: str | None = None) ->
     if session is None:
         return _BACKEND.snapshot_runtime_status(tail_lines=tail_lines)
     return _BACKEND.snapshot_runtime_status(tail_lines=tail_lines, session=session)
+
+
+def runtime_profile_overlays(
+    profile_names: list[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    loader = getattr(_BACKEND, "runtime_profile_overlays", None)
+    if not callable(loader):
+        return {}
+    overlays = loader(profile_names=profile_names)
+    return overlays if isinstance(overlays, dict) else {}
 
 
 def start_all_senders() -> tuple[bool, str]:

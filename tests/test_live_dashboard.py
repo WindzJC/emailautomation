@@ -1212,6 +1212,192 @@ class LiveDashboardTests(unittest.TestCase):
         )
         self.assertNotIn("start_profile_started", history_events)
 
+    def test_start_profile_response_reconciles_verified_running_state(self) -> None:
+        request_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "tmux_dead": False,
+                "pending_count": 15,
+            }],
+        }
+        preconditions = {"ok": True, "warning_reasons": [], "snapshot": request_snapshot}
+        overlay = {
+            "private_jc": {
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "runtime_note": "Managed by astra-sender@private_jc.service.",
+                "tmux_running": True,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=request_snapshot,
+        ) as build_snapshot, patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ), patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "STARTED: verified state=active."),
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "runtime_profile_overlays",
+            return_value=overlay,
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+        ):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("STARTED", body["status"])
+        self.assertEqual("running", body["snapshot"]["profiles"][0]["runtime_state"])
+        self.assertEqual(15, body["snapshot"]["profiles"][0]["pending_count"])
+        build_snapshot.assert_called_once_with()
+
+    def test_start_profile_response_reconciles_activating_state(self) -> None:
+        request_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "tmux_dead": False,
+            }],
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "starting",
+                "runtime_label": "Starting",
+                "runtime_note": "astra-sender@private_jc.service is running startup verification.",
+                "tmux_running": True,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard, "_manual_live_action_block_response", return_value=None
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value=request_snapshot), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value={"ok": True, "warning_reasons": [], "snapshot": request_snapshot},
+        ), patch.object(live_dashboard, "_start_preconditions_block_response", return_value=None), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "STARTING: verified state=activating."),
+        ), patch.object(live_dashboard.runtime_control, "backend_name", return_value="systemd"), patch.object(
+            live_dashboard.runtime_control, "runtime_profile_overlays", return_value=overlay
+        ), patch.object(live_dashboard, "_append_campaign_history"):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertEqual("STARTING", body["status"])
+        self.assertEqual("starting", body["snapshot"]["profiles"][0]["runtime_state"])
+        self.assertEqual("Starting", body["snapshot"]["profiles"][0]["runtime_label"])
+
+    def test_refused_start_response_does_not_preserve_stale_running_state(self) -> None:
+        request_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "tmux_dead": False,
+            }],
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "runtime_note": "astra-sender@private_jc.service is inactive.",
+                "tmux_running": False,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard, "_manual_live_action_block_response", return_value=None
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value=request_snapshot), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value={"ok": True, "warning_reasons": [], "snapshot": request_snapshot},
+        ), patch.object(live_dashboard, "_start_preconditions_block_response", return_value=None), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(False, "REFUSED: start was skipped."),
+        ), patch.object(live_dashboard.runtime_control, "backend_name", return_value="systemd"), patch.object(
+            live_dashboard.runtime_control, "runtime_profile_overlays", return_value=overlay
+        ), patch.object(live_dashboard, "_append_campaign_history"):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("BLOCKED", body["status"])
+        self.assertEqual("stopped", body["snapshot"]["profiles"][0]["runtime_state"])
+
+    def test_successful_stop_response_reconciles_stopped_state_without_full_rebuild(self) -> None:
+        cached_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "tmux_dead": False,
+                "pending_count": 8,
+            }],
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "runtime_note": "astra-sender@private_jc.service is inactive.",
+                "tmux_running": False,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard.runtime_control, "stop_sender", return_value=(True, "Stopped private_jc.")
+        ), patch.object(live_dashboard, "_load_cached_live_snapshot", return_value=cached_snapshot), patch.object(
+            live_dashboard.runtime_control, "backend_name", return_value="systemd"
+        ), patch.object(
+            live_dashboard.runtime_control, "runtime_profile_overlays", return_value=overlay
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("successful stop must reuse cached metrics"),
+        ):
+            response = live_dashboard.stop_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("stopped", body["snapshot"]["profiles"][0]["runtime_state"])
+        self.assertEqual(8, body["snapshot"]["profiles"][0]["pending_count"])
+
     def test_start_profile_precondition_block_reuses_request_snapshot(self) -> None:
         snapshot = {"profiles": []}
         preconditions = {
@@ -7487,16 +7673,153 @@ class LiveDashboardTests(unittest.TestCase):
             "_load_cached_live_snapshot",
             return_value=cached_snapshot,
         ), patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="tmux",
+        ), patch.object(
             live_dashboard,
             "_build_live_snapshot",
             side_effect=AssertionError("full snapshot build must not run when cache is available"),
+        ):
+            snapshot = live_dashboard.snapshot(hours=24, tail_lines=12)
+
+        self.assertIs(cached_snapshot, snapshot)
+
+    def test_cached_snapshot_overlays_current_running_systemd_state_without_rebuild(self) -> None:
+        cached_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "tmux_dead": False,
+                "pending_count": 47,
+                "readiness_label": "Ready",
+                "message_readiness": {"status": "PASS"},
+            }],
+            "summary": {"active_profiles": 0, "total_pending": 47},
+            "queue_safety": {"safe": True, "fingerprint": "unchanged"},
+            "source": "cache",
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "runtime_note": "Managed by astra-sender@private_jc.service.",
+                "tmux_running": True,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(
+            live_dashboard,
+            "_load_cached_live_snapshot",
+            return_value=cached_snapshot,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "runtime_profile_overlays",
+            return_value=overlay,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("runtime overlay must not trigger a full snapshot build"),
+        ) as build_snapshot:
+            snapshot = live_dashboard.snapshot(hours=24, tail_lines=12)
+
+        profile = snapshot["profiles"][0]
+        self.assertEqual("running", profile["runtime_state"])
+        self.assertEqual("Running", profile["runtime_label"])
+        self.assertEqual(47, profile["pending_count"])
+        self.assertEqual("Ready", profile["readiness_label"])
+        self.assertEqual({"status": "PASS"}, profile["message_readiness"])
+        self.assertEqual({"safe": True, "fingerprint": "unchanged"}, snapshot["queue_safety"])
+        self.assertEqual(47, snapshot["summary"]["total_pending"])
+        self.assertEqual(1, snapshot["summary"]["active_profiles"])
+        self.assertEqual("stopped", cached_snapshot["profiles"][0]["runtime_state"])
+        build_snapshot.assert_not_called()
+
+    def test_cached_snapshot_overlays_current_stopped_systemd_state(self) -> None:
+        cached_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "tmux_running": True,
+                "tmux_dead": False,
+                "running": True,
+                "is_running": True,
+                "pending_count": 12,
+            }],
+            "summary": {"active_profiles": 1, "total_pending": 12},
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "runtime_note": "astra-sender@private_jc.service is inactive.",
+                "tmux_running": False,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+        with patch.object(
+            live_dashboard,
+            "_load_cached_live_snapshot",
+            return_value=cached_snapshot,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "runtime_profile_overlays",
+            return_value=overlay,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("runtime overlay must not trigger a full snapshot build"),
         ):
             snapshot = live_dashboard._load_or_build_live_snapshot(
                 activity_hours=24,
                 tail_lines=12,
             )
 
-        self.assertIs(cached_snapshot, snapshot)
+        profile = snapshot["profiles"][0]
+        self.assertEqual("stopped", profile["runtime_state"])
+        self.assertEqual("Stopped", profile["runtime_label"])
+        self.assertFalse(profile["running"])
+        self.assertFalse(profile["is_running"])
+        self.assertEqual(0, snapshot["summary"]["active_profiles"])
+
+    def test_cached_snapshot_runtime_resolution_failure_fails_closed(self) -> None:
+        cached_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "tmux_dead": False,
+            }],
+        }
+        with patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "runtime_profile_overlays",
+            side_effect=RuntimeError("synthetic runtime read failure"),
+        ):
+            snapshot = live_dashboard._reconcile_snapshot_runtime(cached_snapshot)
+
+        profile = snapshot["profiles"][0]
+        self.assertEqual("error", profile["runtime_state"])
+        self.assertEqual("Unknown", profile["runtime_label"])
+        self.assertTrue(profile["tmux_dead"])
 
     def test_missing_cached_snapshot_falls_back_to_full_rebuild(self) -> None:
         rebuilt_snapshot = {"profiles": [], "source": "live"}
@@ -7556,6 +7879,74 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertTrue(websocket.accepted)
         self.assertIs(cached_snapshot, websocket.payload)
         load_snapshot.assert_called_once_with(activity_hours=24, tail_lines=12)
+
+    def test_websocket_cached_path_reconciles_runtime_state(self) -> None:
+        cached_snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "stopped",
+                "runtime_label": "Stopped",
+                "tmux_dead": False,
+                "pending_count": 9,
+            }],
+            "source": "cache",
+        }
+        overlay = {
+            "private_jc": {
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "runtime_note": "Managed by astra-sender@private_jc.service.",
+                "tmux_running": True,
+                "tmux_dead": False,
+                "tmux_command": "astra-sender@private_jc.service",
+                "tmux_tail": "",
+            }
+        }
+
+        class DisconnectAfterFirstSnapshot:
+            accepted = False
+            payload = None
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+            async def send_json(self, payload) -> None:
+                self.payload = payload
+                raise live_dashboard.WebSocketDisconnect()
+
+        websocket = DisconnectAfterFirstSnapshot()
+        with patch.object(
+            live_dashboard,
+            "_dashboard_auth_disabled",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_load_cached_live_snapshot",
+            return_value=cached_snapshot,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "backend_name",
+            return_value="systemd",
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "runtime_profile_overlays",
+            return_value=overlay,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("WebSocket runtime overlay must not build a full snapshot"),
+        ):
+            asyncio.run(
+                live_dashboard.websocket_snapshot_stream(
+                    websocket,
+                    hours=24,
+                    tail_lines=12,
+                )
+            )
+
+        self.assertTrue(websocket.accepted)
+        self.assertEqual("running", websocket.payload["profiles"][0]["runtime_state"])
+        self.assertEqual(9, websocket.payload["profiles"][0]["pending_count"])
 
     def test_selected_dashboard_start_and_stop_target_same_profile(self) -> None:
         profile = "sendgrid_jodi"
