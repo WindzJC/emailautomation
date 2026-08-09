@@ -2544,6 +2544,44 @@ def email_logged_sent(sent_log: Path, email_addr: str) -> bool:
     return False
 
 
+def email_logged_sent_for_runtime(
+    sent_log: Path,
+    email_addr: str,
+    *,
+    preview_sent_emails: Optional[Set[str]] = None,
+) -> bool:
+    """Use a stable run-scoped history snapshot only for preview generation."""
+    if preview_sent_emails is not None:
+        email = norm_email(email_addr)
+        return bool(email and email in preview_sent_emails)
+    return email_logged_sent(sent_log, email_addr)
+
+
+def load_preview_sent_history_snapshot(
+    sent_log: Path,
+) -> tuple[Set[str], Set[str], tuple[object, ...]]:
+    """Load preview sent/done history once and prove the source stayed stable."""
+    signature = _block_source_signature(sent_log)
+    history = load_authoritative_history_email_sets((sent_log,))[sent_log]
+    if _block_source_signature(sent_log) != signature:
+        raise RuntimeError(
+            "Sender history changed while the preview history snapshot was loading."
+        )
+    sent = set(history["sent"])
+    done = sent | set(history["invalid"])
+    return sent, done, signature
+
+
+def assert_preview_sent_history_unchanged(
+    sent_log: Path,
+    expected_signature: tuple[object, ...],
+) -> None:
+    if _block_source_signature(sent_log) != expected_signature:
+        raise RuntimeError(
+            "Sender history changed during preview generation; refusing stale preview output."
+        )
+
+
 def resolve_map_path(base: Path, value: str) -> Path:
     p = Path((value or "").strip())
     if not p:
@@ -4199,7 +4237,16 @@ def main():
     ):
         emit_worker_event("ERROR", "invalid_booktitle_queue", csv_path=str(csv_path))
         return
-    already_done = load_already_done(log_path)
+    preview_sent_emails: Optional[Set[str]] = None
+    preview_sent_history_signature: Optional[tuple[object, ...]] = None
+    if args.preview_messages:
+        (
+            preview_sent_emails,
+            already_done,
+            preview_sent_history_signature,
+        ) = load_preview_sent_history_snapshot(log_path)
+    else:
+        already_done = load_already_done(log_path)
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
     always_send_set = parse_email_list(getattr(args, "always_send", ""))
@@ -4293,7 +4340,11 @@ def main():
         exclude_logged_always_send: bool = False,
     ) -> tuple[List[Dict[str, str]], Dict[str, int], int, int]:
         candidate_rows = list(current_rows) if current_rows is not None else read_rows(csv_path)
-        current_already_done = load_already_done(log_path)
+        current_already_done = (
+            set(already_done)
+            if args.preview_messages
+            else load_already_done(log_path)
+        )
         current_unsubbed = load_emails_from_csv(unsub_csv_path)
         current_suppressed = load_emails_from_csv(suppress_csv_path)
         current_sendgrid_suppressed_active: Set[str] = set(sendgrid_suppressed_active)
@@ -5078,7 +5129,11 @@ def main():
                     next_index = idx + 1
                     continue
 
-                if not is_recontact_cold_campaign(row_campaign_type) and email_logged_sent(log_path, to_email):
+                if not is_recontact_cold_campaign(row_campaign_type) and email_logged_sent_for_runtime(
+                    log_path,
+                    to_email,
+                    preview_sent_emails=preview_sent_emails,
+                ):
                     if not args.preview_messages:
                         log_row(
                             log_path,
@@ -6195,6 +6250,15 @@ def main():
                         audit_sleep(cooldown_seconds, action="COOLDOWN_WAIT")
             else:
                 break
+
+        if (
+            args.preview_messages
+            and preview_sent_history_signature is not None
+        ):
+            assert_preview_sent_history_unchanged(
+                log_path,
+                preview_sent_history_signature,
+            )
 
         final_reason = stop_reason or "queue_exhausted"
         emit_worker_event(

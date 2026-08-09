@@ -221,6 +221,87 @@ class SendShardTests(unittest.TestCase):
             self.assertTrue(send_shard.email_logged_sent(log_path, "author@example.test"))
             self.assertTrue(send_shard.email_logged_authoritative_sent_any([log_path], "author@example.test"))
 
+    def test_preview_sent_history_snapshot_preserves_sent_and_invalid_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "private_jc_log.csv"
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {"Email": "sent@example.test", "Status": "SENT", "Info": ""},
+                    {
+                        "Email": "attempt@example.test",
+                        "Status": "ATTEMPT",
+                        "Info": "outcome=sent sg_message_id=synthetic",
+                    },
+                    {"Email": "invalid@example.test", "Status": "INVALID", "Info": ""},
+                    {"Email": "retry@example.test", "Status": "ERROR", "Info": ""},
+                ],
+            )
+
+            sent, done, signature = send_shard.load_preview_sent_history_snapshot(log_path)
+
+            self.assertEqual({"sent@example.test", "attempt@example.test"}, sent)
+            self.assertEqual(
+                {"sent@example.test", "attempt@example.test", "invalid@example.test"},
+                done,
+            )
+            send_shard.assert_preview_sent_history_unchanged(log_path, signature)
+
+    def test_preview_sent_lookup_uses_snapshot_without_rescanning_log(self) -> None:
+        sent_log = Path("private_jc_log.csv")
+        preview_sent = {"sent@example.test"}
+
+        with patch.object(
+            send_shard,
+            "email_logged_sent",
+            side_effect=AssertionError("preview must not rescan sender history"),
+        ) as live_lookup:
+            self.assertTrue(
+                send_shard.email_logged_sent_for_runtime(
+                    sent_log,
+                    "SENT@example.test",
+                    preview_sent_emails=preview_sent,
+                )
+            )
+            self.assertFalse(
+                send_shard.email_logged_sent_for_runtime(
+                    sent_log,
+                    "new@example.test",
+                    preview_sent_emails=preview_sent,
+                )
+            )
+
+        live_lookup.assert_not_called()
+
+    def test_real_send_sent_lookup_still_uses_live_log_scan(self) -> None:
+        sent_log = Path("private_jc_log.csv")
+        with patch.object(send_shard, "email_logged_sent", return_value=True) as live_lookup:
+            self.assertTrue(
+                send_shard.email_logged_sent_for_runtime(
+                    sent_log,
+                    "sent@example.test",
+                    preview_sent_emails=None,
+                )
+            )
+
+        live_lookup.assert_called_once_with(sent_log, "sent@example.test")
+
+    def test_preview_refuses_if_sent_history_changes_during_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "private_jc_log.csv"
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [{"Email": "sent@example.test", "Status": "SENT", "Info": ""}],
+            )
+            _sent, _done, signature = send_shard.load_preview_sent_history_snapshot(log_path)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("new@example.test,SENT,\n")
+
+            with self.assertRaisesRegex(RuntimeError, "changed during preview generation"):
+                send_shard.assert_preview_sent_history_unchanged(log_path, signature)
+
     def test_authoritative_sent_history_is_scoped_by_sender_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             logs_dir = Path(tmpdir)
