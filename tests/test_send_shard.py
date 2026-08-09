@@ -1249,7 +1249,16 @@ class SendShardTests(unittest.TestCase):
             profile["interval"] = 35
             profile["cooldown_seconds"] = 35
             profile["repeat"] = True
-            original_csv = csv_path.read_text(encoding="utf-8")
+            sg_suppress.write_text(
+                "email,status,code,reason,last_seen_utc,is_permanent,ttl_until_utc\n"
+                "fresh@example.com,bounce,550,synthetic,2026-08-10T00:00:00+00:00,true,\n",
+                encoding="utf-8",
+            )
+            original_artifacts = {
+                path.relative_to(base): path.read_bytes()
+                for path in base.rglob("*")
+                if path.is_file()
+            }
 
             stdout = io.StringIO()
             with patch.object(settings, "APP_ROOT", base), patch.object(settings, "SHARDS_DIR", shards), patch.object(
@@ -1279,7 +1288,14 @@ class SendShardTests(unittest.TestCase):
             ), redirect_stdout(stdout):
                 send_shard.main()
 
-            self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                original_artifacts,
+                {
+                    path.relative_to(base): path.read_bytes()
+                    for path in base.rglob("*")
+                    if path.is_file()
+                },
+            )
             self.assertIn("PRUNE: would remove 1 from recipients_sendgrid_1.csv (preflight only)", stdout.getvalue())
             self.assertIn("PACE RESOLVED: profile=sendgrid_annette", stdout.getvalue())
             self.assertIn("effective_spacing=35s", stdout.getvalue())

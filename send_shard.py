@@ -4453,7 +4453,7 @@ def main():
 
     pending, pending_stats, source_row_count, eligible_pending_count = build_pending_snapshot(
         rows,
-        emit_suppressed_logs=True,
+        emit_suppressed_logs=not bool(args.preflight),
     )
     skipped_dupes = pending_stats["skipped_dupes"]
     skipped_global_logs = pending_stats["skipped_global_logs"]
