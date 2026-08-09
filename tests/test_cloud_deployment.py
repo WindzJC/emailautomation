@@ -139,6 +139,13 @@ def test_systemd_backend_start_and_stop_target_only_selected_profile(
                 "",
                 "",
             )
+        if action == "show-active":
+            return subprocess.CompletedProcess(
+                [],
+                0,
+                "active\n" if profile in active else "inactive\n",
+                "",
+            )
         if action == "start":
             active.add(profile)
             return subprocess.CompletedProcess([], 0, "", "")

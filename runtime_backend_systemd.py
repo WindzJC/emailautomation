@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import replace
 from typing import List
 
@@ -15,6 +16,8 @@ SYSTEMCTL_BIN = os.environ.get(
     "/usr/bin/systemctl",
 ).strip()
 PROFILE_RE = re.compile(r"^[a-z0-9_]+$")
+START_VERIFY_ATTEMPTS = 20
+START_VERIFY_INTERVAL_SECONDS = 0.1
 
 
 def backend_name() -> str:
@@ -111,6 +114,44 @@ def _is_active(profile_name: str) -> bool:
 
 def _is_failed(profile_name: str) -> bool:
     return _control("is-failed", profile_name).returncode == 0
+
+
+def _verify_started_state(profile_name: str) -> tuple[bool, str]:
+    unit = unit_name(profile_name)
+    last_state = "unknown"
+    for attempt in range(START_VERIFY_ATTEMPTS):
+        last_state = _active_state(profile_name)
+        if last_state in {"active", "reloading"}:
+            return True, f"STARTED: {unit}; verified state={last_state}."
+        if last_state == "failed":
+            return False, f"FAILED: {unit} entered the failed state during startup."
+        if last_state == "deactivating":
+            return False, f"REFUSED: {unit} entered the deactivating state during startup."
+        if attempt + 1 < START_VERIFY_ATTEMPTS:
+            time.sleep(START_VERIFY_INTERVAL_SECONDS)
+
+    if last_state == "activating":
+        return (
+            True,
+            f"STARTING: {unit}; state is still activating after bounded verification.",
+        )
+    if last_state in {"inactive", "dead"}:
+        return (
+            False,
+            f"REFUSED: start was skipped for {unit}; "
+            f"state remained {last_state} after bounded verification.",
+        )
+    if last_state == "unknown":
+        return (
+            False,
+            f"VERIFICATION_TIMEOUT: unable to verify start of {unit}; "
+            "systemd state remained unknown until verification timed out.",
+        )
+    return (
+        False,
+        f"VERIFICATION_TIMEOUT: unable to verify start of {unit}; "
+        f"unexpected state={last_state} after bounded verification.",
+    )
 
 
 def _profile_snapshot(profile_name: str, pane_index: int, tail_lines: int):
@@ -265,7 +306,7 @@ def start_sender(
             f"(systemctl exit {result.returncode}).",
         )
 
-    return True, f"Start submitted for {unit}."
+    return _verify_started_state(profile_name)
 
 
 def stop_sender(

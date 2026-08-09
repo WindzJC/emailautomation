@@ -4681,10 +4681,16 @@ def _lead_state_start_block_reasons(queue_safety: dict[str, object] | None = Non
     return reasons
 
 
-def _build_start_preconditions_report(profile_name: str = "") -> dict[str, object]:
+def _build_start_preconditions_report(
+    profile_name: str = "",
+    *,
+    snapshot: dict[str, object] | None = None,
+) -> dict[str, object]:
     requested_profile = str(profile_name or "").strip()
     profiles = _start_precondition_profiles(requested_profile)
-    snapshot = _build_live_snapshot()
+    request_snapshot = (
+        snapshot if isinstance(snapshot, dict) else _build_live_snapshot()
+    )
     queue_safety_provider = _queue_safety_provider_for_start(requested_profile)
     queue_safety = build_dashboard_queue_safety_report(queue_safety_provider)
     active_profiles = _active_sender_names()
@@ -4715,9 +4721,9 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
     readiness_by_profile: dict[str, dict[str, object]] = {}
     readiness_status_by_profile: dict[str, str] = {}
     for profile in profiles:
-        readiness = _profile_readiness_from_snapshot(snapshot, profile)
+        readiness = _profile_readiness_from_snapshot(request_snapshot, profile)
         readiness_by_profile[profile] = readiness
-        provider_block = _profile_provider_block_reason_from_snapshot(snapshot, profile)
+        provider_block = _profile_provider_block_reason_from_snapshot(request_snapshot, profile)
         if provider_block:
             blocked_reasons.append(provider_block)
         status = str(readiness.get("status") or "NOT RUN").strip().upper() or "NOT RUN"
@@ -4763,7 +4769,7 @@ def _build_start_preconditions_report(profile_name: str = "") -> dict[str, objec
             "Run Preview + Validate for each sender, wait for active jobs/senders to finish, "
             "rerun Upload & Check/Fast Triage/Dispatch Preview if stale, then confirm/rebuild queues if needed."
         ),
-        "snapshot": snapshot,
+        "snapshot": request_snapshot,
     }
 
 
@@ -4782,6 +4788,11 @@ def _start_preconditions_block_response(report: dict[str, object]) -> JSONRespon
     )
     error = "queue_safety_unsafe" if str(report.get("queue_safety_status") or "") == "unsafe" else "start_preconditions_failed"
     message = "NOT READY / BLOCKED: " + (" ".join(reasons) if reasons else "Start preconditions failed.")
+    report_snapshot = (
+        report.get("snapshot")
+        if isinstance(report.get("snapshot"), dict)
+        else _build_live_snapshot()
+    )
     payload = {
         "ok": False,
         "blocked": True,
@@ -4798,7 +4809,7 @@ def _start_preconditions_block_response(report: dict[str, object]) -> JSONRespon
         "queue_safety": queue_safety,
         "suggested_fix": report.get("suggested_fix") or "",
         "message": message,
-        "snapshot": _build_live_snapshot(),
+        "snapshot": report_snapshot,
     }
     return JSONResponse(payload, status_code=409)
 
@@ -5092,7 +5103,8 @@ def start_profile(profile_name: str) -> JSONResponse:
     live_action_block = _manual_live_action_block_response(profile_name)
     if live_action_block is not None:
         return live_action_block
-    _append_campaign_history("start_profile_requested", profile=profile_name, snapshot=_build_live_snapshot())
+    request_snapshot = _build_live_snapshot()
+    _append_campaign_history("start_profile_requested", profile=profile_name, snapshot=request_snapshot)
     if profile_name == "private_jc_warm":
         lane = warm_private_jc_lane_status()
         if not bool(lane.get("ready")):
@@ -5104,7 +5116,7 @@ def start_profile(profile_name: str) -> JSONResponse:
                     "error": warm_error,
                     "message": str(lane.get("message") or "Confirm Warm Private JC before starting."),
                     "warm_private_jc_lane": lane,
-                    "snapshot": _build_live_snapshot(),
+                    "snapshot": request_snapshot,
                 },
                 status_code=409,
             )
@@ -5114,33 +5126,48 @@ def start_profile(profile_name: str) -> JSONResponse:
                 status_code=409,
             )
         ok, message = runtime_control.start_sender(profile_name)
-        time.sleep(0.6)
         return JSONResponse({
             "ok": ok,
             "message": message,
             "warm_private_jc_lane": warm_private_jc_lane_status(),
-            "snapshot": _build_live_snapshot(),
+            "snapshot": request_snapshot,
         })
-    preconditions = _build_start_preconditions_report(profile_name=profile_name)
+    preconditions = _build_start_preconditions_report(
+        profile_name=profile_name,
+        snapshot=request_snapshot,
+    )
     blocked = _start_preconditions_block_response(preconditions)
     if blocked is not None:
         return blocked
     ok, message = runtime_control.start_sender(profile_name)
-    time.sleep(0.6)
-    snapshot = _build_live_snapshot()
+    if ok and str(message or "").startswith("STARTING:"):
+        start_status = "STARTING"
+        history_event = "start_profile_starting"
+    elif ok:
+        start_status = "STARTED"
+        history_event = "start_profile_started"
+    else:
+        start_status = "BLOCKED"
+        history_event = "start_profile_blocked"
     _append_campaign_history(
-        "start_profile_started" if ok else "start_profile_blocked",
+        history_event,
         profile=profile_name,
-        snapshot=snapshot,
+        snapshot=request_snapshot,
         blocked_reasons=[] if ok else [message],
     )
-    return JSONResponse({
-        "ok": ok,
-        "message": message,
-        "warnings": preconditions.get("warning_reasons") or [],
-        "preconditions": preconditions,
-        "snapshot": _build_live_snapshot(),
-    })
+    return JSONResponse(
+        {
+            "ok": ok,
+            "blocked": not ok,
+            "error": "" if ok else "sender_start_verification_failed",
+            "status": start_status,
+            "message": message,
+            "warnings": preconditions.get("warning_reasons") or [],
+            "preconditions": preconditions,
+            "snapshot": request_snapshot,
+        },
+        status_code=200 if ok else 409,
+    )
 
 
 @app.post("/api/stop")

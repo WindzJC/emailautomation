@@ -1057,6 +1057,205 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("Started sendgrid_annette.", body["message"])
         start_sender.assert_called_once_with("sendgrid_annette")
 
+    def test_start_profile_records_blocked_when_backend_verification_fails(self) -> None:
+        snapshot = {"profiles": []}
+        preconditions = {
+            "ok": True,
+            "warning_reasons": [],
+            "snapshot": snapshot,
+        }
+        history_events: list[str] = []
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ) as build_snapshot, patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ) as build_preconditions, patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(False, "Start refused or skipped."),
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+            side_effect=lambda event_type, **_kwargs: history_events.append(event_type),
+        ):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["blocked"])
+        self.assertEqual("sender_start_verification_failed", body["error"])
+        self.assertEqual("BLOCKED", body["status"])
+        self.assertEqual(
+            ["start_profile_requested", "start_profile_blocked"],
+            history_events,
+        )
+        self.assertNotIn("start_profile_started", history_events)
+        build_snapshot.assert_called_once_with()
+        build_preconditions.assert_called_once_with(
+            profile_name="private_jc",
+            snapshot=snapshot,
+        )
+
+    def test_start_profile_records_started_only_after_backend_verification(self) -> None:
+        snapshot = {"profiles": []}
+        preconditions = {
+            "ok": True,
+            "warning_reasons": [],
+            "snapshot": snapshot,
+        }
+        history_events: list[str] = []
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ) as build_snapshot, patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ), patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "Started and verified active."),
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+            side_effect=lambda event_type, **_kwargs: history_events.append(event_type),
+        ):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("STARTED", body["status"])
+        self.assertEqual(
+            ["start_profile_requested", "start_profile_started"],
+            history_events,
+        )
+        build_snapshot.assert_called_once_with()
+
+    def test_start_profile_records_starting_for_verified_activating_state(self) -> None:
+        snapshot = {"profiles": []}
+        preconditions = {
+            "ok": True,
+            "warning_reasons": [],
+            "snapshot": snapshot,
+        }
+        history_events: list[str] = []
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ), patch.object(
+            live_dashboard,
+            "_start_preconditions_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+            return_value=(True, "STARTING: verified state=activating."),
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+            side_effect=lambda event_type, **_kwargs: history_events.append(event_type),
+        ):
+            response = live_dashboard.start_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertTrue(body["ok"])
+        self.assertEqual("STARTING", body["status"])
+        self.assertEqual(
+            ["start_profile_requested", "start_profile_starting"],
+            history_events,
+        )
+        self.assertNotIn("start_profile_started", history_events)
+
+    def test_start_profile_precondition_block_reuses_request_snapshot(self) -> None:
+        snapshot = {"profiles": []}
+        preconditions = {
+            "ok": False,
+            "blocked": True,
+            "profile": "private_jc",
+            "profiles": ["private_jc"],
+            "queue_safety": {"safe": False},
+            "queue_safety_status": "unsafe",
+            "blocked_reasons": ["synthetic unsafe queue"],
+            "warning_reasons": [],
+            "snapshot": snapshot,
+        }
+
+        with patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            return_value=snapshot,
+        ) as build_snapshot, patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=preconditions,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_sender",
+        ) as start_sender, patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+        ):
+            response = live_dashboard.start_profile("private_jc")
+
+        self.assertEqual(409, response.status_code)
+        self.assertEqual(snapshot, json.loads(response.body)["snapshot"])
+        build_snapshot.assert_called_once_with()
+        start_sender.assert_not_called()
+
     def test_start_all_blocks_when_any_sender_is_active(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
 

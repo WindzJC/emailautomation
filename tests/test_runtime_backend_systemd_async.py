@@ -104,7 +104,7 @@ class AsyncSystemdStartTests(unittest.TestCase):
             calls,
         )
 
-    def test_start_sender_accepts_queued_job(self) -> None:
+    def test_start_sender_accepts_job_that_becomes_activating(self) -> None:
         actions: list[str] = []
 
         def fake_control(
@@ -118,19 +118,108 @@ class AsyncSystemdStartTests(unittest.TestCase):
         with patch.object(
             backend,
             "_active_state",
-            return_value="inactive",
+            side_effect=["inactive", "inactive"]
+            + ["activating"] * (backend.START_VERIFY_ATTEMPTS - 1),
         ), patch.object(
             backend,
             "_control",
             side_effect=fake_control,
+        ), patch.object(
+            backend.time,
+            "sleep",
         ):
             ok, message = backend.start_sender(
                 "private_jc",
             )
 
         self.assertTrue(ok)
-        self.assertIn("Start submitted", message)
+        self.assertIn("STARTING:", message)
+        self.assertIn("still activating", message)
         self.assertEqual(["start"], actions)
+
+    def test_start_sender_accepts_verified_active_state(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            side_effect=["inactive", "active"],
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertTrue(ok)
+        self.assertIn("STARTED:", message)
+        self.assertIn("verified state=active", message)
+
+    def test_start_sender_rejects_exec_condition_style_inactive_state(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep") as sleep:
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("REFUSED:", message)
+        self.assertIn("skipped", message)
+        self.assertIn("remained inactive", message)
+        self.assertEqual(backend.START_VERIFY_ATTEMPTS - 1, sleep.call_count)
+
+    def test_start_sender_rejects_dead_post_start_state(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            side_effect=["inactive"] + ["dead"] * backend.START_VERIFY_ATTEMPTS,
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("REFUSED:", message)
+        self.assertIn("skipped", message)
+        self.assertIn("remained dead", message)
+
+    def test_start_sender_rejects_failed_post_start_state(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            side_effect=["inactive", "failed"],
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("FAILED:", message)
+        self.assertIn("failed state", message)
+
+    def test_start_sender_times_out_when_post_start_state_is_unknown(self) -> None:
+        states = ["inactive"] + ["unknown"] * backend.START_VERIFY_ATTEMPTS
+        with patch.object(
+            backend,
+            "_active_state",
+            side_effect=states,
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("VERIFICATION_TIMEOUT:", message)
+        self.assertIn("timed out", message)
 
     def test_start_sender_rejects_duplicate_activating_job(
         self,
