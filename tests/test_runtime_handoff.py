@@ -76,6 +76,90 @@ def _write_preview_fixture(
     )
 
 
+def _write_profile_preview_fixture(
+    repo: Path,
+    profile: str,
+    emails: list[str],
+    *,
+    mode: str = "consignment",
+) -> None:
+    previews = repo / "data/message_previews"
+    previews.mkdir(parents=True, exist_ok=True)
+    generated_header = (
+        "CampaignType,Email,AuthorEmail,AuthorName,FirstName,BookTitle,"
+        "PersonalizedOpeningLine,Subject,Body\n"
+    )
+    generated_rows = "".join(
+        f"cold,{email},{email},Test Author,Test,Book,Opening,Subject,Body\n"
+        for email in emails
+    )
+    validated_header = (
+        "Email,AuthorEmail,AuthorName,FirstName,BookTitle,"
+        "PersonalizedOpeningLine,Subject,Body,ValidationStatus,FailureReasons\n"
+    )
+    validated_rows = "".join(
+        f"{email},{email},Test Author,Test,Book,Opening,Subject,Body,PASS,\n"
+        for email in emails
+    )
+    (previews / f"{profile}_message_preview.csv").write_text(
+        generated_header + generated_rows,
+        encoding="utf-8",
+    )
+    (previews / f"{profile}_message_preview_validated.csv").write_text(
+        validated_header + validated_rows,
+        encoding="utf-8",
+    )
+    (previews / f"{profile}_message_preview_failed.csv").write_text(
+        validated_header,
+        encoding="utf-8",
+    )
+    (previews / f"{profile}_message_preview_summary.txt").write_text(
+        f"pitch mode: {mode}\n"
+        f"total rows checked: {len(emails)}\n"
+        f"passed rows: {len(emails)}\n"
+        "failed rows: 0\n",
+        encoding="utf-8",
+    )
+
+
+def _write_controlled_sendgrid_runtime(
+    repo: Path,
+    emails: list[str],
+) -> Path:
+    shards = repo / "data/shards"
+    logs = repo / "data/logs"
+    state = repo / "data/state"
+    for path in (shards, logs, state):
+        path.mkdir(parents=True, exist_ok=True)
+    queue = shards / "recipients_sendgrid_controlled_test.csv"
+    queue.write_text(
+        "Email,FirstName,BookTitle,CampaignType\n"
+        + "".join(f"{email},Test,Book,cold\n" for email in emails),
+        encoding="utf-8",
+    )
+    (logs / "sendgrid_controlled_test_log.csv").write_text(
+        "TimestampUTC,Email,Status,Info\n",
+        encoding="utf-8",
+    )
+    (state / "suppressed.csv").write_text("Email\n", encoding="utf-8")
+    (state / "unsubscribed.csv").write_text("Email\n", encoding="utf-8")
+    (state / "sendgrid_suppressions.csv").write_text(
+        "Email,Type\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(state / "send_idempotency.sqlite3") as db:
+        db.execute(
+            "CREATE TABLE send_reservations ("
+            "campaign_id TEXT, provider TEXT, email TEXT, profile TEXT)"
+        )
+    _write_profile_preview_fixture(
+        repo,
+        "sendgrid_controlled_test",
+        emails,
+    )
+    return queue
+
+
 def _write_runtime(repo: Path, emails: list[str], *, sent: list[str] | None = None) -> None:
     shards = repo / "data/shards"
     logs = repo / "data/logs"
@@ -987,6 +1071,158 @@ def test_controlled_sendgrid_profile_is_literal_eval_handoff_safe():
     assert profile["max_per_run"] == 1
     assert profile["repeat"] is False
     assert profile["dashboard_manual_only"] is True
+
+
+def test_controlled_sendgrid_preview_uses_exact_manual_lane_safety(tmp_path):
+    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    queue = _write_controlled_sendgrid_runtime(tmp_path, [recipient])
+    queue_state = runtime_handoff._read_queue_state(
+        queue,
+        "sendgrid_controlled_test",
+    )
+
+    preview = runtime_handoff._preview_safety(
+        tmp_path,
+        "sendgrid_controlled_test",
+        queue,
+        queue_state,
+    )
+
+    assert preview["safe"] is True
+    assert preview["failed_predicates"] == []
+    assert preview["campaign_match"]["safe"] is True
+    assert preview["campaign_match"]["applicability"] == "controlled_profile"
+    assert preview["campaign_match"]["snapshot_type"] == "controlled_test"
+    assert preview["verified_emergency_queue_progress"] is False
+
+
+def test_controlled_sendgrid_preview_rejects_wrong_recipient(tmp_path):
+    queue = _write_controlled_sendgrid_runtime(
+        tmp_path,
+        ["wrong@example.test"],
+    )
+    queue_state = runtime_handoff._read_queue_state(
+        queue,
+        "sendgrid_controlled_test",
+    )
+
+    preview = runtime_handoff._preview_safety(
+        tmp_path,
+        "sendgrid_controlled_test",
+        queue,
+        queue_state,
+    )
+
+    assert preview["safe"] is False
+    assert "controlled_recipient_allowlist_exact" in preview["failed_predicates"]
+
+
+def test_controlled_sendgrid_preview_rejects_queue_count_other_than_one(tmp_path):
+    queue = _write_controlled_sendgrid_runtime(
+        tmp_path,
+        [
+            "astraproductionsbyjc+sendgridtest@gmail.com",
+            "second@example.test",
+        ],
+    )
+    queue_state = runtime_handoff._read_queue_state(
+        queue,
+        "sendgrid_controlled_test",
+    )
+
+    preview = runtime_handoff._preview_safety(
+        tmp_path,
+        "sendgrid_controlled_test",
+        queue,
+        queue_state,
+    )
+
+    assert preview["safe"] is False
+    assert "controlled_queue_count_one" in preview["failed_predicates"]
+
+
+@pytest.mark.parametrize(
+    ("blocked_by", "expected_predicate"),
+    [
+        ("suppression", "controlled_queue_not_suppressed"),
+        (
+            "sent_history",
+            "controlled_queue_no_sendgrid_family_sent_history",
+        ),
+        ("idempotency", "controlled_queue_no_idempotency_overlap"),
+    ],
+)
+def test_controlled_sendgrid_preview_preserves_runtime_blocks(
+    tmp_path,
+    blocked_by,
+    expected_predicate,
+):
+    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    queue = _write_controlled_sendgrid_runtime(tmp_path, [recipient])
+    if blocked_by == "suppression":
+        (tmp_path / "data/state/suppressed.csv").write_text(
+            f"Email\n{recipient}\n",
+            encoding="utf-8",
+        )
+    elif blocked_by == "sent_history":
+        (tmp_path / "data/logs/sendgrid_controlled_test_log.csv").write_text(
+            "TimestampUTC,Email,Status,Info\n"
+            f"2026-08-10T00:00:00Z,{recipient},SENT,controlled test\n",
+            encoding="utf-8",
+        )
+    else:
+        with sqlite3.connect(
+            tmp_path / "data/state/send_idempotency.sqlite3"
+        ) as db:
+            db.execute(
+                "INSERT INTO send_reservations "
+                "(campaign_id, provider, email, profile) VALUES (?, ?, ?, ?)",
+                ("cold", "sendgrid", recipient, "sendgrid_controlled_test"),
+            )
+    queue_state = runtime_handoff._read_queue_state(
+        queue,
+        "sendgrid_controlled_test",
+    )
+
+    preview = runtime_handoff._preview_safety(
+        tmp_path,
+        "sendgrid_controlled_test",
+        queue,
+        queue_state,
+    )
+
+    assert preview["safe"] is False
+    assert expected_predicate in preview["failed_predicates"]
+
+
+def test_normal_sendgrid_preview_still_requires_campaign_lineage(tmp_path):
+    recipient = "normal@example.test"
+    queue = tmp_path / "data/shards/recipients_sendgrid_1.csv"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "Email,FirstName,BookTitle,CampaignType\n"
+        f"{recipient},Test,Book,cold\n",
+        encoding="utf-8",
+    )
+    _write_profile_preview_fixture(
+        tmp_path,
+        "sendgrid_annette",
+        [recipient],
+    )
+    queue_state = runtime_handoff._read_queue_state(
+        queue,
+        "sendgrid_annette",
+    )
+
+    preview = runtime_handoff._preview_safety(
+        tmp_path,
+        "sendgrid_annette",
+        queue,
+        queue_state,
+    )
+
+    assert preview["safe"] is False
+    assert "active_campaign_state_exists" in preview["failed_predicates"]
 
 
 def test_unknown_profile_pitch_validation_mode_refuses(monkeypatch):

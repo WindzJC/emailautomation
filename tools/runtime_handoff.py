@@ -149,6 +149,10 @@ PITCH_VALIDATION_MODES = {
     "pitch5": "consignment",
     "pitch_jc": "astra_visual",
 }
+CONTROLLED_SENDGRID_PROFILE = "sendgrid_controlled_test"
+CONTROLLED_SENDGRID_RECIPIENT = (
+    "astraproductionsbyjc+sendgridtest@gmail.com"
+)
 COMMIT_COMPATIBILITY_FILE_ENV = "ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE"
 COMMIT_COMPATIBILITY_ROOT_KEY = "commit_compatibility_mappings"
 COMMIT_COMPATIBILITY_REQUIRED_FIELDS = {
@@ -2618,6 +2622,121 @@ def _preview_campaign_match(
     return result
 
 
+def _controlled_sendgrid_preview_applicability(
+    runtime_root: Path,
+    *,
+    profile: str,
+    queue_path: Path,
+    queue_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify the isolated manual test lane without Fresh Cold lineage."""
+    result: dict[str, Any] = {
+        "safe": False,
+        "snapshot_type": "controlled_test",
+        "takeover_id": "",
+        "provenance_path": "",
+        "applicability": "controlled_profile",
+        "verified_emergency_queue_progress": False,
+        "failed_predicates": [],
+    }
+    failed = result["failed_predicates"]
+    profiles = _profile_runtime_layout()
+    config = profiles.get(profile)
+    if profile != CONTROLLED_SENDGRID_PROFILE or not isinstance(config, dict):
+        failed.append("controlled_profile_exact")
+        return result
+
+    exact_values = {
+        "provider": "sendgrid",
+        "csv": "recipients_sendgrid_controlled_test.csv",
+        "log": "sendgrid_controlled_test_log.csv",
+        "recipient_allowlist": CONTROLLED_SENDGRID_RECIPIENT,
+    }
+    for field, expected in exact_values.items():
+        if str(config.get(field) or "").strip() != expected:
+            failed.append(f"controlled_config_{field}_exact")
+    for field in (
+        "controlled_test",
+        "dashboard_manual_only",
+        "global_dedupe",
+        "suppress_invalid",
+    ):
+        if config.get(field) is not True:
+            failed.append(f"controlled_config_{field}_enabled")
+    if config.get("repeat") is not False:
+        failed.append("controlled_config_repeat_false")
+    for field in ("max_total", "max_per_run", "max_submission_attempts"):
+        try:
+            value = int(config.get(field))
+        except (TypeError, ValueError):
+            value = -1
+        if value != 1:
+            failed.append(f"controlled_config_{field}_one")
+
+    expected_queue = (
+        runtime_root
+        / "data/shards/recipients_sendgrid_controlled_test.csv"
+    )
+    if queue_path.resolve() != expected_queue.resolve():
+        failed.append("controlled_queue_path_isolated")
+    if int(queue_state.get("row_count") or 0) != 1:
+        failed.append("controlled_queue_count_one")
+    if set(queue_state.get("emails") or set()) != {
+        CONTROLLED_SENDGRID_RECIPIENT
+    }:
+        failed.append("controlled_recipient_allowlist_exact")
+    if int(queue_state.get("duplicate_count") or 0):
+        failed.append("controlled_queue_unique_recipient")
+    if int(queue_state.get("invalid_count") or 0):
+        failed.append("controlled_queue_valid_recipient")
+
+    suppression_paths = (
+        runtime_root / "data/state/suppressed.csv",
+        runtime_root / "data/state/unsubscribed.csv",
+        runtime_root / "data/state/sendgrid_suppressions.csv",
+    )
+    suppressed: set[str] = set()
+    for path in suppression_paths:
+        if not path.is_file():
+            failed.append(
+                f"controlled_suppression_source_exists:{path.name}"
+            )
+            continue
+        try:
+            values, _diagnostics = load_suppression_email_tokens(path)
+        except (OSError, UnicodeError, SuppressionSchemaError):
+            failed.append(
+                f"controlled_suppression_source_readable:{path.name}"
+            )
+            continue
+        suppressed.update(values)
+    queue_emails = set(queue_state.get("emails") or set())
+    if queue_emails & suppressed:
+        failed.append("controlled_queue_not_suppressed")
+
+    log_path = runtime_root / "data/logs/sendgrid_controlled_test_log.csv"
+    if not log_path.is_file():
+        failed.append("controlled_log_exists")
+    family_logs = _profile_log_paths(runtime_root, profiles, profile)
+    if queue_emails & _authoritative_sent_emails(family_logs):
+        failed.append("controlled_queue_no_sendgrid_family_sent_history")
+
+    idempotency_path = runtime_root / "data/state/send_idempotency.sqlite3"
+    if not idempotency_path.is_file():
+        failed.append("controlled_idempotency_state_exists")
+    elif _idempotency_overlap(
+        runtime_root,
+        profile,
+        "sendgrid",
+        queue_state,
+    ):
+        failed.append("controlled_queue_no_idempotency_overlap")
+
+    result["failed_predicates"] = list(dict.fromkeys(failed))
+    result["safe"] = not result["failed_predicates"]
+    return result
+
+
 def _preview_safety(
     runtime_root: Path,
     profile: str,
@@ -2651,17 +2770,25 @@ def _preview_safety(
         expected_mode = _profile_validation_mode(profile)
     except HandoffError:
         expected_mode = ""
-    campaign = _preview_campaign_match(
-        runtime_root,
-        profile=profile,
-        queue_state=queue_state,
-        preview_paths=(preview_path, validated_path, failed_path, summary_path),
-        generated=generated,
-        validated=validated,
-        failed=failed,
-        summary=summary,
-        expected_mode=expected_mode,
-    )
+    if profile == CONTROLLED_SENDGRID_PROFILE:
+        campaign = _controlled_sendgrid_preview_applicability(
+            runtime_root,
+            profile=profile,
+            queue_path=queue_path,
+            queue_state=queue_state,
+        )
+    else:
+        campaign = _preview_campaign_match(
+            runtime_root,
+            profile=profile,
+            queue_state=queue_state,
+            preview_paths=(preview_path, validated_path, failed_path, summary_path),
+            generated=generated,
+            validated=validated,
+            failed=failed,
+            summary=summary,
+            expected_mode=expected_mode,
+        )
     failed_predicates: list[str] = []
     for label, report in (
         ("generated", generated),
