@@ -101,6 +101,7 @@ class LeadLedgerTests(unittest.TestCase):
                 self.assertIn("idx_lead_ledger_email", indexes)
                 self.assertIn("idx_lead_ledger_stage_status", indexes)
                 self.assertIn("idx_lead_ledger_source_row_hash", indexes)
+                self.assertIn("idx_lead_ledger_global_block_email", indexes)
                 dispatch_indexes = {
                     row[1]
                     for row in conn.execute("PRAGMA index_list('lead_dispatch_history')").fetchall()
@@ -108,6 +109,37 @@ class LeadLedgerTests(unittest.TestCase):
                 self.assertIn("idx_lead_dispatch_history_lead_id", dispatch_indexes)
                 self.assertIn("idx_lead_dispatch_history_run_id", dispatch_indexes)
                 self.assertIn("idx_lead_dispatch_history_provider_message_id", dispatch_indexes)
+            finally:
+                conn.close()
+
+    def test_schema_v3_migration_adds_global_block_partial_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "lead_ledger.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE lead_ledger (
+                        email TEXT,
+                        suppressed INTEGER NOT NULL DEFAULT 0,
+                        last_outcome TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.execute("PRAGMA user_version = 3")
+
+            conn = lead_ledger.connect_lead_ledger(db_path)
+            try:
+                indexes = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA index_list('lead_ledger')"
+                    ).fetchall()
+                }
+                self.assertIn("idx_lead_ledger_global_block_email", indexes)
+                self.assertEqual(
+                    lead_ledger.LEAD_LEDGER_SCHEMA_VERSION,
+                    conn.execute("PRAGMA user_version").fetchone()[0],
+                )
             finally:
                 conn.close()
 

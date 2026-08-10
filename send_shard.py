@@ -146,6 +146,13 @@ BAD_SENDGRID_EVENT_STATUSES = {
     "unsubscribe",
     "unsubscribed",
 }
+LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL = """
+suppressed = 1
+OR lower(trim(last_outcome)) IN (
+    'blocked', 'bounced', 'complained', 'dropped',
+    'invalid', 'spamreport', 'spam_report', 'unsubscribed'
+)
+""".strip()
 
 
 def normalize_campaign_type(value: object) -> str:
@@ -2457,11 +2464,7 @@ def load_ledger_blocked_emails(path: Path) -> Set[str]:
             f"""
             SELECT {email_column}
             FROM lead_ledger
-            WHERE suppressed = 1
-               OR lower(trim(last_outcome)) IN (
-                    'blocked', 'bounced', 'complained', 'dropped',
-                    'invalid', 'spamreport', 'spam_report', 'unsubscribed'
-               )
+            WHERE {LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL}
             """
         )
         malformed_count = 0

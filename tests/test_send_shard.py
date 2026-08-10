@@ -19,6 +19,7 @@ import send_shard
 import settings
 import dashboard_core
 import live_dashboard
+import lead_ledger
 from tools.diagnose_private_jc_auth import run_diagnostic
 from tools.validate_message_preview import validate_row
 from send_shard import (
@@ -977,6 +978,60 @@ class SendShardTests(unittest.TestCase):
 
             self.assertEqual(
                 {"bad-outcome@example.test"},
+                send_shard.load_ledger_blocked_emails(ledger),
+            )
+
+    def test_ledger_global_block_loader_uses_schema_partial_index(self) -> None:
+        self.assertEqual(
+            lead_ledger.LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL,
+            send_shard.LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = Path(tmpdir) / "lead_ledger.sqlite3"
+            conn = lead_ledger.connect_lead_ledger(ledger)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO lead_ledger (
+                        lead_id, email, suppressed, last_outcome
+                    ) VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)
+                    """,
+                    (
+                        "suppressed",
+                        "suppressed@example.test",
+                        1,
+                        "",
+                        "bad-outcome",
+                        "bad-outcome@example.test",
+                        0,
+                        "bounced",
+                        "ordinary",
+                        "ordinary@example.test",
+                        0,
+                        "",
+                    ),
+                )
+                conn.commit()
+                plan = conn.execute(
+                    f"""
+                    EXPLAIN QUERY PLAN
+                    SELECT email
+                    FROM lead_ledger
+                    WHERE {lead_ledger.LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL}
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+
+            self.assertTrue(
+                any(
+                    "idx_lead_ledger_global_block_email" in str(tuple(row))
+                    for row in plan
+                ),
+                plan,
+            )
+            self.assertEqual(
+                {"suppressed@example.test", "bad-outcome@example.test"},
                 send_shard.load_ledger_blocked_emails(ledger),
             )
 

@@ -13,8 +13,16 @@ from leads_workflow import iso_utc
 from sendgrid_hygiene import norm_email
 
 
-LEAD_LEDGER_SCHEMA_VERSION = 3
+LEAD_LEDGER_SCHEMA_VERSION = 4
 LEAD_LEDGER_DB_PATH = settings.LEAD_LEDGER_DB_PATH
+
+LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL = """
+suppressed = 1
+OR lower(trim(last_outcome)) IN (
+    'blocked', 'bounced', 'complained', 'dropped',
+    'invalid', 'spamreport', 'spam_report', 'unsubscribed'
+)
+""".strip()
 
 FAST_TRIAGE_STAGE = "FAST_TRIAGE"
 STRICT_PUBLIC_PROOF_STAGE = "STRICT_PUBLIC_PROOF"
@@ -429,6 +437,14 @@ def ensure_lead_ledger_schema(conn: sqlite3.Connection) -> None:
         if current_version < 3:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_lead_dispatch_history_provider_message_id ON lead_dispatch_history(provider_message_id)"
+            )
+        if current_version < 4:
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_lead_ledger_global_block_email
+                ON lead_ledger(email)
+                WHERE {LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL}
+                """
             )
         conn.execute(f"PRAGMA user_version = {LEAD_LEDGER_SCHEMA_VERSION}")
 
