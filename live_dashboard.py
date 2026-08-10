@@ -6522,9 +6522,12 @@ def _private_jc_repair_rebuild_rows(
     counts = {
         "planned_private_jc_rows": 0,
         "already_sent_same_family_removed": 0,
+        "already_sent_other_family_removed": 0,
         "suppressed_or_bad_outcome_removed": 0,
         "invalid_or_malformed_removed": 0,
         "duplicate_removed": 0,
+        # Retained for response compatibility. Cross-family authoritative
+        # sent history is no longer eligible for Private JC repair.
         "other_family_sent_history_allowed": 0,
     }
     for row in (plan_rows_by_queue.get("private_jc") or []):
@@ -6545,7 +6548,8 @@ def _private_jc_repair_rebuild_rows(
             counts["already_sent_same_family_removed"] += 1
             continue
         if email in sendgrid_sent:
-            counts["other_family_sent_history_allowed"] += 1
+            counts["already_sent_other_family_removed"] += 1
+            continue
         normalized = {header: str(row.get(header, "") or "").strip() for header in queue_headers}
         normalized["Email"] = email
         if not normalized.get("AuthorEmail"):
@@ -6578,6 +6582,7 @@ def _private_jc_repair_rebuild_rows(
         "eligible_rows": len(rows),
         "excluded_counts": {
             "private_jc_history": counts["already_sent_same_family_removed"],
+            "other_family_history": counts["already_sent_other_family_removed"],
             "global_blocked": counts["suppressed_or_bad_outcome_removed"],
             "invalid_or_malformed": counts["invalid_or_malformed_removed"],
             "duplicate": counts["duplicate_removed"],
@@ -6893,6 +6898,7 @@ def repair_private_jc_queue() -> JSONResponse:
             "rebuilt_queue_rows": manifest["rebuilt_queue_rows"],
             "planned_private_jc_rows": manifest["planned_private_jc_rows"],
             "already_sent_same_family_removed": manifest["already_sent_same_family_removed"],
+            "already_sent_other_family_removed": manifest["already_sent_other_family_removed"],
             "suppressed_or_bad_outcome_removed": manifest["suppressed_or_bad_outcome_removed"],
             "invalid_or_malformed_removed": manifest["invalid_or_malformed_removed"],
             "duplicate_removed": manifest["duplicate_removed"],
