@@ -22,6 +22,7 @@ polkit.addRule(function(action, subject) {
         "astra-sender@private_jordan.service",
         "astra-sender@sendgrid_alison.service",
         "astra-sender@sendgrid_annette.service",
+        "astra-sender@sendgrid_controlled_test.service",
         "astra-sender@sendgrid_fiorela.service",
         "astra-sender@sendgrid_jodi.service",
         "astra-sender@sendgrid_jordan.service"

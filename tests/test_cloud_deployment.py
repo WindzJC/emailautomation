@@ -208,6 +208,11 @@ def test_polkit_rule_allowlist_exactly_matches_configured_profiles() -> None:
     )
 
     assert {profile for _, profile in allowed_units} == set(ALL_PROFILES)
+    assert (
+        "astra-sender@sendgrid_controlled_test.service",
+        "sendgrid_controlled_test",
+    ) in allowed_units
+    assert "astra-sender@unrelated.service" not in rule
     assert 'verb !== "start" && verb !== "stop"' in rule
     assert 'subject.user !== "astra"' in rule
     assert "polkit.Result.YES" in rule
