@@ -2572,7 +2572,7 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"], list(rebuilt_rows[0].keys()))
             send_via_sendgrid.assert_not_called()
 
-    def test_repair_private_jc_queue_excludes_rows_already_sent_by_sendgrid_history(self) -> None:
+    def test_repair_private_jc_queue_restores_rows_blocked_only_by_sendgrid_history(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
             shards = tmp / "shards"
@@ -2677,19 +2677,18 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertTrue(body["ok"])
             self.assertTrue(body["repaired"])
             self.assertEqual(0, body["summary"]["before_queue_rows"])
-            self.assertEqual(1, body["summary"]["after_queue_rows"])
+            self.assertEqual(2, body["summary"]["after_queue_rows"])
             self.assertEqual(11, body["summary"]["planned_private_jc_rows"])
             self.assertEqual(2, body["summary"]["already_sent_same_family_removed"])
             self.assertEqual(5, body["summary"]["suppressed_or_bad_outcome_removed"])
             self.assertEqual(1, body["summary"]["invalid_or_malformed_removed"])
             self.assertEqual(1, body["summary"]["duplicate_removed"])
-            self.assertEqual(1, body["summary"]["already_sent_other_family_removed"])
-            self.assertEqual(0, body["summary"]["other_family_sent_history_allowed"])
+            self.assertEqual(1, body["summary"]["other_family_sent_history_allowed"])
             self.assertEqual("complete", body["diagnostics"]["phase"])
             self.assertEqual(11, body["diagnostics"]["planned_rows_processed"])
-            self.assertEqual(1, body["diagnostics"]["eligible_rows"])
+            self.assertEqual(2, body["diagnostics"]["eligible_rows"])
             rebuilt_rows = self._read_csv_rows(queue_path)
-            self.assertEqual(["fresh@example.com"], [row["Email"] for row in rebuilt_rows])
+            self.assertEqual(["fresh@example.com", "sg-history-only@example.com"], [row["Email"] for row in rebuilt_rows])
             self.assertEqual(headers, list(rebuilt_rows[0].keys()))
             backup_path = Path(body["summary"]["backup_path"])
             self.assertTrue(backup_path.exists())
@@ -2744,15 +2743,14 @@ class LiveDashboardTests(unittest.TestCase):
         load_history.assert_called_once_with()
         load_global_blocks.assert_called_once_with(invalid_outcomes={"invalid-outcome@example.test"})
         self.assertEqual(4005, normalize_email.call_count)
-        self.assertEqual(4000, len(rows))
+        self.assertEqual(4001, len(rows))
         self.assertEqual(4005, counts["planned_private_jc_rows"])
         self.assertEqual(1, counts["already_sent_same_family_removed"])
         self.assertEqual(1, counts["suppressed_or_bad_outcome_removed"])
         self.assertEqual(1, counts["invalid_or_malformed_removed"])
         self.assertEqual(1, counts["duplicate_removed"])
-        self.assertEqual(1, counts["already_sent_other_family_removed"])
-        self.assertEqual(0, counts["other_family_sent_history_allowed"])
-        self.assertEqual(4000, diagnostics["eligible_rows"])
+        self.assertEqual(1, counts["other_family_sent_history_allowed"])
+        self.assertEqual(4001, diagnostics["eligible_rows"])
         self.assertEqual(500000, diagnostics["source_counts"]["history_rows_loaded"])
 
     def test_private_jc_repair_reports_authoritative_history_load_failure(self) -> None:
