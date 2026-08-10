@@ -45,10 +45,16 @@ export function PageHeading({ eyebrow, title, description, aside = null }) {
 
 export function CommandBar({ html }) {
   return (
-    <div className="react-command-bar">
-      <p className="react-command-label">Run controls</p>
+    <section className="react-command-bar react-global-controls" aria-label="Global sender controls">
+      <div className="react-section-heading">
+        <div>
+          <p className="react-section-label">Global controls</p>
+          <span>Emergency stop, refresh, and send-cap settings</span>
+        </div>
+        <span className="react-section-state">No bulk start</span>
+      </div>
       <LegacyNode html={html} />
-    </div>
+    </section>
   );
 }
 
@@ -109,14 +115,23 @@ export function SendersDashboard({ view }) {
   return (
     <section id="ops-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="ops-tab-btn">
       <PageHeading
-        eyebrow="Delivery operations"
-        title="Sender command center"
-        description="Monitor queues, delivery state, and the next safe action."
+        eyebrow="Campaign delivery"
+        title="Sender operations"
+        description="Review queue health, then start only the sender you intend to run."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
+
+      <MetricCard>
+        <LegacyNode html={view.metrics} />
+      </MetricCard>
+
+      <SenderTable
+        progress={view.progress}
+        details={view.progressDetails}
+      />
+
       <CommandBar html={view.commandBar} />
-      <MetricCard><LegacyNode html={view.metrics} /></MetricCard>
-      <SenderTable progress={view.progress} details={view.progressDetails} />
+
       <section className="react-supporting-panels">
         <LegacyNode html={view.profileDetail} />
         <LegacyNode html={view.history} />

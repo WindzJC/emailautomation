@@ -144,9 +144,9 @@ class LiveDashboardAuthTests(unittest.TestCase):
 
                 with patch.object(live_dashboard.runtime_control, "start_all_senders") as start_all_senders:
                     blocked_start = client.post("/api/start")
-                self.assertEqual(403, blocked_start.status_code)
-                self.assertEqual("live_actions_disabled", blocked_start.json()["error"])
-                self.assertIn("DASHBOARD_ENABLE_LIVE_ACTIONS=1", blocked_start.json()["message"])
+                self.assertEqual(410, blocked_start.status_code)
+                self.assertEqual("bulk_start_disabled", blocked_start.json()["error"])
+                self.assertIn("Start only the intended individual sender", blocked_start.json()["message"])
                 start_all_senders.assert_not_called()
 
                 with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
@@ -174,7 +174,7 @@ class LiveDashboardAuthTests(unittest.TestCase):
                 self.assertTrue(logout.json()["authenticated"])
 
                 markup = client.get("/").text
-                self.assertIn('id="start-btn"', markup)
+                self.assertNotIn('id="start-btn"', markup)
                 self.assertIn('id="ops-tab-btn"', markup)
                 self.assertIn('id="leads-tab-btn"', markup)
 

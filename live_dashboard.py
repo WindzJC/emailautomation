@@ -5162,32 +5162,18 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
 
 @app.post("/api/start")
 def start() -> JSONResponse:
-    live_action_block = _manual_live_action_block_response()
-    if live_action_block is not None:
-        return live_action_block
-    _append_campaign_history("start_all_requested", profile="all", snapshot=_build_live_snapshot())
-    preconditions = _build_start_preconditions_report()
-    blocked = _start_preconditions_block_response(preconditions)
-    if blocked is not None:
-        return blocked
-    ok, message = runtime_control.start_all_senders()
-    time.sleep(0.6)
-    snapshot = _build_live_snapshot()
-    partially_started = str(message or "").startswith("PARTIALLY_STARTED")
-    _append_campaign_history(
-        "start_all_started" if ok else "start_all_partially_started" if partially_started else "start_all_blocked",
-        profile="all",
-        snapshot=snapshot,
-        blocked_reasons=[] if ok else [message],
+    return JSONResponse(
+        {
+            "ok": False,
+            "blocked": True,
+            "error": "bulk_start_disabled",
+            "message": (
+                "Bulk sender start is disabled. "
+                "Start only the intended individual sender."
+            ),
+        },
+        status_code=410,
     )
-    return JSONResponse({
-        "ok": ok,
-        "status": "STARTED" if ok else "PARTIALLY_STARTED" if partially_started else "BLOCKED",
-        "message": message,
-        "warnings": preconditions.get("warning_reasons") or [],
-        "preconditions": preconditions,
-        "snapshot": _build_live_snapshot(),
-    })
 
 
 @app.post("/api/start/{profile_name}")

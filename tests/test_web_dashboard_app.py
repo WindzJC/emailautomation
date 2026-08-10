@@ -1303,7 +1303,8 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
 
-        self.assertIn('path === "/api/start" || path.startsWith("/api/start/")', source)
+        self.assertIn('path.startsWith("/api/start/")', source)
+        self.assertNotIn('path === "/api/start"', source)
         self.assertIn("LIVE SENDER ACTION", source)
         self.assertIn("This starts or resumes real sender workers and can consume pending queue rows", source)
         self.assertIn("Use only on the live Windows/WSL machine", source)
@@ -1321,18 +1322,16 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("profilePendingCount(profile) > 0", source)
         self.assertIn("pendingCount <= 0", source)
 
-    def test_start_all_is_muted_only_when_run_has_no_pending_queues(self) -> None:
+    def test_bulk_start_control_is_absent_and_individual_start_remains(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        start = source.index("function renderControls(snapshot)")
-        end = source.index("function renderDetailSwitcher", start)
-        body = source[start:end]
+        markup = INDEX_HTML.read_text(encoding="utf-8")
 
-        self.assertIn("const summaryPending = Number(snapshot?.summary?.total_pending)", body)
-        self.assertIn("const runComplete = totalPending <= 0", body)
-        self.assertIn("hasActiveSender || blockedByQueueSafety || runComplete", body)
-        self.assertIn('classList.toggle("btn-start-complete", runComplete)', body)
-        self.assertIn('"Run complete — no pending queues."', body)
-        self.assertIn(': "Start all available senders."', body)
+        self.assertNotIn('id="start-btn"', markup)
+        self.assertNotIn('startBtn: document.getElementById("start-btn")', source)
+        self.assertNotIn('postAction("/api/start")', source)
+        self.assertNotIn('"Start all available senders."', source)
+        self.assertIn('path.startsWith("/api/start/")', source)
+        self.assertIn('postAction(`/api/start/${profile}`', source)
 
     def test_dashboard_next_action_prefers_active_private_jc_monitoring(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1544,8 +1543,9 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, source)
 
+        self.assertNotIn('id="start-btn"', markup)
+
         for control_id in [
-            'id="start-btn"',
             'id="stop-btn"',
             'id="ops-tab-btn"',
             'id="leads-tab-btn"',
@@ -1706,7 +1706,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Cold dispatch disabled for Warm Research",
             "Explicit confirmation required",
             "Warm confirmation stays separate",
-            "Start All excludes warm",
+            "Warm Outreach uses individual sender controls",
         ]:
             self.assertIn(expected, source)
 

@@ -39,7 +39,6 @@ const els = {
   sendCapSaveBtn: document.getElementById("send-cap-save-btn"),
   refreshBtn: document.getElementById("refresh-btn"),
   wallboardBtn: document.getElementById("wallboard-btn"),
-  startBtn: document.getElementById("start-btn"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
   leadsImportantInputPath: document.getElementById("leads-important-input-path"),
@@ -5489,7 +5488,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
             <div class="warm-safety-rules">
               <span>Cold dispatch disabled for Warm Research</span>
               <span>Explicit confirmation required</span>
-              <span>Start All excludes warm</span>
+              <span>Warm Outreach uses individual sender controls</span>
               <span>Warm confirmation stays separate</span>
             </div>
           </aside>
@@ -5596,7 +5595,7 @@ function renderLeadsActiveAlerts(status = lastLeadsStatus, snapshot = lastSnapsh
     cards.push({
       severity: currentSafety.private_status === "READY" ? "warn" : "bad",
       title: `${currentSafety.sendgrid_status === "READY" ? "SendGrid ready" : "SendGrid blocked"}; ${currentSafety.private_status === "READY" ? "Private JC ready" : "Private JC blocked"}`,
-      message: "Provider-specific queue safety controls individual Start buttons. Start All still requires every provider to be safe.",
+      message: "Provider-specific queue safety controls each individual Start button.",
       blocks: currentSafety.private_status !== "READY" || currentSafety.sendgrid_status !== "READY",
     });
   }
@@ -8339,20 +8338,6 @@ function renderControls(snapshot) {
   if (els.sendCapInput && document.activeElement !== els.sendCapInput && sendTarget > 0) {
     els.sendCapInput.value = String(sendTarget);
   }
-  if (els.startBtn) {
-    const startUnavailable = hasActiveSender || blockedByQueueSafety || runComplete;
-    els.startBtn.disabled = startUnavailable;
-    els.startBtn.classList.toggle("btn-start-muted", startUnavailable);
-    els.startBtn.classList.toggle("btn-start-complete", runComplete);
-    els.startBtn.title = runComplete
-      ? "Run complete — no pending queues."
-      : blockedByQueueSafety
-      ? queueSafetyMessage
-      : hasActiveSender
-      ? "Some senders are already running. Use per-sender controls or Stop All first."
-      : "Start all available senders.";
-    els.startBtn.setAttribute("aria-describedby", startUnavailable ? "send-cap-note" : "");
-  }
   if (els.stopBtn) {
     els.stopBtn.classList.toggle("btn-danger-active", hasActiveSender);
   }
@@ -8379,7 +8364,7 @@ function renderControls(snapshot) {
       lines.push(scheduleBits.join(" | "));
     }
     if (!lines.length) {
-      lines.push("Choose a send target, then Start All.");
+      lines.push("Choose a sender, then use its individual Start button.");
     }
     setNodeHtml(
       els.sendCapNote,
@@ -9489,7 +9474,7 @@ async function handleSenderStatusClick(event) {
 
 async function postAction(path, options = {}) {
   const { profileName = "", action = "", body = null } = options;
-  const manualSenderStart = path === "/api/start" || path.startsWith("/api/start/");
+  const manualSenderStart = path.startsWith("/api/start/");
   if (manualSenderStart && !window.confirm(
     "LIVE SENDER ACTION\n\n"
     + "This starts or resumes real sender workers and can consume pending queue rows. "
@@ -9827,7 +9812,6 @@ async function bootstrapDashboard() {
 if (els.refreshBtn) els.refreshBtn.addEventListener("click", () => fetchSnapshot());
 if (els.sendCapSaveBtn) els.sendCapSaveBtn.addEventListener("click", () => saveSendCap());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
-if (els.startBtn) els.startBtn.addEventListener("click", () => postAction("/api/start"));
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
 if (els.opsProgressDetailsToggle && els.opsProgressDetails) {

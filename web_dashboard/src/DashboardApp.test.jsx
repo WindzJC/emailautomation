@@ -11,7 +11,7 @@ const template = {
     status: '<div class="app-rail-status"><span id="auth-status-label">Local dev</span></div>',
   },
   senders: {
-    commandBar: '<section class="workspace-status-row"><button id="start-btn">Start All</button></section>',
+    commandBar: '<section class="workspace-status-row"><button id="refresh-btn">Refresh</button></section>',
     metrics: '<section class="queue-health-section"><div id="summary-grid"></div></section>',
     progress: '<section class="ops-progress-strip"><span id="ops-progress-summary"></span></section>',
     progressDetails: '<details id="ops-progress-details"></details>',
@@ -33,7 +33,8 @@ const template = {
 describe("DashboardApp", () => {
   it("mounts sender and Lead Ops controller contracts", () => {
     render(<DashboardApp template={template} />);
-    expect(screen.getByText("Start All")).toBeInTheDocument();
+    expect(screen.queryByText("Start All")).not.toBeInTheDocument();
+    expect(screen.getByText("Refresh")).toBeInTheDocument();
     expect(screen.getByText("Checking dashboard mode...")).toBeInTheDocument();
     expect(screen.getByText("Manual Start/Resume can launch real workers and consume queues.")).toBeInTheDocument();
     expect(screen.getByText("Current run")).toBeInTheDocument();

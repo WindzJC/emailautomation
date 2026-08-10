@@ -342,7 +342,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(status["auto_start_allowed"])
         self.assertIn("DASHBOARD_ALLOW_AUTO_START=1", status["auto_start_note"])
 
-    def test_manual_start_is_allowed_in_local_dev_when_live_actions_explicitly_enabled(self) -> None:
+    def test_manual_profile_start_is_allowed_in_local_dev_when_live_actions_explicitly_enabled(self) -> None:
         preconditions = {"ok": True, "blocked": False, "warning_reasons": []}
         with patch.dict(
             os.environ,
@@ -352,6 +352,10 @@ class LiveDashboardTests(unittest.TestCase):
                 "DASHBOARD_ENABLE_LIVE_ACTIONS": "1",
             },
             clear=False,
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
         ), patch.object(
             live_dashboard,
             "_build_live_snapshot",
@@ -369,14 +373,14 @@ class LiveDashboardTests(unittest.TestCase):
             "append_campaign_run_history",
         ), patch.object(
             live_dashboard.runtime_control,
-            "start_all_senders",
+            "start_sender",
             return_value=(True, "Started."),
-        ) as start_all_senders, patch.object(live_dashboard.time, "sleep"):
-            response = live_dashboard.start()
+        ) as start_sender:
+            response = live_dashboard.start_profile("sendgrid_annette")
 
         self.assertEqual(200, response.status_code)
         self.assertTrue(json.loads(response.body)["ok"])
-        start_all_senders.assert_called_once()
+        start_sender.assert_called_once_with("sendgrid_annette")
 
     def test_preview_validate_profile_blocks_active_sender(self) -> None:
         with (
@@ -434,62 +438,42 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(["missing_book_title: 1"], payload["result"]["validation_reasons"])
         self.assertEqual("preview_validate_completed", history_mock.call_args_list[-1].args[0]["event_type"])
 
-    def test_start_all_writes_requested_and_started_history(self) -> None:
-        preconditions = {
-            "ok": True,
-            "blocked": False,
-            "profile": "",
-            "profiles": ["sendgrid_annette"],
-            "queue_safety": {"safe": True},
-            "queue_safety_status": "safe",
-            "snapshot": {"profiles": [], "queue_safety": {"safe": True}},
-        }
-        with (
-            patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": [], "queue_safety": {"safe": True}}),
-            patch.object(live_dashboard, "_build_start_preconditions_report", return_value=preconditions),
-            patch.object(live_dashboard.runtime_control, "start_all_senders", return_value=(True, "started")),
-            patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
-            patch.object(live_dashboard.time, "sleep", return_value=None),
+    def test_bulk_start_is_permanently_disabled_and_has_no_side_effects(self) -> None:
+        with patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            side_effect=AssertionError("bulk start must not consult the live-action guard"),
+        ), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            side_effect=AssertionError("bulk start must not run start preconditions"),
+        ), patch.object(
+            live_dashboard,
+            "_build_live_snapshot",
+            side_effect=AssertionError("bulk start must not build a live snapshot"),
+        ), patch.object(
+            live_dashboard,
+            "_append_campaign_history",
+            side_effect=AssertionError("bulk start must not write campaign history"),
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "start_all_senders",
+            side_effect=AssertionError("bulk start must never start sender workers"),
+        ), patch.object(
+            live_dashboard.time,
+            "sleep",
+            side_effect=AssertionError("bulk start must not sleep"),
         ):
             response = live_dashboard.start()
 
         payload = json.loads(response.body)
-        self.assertTrue(payload["ok"])
-        self.assertEqual(
-            ["start_all_requested", "start_all_started"],
-            [call.args[0]["event_type"] for call in history_mock.call_args_list],
-        )
-
-    def test_start_all_writes_partially_started_history(self) -> None:
-        preconditions = {
-            "ok": True,
-            "blocked": False,
-            "profile": "",
-            "profiles": ["sendgrid_annette", "sendgrid_fiorela"],
-            "queue_safety": {"safe": True},
-            "queue_safety_status": "safe",
-            "snapshot": {"profiles": [], "queue_safety": {"safe": True}},
-        }
-        message = "PARTIALLY_STARTED: missing profiles: sendgrid_fiorela. Last preflight output: sendgrid_fiorela: status=OK"
-        with (
-            patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": [], "queue_safety": {"safe": True}}),
-            patch.object(live_dashboard, "_build_start_preconditions_report", return_value=preconditions),
-            patch.object(live_dashboard.runtime_control, "start_all_senders", return_value=(False, message)),
-            patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
-            patch.object(live_dashboard.time, "sleep", return_value=None),
-        ):
-            response = live_dashboard.start()
-
-        payload = json.loads(response.body)
+        self.assertEqual(410, response.status_code)
         self.assertFalse(payload["ok"])
-        self.assertEqual("PARTIALLY_STARTED", payload["status"])
-        self.assertIn("sendgrid_fiorela", payload["message"])
-        self.assertEqual(
-            ["start_all_requested", "start_all_partially_started"],
-            [call.args[0]["event_type"] for call in history_mock.call_args_list],
-        )
-        self.assertIn("sendgrid_fiorela", " ".join(history_mock.call_args_list[-1].args[0]["blocked_reasons"]))
+        self.assertTrue(payload["blocked"])
+        self.assertEqual("bulk_start_disabled", payload["error"])
+        self.assertIn("Start only the intended individual sender", payload["message"])
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_blocked_by_queue_safety_writes_history(self) -> None:
         with (
             patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
@@ -703,53 +687,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(prep["blocks_current_send"])
         self.assertIn("Check Leads is running", " ".join(prep["reasons"]))
 
-    def test_start_all_blocks_when_queue_safety_is_unsafe(self) -> None:
-        unsafe_report = {
-            "safe": False,
-            "unsafe_reasons": ["overlap_with_triaged_reject", "outside_intended_source"],
-            "message": "Synthetic unsafe queue.",
-        }
-
-        with patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=unsafe_report,
-        ), patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette"],
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            return_value={"status": "PASS", "reasons": []},
-        ), patch.object(
-            live_dashboard,
-            "_lead_state_start_block_reasons",
-            return_value=[],
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"queue_safety": unsafe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-        ) as start_all_senders:
-            response = live_dashboard.start()
-
-        self.assertEqual(409, response.status_code)
-        body = json.loads(response.body)
-        self.assertFalse(body["ok"])
-        self.assertTrue(body["blocked"])
-        self.assertEqual("queue_safety_unsafe", body["error"])
-        self.assertEqual("unsafe", body["safety_status"])
-        self.assertEqual(unsafe_report["unsafe_reasons"], body["reasons"])
-        self.assertIn("rebuild queues", body["suggested_fix"])
-        start_all_senders.assert_not_called()
-
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_blocks_when_queue_safety_is_unsafe(self) -> None:
         unsafe_report = {
             "safe": False,
@@ -794,6 +732,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("queue_safety_unsafe", body["error"])
         start_sender.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_private_queue_unsafe_does_not_block_sendgrid_profile_start(self) -> None:
         reports = {
             "sendgrid": {"safe": True, "unsafe_reasons": [], "affected_provider": "sendgrid"},
@@ -838,6 +777,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("sendgrid", body["preconditions"]["queue_safety_provider"])
         start_sender.assert_called_once_with("sendgrid_annette")
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_sendgrid_queue_unsafe_blocks_sendgrid_profile_start(self) -> None:
         reports = {
             "sendgrid": {"safe": False, "unsafe_reasons": ["OUTSIDE_CHECKED_OUTPUT"], "affected_provider": "sendgrid"},
@@ -875,6 +815,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("sendgrid", body["queue_safety"]["affected_provider"])
         start_sender.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_private_queue_unsafe_blocks_private_profile_start(self) -> None:
         reports = {
             "private_jc": {"safe": False, "unsafe_reasons": ["OUTSIDE_INTENDED_SOURCE"], "affected_provider": "private_jc"},
@@ -912,6 +853,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("private_jc", body["queue_safety"]["affected_provider"])
         start_sender.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_private_provider_blocker_blocks_private_profile_start(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": [], "affected_provider": "private_jc"}
         snapshot = {
@@ -959,6 +901,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("BOUNCE_SYNC_ERROR", " ".join(body["blocked_reasons"]))
         start_sender.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_private_provider_blocker_does_not_block_sendgrid_profile_start(self) -> None:
         reports = {
             "sendgrid": {"safe": True, "unsafe_reasons": [], "affected_provider": "sendgrid"},
@@ -1017,6 +960,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("sendgrid", body["preconditions"]["queue_safety_provider"])
         start_sender.assert_called_once_with("sendgrid_annette")
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_allows_safe_queue_and_calls_runtime_start(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
 
@@ -1442,169 +1386,7 @@ class LiveDashboardTests(unittest.TestCase):
         build_snapshot.assert_called_once_with()
         start_sender.assert_not_called()
 
-    def test_start_all_blocks_when_any_sender_is_active(self) -> None:
-        safe_report = {"safe": True, "unsafe_reasons": []}
-
-        with patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette"],
-        ), patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=safe_report,
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value={"sendgrid_jordan"},
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            return_value={"status": "PASS", "reasons": []},
-        ), patch.object(
-            live_dashboard,
-            "_lead_state_start_block_reasons",
-            return_value=[],
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"profiles": [], "queue_safety": safe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-        ) as start_all_senders:
-            response = live_dashboard.start()
-
-        self.assertEqual(409, response.status_code)
-        body = json.loads(response.body)
-        self.assertEqual("start_preconditions_failed", body["error"])
-        self.assertIn("sendgrid_jordan", " ".join(body["blocked_reasons"]))
-        start_all_senders.assert_not_called()
-
-    def test_start_all_blocks_when_preview_process_is_active(self) -> None:
-        safe_report = {"safe": True, "unsafe_reasons": []}
-
-        with patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette", "sendgrid_jordan"],
-        ), patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=safe_report,
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_active_preview_names",
-            return_value={"sendgrid_jordan"},
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            return_value={"status": "PASS", "reasons": []},
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"profiles": [], "queue_safety": safe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-        ) as start_all_senders:
-            response = live_dashboard.start()
-
-        self.assertEqual(409, response.status_code)
-        body = json.loads(response.body)
-        self.assertIn("Preview validation", " ".join(body["blocked_reasons"]))
-        self.assertIn("sendgrid_jordan", " ".join(body["blocked_reasons"]))
-        start_all_senders.assert_not_called()
-
-    def test_start_all_excludes_private_jc_and_warns_for_not_run_readiness(self) -> None:
-        safe_report = {"safe": True, "unsafe_reasons": []}
-        checked_profiles: list[str] = []
-
-        def fake_readiness(snapshot, profile):
-            checked_profiles.append(profile)
-            return {"status": "NOT RUN", "reasons": ["synthetic not run"]}
-
-        with patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette", "sendgrid_jordan"],
-        ), patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=safe_report,
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_active_preview_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            side_effect=fake_readiness,
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"profiles": [], "queue_safety": safe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-            return_value=(True, "started"),
-        ) as start_all_senders, patch.object(live_dashboard.time, "sleep"):
-            response = live_dashboard.start()
-
-        self.assertEqual(200, response.status_code)
-        body = json.loads(response.body)
-        self.assertTrue(body["ok"])
-        self.assertEqual(["sendgrid_annette", "sendgrid_jordan"], checked_profiles)
-        self.assertNotIn("private_jc", json.dumps(body))
-        self.assertIn("NOT RUN", " ".join(body["warnings"]))
-        start_all_senders.assert_called_once()
-
-    def test_start_all_blocks_failed_message_readiness(self) -> None:
-        safe_report = {"safe": True, "unsafe_reasons": []}
-
-        with patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette"],
-        ), patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=safe_report,
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_active_preview_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            return_value={"status": "FAIL", "reasons": ["synthetic fail"]},
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"profiles": [], "queue_safety": safe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-        ) as start_all_senders:
-            response = live_dashboard.start()
-
-        self.assertEqual(409, response.status_code)
-        body = json.loads(response.body)
-        self.assertIn("FAIL", " ".join(body["blocked_reasons"]))
-        start_all_senders.assert_not_called()
-
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_treats_not_run_and_stale_readiness_as_warnings(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
         for status in ("NOT RUN", "STALE"):
@@ -1649,6 +1431,7 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertIn(status, " ".join(body["warnings"]))
             start_sender.assert_called_once_with("sendgrid_annette")
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_blocks_when_message_readiness_fails(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
         with patch.object(
@@ -1692,6 +1475,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("FAIL", " ".join(body["blocked_reasons"]))
         start_sender.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_warns_but_does_not_block_stale_next_batch_state(self) -> None:
         safe_report = {"safe": True, "unsafe_reasons": []}
         temp_path = live_dashboard.settings.APP_ROOT / "tmp_synthetic_run" / "_important" / "leads.csv"
@@ -1738,56 +1522,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("temp artifact", " ".join(body["warnings"]))
         start_sender.assert_called_once_with("sendgrid_annette")
 
-    def test_start_all_does_not_block_on_stale_lead_state_when_queue_and_readiness_pass(self) -> None:
-        safe_report = {"safe": True, "unsafe_reasons": []}
-        temp_path = live_dashboard.settings.APP_ROOT / "tmp_synthetic_run" / "_important" / "leads.csv"
-        status = {
-            "active_important_check_job": None,
-            "latest_master_check": {"output_label": str(temp_path), "rejected_label": ""},
-            "latest_lead_triage": {
-                "verified_label": str(temp_path.with_name("leads_triaged_keep.csv")),
-                "rejected_label": str(temp_path.with_name("leads_triaged_reject.csv")),
-            },
-            "latest_auto_dispatch_preview": {},
-        }
-
-        with patch.object(
-            live_dashboard,
-            "SENDGRID_PROFILES",
-            ["sendgrid_annette"],
-        ), patch.object(
-            live_dashboard,
-            "build_dashboard_queue_safety_report",
-            return_value=safe_report,
-        ), patch.object(
-            live_dashboard,
-            "_active_sender_names",
-            return_value=set(),
-        ), patch.object(
-            live_dashboard,
-            "_profile_readiness_from_snapshot",
-            return_value={"status": "PASS", "reasons": []},
-        ), patch.object(
-            live_dashboard,
-            "_combined_leads_status",
-            return_value=status,
-        ), patch.object(
-            live_dashboard,
-            "_build_live_snapshot",
-            return_value={"profiles": [], "queue_safety": safe_report},
-        ), patch.object(
-            live_dashboard.runtime_control,
-            "start_all_senders",
-            return_value=(True, "started"),
-        ) as start_all_senders, patch.object(live_dashboard.time, "sleep"):
-            response = live_dashboard.start()
-
-        self.assertEqual(200, response.status_code)
-        body = json.loads(response.body)
-        self.assertTrue(body["ok"])
-        self.assertNotIn("leads.csv", " ".join(body.get("blocked_reasons", [])))
-        start_all_senders.assert_called_once()
-
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_profile_does_not_block_missing_live_important_files_after_dispatch_cleanup(self) -> None:
         with tempfile.TemporaryDirectory(prefix="synthetic_dispatch_cleanup_", dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
@@ -7542,6 +7277,7 @@ class LiveDashboardTests(unittest.TestCase):
         )
         shard_cleaned_leads.assert_not_called()
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_warm_private_jc_requires_explicit_confirmation(self) -> None:
         with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
             live_dashboard,
@@ -7580,6 +7316,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         confirm_preview.assert_called_once_with(preview_path=preview_path)
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_warm_private_jc_calls_runtime_only_when_confirmed(self) -> None:
         lane = {"confirmed": True, "ready": True, "remaining": 1, "message": "Ready."}
         with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "0"}), patch.object(
@@ -7603,6 +7340,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         start_sender.assert_called_once_with("private_jc_warm")
 
+    @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_warm_private_jc_blocks_payload_mismatch_without_runtime_call(self) -> None:
         lane = {
             "confirmed": False,
