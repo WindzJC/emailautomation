@@ -586,6 +586,38 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("Queue partially consumed — remaining recipients verified safe.", report["message"])
         self.assertIsNone(dashboard_core.queue_safety_alert(report))
 
+    def test_preview_campaign_id_prefers_campaign_type_before_preview_id(self) -> None:
+        self.assertEqual(
+            "campaign-explicit",
+            dashboard_core._preview_campaign_id(
+                {
+                    "campaign_id": "campaign-explicit",
+                    "campaign_type": "cold",
+                    "preview_id": "dispatch_preview_123",
+                }
+            ),
+        )
+        self.assertEqual(
+            "cold",
+            dashboard_core._preview_campaign_id(
+                {
+                    "campaign_id": None,
+                    "campaign_type": "cold",
+                    "preview_id": "dispatch_preview_123",
+                }
+            ),
+        )
+        self.assertEqual(
+            "dispatch_preview_123",
+            dashboard_core._preview_campaign_id(
+                {
+                    "campaign_id": None,
+                    "campaign_type": None,
+                    "preview_id": "dispatch_preview_123",
+                }
+            ),
+        )
+
     def test_private_provider_history_uses_cold_and_warm_logs_not_shared_domain_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             logs = Path(tmpdir)

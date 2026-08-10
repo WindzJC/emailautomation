@@ -3102,8 +3102,8 @@ def _planned_preview_email_set(preview: Dict[str, object], provider: str) -> set
 def _preview_campaign_id(preview: Dict[str, object]) -> str:
     return (
         str(preview.get("campaign_id") or "").strip()
-        or str(preview.get("preview_id") or "").strip()
         or str(preview.get("campaign_type") or "").strip()
+        or str(preview.get("preview_id") or "").strip()
     )
 
 
