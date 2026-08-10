@@ -21,7 +21,7 @@ import time
 import traceback
 import unicodedata
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -814,17 +814,28 @@ def email_logged_authoritative_sent(log_path: Path, email_addr: str) -> bool:
     if not email or not log_path.exists():
         return False
     try:
-        with log_path.open(newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                if norm_email(row.get("Email") or "") == email and _log_row_is_authoritative_sent(row):
-                    return True
+        history = load_authoritative_history_email_sets((log_path,))[Path(log_path)]
+        return email in history["sent"]
     except Exception:
         return False
-    return False
 
 
 def email_logged_authoritative_sent_any(paths: Sequence[Path], email_addr: str) -> bool:
     return any(email_logged_authoritative_sent(path, email_addr) for path in paths)
+
+
+_AUTHORITATIVE_HISTORY_CACHE_MAX = 64
+_AUTHORITATIVE_HISTORY_CACHE: OrderedDict[
+    Path,
+    tuple[tuple[object, ...], frozenset[str], frozenset[str], int],
+] = OrderedDict()
+
+
+def _norm_authoritative_history_email(raw_email: object) -> str:
+    text = str(raw_email or "").strip().lower()
+    if BOOK_TITLE_EMAIL_RE.fullmatch(text):
+        return text
+    return norm_email(str(raw_email or ""))
 
 
 def load_authoritative_history_email_sets(
@@ -833,6 +844,17 @@ def load_authoritative_history_email_sets(
     loaded: Dict[Path, Dict[str, object]] = {}
     for raw_path in paths:
         path = Path(raw_path)
+        cache_key = path.resolve()
+        signature = _block_source_signature(path)
+        cached = _AUTHORITATIVE_HISTORY_CACHE.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            _AUTHORITATIVE_HISTORY_CACHE.move_to_end(cache_key)
+            loaded[path] = {
+                "sent": set(cached[1]),
+                "invalid": set(cached[2]),
+                "row_count": cached[3],
+            }
+            continue
         sent: Set[str] = set()
         invalid: Set[str] = set()
         row_count = 0
@@ -840,13 +862,27 @@ def load_authoritative_history_email_sets(
             with path.open(newline="", encoding="utf-8-sig") as handle:
                 for row in csv.DictReader(handle):
                     row_count += 1
-                    email = norm_email(row.get("Email") or "")
+                    email = _norm_authoritative_history_email(row.get("Email") or "")
                     if not email:
                         continue
                     if _log_row_is_authoritative_sent(row):
                         sent.add(email)
                     if str(row.get("Status") or "").strip().upper() == "INVALID":
                         invalid.add(email)
+        final_signature = _block_source_signature(path)
+        if final_signature != signature:
+            raise RuntimeError(
+                f"Authoritative sender history changed while loading: {path.name}"
+            )
+        _AUTHORITATIVE_HISTORY_CACHE[cache_key] = (
+            final_signature,
+            frozenset(sent),
+            frozenset(invalid),
+            row_count,
+        )
+        _AUTHORITATIVE_HISTORY_CACHE.move_to_end(cache_key)
+        while len(_AUTHORITATIVE_HISTORY_CACHE) > _AUTHORITATIVE_HISTORY_CACHE_MAX:
+            _AUTHORITATIVE_HISTORY_CACHE.popitem(last=False)
         loaded[path] = {
             "sent": sent,
             "invalid": invalid,
@@ -2362,31 +2398,24 @@ def should_block_role_recipient_for_runtime(
 def load_already_done(sent_log: Path) -> Set[str]:
     if not sent_log.exists():
         return set()
-    out: Set[str] = set()
-    with sent_log.open(newline="", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            st = (r.get("Status") or "").strip().upper()
-            if st == "ATTEMPT" and _log_info_marks_sent(r.get("Info") or ""):
-                st = "SENT"
-            if st not in ("SENT", "INVALID"):
-                continue
-            e = norm_email(r.get("Email") or "")
-            if e:
-                out.add(e)
-    return out
+    history = load_authoritative_history_email_sets((sent_log,))[Path(sent_log)]
+    return set(history["sent"]) | set(history["invalid"])
 
 
 def load_log_status_emails(sent_log: Path, statuses: Set[str]) -> Set[str]:
     if not sent_log.exists():
         return set()
     wanted = {str(status or "").strip().upper() for status in statuses if str(status or "").strip()}
+    if wanted == {"INVALID"}:
+        history = load_authoritative_history_email_sets((sent_log,))[Path(sent_log)]
+        return set(history["invalid"])
     out: Set[str] = set()
     with sent_log.open(newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             st = (r.get("Status") or "").strip().upper()
             if st not in wanted:
                 continue
-            e = norm_email(r.get("Email") or "")
+            e = _norm_authoritative_history_email(r.get("Email") or "")
             if e:
                 out.add(e)
     return out

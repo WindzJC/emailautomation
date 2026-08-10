@@ -99,6 +99,11 @@ for unit in \
 do
   install -m 0644 "${REPO_ROOT}/deploy/cloud/${unit}" "${UNIT_DIR}/${unit}"
 done
+CONTROLLED_SENDER_DROPIN_DIR="${UNIT_DIR}/astra-sender@sendgrid_controlled_test.service.d"
+install -d -o root -g root -m 0755 "${CONTROLLED_SENDER_DROPIN_DIR}"
+install -o root -g root -m 0644 \
+  "${REPO_ROOT}/deploy/cloud/astra-sender@sendgrid_controlled_test.service.d/10-no-restart.conf" \
+  "${CONTROLLED_SENDER_DROPIN_DIR}/10-no-restart.conf"
 systemctl daemon-reload
 
 if ! command -v cloudflared >/dev/null 2>&1; then

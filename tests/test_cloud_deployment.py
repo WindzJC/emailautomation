@@ -93,6 +93,23 @@ def test_sender_template_is_profile_driven_and_never_auto_enabled_by_bootstrap()
     assert "systemctl start" not in bootstrap
 
 
+def test_controlled_sender_disables_restart_without_changing_normal_template() -> None:
+    unit = (CLOUD / "astra-sender@.service").read_text(encoding="utf-8")
+    dropin_path = (
+        CLOUD
+        / "astra-sender@sendgrid_controlled_test.service.d"
+        / "10-no-restart.conf"
+    )
+    dropin = dropin_path.read_text(encoding="utf-8")
+    bootstrap = (CLOUD / "bootstrap.sh").read_text(encoding="utf-8")
+
+    assert "Restart=on-failure" in unit
+    assert dropin.strip().splitlines() == ["[Service]", "Restart=no"]
+    assert str(dropin_path.relative_to(ROOT)) in bootstrap
+    assert "astra-sender@sendgrid_controlled_test.service.d" in bootstrap
+    assert "astra-sender@*.service.d" not in bootstrap
+
+
 def test_every_configured_profile_has_isolated_unit_lock_and_credential_mapping() -> None:
     assert tuple(runtime_backend_systemd.configured_profiles()) == ALL_PROFILES
     assert len(set(CREDENTIAL_ENV_BY_PROFILE.values())) >= 2

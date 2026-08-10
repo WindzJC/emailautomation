@@ -438,6 +438,17 @@ class SendShardTests(unittest.TestCase):
                 self.assertIn("sendgrid_annette_log.csv", {path.name for path in sendgrid_paths})
                 self.assertIn("sendgrid_jordan_log.csv", {path.name for path in sendgrid_paths})
                 self.assertIn("sendgrid_domain_log.csv", {path.name for path in sendgrid_paths})
+                expected_sendgrid_logs = {
+                    Path(str(config[key])).name
+                    for name, config in send_shard.PROFILES.items()
+                    if send_shard.get_sender_family(name) == "sendgrid"
+                    for key in ("log", "domain_log")
+                    if config.get(key)
+                }
+                self.assertEqual(
+                    expected_sendgrid_logs,
+                    {path.name for path in sendgrid_paths},
+                )
                 self.assertTrue(
                     send_shard.is_blocked_by_same_sender_family_history(
                         "private_jc",
@@ -527,6 +538,7 @@ class SendShardTests(unittest.TestCase):
     def test_authoritative_history_loader_scans_each_log_once_for_sent_and_invalid_sets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir) / "private_jc_log.csv"
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
             self._write_csv(
                 log_path,
                 ["Email", "Status", "Info"],
@@ -548,6 +560,26 @@ class SendShardTests(unittest.TestCase):
 
             with patch.object(Path, "open", autospec=True, side_effect=tracked_open):
                 loaded = send_shard.load_authoritative_history_email_sets([log_path])
+                self.assertEqual(
+                    {"sent@example.test", "attempt@example.test", "invalid@example.test"},
+                    send_shard.load_already_done(log_path),
+                )
+                self.assertEqual(
+                    {"invalid@example.test"},
+                    send_shard.load_done_statuses_from_logs(
+                        [log_path], {"INVALID"}
+                    ),
+                )
+                self.assertTrue(
+                    send_shard.email_logged_authoritative_sent(
+                        log_path, "sent@example.test"
+                    )
+                )
+                self.assertFalse(
+                    send_shard.email_logged_authoritative_sent(
+                        log_path, "fresh@example.test"
+                    )
+                )
 
             self.assertEqual(1, open_calls)
             self.assertEqual(
@@ -556,6 +588,49 @@ class SendShardTests(unittest.TestCase):
             )
             self.assertEqual({"invalid@example.test"}, loaded[log_path]["invalid"])
             self.assertEqual(3, loaded[log_path]["row_count"])
+
+    def test_authoritative_history_cache_invalidates_when_log_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_annette_log.csv"
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [{"Email": "known@example.test", "Status": "SENT", "Info": ""}],
+            )
+            self.assertEqual(
+                {"known@example.test"},
+                send_shard.load_already_done(log_path),
+            )
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {"Email": "known@example.test", "Status": "SENT", "Info": ""},
+                    {"Email": "new@example.test", "Status": "SENT", "Info": ""},
+                ],
+            )
+            self.assertEqual(
+                {"known@example.test", "new@example.test"},
+                send_shard.load_already_done(log_path),
+            )
+
+    def test_optimized_history_email_normalization_matches_legacy_results(self) -> None:
+        values = (
+            "simple@example.test",
+            " SIMPLE@EXAMPLE.TEST ",
+            "Author Name <author@example.test>",
+            "astraproductionsbyjc+sendgridtest@gmail.com",
+            "invalid@@example.test",
+            "",
+        )
+        self.assertEqual(
+            {send_shard.norm_email(value) for value in values},
+            {
+                send_shard._norm_authoritative_history_email(value)
+                for value in values
+            },
+        )
 
     def test_send_idempotency_reservation_blocks_duplicate_campaign_provider_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
