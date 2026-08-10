@@ -148,7 +148,7 @@ class DashboardCoreTests(unittest.TestCase):
             queue = shards / "recipients_sendgrid_controlled_test.csv"
             queue.write_text(
                 "Email,FirstName,BookTitle\n"
-                "astraproductionsbyjc@gmail.com,Astra,Controlled Test\n",
+                "astraproductionsbyjc+sendgridtest@gmail.com,Astra,Controlled Test\n",
                 encoding="utf-8",
             )
             preview = previews / "sendgrid_controlled_test_message_preview.csv"
@@ -176,7 +176,7 @@ class DashboardCoreTests(unittest.TestCase):
                     "log": str(base / "sendgrid_controlled_test_log.csv"),
                     "pitch": "pitch1",
                     "controlled_test": True,
-                    "recipient_allowlist": "astraproductionsbyjc@gmail.com",
+                    "recipient_allowlist": "astraproductionsbyjc+sendgridtest@gmail.com",
                     "require_preview_recipient_fingerprint": True,
                 }
             }
@@ -193,11 +193,11 @@ class DashboardCoreTests(unittest.TestCase):
 
                 preview.write_text(
                     "Email,FirstName,BookTitle,Subject,Body\n"
-                    "astraproductionsbyjc@gmail.com,Astra,Controlled Test,Subject,Body\n",
+                    "astraproductionsbyjc+sendgridtest@gmail.com,Astra,Controlled Test,Subject,Body\n",
                     encoding="utf-8",
                 )
                 (previews / "sendgrid_controlled_test_message_preview_validated.csv").write_text(
-                    "Email\nastraproductionsbyjc@gmail.com\n",
+                    "Email\nastraproductionsbyjc+sendgridtest@gmail.com\n",
                     encoding="utf-8",
                 )
                 (previews / "sendgrid_controlled_test_message_preview_summary.txt").write_text(

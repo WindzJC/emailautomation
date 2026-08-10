@@ -1173,7 +1173,7 @@ class SendShardTests(unittest.TestCase):
             controlled_queue = shards / "recipients_sendgrid_controlled_test.csv"
             controlled_queue.write_text(
                 "Email,FirstName,BookTitle\n"
-                "astraproductionsbyjc@gmail.com,Astra,Controlled Test\n",
+                "astraproductionsbyjc+sendgridtest@gmail.com,Astra,Controlled Test\n",
                 encoding="utf-8",
             )
             (logs / "sendgrid_annette_log.csv").write_text(
