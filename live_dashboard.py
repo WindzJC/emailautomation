@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -141,6 +142,8 @@ from provider_pacing import mark_recovery_started, provider_pacing_status
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
+    campaign_id_for_row,
+    get_row_value_ci,
     authoritative_send_log_paths,
     load_authoritative_history_email_sets,
     load_bad_sendgrid_event_emails,
@@ -6483,13 +6486,103 @@ def _private_jc_repair_authoritative_history_sets() -> dict[str, object]:
     }
 
 
+
+def _private_jc_repair_idempotency_state() -> dict[str, object]:
+    """Load Private JC idempotency protection without mutating the ledger."""
+    path = settings.STATE_DIR / "send_idempotency.sqlite3"
+    empty: dict[str, object] = {
+        "private_campaigns_by_email": {},
+        "warm_lane_emails": set(),
+        "row_count": 0,
+        "path": str(path),
+    }
+    if not path.is_file():
+        return empty
+
+    try:
+        with sqlite3.connect(
+            f"file:{path.resolve().as_posix()}?mode=ro",
+            uri=True,
+        ) as db:
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='send_reservations'"
+            ).fetchone()
+            if not table:
+                return empty
+
+            columns = {
+                str(row[1]).strip().lower()
+                for row in db.execute("PRAGMA table_info(send_reservations)")
+            }
+            required = {"campaign_id", "provider", "email", "profile"}
+            if not required <= columns:
+                missing = ",".join(sorted(required - columns))
+                raise RuntimeError(
+                    f"idempotency database is missing required columns: {missing}"
+                )
+
+            rows = db.execute(
+                """
+                SELECT campaign_id, provider, email, profile
+                FROM send_reservations
+                """
+            ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise RuntimeError(
+            f"could not read idempotency database {path}: {exc}"
+        ) from exc
+
+    private_campaigns_by_email: dict[str, set[str]] = {}
+    warm_lane_emails: set[str] = set()
+
+    for campaign_id, provider, email_value, profile in rows:
+        email = norm_email(email_value or "")
+        if not email:
+            continue
+
+        clean_provider = str(provider or "").strip().lower()
+        clean_campaign = str(campaign_id or "").strip().lower()
+        clean_profile = str(profile or "").strip().lower()
+
+        if clean_provider == "private" and clean_campaign:
+            private_campaigns_by_email.setdefault(email, set()).add(
+                clean_campaign
+            )
+
+        # Match runtime_handoff's Private JC cross-lane protection:
+        # any reservation belonging to private_jc_warm protects the email.
+        if clean_profile == "private_jc_warm":
+            warm_lane_emails.add(email)
+
+    return {
+        "private_campaigns_by_email": private_campaigns_by_email,
+        "warm_lane_emails": warm_lane_emails,
+        "row_count": len(rows),
+        "path": str(path),
+    }
+
+
 def _private_jc_repair_rebuild_rows(
     preview: dict[str, object],
     queue_headers: list[str],
+    *,
+    idempotency_state: dict[str, object] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int], dict[str, object]]:
     started = time.perf_counter()
     phase_timings: list[dict[str, object]] = []
     plan_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+    idempotency_state = idempotency_state or {}
+    private_campaigns_by_email = (
+        idempotency_state.get("private_campaigns_by_email")
+        if isinstance(idempotency_state.get("private_campaigns_by_email"), dict)
+        else {}
+    )
+    warm_lane_emails = {
+        norm_email(value)
+        for value in (idempotency_state.get("warm_lane_emails") or set())
+        if norm_email(value)
+    }
     history_started = time.perf_counter()
     try:
         history = _private_jc_repair_authoritative_history_sets()
@@ -6522,6 +6615,7 @@ def _private_jc_repair_rebuild_rows(
     counts = {
         "planned_private_jc_rows": 0,
         "already_sent_same_family_removed": 0,
+        "idempotency_protected_removed": 0,
         "suppressed_or_bad_outcome_removed": 0,
         "invalid_or_malformed_removed": 0,
         "duplicate_removed": 0,
@@ -6545,7 +6639,39 @@ def _private_jc_repair_rebuild_rows(
             counts["already_sent_same_family_removed"] += 1
             continue
         if email in sendgrid_sent:
+            # Cross-family SendGrid history is intentionally not itself
+            # a Private JC exclusion.
             counts["other_family_sent_history_allowed"] += 1
+
+        row_campaign_type = normalize_campaign_type(
+            get_row_value_ci(
+                row,
+                ["campaign_type", "CampaignType", "campaign type"],
+            )
+            or preview.get("campaign_type")
+            or CAMPAIGN_TYPE_COLD
+        )
+        row_campaign_id = str(
+            campaign_id_for_row(row, row_campaign_type) or ""
+        ).strip().lower()
+
+        protected_campaigns = {
+            str(value or "").strip().lower()
+            for value in (
+                private_campaigns_by_email.get(email, set())
+                if isinstance(private_campaigns_by_email, dict)
+                else set()
+            )
+            if str(value or "").strip()
+        }
+
+        if (
+            row_campaign_id in protected_campaigns
+            or email in warm_lane_emails
+        ):
+            counts["idempotency_protected_removed"] += 1
+            continue
+
         normalized = {header: str(row.get(header, "") or "").strip() for header in queue_headers}
         normalized["Email"] = email
         if not normalized.get("AuthorEmail"):
@@ -6573,11 +6699,21 @@ def _private_jc_repair_rebuild_rows(
             "sendgrid_sent_emails": len(sendgrid_sent),
             "invalid_outcome_emails": len(set(history.get("invalid_outcomes") or set())),
             "global_blocked_emails": len(blocked),
+            "idempotency_rows_loaded": int(
+                idempotency_state.get("row_count") or 0
+            ),
+            "private_idempotency_emails": len(
+                private_campaigns_by_email
+            ),
+            "warm_lane_idempotency_emails": len(
+                warm_lane_emails
+            ),
         },
         "planned_rows_processed": counts["planned_private_jc_rows"],
         "eligible_rows": len(rows),
         "excluded_counts": {
             "private_jc_history": counts["already_sent_same_family_removed"],
+            "idempotency_protected": counts["idempotency_protected_removed"],
             "global_blocked": counts["suppressed_or_bad_outcome_removed"],
             "invalid_or_malformed": counts["invalid_or_malformed_removed"],
             "duplicate": counts["duplicate_removed"],
@@ -6757,7 +6893,30 @@ def repair_private_jc_queue() -> JSONResponse:
         private_queue_path = settings.SHARDS_DIR / "recipients_private_jc.csv"
         if preview_private_path.name != private_queue_path.name:
             raise RuntimeError("Confirmed dispatch preview does not target the Private JC queue. Re-run Preview Dispatch and Confirm Dispatch.")
-        planned_rows, rebuild_counts, diagnostics = _private_jc_repair_rebuild_rows(preview, queue_headers)
+        idempotency_started = time.perf_counter()
+        try:
+            idempotency_state = _private_jc_repair_idempotency_state()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Private JC queue repair could not load idempotency state: {exc}"
+            ) from exc
+        idempotency_elapsed = round(
+            time.perf_counter() - idempotency_started,
+            6,
+        )
+
+        planned_rows, rebuild_counts, diagnostics = _private_jc_repair_rebuild_rows(
+            preview,
+            queue_headers,
+            idempotency_state=idempotency_state,
+        )
+        diagnostics["phase_timings"].insert(
+            0,
+            {
+                "phase": "load_idempotency_state",
+                "elapsed_seconds": idempotency_elapsed,
+            },
+        )
         live_queue_started = time.perf_counter()
         live_queue_emails = _private_jc_repair_email_set(private_queue_path)
         planned_emails = {str(row.get("Email") or "") for row in planned_rows if str(row.get("Email") or "")}
@@ -6893,6 +7052,7 @@ def repair_private_jc_queue() -> JSONResponse:
             "rebuilt_queue_rows": manifest["rebuilt_queue_rows"],
             "planned_private_jc_rows": manifest["planned_private_jc_rows"],
             "already_sent_same_family_removed": manifest["already_sent_same_family_removed"],
+            "idempotency_protected_removed": manifest["idempotency_protected_removed"],
             "suppressed_or_bad_outcome_removed": manifest["suppressed_or_bad_outcome_removed"],
             "invalid_or_malformed_removed": manifest["invalid_or_malformed_removed"],
             "duplicate_removed": manifest["duplicate_removed"],

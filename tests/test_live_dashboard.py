@@ -2695,6 +2695,150 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual([], list(queue_path.parent.glob(f".{queue_path.name}.*.tmp")))
             send_via_sendgrid.assert_not_called()
 
+    def test_private_jc_repair_loads_idempotency_state_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            db_path = state_dir / "send_idempotency.sqlite3"
+            original_rows = [
+                ("cold", "private", "reserved@example.test", "private_jc"),
+                ("campaign-a", "private", "other@example.test", "private_jc"),
+                ("cold", "sendgrid", "sendgrid@example.test", "sendgrid_annette"),
+                ("warm-campaign", "private", "warm@example.test", "private_jc_warm"),
+            ]
+
+            with live_dashboard.sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE send_reservations (
+                        campaign_id TEXT,
+                        provider TEXT,
+                        email TEXT,
+                        profile TEXT
+                    )
+                    """
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO send_reservations
+                        (campaign_id, provider, email, profile)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    original_rows,
+                )
+                conn.commit()
+
+            with patch.object(live_dashboard.settings, "STATE_DIR", state_dir):
+                loaded = live_dashboard._private_jc_repair_idempotency_state()
+
+            self.assertEqual(4, loaded["row_count"])
+            self.assertEqual(
+                {"cold"},
+                loaded["private_campaigns_by_email"]["reserved@example.test"],
+            )
+            self.assertEqual(
+                {"campaign-a"},
+                loaded["private_campaigns_by_email"]["other@example.test"],
+            )
+            self.assertNotIn(
+                "sendgrid@example.test",
+                loaded["private_campaigns_by_email"],
+            )
+            self.assertEqual(
+                {"warm@example.test"},
+                loaded["warm_lane_emails"],
+            )
+
+            with live_dashboard.sqlite3.connect(db_path) as conn:
+                after_rows = conn.execute(
+                    """
+                    SELECT campaign_id, provider, email, profile
+                    FROM send_reservations
+                    ORDER BY rowid
+                    """
+                ).fetchall()
+
+            self.assertEqual(original_rows, after_rows)
+
+    def test_private_jc_repair_excludes_idempotency_protected_rows(self) -> None:
+        headers = [
+            "Email",
+            "FirstName",
+            "AuthorEmail",
+            "AuthorName",
+            "BookTitle",
+            "campaign_id",
+        ]
+        preview = {
+            "campaign_type": "cold",
+            "plan_rows_by_queue": {
+                "private_jc": [
+                    {"Email": "reserved@example.test", "FirstName": "Reserved"},
+                    {"Email": "error@example.test", "FirstName": "Error"},
+                    {"Email": "warm@example.test", "FirstName": "Warm"},
+                    {
+                        "Email": "other-campaign@example.test",
+                        "FirstName": "Other",
+                        "campaign_id": "campaign-b",
+                    },
+                    {"Email": "sendgrid-history@example.test", "FirstName": "SG"},
+                ]
+            },
+        }
+        history = {
+            "private_sent": set(),
+            "sendgrid_sent": {
+                "reserved@example.test",
+                "sendgrid-history@example.test",
+            },
+            "invalid_outcomes": set(),
+            "private_history_files": 2,
+            "sendgrid_history_files": 6,
+            "global_history_files": 8,
+            "history_rows_loaded": 100,
+        }
+        idempotency_state = {
+            "private_campaigns_by_email": {
+                "reserved@example.test": {"cold"},
+                "error@example.test": {"cold"},
+                "other-campaign@example.test": {"campaign-a"},
+            },
+            "warm_lane_emails": {"warm@example.test"},
+            "row_count": 4,
+        }
+
+        with patch.object(
+            live_dashboard,
+            "_private_jc_repair_authoritative_history_sets",
+            return_value=history,
+        ), patch.object(
+            live_dashboard,
+            "_private_jc_repair_global_blocked_emails",
+            return_value=set(),
+        ):
+            rows, counts, diagnostics = (
+                live_dashboard._private_jc_repair_rebuild_rows(
+                    preview,
+                    headers,
+                    idempotency_state=idempotency_state,
+                )
+            )
+
+        self.assertEqual(
+            [
+                "other-campaign@example.test",
+                "sendgrid-history@example.test",
+            ],
+            [row["Email"] for row in rows],
+        )
+        self.assertEqual(5, counts["planned_private_jc_rows"])
+        self.assertEqual(3, counts["idempotency_protected_removed"])
+        self.assertEqual(2, counts["other_family_sent_history_allowed"])
+        self.assertEqual(
+            3,
+            diagnostics["excluded_counts"]["idempotency_protected"],
+        )
+        self.assertEqual(4, diagnostics["source_counts"]["idempotency_rows_loaded"])
+
     def test_private_jc_repair_precomputes_history_sets_once_for_thousands_of_rows(self) -> None:
         headers = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]
         fresh_rows = [
