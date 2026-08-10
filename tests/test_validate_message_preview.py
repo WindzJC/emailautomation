@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import send_shard
 from tools import validate_message_preview
 
 
@@ -21,7 +22,11 @@ class ValidateMessagePreviewTests(unittest.TestCase):
             writer.writerows(rows)
 
     def test_consignment_blank_booktitle_passes_when_generic_fallback_rendered(self) -> None:
-        generic_opening = validate_message_preview.BOOK_TITLE_GENERIC_OPENING
+        generic_opening = send_shard.BOOK_TITLE_GENERIC_OPENING
+        self.assertEqual(
+            send_shard.BOOK_TITLE_GENERIC_OPENING,
+            validate_message_preview.BOOK_TITLE_GENERIC_OPENING,
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             preview_path = Path(tmpdir) / "sendgrid_annette_message_preview.csv"
             self._write_preview(

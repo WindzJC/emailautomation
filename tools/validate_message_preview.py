@@ -14,6 +14,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 import settings
+from send_shard import BOOK_TITLE_GENERIC_OPENING
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -30,10 +31,6 @@ CONSIGNMENT_SUBJECT_FALLBACKS = {
     "Independent author review",
 }
 ASTRA_VISUAL_SUBJECT_FALLBACK = "A trailer idea for independent authors"
-BOOK_TITLE_GENERIC_OPENING = (
-    "Our team came across your author profile and thought your work may be a strong fit "
-    "for readers discovering new independent books this summer."
-)
 BOOK_TITLE_PERSONALIZED_OPENINGS = (
     "My team came across",
 )
