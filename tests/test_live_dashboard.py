@@ -2316,6 +2316,80 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(preview_id, preview["preview_id"])
             self.assertEqual("dispatch_run_explicit", preview["confirmed_run_id"])
 
+    def test_confirmed_dispatch_preview_accepts_legacy_state_preview_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            legacy = app_root / "data" / "state" / "dispatch_previews"
+            preview_id = "dispatch_preview_legacy_1234"
+            preview_path = legacy / f"{preview_id}.json"
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_text(
+                json.dumps(
+                    {
+                        "preview_id": preview_id,
+                        "status": "confirmed",
+                        "confirmed_run_id": "dispatch_run_legacy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            latest_dispatch = {
+                "run_id": "dispatch_run_legacy",
+                "preview_path": str(preview_path.relative_to(app_root)),
+            }
+
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical
+            ):
+                preview = live_dashboard._resolve_confirmed_dispatch_preview(
+                    latest_dispatch,
+                    preview_id,
+                )
+
+            self.assertEqual(preview_id, preview["preview_id"])
+            self.assertEqual("dispatch_run_legacy", preview["confirmed_run_id"])
+
+    def test_confirmed_dispatch_preview_rejects_unapproved_repository_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_unapproved_1234"
+            preview_path = app_root / "data" / "state" / "other" / f"{preview_id}.json"
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_text(
+                json.dumps(
+                    {
+                        "preview_id": preview_id,
+                        "status": "confirmed",
+                        "confirmed_run_id": "dispatch_run_unapproved",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            latest_dispatch = {
+                "run_id": "dispatch_run_unapproved",
+                "preview_path": str(preview_path.relative_to(app_root)),
+            }
+
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "outside an approved preview directory",
+                ):
+                    live_dashboard._resolve_confirmed_dispatch_preview(
+                        latest_dispatch,
+                        preview_id,
+                    )
+
     def test_confirmed_dispatch_preview_fallback_uses_exact_nested_id_not_newer_preview(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             app_root = Path(tmpdir)

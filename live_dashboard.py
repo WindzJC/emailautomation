@@ -6612,6 +6612,16 @@ def _confirmed_dispatch_explicit_preview_path(latest_dispatch: dict[str, object]
     return ""
 
 
+def _legacy_confirmed_dispatch_preview_path(preview_id: str) -> Path:
+    return (
+        settings.APP_ROOT
+        / "data"
+        / "state"
+        / "dispatch_previews"
+        / f"{preview_id}.json"
+    )
+
+
 def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Path:
     candidate = Path(path_value)
     if not candidate.is_absolute():
@@ -6621,21 +6631,33 @@ def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Pat
     try:
         resolved.relative_to(app_root)
     except ValueError as exc:
-        raise RuntimeError("Confirmed dispatch preview path is outside the repository. Repair is blocked.") from exc
+        raise RuntimeError(
+            "Confirmed dispatch preview path is outside the repository. Repair is blocked."
+        ) from exc
+
     expected_name = f"{preview_id}.json"
+
     if resolved == (IMPORTANT_LEADS_DISPATCH_PREVIEWS / expected_name).resolve():
         return resolved
+
+    if resolved == _legacy_confirmed_dispatch_preview_path(preview_id).resolve():
+        return resolved
+
     runs_root = IMPORTANT_LEADS_RUNS.resolve()
     try:
         relative = resolved.relative_to(runs_root)
     except ValueError as exc:
-        raise RuntimeError("Confirmed dispatch preview path is outside an approved preview directory. Repair is blocked.") from exc
+        raise RuntimeError(
+            "Confirmed dispatch preview path is outside an approved preview directory. Repair is blocked."
+        ) from exc
+
     if (
         len(relative.parts) != 3
         or relative.parts[1] != "dispatch_previews"
         or relative.parts[2] != expected_name
     ):
         raise RuntimeError("Confirmed dispatch preview path is invalid. Repair is blocked.")
+
     return resolved
 
 
@@ -6663,6 +6685,16 @@ def _resolve_confirmed_dispatch_preview(
     canonical_path = IMPORTANT_LEADS_DISPATCH_PREVIEWS / f"{preview_id}.json"
     if canonical_path.exists():
         candidates.append((canonical_path, _load_confirmed_preview_candidate(canonical_path, preview_id)))
+
+    legacy_path = _legacy_confirmed_dispatch_preview_path(preview_id)
+    if legacy_path.exists():
+        safe_legacy_path = _safe_confirmed_preview_path(legacy_path, preview_id)
+        candidates.append(
+            (
+                safe_legacy_path,
+                _load_confirmed_preview_candidate(safe_legacy_path, preview_id),
+            )
+        )
 
     runs_root = IMPORTANT_LEADS_RUNS.resolve()
     if runs_root.exists():
