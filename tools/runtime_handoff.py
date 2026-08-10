@@ -3022,13 +3022,27 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
 
     for profile, config, queue_path, queue_state in active:
         queue_emails = set(queue_state["emails"])
+        source_lineage_applicable = profile != CONTROLLED_SENDGRID_PROFILE
         duplicate_across_profiles += len(all_queue_emails & queue_emails)
         all_queue_emails.update(queue_emails)
         duplicate_rows += int(queue_state["duplicate_count"])
         invalid_rows += int(queue_state["invalid_count"])
-        outside_checked = queue_emails - checked_emails if checked_emails else set(queue_emails)
-        outside_intended = queue_emails - intended_emails if intended_emails else set(queue_emails)
-        reject_overlap = queue_emails & reject_emails
+        if source_lineage_applicable:
+            outside_checked = (
+                queue_emails - checked_emails
+                if checked_emails
+                else set(queue_emails)
+            )
+            outside_intended = (
+                queue_emails - intended_emails
+                if intended_emails
+                else set(queue_emails)
+            )
+            reject_overlap = queue_emails & reject_emails
+        else:
+            outside_checked = set()
+            outside_intended = set()
+            reject_overlap = set()
         profile_suppressed = queue_emails & suppressed_emails
         suppression_overlap.update(profile_suppressed)
         provider = str(config.get("provider") or "").strip().lower()
@@ -3066,7 +3080,7 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
                 f"reject_overlap={len(reject_overlap)} authoritative_source={source_description} "
                 f"queue_fingerprint={queue_state['fingerprint']}"
             )
-        if source_fingerprint_mismatches:
+        if source_lineage_applicable and source_fingerprint_mismatches:
             reasons.append("queue source fingerprint mismatch")
             details.append(
                 f"profile={profile} queue={queue_path} overlap_count=0 "
@@ -3131,7 +3145,12 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
                 "authoritative_log_paths": [str(path) for path in log_paths],
                 "source_state_path": source_state_path,
                 "source_state_fingerprint": source_state_fingerprint,
-                "source_fingerprint_mismatches": list(source_fingerprint_mismatches),
+                "source_lineage_applicable": source_lineage_applicable,
+                "source_fingerprint_mismatches": (
+                    list(source_fingerprint_mismatches)
+                    if source_lineage_applicable
+                    else []
+                ),
                 "preview": preview,
             }
         )

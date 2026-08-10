@@ -1096,6 +1096,27 @@ def test_controlled_sendgrid_preview_uses_exact_manual_lane_safety(tmp_path):
     assert preview["verified_emergency_queue_progress"] is False
 
 
+def test_controlled_sendgrid_recompute_skips_only_campaign_source_lineage(
+    tmp_path,
+):
+    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    _write_controlled_sendgrid_runtime(tmp_path, [recipient])
+
+    safety = runtime_handoff.recompute_queue_safety(tmp_path)
+
+    assert safety["safe"] is True
+    assert safety["unsafe_reasons"] == []
+    assert safety["active_intended_profiles"] == [
+        "sendgrid_controlled_test"
+    ]
+    profile = safety["profiles"][0]
+    assert profile["source_lineage_applicable"] is False
+    assert profile["outside_checked_output_count"] == 0
+    assert profile["outside_intended_source_count"] == 0
+    assert profile["reject_overlap_count"] == 0
+    assert profile["preview"]["safe"] is True
+
+
 def test_controlled_sendgrid_preview_rejects_wrong_recipient(tmp_path):
     queue = _write_controlled_sendgrid_runtime(
         tmp_path,
@@ -1139,6 +1160,34 @@ def test_controlled_sendgrid_preview_rejects_queue_count_other_than_one(tmp_path
 
     assert preview["safe"] is False
     assert "controlled_queue_count_one" in preview["failed_predicates"]
+
+
+@pytest.mark.parametrize(
+    ("emails", "expected_predicate"),
+    [
+        (["wrong@example.test"], "controlled_recipient_allowlist_exact"),
+        (
+            [
+                "astraproductionsbyjc+sendgridtest@gmail.com",
+                "second@example.test",
+            ],
+            "controlled_queue_count_one",
+        ),
+    ],
+)
+def test_controlled_sendgrid_recompute_retains_exact_queue_invariants(
+    tmp_path,
+    emails,
+    expected_predicate,
+):
+    _write_controlled_sendgrid_runtime(tmp_path, emails)
+
+    safety = runtime_handoff.recompute_queue_safety(tmp_path)
+
+    assert safety["safe"] is False
+    assert expected_predicate in safety["profiles"][0]["preview"][
+        "failed_predicates"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1223,6 +1272,33 @@ def test_normal_sendgrid_preview_still_requires_campaign_lineage(tmp_path):
 
     assert preview["safe"] is False
     assert "active_campaign_state_exists" in preview["failed_predicates"]
+
+
+def test_normal_sendgrid_recompute_still_requires_campaign_source_lineage(
+    tmp_path,
+):
+    recipient = "normal@example.test"
+    queue = tmp_path / "data/shards/recipients_sendgrid_1.csv"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "Email,FirstName,BookTitle,CampaignType\n"
+        f"{recipient},Test,Book,cold\n",
+        encoding="utf-8",
+    )
+    _write_profile_preview_fixture(
+        tmp_path,
+        "sendgrid_annette",
+        [recipient],
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(tmp_path)
+
+    assert safety["safe"] is False
+    assert "queue source validation failures" in safety["unsafe_reasons"]
+    profile = safety["profiles"][0]
+    assert profile["source_lineage_applicable"] is True
+    assert profile["outside_checked_output_count"] == 1
+    assert profile["outside_intended_source_count"] == 1
 
 
 def test_unknown_profile_pitch_validation_mode_refuses(monkeypatch):
