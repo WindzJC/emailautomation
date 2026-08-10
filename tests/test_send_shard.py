@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import imaplib
 import io
@@ -201,6 +202,91 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(35, profile["interval"])
             self.assertEqual(35, profile["cooldown_seconds"])
             self.assertEqual("12:00", profile["stop_at_local"])
+
+    def test_controlled_sendgrid_profile_is_isolated_and_hard_limited(self) -> None:
+        profile = send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE]
+
+        self.assertEqual("sendgrid", profile["provider"])
+        self.assertEqual(
+            "recipients_sendgrid_controlled_test.csv",
+            profile["csv"],
+        )
+        self.assertEqual("sendgrid_controlled_test_log.csv", profile["log"])
+        self.assertEqual(
+            send_shard.CONTROLLED_SENDGRID_RECIPIENT,
+            profile["recipient_allowlist"],
+        )
+        self.assertEqual(1, profile["max_total"])
+        self.assertEqual(1, profile["max_per_run"])
+        self.assertEqual(1, profile["max_submission_attempts"])
+        self.assertFalse(profile["repeat"])
+        self.assertTrue(profile["dashboard_manual_only"])
+        self.assertTrue(profile["global_dedupe"])
+        self.assertTrue(profile["suppress_invalid"])
+        self.assertEqual(
+            "sendgrid_controlled_test_message_preview.csv",
+            dashboard_core.message_preview_path_for_profile(
+                send_shard.CONTROLLED_SENDGRID_PROFILE
+            ).name,
+        )
+        self.assertEqual(
+            [
+                "sendgrid_annette",
+                "sendgrid_jordan",
+                "sendgrid_jodi",
+                "sendgrid_alison",
+                "sendgrid_fiorela",
+            ],
+            dashboard_core.SENDGRID_PROFILES,
+        )
+        self.assertNotIn(
+            send_shard.CONTROLLED_SENDGRID_PROFILE,
+            dashboard_core.START_ALL_PROFILES,
+        )
+
+    def test_controlled_sendgrid_profile_rejects_safety_overrides(self) -> None:
+        profile = send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE]
+        args = argparse.Namespace(profile=send_shard.CONTROLLED_SENDGRID_PROFILE, **profile)
+        self.assertEqual("", send_shard.controlled_sendgrid_profile_error(args, profile))
+
+        args.csv = "recipients_sendgrid_1.csv"
+        self.assertIn(
+            "requires csv=recipients_sendgrid_controlled_test.csv",
+            send_shard.controlled_sendgrid_profile_error(args, profile),
+        )
+        args.csv = profile["csv"]
+        args.max_total = 2
+        self.assertEqual(
+            "controlled test requires max_total=1",
+            send_shard.controlled_sendgrid_profile_error(args, profile),
+        )
+
+    def test_controlled_sendgrid_queue_requires_one_allowlisted_recipient(self) -> None:
+        allowed = {send_shard.CONTROLLED_SENDGRID_RECIPIENT}
+        self.assertEqual(
+            "",
+            send_shard.controlled_sendgrid_queue_error(
+                [{"Email": send_shard.CONTROLLED_SENDGRID_RECIPIENT}],
+                allowed,
+            ),
+        )
+        self.assertIn(
+            "hard-allowlisted",
+            send_shard.controlled_sendgrid_queue_error(
+                [{"Email": "other@example.test"}],
+                allowed,
+            ),
+        )
+        self.assertIn(
+            "exactly one",
+            send_shard.controlled_sendgrid_queue_error(
+                [
+                    {"Email": send_shard.CONTROLLED_SENDGRID_RECIPIENT},
+                    {"Email": send_shard.CONTROLLED_SENDGRID_RECIPIENT},
+                ],
+                allowed,
+            ),
+        )
 
     def test_private_jc_pacing_remains_unchanged(self) -> None:
         profile = send_shard.PROFILES["private_jc"]
@@ -986,6 +1072,7 @@ class SendShardTests(unittest.TestCase):
         *,
         send_side_effect=None,
         max_total: int = 0,
+        profile_name: str = "sendgrid_annette",
     ) -> tuple[str, object]:
         (
             base,
@@ -1052,7 +1139,7 @@ class SendShardTests(unittest.TestCase):
             stack.enter_context(
                 patch.dict(
                     send_shard.PROFILES,
-                    {"sendgrid_annette": profile},
+                    {profile_name: profile},
                     clear=False,
                 )
             )
@@ -1063,13 +1150,51 @@ class SendShardTests(unittest.TestCase):
                     clear=False,
                 )
             )
-            argv = ["send_shard.py", "--profile", "sendgrid_annette"]
+            argv = ["send_shard.py", "--profile", profile_name]
             if max_total:
                 argv.extend(["--max_total", str(max_total)])
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(redirect_stdout(stdout))
             send_shard.main()
         return stdout.getvalue(), send_mock
+
+    def test_controlled_sendgrid_stops_after_one_provider_submission_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            (
+                _base,
+                shards,
+                logs,
+                _state,
+                _old_queue,
+                *_rest,
+                profile,
+            ) = fixture
+            controlled_queue = shards / "recipients_sendgrid_controlled_test.csv"
+            controlled_queue.write_text(
+                "Email,FirstName,BookTitle\n"
+                "astraproductionsbyjc@gmail.com,Astra,Controlled Test\n",
+                encoding="utf-8",
+            )
+            (logs / "sendgrid_annette_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            (logs / "sendgrid_controlled_test_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            profile.clear()
+            profile.update(send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE])
+
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                profile_name=send_shard.CONTROLLED_SENDGRID_PROFILE,
+                send_side_effect=smtplib.SMTPResponseException(421, b"synthetic throttle"),
+            )
+
+        self.assertEqual(1, send_mock.call_count, output)
+        self.assertIn("total_sent_attempted=1", output)
 
     def test_global_block_refresh_schema_failure_prevents_smtp_submission(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

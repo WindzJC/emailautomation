@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -26,7 +27,14 @@ from zoneinfo import ZoneInfo
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
 from provider_pacing import provider_pacing_status
-from send_shard import DOMAIN_SLOT_TTL_SECONDS, PROFILES, PROVIDER_LIMIT_DEFAULTS, profile_runtime_lock_status
+from send_shard import (
+    CONTROLLED_SENDGRID_PROFILE,
+    CONTROLLED_SENDGRID_RECIPIENT,
+    DOMAIN_SLOT_TTL_SECONDS,
+    PROFILES,
+    PROVIDER_LIMIT_DEFAULTS,
+    profile_runtime_lock_status,
+)
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
@@ -65,7 +73,10 @@ SHELL_COMMANDS = {"", "bash", "sh", "zsh", "fish"}
 SENDGRID_ENV_FILES = settings.ENV_FILES
 DEFAULT_AUTO_START_LOCAL_TIME = "18:00"
 SENDGRID_PROFILES = [
-    name for name, cfg in PROFILES.items() if str(cfg.get("provider") or "") == "sendgrid"
+    name
+    for name, cfg in PROFILES.items()
+    if str(cfg.get("provider") or "") == "sendgrid"
+    and not bool(cfg.get("controlled_test"))
 ]
 SYSTEMD_RUNTIME_BACKEND = (
     os.environ.get("RUNTIME_BACKEND", "").strip().lower() == "systemd"
@@ -546,6 +557,43 @@ def _normalized_email_for_readiness(row: Dict[str, str]) -> str:
     return addr.strip().lower()
 
 
+def _recipient_fingerprint(rows: Sequence[Dict[str, str]]) -> str:
+    recipients = [_normalized_email_for_readiness(row) for row in rows]
+    payload = "\n".join(recipients).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_controlled_sendgrid_queue_safety_report(
+    profile_name: str = CONTROLLED_SENDGRID_PROFILE,
+) -> Dict[str, object]:
+    cfg = PROFILES.get(profile_name, {})
+    csv_path = _profile_csv_path(cfg)
+    _fieldnames, row_count, rows = _csv_row_count_with_fieldnames(csv_path)
+    recipients = [_normalized_email_for_readiness(row) for row in rows]
+    expected_recipient = str(
+        cfg.get("recipient_allowlist") or CONTROLLED_SENDGRID_RECIPIENT
+    ).strip().lower()
+    unsafe_reasons: List[str] = []
+    if row_count != 1:
+        unsafe_reasons.append(
+            "Controlled SendGrid queue must contain exactly one recipient row."
+        )
+    if recipients != [expected_recipient]:
+        unsafe_reasons.append(
+            "Controlled SendGrid queue recipient does not match the hard allowlist."
+        )
+    return {
+        "safe": not unsafe_reasons,
+        "provider": "sendgrid_controlled_test",
+        "profile": profile_name,
+        "queue_path": str(csv_path),
+        "queue_row_count": row_count,
+        "queue_fingerprint": _recipient_fingerprint(rows),
+        "unsafe_reasons": unsafe_reasons,
+        "message": unsafe_reasons[0] if unsafe_reasons else "Controlled SendGrid queue is isolated and allowlisted.",
+    }
+
+
 def _validation_failed_count(failed_path: Path, summary_path: Path) -> Optional[int]:
     if failed_path.exists():
         _, row_count, _rows = _csv_row_count_with_fieldnames(failed_path)
@@ -588,6 +636,8 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     preview_path = message_preview_path_for_profile(profile_name)
     validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
     _preview_fields, preview_row_count, _preview_rows = _csv_row_count_with_fieldnames(preview_path)
+    queue_recipient_fingerprint = _recipient_fingerprint(rows)
+    preview_recipient_fingerprint = _recipient_fingerprint(_preview_rows)
     preview_exists = preview_path.exists() or (pre_rendered_message and row_count > 0)
     validation_artifacts = [path for path in (validated_path, failed_path, summary_path) if path.exists()]
     validation_time_utc = max((iso_mtime(path) for path in validation_artifacts), default="")
@@ -628,6 +678,16 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     if duplicate_count > 0:
         status = "FAIL"
         reasons.append("Recipient queue has duplicate email rows.")
+    if bool(cfg.get("controlled_test")):
+        expected_recipient = str(
+            cfg.get("recipient_allowlist") or CONTROLLED_SENDGRID_RECIPIENT
+        ).strip().lower()
+        queue_recipients = [_normalized_email_for_readiness(row) for row in rows]
+        if row_count != 1 or queue_recipients != [expected_recipient]:
+            status = "FAIL"
+            reasons.append(
+                "Controlled SendGrid queue must contain only the hard-allowlisted recipient."
+            )
     if expected_mode != actual_mode:
         status = "FAIL"
         reasons.append("Profile pitch mode does not match expected mode.")
@@ -645,6 +705,13 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         reasons.append(
             f"Preview row count {preview_row_count} does not match recipient queue row count {row_count}."
         )
+    if (
+        status == "PASS"
+        and bool(cfg.get("require_preview_recipient_fingerprint"))
+        and queue_recipient_fingerprint != preview_recipient_fingerprint
+    ):
+        status = "STALE"
+        reasons.append("Preview recipient fingerprint does not match the controlled queue.")
     if status == "PASS" and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
         status = "STALE"
         reasons.append("Preview CSV is older than the recipient queue.")
@@ -671,6 +738,11 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "pitch_mode_expected": expected_mode,
         "actual_profile_mode": actual_mode,
         "preview_csv_name": preview_path.name,
+        "queue_recipient_fingerprint": queue_recipient_fingerprint,
+        "preview_recipient_fingerprint": preview_recipient_fingerprint,
+        "preview_recipient_fingerprint_matches": (
+            queue_recipient_fingerprint == preview_recipient_fingerprint
+        ),
         "reasons": reasons,
     }
 

@@ -61,6 +61,7 @@ from dashboard_security import (
 from dashboard_core import (
     SENDGRID_PROFILES,
     append_campaign_run_history,
+    build_controlled_sendgrid_queue_safety_report,
     build_dashboard_queue_safety_report,
     build_dashboard_snapshot,
     build_profile_message_readiness,
@@ -4777,7 +4778,13 @@ def _build_start_preconditions_report(
         snapshot if isinstance(snapshot, dict) else _build_live_snapshot()
     )
     queue_safety_provider = _queue_safety_provider_for_start(requested_profile)
-    queue_safety = build_dashboard_queue_safety_report(queue_safety_provider)
+    requested_cfg = PROFILES.get(requested_profile) or {}
+    controlled_test = bool(requested_cfg.get("controlled_test"))
+    queue_safety = (
+        build_controlled_sendgrid_queue_safety_report(requested_profile)
+        if controlled_test
+        else build_dashboard_queue_safety_report(queue_safety_provider)
+    )
     active_profiles = _active_sender_names()
     active_preview_profiles = _active_preview_names(profiles if requested_profile else None)
     blocked_reasons: list[str] = []
@@ -4822,7 +4829,9 @@ def _build_start_preconditions_report(
         else:
             blocked_reasons.append(f"Message Readiness for {profile} is {status}.{suffix}")
 
-    lead_state_reasons = _lead_state_start_block_reasons(queue_safety)
+    lead_state_reasons = (
+        [] if controlled_test else _lead_state_start_block_reasons(queue_safety)
+    )
     if lead_state_reasons:
         warning_reasons.extend(f"Next batch prep: {reason}" for reason in lead_state_reasons)
     blocked_reasons = list(dict.fromkeys(reason for reason in blocked_reasons if str(reason or "").strip()))

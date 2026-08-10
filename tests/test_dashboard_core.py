@@ -138,6 +138,83 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("consignment", readiness["pitch_mode_expected"])
         self.assertEqual("consignment", readiness["actual_profile_mode"])
 
+    def test_controlled_sendgrid_readiness_requires_matching_recipient_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            shards.mkdir()
+            previews.mkdir()
+            queue = shards / "recipients_sendgrid_controlled_test.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle\n"
+                "astraproductionsbyjc@gmail.com,Astra,Controlled Test\n",
+                encoding="utf-8",
+            )
+            preview = previews / "sendgrid_controlled_test_message_preview.csv"
+            preview.write_text(
+                "Email,FirstName,BookTitle,Subject,Body\n"
+                "other@example.test,Astra,Controlled Test,Subject,Body\n",
+                encoding="utf-8",
+            )
+            (previews / "sendgrid_controlled_test_message_preview_validated.csv").write_text(
+                "Email\nother@example.test\n",
+                encoding="utf-8",
+            )
+            (previews / "sendgrid_controlled_test_message_preview_failed.csv").write_text(
+                "Email\n",
+                encoding="utf-8",
+            )
+            (previews / "sendgrid_controlled_test_message_preview_summary.txt").write_text(
+                "failed rows: 0\n",
+                encoding="utf-8",
+            )
+            profiles = {
+                "sendgrid_controlled_test": {
+                    "provider": "sendgrid",
+                    "csv": str(queue),
+                    "log": str(base / "sendgrid_controlled_test_log.csv"),
+                    "pitch": "pitch1",
+                    "controlled_test": True,
+                    "recipient_allowlist": "astraproductionsbyjc@gmail.com",
+                    "require_preview_recipient_fingerprint": True,
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                SHARDS_DIR=shards,
+                MESSAGE_PREVIEW_DIR=previews,
+                PROFILES=profiles,
+            ):
+                stale = dashboard_core.build_profile_message_readiness(
+                    "sendgrid_controlled_test"
+                )
+                safety = dashboard_core.build_controlled_sendgrid_queue_safety_report()
+
+                preview.write_text(
+                    "Email,FirstName,BookTitle,Subject,Body\n"
+                    "astraproductionsbyjc@gmail.com,Astra,Controlled Test,Subject,Body\n",
+                    encoding="utf-8",
+                )
+                (previews / "sendgrid_controlled_test_message_preview_validated.csv").write_text(
+                    "Email\nastraproductionsbyjc@gmail.com\n",
+                    encoding="utf-8",
+                )
+                (previews / "sendgrid_controlled_test_message_preview_summary.txt").write_text(
+                    "failed rows: 0\n",
+                    encoding="utf-8",
+                )
+                current = dashboard_core.build_profile_message_readiness(
+                    "sendgrid_controlled_test"
+                )
+
+        self.assertTrue(safety["safe"])
+        self.assertEqual("STALE", stale["status"])
+        self.assertFalse(stale["preview_recipient_fingerprint_matches"])
+        self.assertIn("fingerprint", " ".join(stale["reasons"]))
+        self.assertEqual("PASS", current["status"])
+        self.assertTrue(current["preview_recipient_fingerprint_matches"])
+
     def test_profile_message_readiness_marks_partial_preview_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

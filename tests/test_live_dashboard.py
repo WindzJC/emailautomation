@@ -7990,6 +7990,61 @@ class LiveDashboardTests(unittest.TestCase):
         start_sender.assert_called_once_with(profile)
         stop_sender.assert_called_once_with(profile)
 
+    def test_controlled_sendgrid_start_uses_isolated_queue_safety(self) -> None:
+        profile = "sendgrid_controlled_test"
+        snapshot = {"profiles": []}
+        controlled_safety = {
+            "safe": True,
+            "provider": "sendgrid_controlled_test",
+            "unsafe_reasons": [],
+        }
+        with patch.dict(
+            live_dashboard.PROFILES,
+            {
+                profile: {
+                    "provider": "sendgrid",
+                    "controlled_test": True,
+                }
+            },
+            clear=False,
+        ), patch.object(
+            live_dashboard,
+            "build_controlled_sendgrid_queue_safety_report",
+            return_value=controlled_safety,
+        ) as controlled_report, patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+        ) as production_report, patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_profile_provider_block_reason_from_snapshot",
+            return_value="",
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+        ) as lead_state:
+            report = live_dashboard._build_start_preconditions_report(
+                profile_name=profile,
+                snapshot=snapshot,
+            )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(controlled_safety, report["queue_safety"])
+        controlled_report.assert_called_once_with(profile)
+        production_report.assert_not_called()
+        lead_state.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

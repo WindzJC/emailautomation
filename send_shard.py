@@ -56,6 +56,8 @@ SMTP_PRESETS = {
 
 DEFAULT_DOMAIN = "barnesnoblemarketing.com"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
+CONTROLLED_SENDGRID_PROFILE = "sendgrid_controlled_test"
+CONTROLLED_SENDGRID_RECIPIENT = "astraproductionsbyjc@gmail.com"
 ROOT = settings.APP_ROOT
 SHARDS_DIR = settings.SHARDS_DIR
 LOGS_DIR = settings.LOGS_DIR
@@ -528,6 +530,35 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
+    },
+    "sendgrid_controlled_test": {
+        "provider": "sendgrid",
+        "csv": "recipients_sendgrid_controlled_test.csv",
+        "log": "sendgrid_controlled_test_log.csv",
+        "pitch": "pitch1",
+        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
+        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "interval": 35,
+        "batch_size": 1,
+        "cooldown_seconds": 0,
+        "repeat": False,
+        "stop_at_local": "",
+        "max_per_run": 1,
+        "max_total": 1,
+        "max_submission_attempts": 1,
+        "domain_log": "sendgrid_domain_log.csv",
+        "suppress_invalid": True,
+        "global_dedupe": True,
+        "account_map": "account_map_private_sendgrid.csv",
+        "always_send": "",
+        "daily_target": 1,
+        "prune_sent": True,
+        "unsubscribe_group_id": 363425,
+        "groups_to_display": [363425],
+        "dashboard_manual_only": True,
+        "controlled_test": True,
+        "recipient_allowlist": CONTROLLED_SENDGRID_RECIPIENT,
+        "require_preview_recipient_fingerprint": True,
     },
 
 
@@ -3704,6 +3735,52 @@ def append_suppressed_email(suppress_csv_path: Path, email_addr: str) -> None:
             w.writerow({"Email": email_addr})
 
 
+def controlled_sendgrid_profile_error(
+    args: argparse.Namespace,
+    profile_defaults: Dict[str, object],
+) -> str:
+    """Return a fail-closed configuration error for the manual test lane."""
+    if str(getattr(args, "profile", "") or "").strip() != CONTROLLED_SENDGRID_PROFILE:
+        return ""
+
+    exact_values = {
+        "provider": "sendgrid",
+        "csv": str(profile_defaults.get("csv") or ""),
+        "log": str(profile_defaults.get("log") or ""),
+        "recipient_allowlist": CONTROLLED_SENDGRID_RECIPIENT,
+    }
+    for field, expected in exact_values.items():
+        actual = str(getattr(args, field, "") or "").strip()
+        if actual != expected:
+            return f"controlled test requires {field}={expected}"
+    if bool(getattr(args, "repeat", False)):
+        return "controlled test requires repeat=false"
+    if int(getattr(args, "max_total", 0) or 0) != 1:
+        return "controlled test requires max_total=1"
+    if int(getattr(args, "max_per_run", 0) or 0) != 1:
+        return "controlled test requires max_per_run=1"
+    if int(getattr(args, "max_submission_attempts", 0) or 0) != 1:
+        return "controlled test requires max_submission_attempts=1"
+    if str(getattr(args, "always_send", "") or "").strip():
+        return "controlled test cannot use always_send injection"
+    return ""
+
+
+def controlled_sendgrid_queue_error(
+    rows: Sequence[Dict[str, str]],
+    recipient_allowlist: Set[str],
+) -> str:
+    """Require one queue row and the exact controlled recipient."""
+    if len(rows) != 1:
+        return "controlled test queue must contain exactly one recipient row"
+    recipients = [norm_email(resolve_recipient_email(row)) for row in rows]
+    if any(not email for email in recipients):
+        return "controlled test queue contains a missing or malformed recipient"
+    if set(recipients) != recipient_allowlist:
+        return "controlled test queue recipient is not hard-allowlisted"
+    return ""
+
+
 def main():
     profile_parser = argparse.ArgumentParser(add_help=False)
     profile_parser.add_argument("--profile", choices=sorted(PROFILES.keys()), help="Load a preset configuration.")
@@ -4088,6 +4165,11 @@ def main():
         print("Provide them via flags or set a --profile that includes them.")
         return
 
+    controlled_config_error = controlled_sendgrid_profile_error(args, profile_defaults)
+    if controlled_config_error:
+        print(f"REFUSED: {controlled_config_error}")
+        return
+
     if args.provider == "sendgrid" and not no_send_mode and not sendgrid_api_key:
         print("ERROR: SENDGRID_API_KEY is required for --provider sendgrid.")
         return
@@ -4205,6 +4287,18 @@ def main():
         my_domains = {DEFAULT_DOMAIN}
 
     rows = read_rows(csv_path)
+    recipient_allowlist = parse_email_list(
+        str(getattr(args, "recipient_allowlist", "") or "")
+    )
+    if bool(getattr(args, "controlled_test", False)):
+        controlled_queue_error = controlled_sendgrid_queue_error(
+            rows,
+            recipient_allowlist,
+        )
+        if controlled_queue_error:
+            emit_worker_event("ERROR", "controlled_test_queue_refused")
+            print(f"REFUSED: {controlled_queue_error}")
+            return
     pre_rendered_message = bool(pitch.get("pre_rendered_message"))
     warm_confirmation_manifest: Dict[str, object] = {}
     if pre_rendered_message:
@@ -4789,6 +4883,7 @@ def main():
     human_state: Dict[str, int] = {}
     provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
     last_success_sent_at_utc: Optional[datetime] = None
+    submission_attempts_this_run = 0
 
     def audit_sleep(seconds: float, action: str = "SLEEP") -> None:
         remaining_sleep = max(0.0, float(seconds or 0))
@@ -4938,11 +5033,21 @@ def main():
         PrivateEmail: connect per message (reduces DISCONNECTED loops)
         Gmail: keep connection open
         """
-        nonlocal smtp
+        nonlocal smtp, submission_attempts_this_run
         # Re-check immediately before every provider submission. This closes
         # the gap where a long-running worker was started while authorized but
         # a target import later revoked this machine.
         assert_send_authorized(ROOT)
+        max_submission_attempts = max(
+            0,
+            int(getattr(args, "max_submission_attempts", 0) or 0),
+        )
+        if (
+            max_submission_attempts
+            and submission_attempts_this_run >= max_submission_attempts
+        ):
+            raise RuntimeError("provider submission attempt cap reached")
+        submission_attempts_this_run += 1
         if args.provider == "sendgrid":
             return send_via_sendgrid(
                 sendgrid_api_key,
@@ -6152,6 +6257,20 @@ def main():
                     if not stop_reason and circuit_reason:
                         print(f"STOP: {circuit_reason} after errors")
                         stop_reason = circuit_reason
+
+                max_submission_attempts = max(
+                    0,
+                    int(getattr(args, "max_submission_attempts", 0) or 0),
+                )
+                if (
+                    max_submission_attempts
+                    and submission_attempts_this_run >= max_submission_attempts
+                ):
+                    print(
+                        "STOP: reached "
+                        f"--max_submission_attempts={max_submission_attempts}"
+                    )
+                    stop_reason = "max_submission_attempts"
 
                 if stop_reason:
                     break
