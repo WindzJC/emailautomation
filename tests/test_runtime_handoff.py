@@ -977,6 +977,18 @@ def test_preview_validation_mode_is_derived_from_profile_pitch():
     )
 
 
+def test_controlled_sendgrid_profile_is_literal_eval_handoff_safe():
+    profile = runtime_handoff._profile_runtime_layout()["sendgrid_controlled_test"]
+
+    assert profile["recipient_allowlist"] == "astraproductionsbyjc@gmail.com"
+    assert profile["csv"] == "recipients_sendgrid_controlled_test.csv"
+    assert profile["log"] == "sendgrid_controlled_test_log.csv"
+    assert profile["max_total"] == 1
+    assert profile["max_per_run"] == 1
+    assert profile["repeat"] is False
+    assert profile["dashboard_manual_only"] is True
+
+
 def test_unknown_profile_pitch_validation_mode_refuses(monkeypatch):
     monkeypatch.setattr(
         runtime_handoff,

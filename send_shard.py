@@ -557,7 +557,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "groups_to_display": [363425],
         "dashboard_manual_only": True,
         "controlled_test": True,
-        "recipient_allowlist": CONTROLLED_SENDGRID_RECIPIENT,
+        "recipient_allowlist": "astraproductionsbyjc@gmail.com",
         "require_preview_recipient_fingerprint": True,
     },
 
