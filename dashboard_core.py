@@ -1686,6 +1686,199 @@ def archive_reset_sender_logs(session: str = "sendgrid") -> tuple[bool, str]:
     return True, f"Archived and reset {reset_count} sender log(s) to {backup_root}."
 
 
+
+_PROFILE_LOG_METRICS_CACHE_LOCK = threading.Lock()
+_PROFILE_LOG_METRICS_CACHE: Dict[tuple[object, ...], Dict[str, object]] = {}
+_PROFILE_LOG_METRICS_INFLIGHT: Dict[tuple[object, ...], threading.Event] = {}
+_PROFILE_LOG_METRICS_CACHE_LIMIT = 128
+
+
+def _reset_profile_log_metrics_cache_for_tests() -> None:
+    with _PROFILE_LOG_METRICS_CACHE_LOCK:
+        _PROFILE_LOG_METRICS_CACHE.clear()
+        waiters = list(_PROFILE_LOG_METRICS_INFLIGHT.values())
+        _PROFILE_LOG_METRICS_INFLIGHT.clear()
+    for waiter in waiters:
+        waiter.set()
+
+
+def _profile_log_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _compute_profile_log_metrics(
+    log_path: Path,
+    *,
+    start: datetime,
+    end: datetime,
+    always_send_email: str,
+) -> Dict[str, object]:
+    sent_today = 0
+    errors_today = 0
+    skipped_today = 0
+    run_sent = 0
+    run_errors = 0
+    run_skipped = 0
+    last_status = ""
+    last_email = ""
+    last_info = ""
+    last_timestamp: Optional[datetime] = None
+    last_sent_timestamp: Optional[datetime] = None
+    run_started_at: Optional[datetime] = None
+
+    parsed_rows: list[
+        tuple[
+            Optional[datetime],
+            str,
+            str,
+            str,
+            str,
+        ]
+    ] = []
+
+    for row in read_csv_rows(log_path):
+        ts = parse_log_timestamp(row.get("TimestampUTC", ""))
+        status = (row.get("Status") or "").strip()
+        display_email = (row.get("Email") or "").strip()
+        email = display_email.lower()
+        info = (row.get("Info") or "").strip()
+        parsed_rows.append((ts, status, email, display_email, info))
+
+        if ts and start <= ts < end:
+            if status == "SENT":
+                sent_today += 1
+            elif status == "SKIP":
+                skipped_today += 1
+            else:
+                errors_today += 1
+
+        if (
+            ts
+            and always_send_email
+            and email == always_send_email
+            and status == "SENT"
+        ):
+            if run_started_at is None or ts >= run_started_at:
+                run_started_at = ts
+
+        if ts and (last_timestamp is None or ts >= last_timestamp):
+            last_timestamp = ts
+            last_status = status
+            last_email = display_email
+            last_info = info
+
+        if (
+            ts
+            and status == "SENT"
+            and (
+                last_sent_timestamp is None
+                or ts >= last_sent_timestamp
+            )
+        ):
+            last_sent_timestamp = ts
+
+    if run_started_at is not None:
+        for ts, status, _email, _display_email, _info in parsed_rows:
+            if not ts or ts < run_started_at:
+                continue
+            if status == "SENT":
+                run_sent += 1
+            elif status == "SKIP":
+                run_skipped += 1
+            else:
+                run_errors += 1
+
+    return {
+        "sent_today": sent_today,
+        "errors_today": errors_today,
+        "skipped_today": skipped_today,
+        "run_sent": run_sent,
+        "run_errors": run_errors,
+        "run_skipped": run_skipped,
+        "last_status": last_status,
+        "last_email": last_email,
+        "last_info": last_info,
+        "last_timestamp": last_timestamp,
+        "last_sent_timestamp": last_sent_timestamp,
+        "run_started_at": run_started_at,
+    }
+
+
+def _profile_log_metrics(
+    log_path: Path,
+    *,
+    start: datetime,
+    end: datetime,
+    always_send_email: str,
+) -> Dict[str, object]:
+    signature = _profile_log_signature(log_path)
+    key: tuple[object, ...] = (
+        str(log_path),
+        signature,
+        start.isoformat(),
+        end.isoformat(),
+        always_send_email,
+    )
+
+    with _PROFILE_LOG_METRICS_CACHE_LOCK:
+        cached = _PROFILE_LOG_METRICS_CACHE.get(key)
+        if cached is not None:
+            return dict(cached)
+
+        waiter = _PROFILE_LOG_METRICS_INFLIGHT.get(key)
+        if waiter is None:
+            waiter = threading.Event()
+            _PROFILE_LOG_METRICS_INFLIGHT[key] = waiter
+            leader = True
+        else:
+            leader = False
+
+    if not leader:
+        waiter.wait(timeout=30.0)
+        with _PROFILE_LOG_METRICS_CACHE_LOCK:
+            cached = _PROFILE_LOG_METRICS_CACHE.get(key)
+            if cached is not None:
+                return dict(cached)
+
+        return _compute_profile_log_metrics(
+            log_path,
+            start=start,
+            end=end,
+            always_send_email=always_send_email,
+        )
+
+    try:
+        metrics = _compute_profile_log_metrics(
+            log_path,
+            start=start,
+            end=end,
+            always_send_email=always_send_email,
+        )
+        ending_signature = _profile_log_signature(log_path)
+
+        if ending_signature == signature:
+            with _PROFILE_LOG_METRICS_CACHE_LOCK:
+                if len(_PROFILE_LOG_METRICS_CACHE) >= _PROFILE_LOG_METRICS_CACHE_LIMIT:
+                    _PROFILE_LOG_METRICS_CACHE.clear()
+                _PROFILE_LOG_METRICS_CACHE[key] = dict(metrics)
+
+        return metrics
+    finally:
+        with _PROFILE_LOG_METRICS_CACHE_LOCK:
+            active_waiter = _PROFILE_LOG_METRICS_INFLIGHT.pop(key, None)
+        if active_waiter is not None:
+            active_waiter.set()
+
+
 def load_profile_snapshot(
     profile_name: str,
     pane_index: int,
@@ -1704,57 +1897,27 @@ def load_profile_snapshot(
     provider_name = str(cfg.get("provider") or "").strip().lower()
     pacing = provider_pacing_status(profile_name, provider_name, cooldown_seconds)
     effective_cooldown_seconds = max(cooldown_seconds, int(pacing.get("recommended_cooldown_seconds") or 0))
-    rows = read_csv_rows(log_path)
     start, end = local_today_bounds()
     always_send_email = (cfg.get("always_send") or "").strip().lower()
+    log_metrics = _profile_log_metrics(
+        log_path,
+        start=start,
+        end=end,
+        always_send_email=always_send_email,
+    )
 
-    sent_today = 0
-    errors_today = 0
-    skipped_today = 0
-    run_sent = 0
-    run_errors = 0
-    run_skipped = 0
-    last_status = ""
-    last_email = ""
-    last_info = ""
-    last_timestamp: Optional[datetime] = None
-    last_sent_timestamp: Optional[datetime] = None
-    run_started_at: Optional[datetime] = None
-
-    for row in rows:
-        ts = parse_log_timestamp(row.get("TimestampUTC", ""))
-        status = (row.get("Status") or "").strip()
-        email = (row.get("Email") or "").strip().lower()
-        if ts and start <= ts < end:
-            if status == "SENT":
-                sent_today += 1
-            elif status == "SKIP":
-                skipped_today += 1
-            else:
-                errors_today += 1
-        if ts and always_send_email and email == always_send_email and status == "SENT":
-            if run_started_at is None or ts >= run_started_at:
-                run_started_at = ts
-        if ts and (last_timestamp is None or ts >= last_timestamp):
-            last_timestamp = ts
-            last_status = status
-            last_email = (row.get("Email") or "").strip()
-            last_info = (row.get("Info") or "").strip()
-        if ts and status == "SENT" and (last_sent_timestamp is None or ts >= last_sent_timestamp):
-            last_sent_timestamp = ts
-
-    if run_started_at is not None:
-        for row in rows:
-            ts = parse_log_timestamp(row.get("TimestampUTC", ""))
-            if not ts or ts < run_started_at:
-                continue
-            status = (row.get("Status") or "").strip()
-            if status == "SENT":
-                run_sent += 1
-            elif status == "SKIP":
-                run_skipped += 1
-            else:
-                run_errors += 1
+    sent_today = int(log_metrics["sent_today"])
+    errors_today = int(log_metrics["errors_today"])
+    skipped_today = int(log_metrics["skipped_today"])
+    run_sent = int(log_metrics["run_sent"])
+    run_errors = int(log_metrics["run_errors"])
+    run_skipped = int(log_metrics["run_skipped"])
+    last_status = str(log_metrics["last_status"])
+    last_email = str(log_metrics["last_email"])
+    last_info = str(log_metrics["last_info"])
+    last_timestamp = log_metrics["last_timestamp"]
+    last_sent_timestamp = log_metrics["last_sent_timestamp"]
+    run_started_at = log_metrics["run_started_at"]
 
     pane = pane_info.get(str(pane_index), {})
     current_cmd = (pane.get("cmd") or "").strip()
