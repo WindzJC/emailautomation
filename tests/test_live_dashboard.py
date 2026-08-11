@@ -7641,7 +7641,7 @@ class LiveDashboardTests(unittest.TestCase):
             "_build_live_snapshot",
             side_effect=AssertionError("full snapshot build must not run when cache is available"),
         ):
-            response = live_dashboard.snapshot(hours=24, tail_lines=12)
+            response = asyncio.run(live_dashboard.snapshot(hours=24, tail_lines=12))
 
         snapshot = json.loads(response.body)
         self.assertEqual(cached_snapshot, snapshot)
@@ -7690,7 +7690,7 @@ class LiveDashboardTests(unittest.TestCase):
             "_build_live_snapshot",
             side_effect=AssertionError("runtime overlay must not trigger a full snapshot build"),
         ) as build_snapshot:
-            response = live_dashboard.snapshot(hours=24, tail_lines=12)
+            response = asyncio.run(live_dashboard.snapshot(hours=24, tail_lines=12))
 
         snapshot = json.loads(response.body)
         profile = snapshot["profiles"][0]
@@ -8019,6 +8019,114 @@ class DashboardStabilizationTests(unittest.TestCase):
     def test_health_endpoint_is_async_and_worker_pool_independent(self) -> None:
         self.assertTrue(inspect.iscoroutinefunction(live_dashboard.health))
         self.assertEqual({"status": "ok"}, asyncio.run(live_dashboard.health()))
+
+    def test_lightweight_control_routes_do_not_use_shared_sync_worker_pool(self) -> None:
+        for endpoint in (
+            live_dashboard.index,
+            live_dashboard.auth_status,
+            live_dashboard.auth_login,
+            live_dashboard.auth_logout,
+            live_dashboard.snapshot,
+        ):
+            self.assertTrue(
+                inspect.iscoroutinefunction(endpoint),
+                getattr(endpoint, "__name__", repr(endpoint)),
+            )
+
+    def test_snapshot_executor_keeps_event_loop_responsive_during_cold_refresh(self) -> None:
+        calls = 0
+
+        def slow_loader(*, activity_hours: int, tail_lines: int):
+            nonlocal calls
+            calls += 1
+            time.sleep(0.15)
+            return {
+                "profiles": [{"name": "sendgrid_annette"}],
+                "hours": activity_hours,
+                "tail": tail_lines,
+            }
+
+        async def scenario() -> tuple[dict[str, str], list[dict[str, object]]]:
+            tasks = [
+                asyncio.create_task(
+                    live_dashboard._snapshot_fanout_entry_async(
+                        activity_hours=24,
+                        tail_lines=12,
+                    )
+                )
+                for _ in range(8)
+            ]
+            await asyncio.sleep(0.02)
+            health_started = time.perf_counter()
+            health_payload = await live_dashboard.health()
+            self.assertLess(time.perf_counter() - health_started, 0.05)
+            entries = await asyncio.gather(*tasks)
+            return health_payload, entries
+
+        with patch.object(
+            live_dashboard,
+            "_load_or_build_live_snapshot",
+            side_effect=slow_loader,
+        ):
+            health_payload, entries = asyncio.run(scenario())
+
+        self.assertEqual({"status": "ok"}, health_payload)
+        self.assertEqual(1, calls)
+        self.assertEqual(1, len({int(entry["revision"]) for entry in entries}))
+
+    def test_webhook_executor_keeps_event_loop_responsive(self) -> None:
+        def slow_processor(payload, received_at):
+            time.sleep(0.15)
+            return {"ok": True, "received": len(payload), "received_at": received_at.isoformat()}
+
+        async def scenario() -> tuple[dict[str, str], dict[str, object]]:
+            processing = asyncio.create_task(
+                live_dashboard._process_sendgrid_webhook_payload_async(
+                    [{"email": "author@example.com", "event": "delivered"}],
+                    live_dashboard.datetime.now(live_dashboard.timezone.utc),
+                )
+            )
+            await asyncio.sleep(0.02)
+            health_started = time.perf_counter()
+            health_payload = await live_dashboard.health()
+            self.assertLess(time.perf_counter() - health_started, 0.05)
+            result = await processing
+            return health_payload, result
+
+        with patch.object(
+            live_dashboard,
+            "_process_sendgrid_webhook_payload",
+            side_effect=slow_processor,
+        ):
+            health_payload, result = asyncio.run(scenario())
+
+        self.assertEqual({"status": "ok"}, health_payload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["received"])
+
+    def test_background_automation_executor_keeps_event_loop_responsive(self) -> None:
+        def slow_cycle() -> None:
+            time.sleep(0.15)
+
+        async def scenario() -> dict[str, str]:
+            background = asyncio.create_task(
+                live_dashboard._run_background_automation_once_async()
+            )
+            await asyncio.sleep(0.02)
+            health_started = time.perf_counter()
+            health_payload = await live_dashboard.health()
+            self.assertLess(time.perf_counter() - health_started, 0.05)
+            await background
+            return health_payload
+
+        with patch.object(
+            live_dashboard,
+            "_run_background_automation_once",
+            side_effect=slow_cycle,
+        ):
+            health_payload = asyncio.run(scenario())
+
+        self.assertEqual({"status": "ok"}, health_payload)
 
     def test_snapshot_fanout_singleflights_concurrent_clients(self) -> None:
         calls = 0

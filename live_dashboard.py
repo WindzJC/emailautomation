@@ -15,8 +15,9 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Callable, List
 
@@ -4217,9 +4218,17 @@ def _run_background_automation_once() -> None:
         return
 
 
+async def _run_background_automation_once_async() -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        _AUTOMATION_EXECUTOR,
+        _run_background_automation_once,
+    )
+
+
 async def _background_automation_loop() -> None:
     while True:
-        await asyncio.to_thread(_run_background_automation_once)
+        await _run_background_automation_once_async()
         await asyncio.sleep(AUTOMATION_LOOP_SECONDS)
 
 
@@ -4369,7 +4378,7 @@ def _human_upload_limit(limit: int) -> str:
 
 
 @app.get("/")
-def index() -> FileResponse:
+async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -4380,7 +4389,7 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/api/auth/status")
-def auth_status(request: Request) -> JSONResponse:
+async def auth_status(request: Request) -> JSONResponse:
     authenticated = bool(request.session.get(_AUTH_SESSION_KEY))
     auth_response = _dashboard_auth_response()
     return JSONResponse(
@@ -4396,7 +4405,7 @@ def auth_status(request: Request) -> JSONResponse:
 
 
 @app.post("/api/auth/login")
-def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
+async def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
     if _dashboard_auth_disabled():
         return JSONResponse(
             {
@@ -4422,7 +4431,7 @@ def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
 
 
 @app.post("/api/auth/logout")
-def auth_logout(request: Request) -> JSONResponse:
+async def auth_logout(request: Request) -> JSONResponse:
     request.session.clear()
     message = "Local dev auth disabled." if _dashboard_auth_disabled() else "Signed out."
     return JSONResponse({"ok": True, "message": message, **_dashboard_auth_response()})
@@ -4450,6 +4459,14 @@ _SNAPSHOT_FANOUT_LOCK = threading.Lock()
 _SNAPSHOT_FANOUT_CACHE: dict[tuple[int, int], dict[str, object]] = {}
 _SNAPSHOT_FANOUT_INFLIGHT: dict[tuple[int, int], threading.Event] = {}
 _SNAPSHOT_FANOUT_REVISION = 0
+
+# Keep expensive control-plane work out of Starlette/AnyIO's shared synchronous
+# worker pool. A cold snapshot burst previously consumed request workers while
+# followers blocked on the single-flight event, which could starve login/root
+# even though /api/health (async) remained responsive.
+_SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-snapshot")
+_WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-webhook")
+_AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-automation")
 
 
 def _snapshot_file_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -4681,12 +4698,24 @@ def _snapshot_fanout_entry(*, activity_hours: int, tail_lines: int) -> dict[str,
             active_waiter.set()
 
 
+async def _snapshot_fanout_entry_async(*, activity_hours: int, tail_lines: int) -> dict[str, object]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _SNAPSHOT_EXECUTOR,
+        partial(
+            _snapshot_fanout_entry,
+            activity_hours=activity_hours,
+            tail_lines=tail_lines,
+        ),
+    )
+
+
 @app.get("/api/snapshot")
-def snapshot(
+async def snapshot(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
 ) -> Response:
-    entry = _snapshot_fanout_entry(activity_hours=hours, tail_lines=tail_lines)
+    entry = await _snapshot_fanout_entry_async(activity_hours=hours, tail_lines=tail_lines)
     # Returning an already-rendered Response prevents FastAPI from repeatedly
     # JSON-encoding the same large snapshot on the event-loop thread.
     return Response(
@@ -7437,6 +7466,69 @@ def leads_status() -> JSONResponse:
     return JSONResponse({"ok": True, "status": _combined_leads_status()})
 
 
+def _process_sendgrid_webhook_payload(
+    payload: list[dict[str, object]],
+    received_at: datetime,
+) -> dict[str, object]:
+    normalized = normalize_webhook_events(
+        payload,
+        source_log=WEBHOOK_EVENTS_JSONL,
+        received_at_utc=received_at,
+    )
+    dedupe_result = dedupe_webhook_events(
+        normalized,
+        WEBHOOK_DEDUPE_PATH,
+        reference_utc=received_at,
+    )
+    unique_events = list(dedupe_result.get("unique_events", []))
+    appended = append_events_jsonl(unique_events, WEBHOOK_EVENTS_PATH)
+    suppression_summary = update_suppressions_from_events(unique_events, SUPPRESSION_CSV)
+    ledger_summary = ingest_send_outcome_events(unique_events, db_path=settings.LEAD_LEDGER_DB_PATH)
+    auto_stops = runtime_control.apply_delivery_guards()
+    return {
+        "ok": True,
+        "received": len(payload),
+        "normalized": len(normalized),
+        "stored": appended,
+        "duplicates_ignored": int(dedupe_result.get("duplicates", 0) or 0),
+        "suppression_summary": {
+            "updated_events": int(suppression_summary.get("updated_events", 0) or 0),
+            "records_total": int(suppression_summary.get("records_total", 0) or 0),
+            "total_perm": int(suppression_summary.get("total_perm", 0) or 0),
+            "total_temp_active": int(suppression_summary.get("total_temp_active", 0) or 0),
+        },
+        "ledger_summary": {
+            "processed_events": int(ledger_summary.get("processed_events", 0) or 0),
+            "matched_events": int(ledger_summary.get("matched_events", 0) or 0),
+            "unmatched_events": int(ledger_summary.get("unmatched_events", 0) or 0),
+            "ignored_events": int(ledger_summary.get("ignored_events", 0) or 0),
+            "dispatch_rows_updated": int(ledger_summary.get("dispatch_rows_updated", 0) or 0),
+            "lead_rows_updated": int(ledger_summary.get("lead_rows_updated", 0) or 0),
+            "suppressed_events": int(ledger_summary.get("suppressed_events", 0) or 0),
+            "outcome_counts": {
+                str(key): int(value or 0)
+                for key, value in dict(ledger_summary.get("outcome_counts", {})).items()
+            },
+        },
+        "auto_stops": auto_stops,
+    }
+
+
+async def _process_sendgrid_webhook_payload_async(
+    payload: list[dict[str, object]],
+    received_at: datetime,
+) -> dict[str, object]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _WEBHOOK_EXECUTOR,
+        partial(
+            _process_sendgrid_webhook_payload,
+            payload,
+            received_at,
+        ),
+    )
+
+
 @app.post("/webhooks/sendgrid/events")
 async def sendgrid_event_webhook(request: Request) -> JSONResponse:
     raw_body = await request.body()
@@ -7470,48 +7562,11 @@ async def sendgrid_event_webhook(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "Expected JSON array."}, status_code=400)
 
     received_at = datetime.now(timezone.utc)
-    normalized = normalize_webhook_events(
+    result = await _process_sendgrid_webhook_payload_async(
         [item for item in payload if isinstance(item, dict)],
-        source_log=WEBHOOK_EVENTS_JSONL,
-        received_at_utc=received_at,
+        received_at,
     )
-    dedupe_result = dedupe_webhook_events(normalized, WEBHOOK_DEDUPE_PATH, reference_utc=received_at)
-    unique_events = list(dedupe_result.get("unique_events", []))
-    appended = append_events_jsonl(unique_events, WEBHOOK_EVENTS_PATH)
-    suppression_summary = update_suppressions_from_events(unique_events, SUPPRESSION_CSV)
-    ledger_summary = ingest_send_outcome_events(unique_events, db_path=settings.LEAD_LEDGER_DB_PATH)
-    auto_stops = runtime_control.apply_delivery_guards()
-    json_safe_summary = {
-        "updated_events": int(suppression_summary.get("updated_events", 0) or 0),
-        "records_total": int(suppression_summary.get("records_total", 0) or 0),
-        "total_perm": int(suppression_summary.get("total_perm", 0) or 0),
-        "total_temp_active": int(suppression_summary.get("total_temp_active", 0) or 0),
-    }
-    json_safe_ledger_summary = {
-        "processed_events": int(ledger_summary.get("processed_events", 0) or 0),
-        "matched_events": int(ledger_summary.get("matched_events", 0) or 0),
-        "unmatched_events": int(ledger_summary.get("unmatched_events", 0) or 0),
-        "ignored_events": int(ledger_summary.get("ignored_events", 0) or 0),
-        "dispatch_rows_updated": int(ledger_summary.get("dispatch_rows_updated", 0) or 0),
-        "lead_rows_updated": int(ledger_summary.get("lead_rows_updated", 0) or 0),
-        "suppressed_events": int(ledger_summary.get("suppressed_events", 0) or 0),
-        "outcome_counts": {
-            str(key): int(value or 0)
-            for key, value in dict(ledger_summary.get("outcome_counts", {})).items()
-        },
-    }
-    return JSONResponse(
-        {
-            "ok": True,
-            "received": len(payload),
-            "normalized": len(normalized),
-            "stored": appended,
-            "duplicates_ignored": int(dedupe_result.get("duplicates", 0) or 0),
-            "suppression_summary": json_safe_summary,
-            "ledger_summary": json_safe_ledger_summary,
-            "auto_stops": auto_stops,
-        }
-    )
+    return JSONResponse(result)
 
 
 @app.websocket("/ws")
@@ -7530,8 +7585,7 @@ async def websocket_snapshot_stream(
     last_sent_monotonic = 0.0
     try:
         while True:
-            entry = await asyncio.to_thread(
-                _snapshot_fanout_entry,
+            entry = await _snapshot_fanout_entry_async(
                 activity_hours=hours,
                 tail_lines=tail_lines,
             )
