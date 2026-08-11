@@ -363,6 +363,108 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("Sendgrid queue unsafe", alert["title"])
         self.assertIn("fixture error", alert["message"])
 
+    def test_queue_safety_scan_cache_reuses_and_invalidates_email_sets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            path.write_text("Email\na@example.test\n", encoding="utf-8")
+            cache = rebuild_recipient_queues.QueueSafetyScanCache()
+
+            with patch.object(
+                rebuild_recipient_queues,
+                "read_csv",
+                wraps=rebuild_recipient_queues.read_csv,
+            ) as reader:
+                self.assertEqual({"a@example.test"}, cache.email_set(path))
+                self.assertEqual({"a@example.test"}, cache.email_set(path))
+                self.assertEqual(1, reader.call_count)
+
+                path.write_text(
+                    "Email\na@example.test\nb@example.test\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    {"a@example.test", "b@example.test"},
+                    cache.email_set(path),
+                )
+                self.assertEqual(2, reader.call_count)
+
+    def test_queue_safety_provider_log_evidence_is_shared_within_snapshot_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            logs = base / "data" / "logs"
+            logs.mkdir(parents=True)
+            log_path = logs / "sendgrid_annette_log.csv"
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-08-11T00:00:00+00:00,sent@example.test,SENT,\n"
+                "2026-08-11T00:00:01+00:00,skip@example.test,SKIP,\n",
+                encoding="utf-8",
+            )
+            profiles = {
+                "sendgrid_annette": {
+                    "provider": "sendgrid",
+                    "log": "sendgrid_annette_log.csv",
+                }
+            }
+            context = dashboard_core._DashboardQueueSafetyScanContext()
+            with patch.multiple(
+                dashboard_core,
+                PROFILES=profiles,
+                SENDGRID_PROFILES=["sendgrid_annette"],
+                DASHBOARD_PROFILES=["sendgrid_annette"],
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                rebuild_recipient_queues,
+                "read_csv",
+                wraps=rebuild_recipient_queues.read_csv,
+            ) as reader:
+                accounted = dashboard_core._provider_log_accounted_missing_emails(
+                    "sendgrid", scan_context=context
+                )
+                sent = dashboard_core._provider_authoritative_sent_emails(
+                    "sendgrid", scan_context=context
+                )
+
+            self.assertEqual({"sent@example.test", "skip@example.test"}, accounted)
+            self.assertEqual({"sent@example.test"}, sent)
+            self.assertEqual(1, reader.call_count)
+
+    def test_delivery_guards_skip_historical_scans_when_all_selected_profiles_idle(self) -> None:
+        idle_snapshot = SimpleNamespace(
+            name="sendgrid_annette",
+            runtime_state="stopped",
+            tmux_dead=False,
+        )
+        with patch.object(dashboard_core, "collect_send_attempts") as collect_attempts, patch.object(
+            dashboard_core, "load_activity_events"
+        ) as load_events:
+            result = dashboard_core.evaluate_and_apply_profile_delivery_guards(
+                snapshots=[idle_snapshot]
+            )
+
+        self.assertEqual([], result)
+        collect_attempts.assert_not_called()
+        load_events.assert_not_called()
+
+    def test_dashboard_queue_safety_fails_closed_if_preview_evidence_changes(self) -> None:
+        with patch.object(
+            dashboard_core,
+            "build_queue_safety_report",
+            return_value={"safe": True, "unsafe_reasons": [], "shards": []},
+        ), patch.object(
+            dashboard_core,
+            "_provider_authoritative_sent_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "_apply_preview_queue_match",
+            side_effect=RuntimeError("source changed during scan"),
+        ):
+            report = dashboard_core.build_dashboard_queue_safety_report("sendgrid")
+
+        self.assertFalse(report["safe"])
+        self.assertIn("QUEUE_SAFETY_CHECK_FAILED", report["unsafe_reasons"])
+        self.assertIn("source changed during scan", report["message"])
+
     def test_provider_queue_safety_uses_only_provider_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             shards = Path(tmpdir)

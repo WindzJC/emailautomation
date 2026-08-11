@@ -46,7 +46,13 @@ from sendgrid_hygiene import (
     parse_iso_utc,
 )
 from sendgrid_launch_auth import resolve_sendgrid_api_key
-from tools.rebuild_recipient_queues import build_queue_safety_report, default_queue_paths, default_sendgrid_queue_paths, email_set, set_fingerprint
+from tools.rebuild_recipient_queues import (
+    QueueSafetyScanCache,
+    build_queue_safety_report,
+    default_queue_paths,
+    default_sendgrid_queue_paths,
+    set_fingerprint,
+)
 
 ROOT = settings.APP_ROOT
 PYTHON_BIN = ROOT / ".venv" / "bin" / "python"
@@ -3313,28 +3319,42 @@ def _provider_log_paths(provider: str) -> list[Path]:
     return paths
 
 
-def _provider_log_accounted_missing_emails(provider: str) -> set[str]:
+class _DashboardQueueSafetyScanContext:
+    """Ephemeral read-through state shared by one dashboard snapshot build."""
+
+    def __init__(self) -> None:
+        self.csv_cache = QueueSafetyScanCache()
+        self.preview_loaded = False
+        self.preview_payload: Dict[str, object] = {}
+
+    def preview(self) -> Dict[str, object]:
+        if not self.preview_loaded:
+            self.preview_payload = _active_campaign_preview_payload()
+            self.preview_loaded = True
+        return self.preview_payload
+
+
+def _provider_log_accounted_missing_emails(
+    provider: str,
+    *,
+    scan_context: _DashboardQueueSafetyScanContext | None = None,
+) -> set[str]:
+    context = scan_context or _DashboardQueueSafetyScanContext()
     accounted: set[str] = set()
     for path in _provider_log_paths(provider):
-        for row in read_csv_rows(path):
-            status = str(row.get("Status") or "").strip().upper()
-            if status not in {"SENT", "SKIP"} and not (status == "ATTEMPT" and _log_info_marks_sent(row.get("Info") or "")):
-                continue
-            email = str(row.get("Email") or "").strip().lower()
-            if email:
-                accounted.add(email)
+        accounted.update(context.csv_cache.accounted_email_set_exact(path))
     return accounted
 
 
-def _provider_authoritative_sent_emails(provider: str) -> set[str]:
+def _provider_authoritative_sent_emails(
+    provider: str,
+    *,
+    scan_context: _DashboardQueueSafetyScanContext | None = None,
+) -> set[str]:
+    context = scan_context or _DashboardQueueSafetyScanContext()
     sent: set[str] = set()
     for path in _provider_log_paths(provider):
-        for row in read_csv_rows(path):
-            if not _authoritative_sent_log_row(row):
-                continue
-            email = str(row.get("Email") or "").strip().lower()
-            if email:
-                sent.add(email)
+        sent.update(context.csv_cache.authoritative_sent_email_set_exact(path))
     return sent
 
 
@@ -3485,15 +3505,22 @@ def _provider_idempotency_accounted_emails(provider: str, campaign_id: str = "")
     return accounted
 
 
-def _apply_preview_queue_match(report: Dict[str, object], provider: str, shard_paths: Optional[List[Path]]) -> None:
-    preview = _active_campaign_preview_payload()
+def _apply_preview_queue_match(
+    report: Dict[str, object],
+    provider: str,
+    shard_paths: Optional[List[Path]],
+    *,
+    scan_context: _DashboardQueueSafetyScanContext | None = None,
+) -> None:
+    context = scan_context or _DashboardQueueSafetyScanContext()
+    preview = context.preview()
     expected = _planned_preview_email_set(preview, provider)
     if expected is None:
         return
     paths = list(shard_paths or default_sendgrid_queue_paths(SHARDS_DIR) + _private_queue_paths())
     live: set[str] = set()
     for path in paths:
-        live.update(email_set(path))
+        live.update(context.csv_cache.email_set(path))
 
     missing = expected - live
     extra = live - expected
@@ -3502,10 +3529,12 @@ def _apply_preview_queue_match(report: Dict[str, object], provider: str, shard_p
     live_sent_overlap: set[str] = set()
     if provider in {"private_jc", "sendgrid", "all"}:
         accounted_missing = missing & (
-            _provider_log_accounted_missing_emails(provider)
+            _provider_log_accounted_missing_emails(provider, scan_context=context)
             | _provider_idempotency_accounted_emails(provider, campaign_id=campaign_id)
         )
-        live_sent_overlap = live & _provider_authoritative_sent_emails(provider)
+        live_sent_overlap = live & _provider_authoritative_sent_emails(
+            provider, scan_context=context
+        )
     unaccounted_missing = missing - accounted_missing
     report["preview_id"] = str(preview.get("preview_id") or "")
     report["preview_campaign_id"] = campaign_id
@@ -3536,12 +3565,18 @@ def _apply_preview_queue_match(report: Dict[str, object], provider: str, shard_p
         report["safe"] = False
 
 
-def build_dashboard_queue_safety_report(provider: str = "all") -> Dict[str, object]:
+def build_dashboard_queue_safety_report(
+    provider: str = "all",
+    *,
+    scan_context: _DashboardQueueSafetyScanContext | None = None,
+) -> Dict[str, object]:
     provider_name, shard_paths = _queue_safety_provider_paths(provider)
+    context = scan_context or _DashboardQueueSafetyScanContext()
     try:
         report = build_queue_safety_report(
             shard_paths=shard_paths,
             sendgrid_log_paths=_dashboard_sendgrid_log_paths(),
+            scan_cache=context.csv_cache,
         )
     except Exception as exc:
         return {
@@ -3555,7 +3590,17 @@ def build_dashboard_queue_safety_report(provider: str = "all") -> Dict[str, obje
     report["provider"] = provider_name
     report["affected_provider"] = provider_name
     report["validated_shard_paths"] = [str(item.get("path") or "") for item in report.get("shards", []) if isinstance(item, dict)]
-    _apply_preview_queue_match(report, provider_name, shard_paths)
+    try:
+        _apply_preview_queue_match(
+            report, provider_name, shard_paths, scan_context=context
+        )
+    except Exception as exc:
+        reasons = list(report.get("unsafe_reasons") or [])
+        if "QUEUE_SAFETY_CHECK_FAILED" not in reasons:
+            reasons.append("QUEUE_SAFETY_CHECK_FAILED")
+        report["unsafe_reasons"] = reasons
+        report["safe"] = False
+        report["message"] = f"Queue safety check failed: {exc}"
     return report
 
 
@@ -4250,6 +4295,12 @@ def evaluate_and_apply_profile_delivery_guards(
         if snapshots is not None
         else load_sendgrid_profile_snapshots(session=session, tail_lines=12)
     )
+    # Guard evaluation can only stop an active sender.  Avoid repeatedly
+    # reparsing historical send and webhook logs while every SendGrid profile
+    # is idle; when any profile is active the existing guard path is preserved.
+    if not any(profile_is_active(snapshot) for snapshot in selected_snapshots):
+        return []
+
     attempts = collect_send_attempts(SENDGRID_PROFILES)
     email_to_profile = unique_send_profile_by_email(attempts)
     message_id_to_profile = latest_send_profile_by_message_id(attempts)
@@ -4429,9 +4480,16 @@ def build_dashboard_snapshot(
             except Exception:
                 profile["run_sent_display"] = 0
 
-    queue_safety = build_dashboard_queue_safety_report("all")
-    sendgrid_queue_safety = build_dashboard_queue_safety_report("sendgrid")
-    private_queue_safety = build_dashboard_queue_safety_report("private_jc")
+    queue_safety_scan_context = _DashboardQueueSafetyScanContext()
+    queue_safety = build_dashboard_queue_safety_report(
+        "all", scan_context=queue_safety_scan_context
+    )
+    sendgrid_queue_safety = build_dashboard_queue_safety_report(
+        "sendgrid", scan_context=queue_safety_scan_context
+    )
+    private_queue_safety = build_dashboard_queue_safety_report(
+        "private_jc", scan_context=queue_safety_scan_context
+    )
     run_status_items = build_run_status_items(
         session_label,
         profile_dicts,

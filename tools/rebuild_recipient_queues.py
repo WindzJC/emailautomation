@@ -248,6 +248,177 @@ def set_fingerprint(values: Iterable[str]) -> str:
     return digest.hexdigest()
 
 
+class QueueSafetyScanCache:
+    """Per-report-build cache for stable, read-only queue-safety CSV facts.
+
+    The dashboard renders combined, SendGrid, and Private JC safety views from
+    heavily overlapping files.  Without a shared cache, each view reparses the
+    same queues and source CSVs.  This cache is intentionally scoped to one
+    dashboard snapshot build: it never carries stale safety evidence across
+    snapshots, and every cached access is invalidated by a file signature
+    change.  A source that changes while it is being scanned raises so callers
+    fail closed rather than mixing file versions.
+    """
+
+    def __init__(self) -> None:
+        self._queue_summaries: Dict[str, Tuple[Tuple[object, ...], Dict[str, object]]] = {}
+        self._email_sets: Dict[str, Tuple[Tuple[object, ...], set[str]]] = {}
+        self._log_evidence: Dict[str, Tuple[Tuple[object, ...], Dict[str, set[str]]]] = {}
+        self._reject_rows: Dict[str, Tuple[Tuple[object, ...], Dict[str, List[Dict[str, str]]]]] = {}
+
+    @staticmethod
+    def _signature(path: Path) -> Tuple[object, ...]:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return ("missing",)
+        return (
+            int(stat.st_dev),
+            int(stat.st_ino),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        )
+
+    def _stable_read_csv(self, path: Path) -> Tuple[List[str], List[Dict[str, str]], Tuple[object, ...]]:
+        before = self._signature(path)
+        headers, rows = read_csv(path)
+        after = self._signature(path)
+        if before != after:
+            raise RuntimeError(f"Queue-safety source changed during scan: {path}")
+        return headers, rows, after
+
+    def queue_summary(self, path: Path) -> Dict[str, object]:
+        marker = str(path)
+        signature = self._signature(path)
+        cached = self._queue_summaries.get(marker)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        headers, rows, stable_signature = self._stable_read_csv(path)
+        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+        emails = {
+            email
+            for email in (norm_email(row.get(email_header or "")) for row in rows)
+            if email
+        }
+        summary: Dict[str, object] = {
+            "headers": tuple(headers),
+            "row_count": len(rows),
+            "emails": emails,
+            "missing_or_empty": stable_signature == ("missing",) or (path.exists() and path.stat().st_size <= 0),
+        }
+        self._queue_summaries[marker] = (stable_signature, summary)
+        self._email_sets[marker] = (stable_signature, emails)
+        return summary
+
+    def email_set(self, path: Path) -> set[str]:
+        marker = str(path)
+        signature = self._signature(path)
+        cached = self._email_sets.get(marker)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        queue_cached = self._queue_summaries.get(marker)
+        if queue_cached is not None and queue_cached[0] == signature:
+            emails = queue_cached[1].get("emails")
+            if isinstance(emails, set):
+                self._email_sets[marker] = (signature, emails)
+                return emails
+
+        headers, rows, stable_signature = self._stable_read_csv(path)
+        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+        emails = {email for email in (norm_email(row.get(email_header or "")) for row in rows) if email}
+        self._email_sets[marker] = (stable_signature, emails)
+        return emails
+
+    def delivery_log_evidence(self, path: Path) -> Dict[str, set[str]]:
+        """Scan one stable log version and derive all safety evidence at once."""
+
+        marker = str(path)
+        signature = self._signature(path)
+        cached = self._log_evidence.get(marker)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        headers, rows, stable_signature = self._stable_read_csv(path)
+        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+        status_header = find_header(headers, ("status", "event", "result"))
+        info_header = find_header(headers, ("info", "details", "message"))
+        queue_sent: set[str] = set()
+        accounted_exact: set[str] = set()
+        authoritative_sent_exact: set[str] = set()
+
+        if email_header:
+            for row in rows:
+                email = norm_email(row.get(email_header))
+                if not email:
+                    continue
+
+                # Preserve sent_email_set() semantics used by the queue rebuild
+                # safety checker, including its conservative no-status-column
+                # behavior.
+                if status_header:
+                    status = str(row.get(status_header) or "").strip().upper()
+                    info = str(row.get(info_header or "") or "").strip().lower()
+                    queue_marks_sent = status == "SENT" or (
+                        status == "ATTEMPT" and "outcome=sent" in info
+                    )
+                else:
+                    queue_marks_sent = True
+                if queue_marks_sent:
+                    queue_sent.add(email)
+
+                # Preserve dashboard_core's exact historical-log semantics.
+                exact_status = str(row.get("Status") or "").strip().upper()
+                exact_info = str(row.get("Info") or "").strip().lower()
+                exact_marks_sent = exact_status == "SENT" or (
+                    exact_status == "ATTEMPT"
+                    and (
+                        "outcome=sent" in exact_info
+                        or '"outcome":"sent"' in exact_info
+                        or "'outcome': 'sent'" in exact_info
+                    )
+                )
+                if exact_status in {"SENT", "SKIP"} or exact_marks_sent:
+                    accounted_exact.add(email)
+                if exact_marks_sent:
+                    authoritative_sent_exact.add(email)
+
+        evidence = {
+            "queue_sent": queue_sent,
+            "accounted_exact": accounted_exact,
+            "authoritative_sent_exact": authoritative_sent_exact,
+        }
+        self._log_evidence[marker] = (stable_signature, evidence)
+        return evidence
+
+    def sent_email_set(self, path: Path) -> set[str]:
+        return self.delivery_log_evidence(path)["queue_sent"]
+
+    def accounted_email_set_exact(self, path: Path) -> set[str]:
+        return self.delivery_log_evidence(path)["accounted_exact"]
+
+    def authoritative_sent_email_set_exact(self, path: Path) -> set[str]:
+        return self.delivery_log_evidence(path)["authoritative_sent_exact"]
+
+    def reject_rows_by_email(self, path: Path) -> Dict[str, List[Dict[str, str]]]:
+        marker = str(path)
+        signature = self._signature(path)
+        cached = self._reject_rows.get(marker)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        headers, rows, stable_signature = self._stable_read_csv(path)
+        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
+        by_email: Dict[str, List[Dict[str, str]]] = {}
+        if email_header:
+            for row in rows:
+                email = norm_email(row.get(email_header))
+                if email:
+                    by_email.setdefault(email, []).append(row)
+        self._reject_rows[marker] = (stable_signature, by_email)
+        return by_email
+
+
 def active_campaign_manifest_path(state_dir: Path | None = None) -> Path:
     return (state_dir or settings.STATE_DIR) / ACTIVE_CAMPAIGN_MANIFEST_NAME
 
@@ -481,6 +652,8 @@ def build_queue_safety_report(
     allow_sendgrid_already_sent: bool = False,
     campaign_type: str = "",
     recontact_blocked_overlap_export_path: Path | None = None,
+    scan_cache: QueueSafetyScanCache | None = None,
+    sendgrid_sent_emails: set[str] | None = None,
 ) -> Dict[str, object]:
     important_dir = settings.APP_ROOT / "_important"
     default_sources = default_queue_safety_sources(important_dir)
@@ -489,6 +662,7 @@ def build_queue_safety_report(
     triaged_keep = triaged_keep_path or Path(default_sources["triaged_keep"])
     triaged_reject = triaged_reject_path or Path(default_sources["triaged_reject"])
     queues = list(shard_paths or default_queue_paths())
+    cache = scan_cache or QueueSafetyScanCache()
 
     per_shard = []
     shard_emails: set[str] = set()
@@ -497,10 +671,10 @@ def build_queue_safety_report(
     duplicate_rows_across_shards = 0
     seen: set[str] = set()
     for path in queues:
-        headers, raw_rows = read_csv(path)
-        email_header = find_header(headers, EMAIL_HEADER_CANDIDATES)
-        emails = {email for email in (norm_email(row.get(email_header or "")) for row in raw_rows) if email}
-        rows = len(raw_rows)
+        summary = cache.queue_summary(path)
+        headers = list(summary.get("headers") or [])
+        emails = set(summary.get("emails") or set())
+        rows = int(summary.get("row_count") or 0)
         missing_required_headers = _missing_required_headers(headers) if _is_sendgrid_queue_path(path) else []
         per_shard.append(
             {
@@ -508,7 +682,7 @@ def build_queue_safety_report(
                 "name": path.name,
                 "row_count": rows,
                 "unique_emails": len(emails),
-                "missing_or_empty": not path.exists() or path.stat().st_size <= 0,
+                "missing_or_empty": bool(summary.get("missing_or_empty")),
                 "missing_required_headers": missing_required_headers,
                 "required_headers_present": not missing_required_headers,
             }
@@ -522,24 +696,25 @@ def build_queue_safety_report(
         if _is_sendgrid_queue_path(path):
             sendgrid_shard_emails.update(emails)
 
-    intended_emails = email_set(intended)
-    checked_emails = email_set(checked)
-    keep_emails = email_set(triaged_keep)
-    reject_emails = email_set(triaged_reject)
-    reject_rows_by_email = triaged_reject_rows_by_email(triaged_reject)
-    sendgrid_sent_emails: set[str] = set()
-    if sendgrid_shard_emails:
+    intended_emails = cache.email_set(intended)
+    checked_emails = cache.email_set(checked)
+    keep_emails = cache.email_set(triaged_keep)
+    reject_emails = cache.email_set(triaged_reject)
+    effective_sendgrid_sent_emails = set(sendgrid_sent_emails or set())
+    if sendgrid_shard_emails and sendgrid_sent_emails is None:
         for log_path in list(sendgrid_log_paths or default_sendgrid_log_paths()):
-            sendgrid_sent_emails.update(sent_email_set(log_path))
+            effective_sendgrid_sent_emails.update(cache.sent_email_set(log_path))
 
     outside_intended = shard_emails - intended_emails if intended_emails else set(shard_emails)
     outside_checked = shard_emails - checked_emails if checked_emails else set(shard_emails)
     reject_overlap = shard_emails & reject_emails
-    sendgrid_sent_overlap = sendgrid_shard_emails & sendgrid_sent_emails
+    sendgrid_sent_overlap = sendgrid_shard_emails & effective_sendgrid_sent_emails
     source_reject_overlap = intended_emails & reject_emails
     normalized_campaign_type = str(campaign_type or "").strip().lower()
     allow_name_quality_reject_overlap = normalized_campaign_type == RECONTACT_COLD_CAMPAIGN_TYPE
+    reject_rows_by_email: Dict[str, List[Dict[str, str]]] = {}
     if allow_name_quality_reject_overlap:
+        reject_rows_by_email = cache.reject_rows_by_email(triaged_reject)
         allowed_reject_overlap = {
             email
             for email in reject_overlap
