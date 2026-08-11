@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from typing import List
@@ -18,6 +19,14 @@ SYSTEMCTL_BIN = os.environ.get(
 PROFILE_RE = re.compile(r"^[a-z0-9_]+$")
 START_VERIFY_ATTEMPTS = 20
 START_VERIFY_INTERVAL_SECONDS = 0.1
+RUNTIME_OVERLAY_CACHE_TTL_SECONDS = 5.0
+RUNTIME_OVERLAY_STALE_SECONDS = 60.0
+RUNTIME_OVERLAY_SYSTEMCTL_TIMEOUT_SECONDS = 10
+
+_RUNTIME_OVERLAY_CACHE_LOCK = threading.Lock()
+_RUNTIME_OVERLAY_CACHE: dict[str, dict[str, object]] = {}
+_RUNTIME_OVERLAY_CACHE_AT = 0.0
+_RUNTIME_OVERLAY_REFRESHING = False
 
 
 def backend_name() -> str:
@@ -116,6 +125,133 @@ def _is_failed(profile_name: str) -> bool:
     return _control("is-failed", profile_name).returncode == 0
 
 
+def _runtime_fields_from_active_state(
+    profile_name: str,
+    active_state: str,
+) -> dict[str, object]:
+    unit = unit_name(profile_name)
+
+    if active_state == "activating":
+        return {
+            "tmux_running": True,
+            "tmux_dead": False,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "starting",
+            "runtime_label": "Starting",
+            "runtime_note": f"{unit} is running startup verification.",
+        }
+
+    if active_state in {"active", "reloading"}:
+        return {
+            "tmux_running": True,
+            "tmux_dead": False,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "running",
+            "runtime_label": "Running",
+            "runtime_note": f"Managed by {unit}.",
+        }
+
+    if active_state == "failed":
+        return {
+            "tmux_running": False,
+            "tmux_dead": True,
+            "tmux_command": unit,
+            "tmux_tail": "",
+            "runtime_state": "error",
+            "runtime_label": "Error",
+            "runtime_note": f"{unit} is in the failed state.",
+        }
+
+    return {
+        "tmux_running": False,
+        "tmux_dead": False,
+        "tmux_command": unit,
+        "tmux_tail": "",
+        "runtime_state": "stopped",
+        "runtime_label": "Stopped",
+        "runtime_note": f"{unit} is inactive.",
+    }
+
+
+def _unresolved_runtime_fields(
+    profile_name: str,
+) -> dict[str, object]:
+    unit = unit_name(profile_name)
+    return {
+        "tmux_running": False,
+        "tmux_dead": True,
+        "tmux_command": unit,
+        "tmux_tail": "",
+        "runtime_state": "error",
+        "runtime_label": "Unknown",
+        "runtime_note": f"Unable to determine current state of {unit}.",
+    }
+
+
+def _batch_active_states(
+    profile_names: list[str],
+) -> dict[str, str] | None:
+    if not profile_names:
+        return {}
+
+    unit_to_profile = {
+        unit_name(profile_name): profile_name
+        for profile_name in profile_names
+    }
+    command = [
+        SYSTEMCTL_BIN,
+        "show",
+        *unit_to_profile,
+        "--property=Id",
+        "--property=ActiveState",
+        "--no-pager",
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=RUNTIME_OVERLAY_SYSTEMCTL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    states: dict[str, str] = {}
+    for block in str(result.stdout or "").split("\n\n"):
+        properties: dict[str, str] = {}
+        for raw_line in block.splitlines():
+            line = raw_line.strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            properties[key.strip()] = value.strip()
+
+        profile_name = unit_to_profile.get(properties.get("Id", ""))
+        active_state = properties.get("ActiveState", "").strip().lower()
+        if profile_name and active_state:
+            states[profile_name] = active_state
+
+    return states
+
+
+def _reset_runtime_overlay_cache_for_tests() -> None:
+    global _RUNTIME_OVERLAY_CACHE
+    global _RUNTIME_OVERLAY_CACHE_AT
+    global _RUNTIME_OVERLAY_REFRESHING
+
+    with _RUNTIME_OVERLAY_CACHE_LOCK:
+        _RUNTIME_OVERLAY_CACHE = {}
+        _RUNTIME_OVERLAY_CACHE_AT = 0.0
+        _RUNTIME_OVERLAY_REFRESHING = False
+
+
 def _verify_started_state(profile_name: str) -> tuple[bool, str]:
     unit = unit_name(profile_name)
     last_state = "unknown"
@@ -205,17 +341,117 @@ def _profile_runtime_fields(profile_name: str) -> dict[str, object]:
 def runtime_profile_overlays(
     profile_names: list[str] | None = None,
 ) -> dict[str, dict[str, object]]:
-    """Return current systemd-only fields without loading queue/log metrics."""
+    """Return current systemd-only fields without loading queue/log metrics.
+
+    Dashboard runtime reads are batched and briefly cached so concurrent
+    snapshot requests cannot create a systemctl subprocess storm. Sender
+    control and startup verification continue to use the direct control path.
+    """
+    global _RUNTIME_OVERLAY_CACHE
+    global _RUNTIME_OVERLAY_CACHE_AT
+    global _RUNTIME_OVERLAY_REFRESHING
+
     requested = configured_profiles() if profile_names is None else profile_names
     selected = list(dict.fromkeys(
         profile_name
         for profile_name in requested
         if is_known_profile(profile_name)
     ))
-    return {
-        profile_name: _profile_runtime_fields(profile_name)
-        for profile_name in selected
-    }
+
+    if not selected:
+        return {}
+
+    now = time.monotonic()
+    with _RUNTIME_OVERLAY_CACHE_LOCK:
+        cache_complete = all(
+            profile_name in _RUNTIME_OVERLAY_CACHE
+            for profile_name in selected
+        )
+        cache_age = (
+            now - _RUNTIME_OVERLAY_CACHE_AT
+            if _RUNTIME_OVERLAY_CACHE_AT > 0
+            else float("inf")
+        )
+
+        if cache_complete and cache_age <= RUNTIME_OVERLAY_CACHE_TTL_SECONDS:
+            return {
+                profile_name: dict(_RUNTIME_OVERLAY_CACHE[profile_name])
+                for profile_name in selected
+            }
+
+        if _RUNTIME_OVERLAY_REFRESHING:
+            if cache_complete and cache_age <= RUNTIME_OVERLAY_STALE_SECONDS:
+                return {
+                    profile_name: dict(_RUNTIME_OVERLAY_CACHE[profile_name])
+                    for profile_name in selected
+                }
+            return {
+                profile_name: _unresolved_runtime_fields(profile_name)
+                for profile_name in selected
+            }
+
+        _RUNTIME_OVERLAY_REFRESHING = True
+
+    try:
+        refresh_names = list(dict.fromkeys(
+            profile_name
+            for profile_name in configured_profiles()
+            if is_known_profile(profile_name)
+        ))
+        states = _batch_active_states(refresh_names)
+
+        if states is None:
+            now = time.monotonic()
+            with _RUNTIME_OVERLAY_CACHE_LOCK:
+                cache_complete = all(
+                    profile_name in _RUNTIME_OVERLAY_CACHE
+                    for profile_name in selected
+                )
+                cache_age = (
+                    now - _RUNTIME_OVERLAY_CACHE_AT
+                    if _RUNTIME_OVERLAY_CACHE_AT > 0
+                    else float("inf")
+                )
+                if (
+                    cache_complete
+                    and cache_age <= RUNTIME_OVERLAY_STALE_SECONDS
+                ):
+                    return {
+                        profile_name: dict(_RUNTIME_OVERLAY_CACHE[profile_name])
+                        for profile_name in selected
+                    }
+            return {
+                profile_name: _unresolved_runtime_fields(profile_name)
+                for profile_name in selected
+            }
+
+        refreshed = {
+            profile_name: (
+                _runtime_fields_from_active_state(
+                    profile_name,
+                    states[profile_name],
+                )
+                if profile_name in states
+                else _unresolved_runtime_fields(profile_name)
+            )
+            for profile_name in refresh_names
+        }
+
+        with _RUNTIME_OVERLAY_CACHE_LOCK:
+            _RUNTIME_OVERLAY_CACHE = refreshed
+            _RUNTIME_OVERLAY_CACHE_AT = time.monotonic()
+            return {
+                profile_name: dict(
+                    refreshed.get(
+                        profile_name,
+                        _unresolved_runtime_fields(profile_name),
+                    )
+                )
+                for profile_name in selected
+            }
+    finally:
+        with _RUNTIME_OVERLAY_CACHE_LOCK:
+            _RUNTIME_OVERLAY_REFRESHING = False
 
 
 def _profile_snapshot(profile_name: str, pane_index: int, tail_lines: int):
@@ -234,10 +470,24 @@ def list_sender_snapshots(
     session: str = "systemd",
 ) -> list[object]:
     del session
-    return [
-        _profile_snapshot(profile_name, index, tail_lines)
-        for index, profile_name in enumerate(configured_profiles())
-    ]
+    profile_names = configured_profiles()
+    overlays = runtime_profile_overlays(profile_names)
+    snapshots: list[object] = []
+
+    for index, profile_name in enumerate(profile_names):
+        snapshot = dashboard_core.load_profile_snapshot(
+            profile_name,
+            index,
+            {},
+            tail_lines=tail_lines,
+            session="systemd",
+        )
+        runtime_fields = overlays.get(profile_name)
+        if runtime_fields is None:
+            runtime_fields = _unresolved_runtime_fields(profile_name)
+        snapshots.append(replace(snapshot, **runtime_fields))
+
+    return snapshots
 
 
 def list_active_sender_snapshots(

@@ -291,19 +291,19 @@ class AsyncSystemdStartTests(unittest.TestCase):
         )
 
     def test_runtime_profile_overlays_reuses_systemd_mapping_without_loading_metrics(self) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
         with patch.object(
             backend,
             "configured_profiles",
             return_value=["private_jc", "sendgrid_annette"],
         ), patch.object(
             backend,
-            "_active_state",
-            side_effect=["active", "inactive"],
-        ), patch.object(
-            backend,
-            "_is_failed",
-            return_value=False,
-        ) as is_failed, patch.object(
+            "_batch_active_states",
+            return_value={
+                "private_jc": "active",
+                "sendgrid_annette": "inactive",
+            },
+        ) as batch_active_states, patch.object(
             backend.dashboard_core,
             "load_profile_snapshot",
         ) as load_profile_snapshot:
@@ -313,28 +313,191 @@ class AsyncSystemdStartTests(unittest.TestCase):
         self.assertTrue(overlays["private_jc"]["tmux_running"])
         self.assertEqual("stopped", overlays["sendgrid_annette"]["runtime_state"])
         self.assertFalse(overlays["sendgrid_annette"]["tmux_running"])
-        is_failed.assert_called_once_with("sendgrid_annette")
+        batch_active_states.assert_called_once_with(
+            ["private_jc", "sendgrid_annette"]
+        )
         load_profile_snapshot.assert_not_called()
 
     def test_runtime_profile_overlays_preserves_failed_mapping(self) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
         with patch.object(
             backend,
             "configured_profiles",
             return_value=["private_jc"],
         ), patch.object(
             backend,
-            "_active_state",
-            return_value="failed",
-        ), patch.object(
-            backend,
-            "_is_failed",
-            return_value=True,
+            "_batch_active_states",
+            return_value={"private_jc": "failed"},
         ):
             overlays = backend.runtime_profile_overlays()
 
         self.assertEqual("error", overlays["private_jc"]["runtime_state"])
         self.assertEqual("Error", overlays["private_jc"]["runtime_label"])
         self.assertTrue(overlays["private_jc"]["tmux_dead"])
+
+    def test_batch_active_states_uses_one_systemctl_show(self) -> None:
+        stdout = (
+            "Id=astra-sender@private_jc.service\n"
+            "ActiveState=active\n"
+            "\n"
+            "Id=astra-sender@sendgrid_annette.service\n"
+            "ActiveState=failed\n"
+        )
+        with patch.object(
+            backend.subprocess,
+            "run",
+            return_value=completed([], stdout=stdout),
+        ) as run:
+            states = backend._batch_active_states(
+                ["private_jc", "sendgrid_annette"]
+            )
+
+        self.assertEqual(
+            {
+                "private_jc": "active",
+                "sendgrid_annette": "failed",
+            },
+            states,
+        )
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(
+            [
+                backend.SYSTEMCTL_BIN,
+                "show",
+                "astra-sender@private_jc.service",
+                "astra-sender@sendgrid_annette.service",
+                "--property=Id",
+                "--property=ActiveState",
+                "--no-pager",
+            ],
+            command,
+        )
+        self.assertEqual(
+            backend.RUNTIME_OVERLAY_SYSTEMCTL_TIMEOUT_SECONDS,
+            run.call_args.kwargs["timeout"],
+        )
+
+    def test_runtime_profile_overlays_reuses_short_lived_cache(self) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc"],
+        ), patch.object(
+            backend,
+            "_batch_active_states",
+            return_value={"private_jc": "active"},
+        ) as batch_active_states:
+            first = backend.runtime_profile_overlays()
+            second = backend.runtime_profile_overlays()
+
+        self.assertEqual(first, second)
+        self.assertEqual("running", second["private_jc"]["runtime_state"])
+        batch_active_states.assert_called_once_with(["private_jc"])
+
+    def test_runtime_profile_overlays_returns_stale_cache_during_refresh(
+        self,
+    ) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc"],
+        ), patch.object(
+            backend,
+            "_batch_active_states",
+            return_value={"private_jc": "active"},
+        ):
+            initial = backend.runtime_profile_overlays()
+
+        self.assertEqual(
+            "running",
+            initial["private_jc"]["runtime_state"],
+        )
+
+        with backend._RUNTIME_OVERLAY_CACHE_LOCK:
+            backend._RUNTIME_OVERLAY_CACHE_AT = (
+                backend.time.monotonic()
+                - backend.RUNTIME_OVERLAY_CACHE_TTL_SECONDS
+                - 0.1
+            )
+            backend._RUNTIME_OVERLAY_REFRESHING = True
+
+        try:
+            with patch.object(
+                backend,
+                "_batch_active_states",
+            ) as batch_active_states:
+                stale = backend.runtime_profile_overlays(
+                    ["private_jc"]
+                )
+        finally:
+            with backend._RUNTIME_OVERLAY_CACHE_LOCK:
+                backend._RUNTIME_OVERLAY_REFRESHING = False
+
+        self.assertEqual(
+            "running",
+            stale["private_jc"]["runtime_state"],
+        )
+        batch_active_states.assert_not_called()
+
+    def test_runtime_profile_overlays_batch_failure_is_fail_closed(
+        self,
+    ) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc"],
+        ), patch.object(
+            backend,
+            "_batch_active_states",
+            return_value=None,
+        ):
+            overlays = backend.runtime_profile_overlays()
+
+        self.assertEqual("error", overlays["private_jc"]["runtime_state"])
+        self.assertEqual("Unknown", overlays["private_jc"]["runtime_label"])
+        self.assertTrue(overlays["private_jc"]["tmux_dead"])
+
+    def test_list_sender_snapshots_uses_runtime_overlay_batch(self) -> None:
+        backend._reset_runtime_overlay_cache_for_tests()
+        overlays = {
+            "private_jc": backend._runtime_fields_from_active_state(
+                "private_jc",
+                "active",
+            ),
+            "sendgrid_annette": backend._runtime_fields_from_active_state(
+                "sendgrid_annette",
+                "inactive",
+            ),
+        }
+
+        with patch.object(
+            backend,
+            "configured_profiles",
+            return_value=["private_jc", "sendgrid_annette"],
+        ), patch.object(
+            backend,
+            "runtime_profile_overlays",
+            return_value=overlays,
+        ) as runtime_profile_overlays, patch.object(
+            backend.dashboard_core,
+            "load_profile_snapshot",
+            side_effect=[
+                FakeSnapshot(name="private_jc"),
+                FakeSnapshot(name="sendgrid_annette"),
+            ],
+        ):
+            snapshots = backend.list_sender_snapshots()
+
+        runtime_profile_overlays.assert_called_once_with(
+            ["private_jc", "sendgrid_annette"]
+        )
+        self.assertEqual(2, len(snapshots))
+        self.assertEqual("running", snapshots[0].runtime_state)
+        self.assertEqual("stopped", snapshots[1].runtime_state)
 
     def test_stop_sender_can_stop_activating_unit(
         self,
