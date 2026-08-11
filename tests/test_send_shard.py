@@ -8,6 +8,8 @@ import json
 import smtplib
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import ExitStack
 from contextlib import redirect_stdout
@@ -666,6 +668,132 @@ class SendShardTests(unittest.TestCase):
                     db_path=db_path,
                 )[0]
             )
+
+    def test_send_idempotency_busy_retry_succeeds_after_writer_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="seed",
+                    provider="sendgrid",
+                    email="seed@example.test",
+                    profile="sendgrid_annette",
+                    queue_file="recipients_sendgrid_1.csv",
+                    db_path=db_path,
+                )[0]
+            )
+
+            acquired = threading.Event()
+            released = threading.Event()
+
+            def hold_lock_briefly() -> None:
+                locker = send_shard.sqlite3.connect(db_path, timeout=1)
+                locker.execute("BEGIN IMMEDIATE")
+                acquired.set()
+                time.sleep(0.12)
+                locker.commit()
+                locker.close()
+                released.set()
+
+            thread = threading.Thread(target=hold_lock_briefly)
+            thread.start()
+            self.assertTrue(acquired.wait(timeout=1))
+            try:
+                with patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS", 50), patch.object(
+                    send_shard, "SEND_IDEMPOTENCY_BUSY_RETRIES", 4
+                ), patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_BACKOFF_MS", 25):
+                    reserved, reason = send_shard.reserve_send_idempotency(
+                        campaign_id="campaign-busy",
+                        provider="sendgrid",
+                        email="busy@example.test",
+                        profile="sendgrid_alison",
+                        queue_file="recipients_sendgrid_2.csv",
+                        db_path=db_path,
+                    )
+            finally:
+                thread.join(timeout=2)
+
+            self.assertTrue(released.is_set())
+            self.assertTrue(reserved)
+            self.assertEqual("reserved", reason)
+
+    def test_send_idempotency_busy_budget_returns_database_busy_without_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="seed",
+                    provider="sendgrid",
+                    email="seed@example.test",
+                    profile="sendgrid_annette",
+                    queue_file="recipients_sendgrid_1.csv",
+                    db_path=db_path,
+                )[0]
+            )
+            locker = send_shard.sqlite3.connect(db_path, timeout=1)
+            locker.execute("BEGIN IMMEDIATE")
+            try:
+                with patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS", 25), patch.object(
+                    send_shard, "SEND_IDEMPOTENCY_BUSY_RETRIES", 1
+                ), patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_BACKOFF_MS", 10):
+                    reserved, reason = send_shard.reserve_send_idempotency(
+                        campaign_id="campaign-locked",
+                        provider="sendgrid",
+                        email="locked@example.test",
+                        profile="sendgrid_alison",
+                        queue_file="recipients_sendgrid_2.csv",
+                        db_path=db_path,
+                    )
+            finally:
+                locker.rollback()
+                locker.close()
+
+            self.assertFalse(reserved)
+            self.assertEqual("database_busy", reason)
+
+    def test_outcome_and_release_fail_closed_when_idempotency_database_stays_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+            kwargs = {
+                "campaign_id": "campaign-busy-outcome",
+                "provider": "sendgrid",
+                "email": "outcome@example.test",
+                "profile": "sendgrid_annette",
+                "queue_file": "recipients_sendgrid_1.csv",
+                "db_path": db_path,
+            }
+            self.assertTrue(send_shard.reserve_send_idempotency(**kwargs)[0])
+            locker = send_shard.sqlite3.connect(db_path, timeout=1)
+            locker.execute("BEGIN IMMEDIATE")
+            try:
+                with patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS", 25), patch.object(
+                    send_shard, "SEND_IDEMPOTENCY_BUSY_RETRIES", 1
+                ), patch.object(send_shard, "SEND_IDEMPOTENCY_BUSY_BACKOFF_MS", 10):
+                    recorded = send_shard.record_send_idempotency_outcome(
+                        campaign_id=kwargs["campaign_id"],
+                        provider=kwargs["provider"],
+                        email=kwargs["email"],
+                        outcome="sent",
+                        db_path=db_path,
+                    )
+                    released = send_shard.release_send_idempotency_reservation(
+                        campaign_id=kwargs["campaign_id"],
+                        provider=kwargs["provider"],
+                        email=kwargs["email"],
+                        db_path=db_path,
+                    )
+            finally:
+                locker.rollback()
+                locker.close()
+
+            self.assertFalse(recorded)
+            self.assertFalse(released)
+            with send_shard.sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT status, outcome FROM send_reservations WHERE email = ?",
+                    (kwargs["email"],),
+                ).fetchone()
+            self.assertEqual(("reserved", ""), row)
 
     def test_claim_queue_row_atomically_removes_single_recipient(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2057,6 +2185,40 @@ class SendShardTests(unittest.TestCase):
                 ["late-block@example.test"],
                 [row["Email"] for row in queued],
             )
+
+    def test_idempotency_database_busy_restores_claim_and_never_submits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path = fixture[4]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "busy@example.test,Busy,Book A,busy-campaign\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                send_shard,
+                "reserve_send_idempotency",
+                return_value=(False, "database_busy"),
+            ):
+                output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            send_mock.assert_not_called()
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                queued = list(csv.DictReader(handle))
+            self.assertEqual(["busy@example.test"], [row["Email"] for row in queued])
+            with log_path.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual("ERROR", rows[-1]["Status"])
+            self.assertIn("event_type=DEFINITELY_NOT_SUBMITTED", rows[-1]["Info"])
+            self.assertIn("phase=idempotency_reservation", rows[-1]["Info"])
+            self.assertIn("restored=true", rows[-1]["Info"])
+            self.assertIn("idempotency database_busy", output)
 
     def test_local_pre_submit_failure_restores_claim_and_releases_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import csv
 import hashlib
+import inspect
 import json
 import os
 import subprocess
 from contextlib import ExitStack
 from io import BytesIO, StringIO
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7623,6 +7626,7 @@ class LiveDashboardTests(unittest.TestCase):
         )
 
     def test_cached_snapshot_is_reused_without_full_rebuild(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
         cached_snapshot = {"profiles": [{"name": "private_jc"}], "source": "cache"}
         with patch.object(
             live_dashboard,
@@ -7637,11 +7641,13 @@ class LiveDashboardTests(unittest.TestCase):
             "_build_live_snapshot",
             side_effect=AssertionError("full snapshot build must not run when cache is available"),
         ):
-            snapshot = live_dashboard.snapshot(hours=24, tail_lines=12)
+            response = live_dashboard.snapshot(hours=24, tail_lines=12)
 
-        self.assertIs(cached_snapshot, snapshot)
+        snapshot = json.loads(response.body)
+        self.assertEqual(cached_snapshot, snapshot)
 
     def test_cached_snapshot_overlays_current_running_systemd_state_without_rebuild(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
         cached_snapshot = {
             "profiles": [{
                 "name": "private_jc",
@@ -7684,8 +7690,9 @@ class LiveDashboardTests(unittest.TestCase):
             "_build_live_snapshot",
             side_effect=AssertionError("runtime overlay must not trigger a full snapshot build"),
         ) as build_snapshot:
-            snapshot = live_dashboard.snapshot(hours=24, tail_lines=12)
+            response = live_dashboard.snapshot(hours=24, tail_lines=12)
 
+        snapshot = json.loads(response.body)
         profile = snapshot["profiles"][0]
         self.assertEqual("running", profile["runtime_state"])
         self.assertEqual("Running", profile["runtime_label"])
@@ -7797,6 +7804,7 @@ class LiveDashboardTests(unittest.TestCase):
         build_snapshot.assert_called_once_with(activity_hours=6, tail_lines=5)
 
     def test_websocket_snapshot_stream_uses_cached_loader(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
         cached_snapshot = {"profiles": [{"name": "private_jc"}], "source": "cache"}
 
         class DisconnectAfterFirstSnapshot:
@@ -7837,6 +7845,7 @@ class LiveDashboardTests(unittest.TestCase):
         load_snapshot.assert_called_once_with(activity_hours=24, tail_lines=12)
 
     def test_websocket_cached_path_reconciles_runtime_state(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
         cached_snapshot = {
             "profiles": [{
                 "name": "private_jc",
@@ -8000,6 +8009,145 @@ class LiveDashboardTests(unittest.TestCase):
         controlled_report.assert_called_once_with(profile)
         production_report.assert_not_called()
         lead_state.assert_not_called()
+
+
+class DashboardStabilizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
+        dashboard_core._reset_idempotency_accounting_cache_for_tests()
+
+    def test_health_endpoint_is_async_and_worker_pool_independent(self) -> None:
+        self.assertTrue(inspect.iscoroutinefunction(live_dashboard.health))
+        self.assertEqual({"status": "ok"}, asyncio.run(live_dashboard.health()))
+
+    def test_snapshot_fanout_singleflights_concurrent_clients(self) -> None:
+        calls = 0
+
+        def slow_loader(*, activity_hours: int, tail_lines: int):
+            nonlocal calls
+            calls += 1
+            time.sleep(0.08)
+            return {
+                "profiles": [{"name": "sendgrid_annette"}],
+                "hours": activity_hours,
+                "tail": tail_lines,
+            }
+
+        with patch.object(
+            live_dashboard,
+            "_load_or_build_live_snapshot",
+            side_effect=slow_loader,
+        ):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [
+                    pool.submit(
+                        live_dashboard._snapshot_fanout_entry,
+                        activity_hours=24,
+                        tail_lines=12,
+                    )
+                    for _ in range(8)
+                ]
+                entries = [future.result(timeout=2) for future in futures]
+
+        self.assertEqual(1, calls)
+        self.assertEqual(1, len({int(entry["revision"]) for entry in entries}))
+        self.assertEqual(1, len({str(entry["json_text"]) for entry in entries}))
+        self.assertEqual("sendgrid_annette", entries[0]["snapshot"]["profiles"][0]["name"])
+
+    def test_websocket_uses_pre_serialized_text(self) -> None:
+        class TextWebSocket:
+            accepted = False
+            payload = ""
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+            async def send_text(self, payload: str) -> None:
+                self.payload = payload
+                raise live_dashboard.WebSocketDisconnect()
+
+        websocket = TextWebSocket()
+        entry = {
+            "snapshot": {"profiles": [{"name": "private_jc"}]},
+            "json_text": '{"profiles":[{"name":"private_jc"}]}',
+            "revision": 1,
+            "refreshed_at_monotonic": time.monotonic(),
+        }
+        with patch.object(
+            live_dashboard,
+            "_dashboard_auth_disabled",
+            return_value=True,
+        ), patch.object(
+            live_dashboard,
+            "_snapshot_fanout_entry",
+            return_value=entry,
+        ):
+            asyncio.run(
+                live_dashboard.websocket_snapshot_stream(
+                    websocket,
+                    hours=24,
+                    tail_lines=12,
+                )
+            )
+
+        self.assertTrue(websocket.accepted)
+        self.assertEqual(entry["json_text"], websocket.payload)
+
+    def test_idempotency_accounting_cache_reuses_unchanged_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            db_path = state_dir / "send_idempotency.sqlite3"
+            with dashboard_core.sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE send_reservations (
+                        campaign_id TEXT,
+                        provider TEXT,
+                        email TEXT,
+                        status TEXT,
+                        outcome TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO send_reservations VALUES (?, ?, ?, ?, ?)",
+                    ("campaign-1", "sendgrid", "author@example.com", "reserved", ""),
+                )
+
+            with patch.object(dashboard_core, "STATE_DIR", state_dir):
+                first = dashboard_core._provider_idempotency_accounted_emails(
+                    "sendgrid",
+                    campaign_id="campaign-1",
+                )
+                with patch.object(
+                    dashboard_core.sqlite3,
+                    "connect",
+                    side_effect=AssertionError("unchanged DB should be served from cache"),
+                ):
+                    second = dashboard_core._provider_idempotency_accounted_emails(
+                        "sendgrid",
+                        campaign_id="campaign-1",
+                    )
+
+        self.assertEqual({"author@example.com"}, first)
+        self.assertEqual(first, second)
+
+    def test_idempotency_accounting_read_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            db_path = state_dir / "send_idempotency.sqlite3"
+            db_path.write_bytes(b"not-a-database")
+            with patch.object(dashboard_core, "STATE_DIR", state_dir), patch.object(
+                dashboard_core.sqlite3,
+                "connect",
+                side_effect=dashboard_core.sqlite3.OperationalError("database is locked"),
+            ):
+                accounted = dashboard_core._provider_idempotency_accounted_emails(
+                    "sendgrid",
+                    campaign_id="campaign-1",
+                )
+
+        self.assertEqual(set(), accounted)
 
 
 if __name__ == "__main__":

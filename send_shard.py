@@ -17,6 +17,7 @@ import smtplib
 import sqlite3
 import ssl
 import tempfile
+import threading
 import time
 import traceback
 import unicodedata
@@ -83,6 +84,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, "").strip() or default)
     except Exception:
         return default
+
+
+SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS = max(100, min(5000, _env_int("SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS", 1000)))
+SEND_IDEMPOTENCY_BUSY_RETRIES = max(0, min(8, _env_int("SEND_IDEMPOTENCY_BUSY_RETRIES", 4)))
+SEND_IDEMPOTENCY_BUSY_BACKOFF_MS = max(10, min(2000, _env_int("SEND_IDEMPOTENCY_BUSY_BACKOFF_MS", 100)))
+_IDEMPOTENCY_SCHEMA_LOCK = threading.Lock()
+_IDEMPOTENCY_SCHEMA_READY: set[str] = set()
 
 
 SENDGRID_MAX_MESSAGES_1H = max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 180))
@@ -945,7 +953,62 @@ def _init_send_idempotency_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.commit()
+
+
+def _send_idempotency_connection(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        path,
+        timeout=SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS / 1000.0,
+    )
+    conn.execute(f"PRAGMA busy_timeout = {SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS}")
+    return conn
+
+
+def _idempotency_database_busy(exc: BaseException) -> bool:
+    text = str(exc or "").strip().lower()
+    return isinstance(exc, sqlite3.OperationalError) and (
+        "locked" in text or "busy" in text
+    )
+
+
+def _idempotency_retry_sleep(attempt: int) -> None:
+    # Small bounded exponential backoff.  SQLite's busy_timeout already waits
+    # inside each attempt; this jitter-free pause prevents a group of sender
+    # workers from immediately colliding again after the timeout expires.
+    delay_ms = min(
+        2000,
+        SEND_IDEMPOTENCY_BUSY_BACKOFF_MS * (2 ** max(0, int(attempt))),
+    )
+    time.sleep(delay_ms / 1000.0)
+
+
+def _ensure_send_idempotency_schema(path: Path) -> tuple[bool, str]:
+    """Create the reservation table at most once per process and path.
+
+    The previous implementation executed CREATE TABLE + COMMIT on every send
+    reservation.  Under multiple sender processes that unnecessarily doubled
+    the number of SQLite write transactions and increased lock contention.
+    """
+    key = str(path.resolve())
+    if key in _IDEMPOTENCY_SCHEMA_READY:
+        return True, "ready"
+    with _IDEMPOTENCY_SCHEMA_LOCK:
+        if key in _IDEMPOTENCY_SCHEMA_READY:
+            return True, "ready"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(SEND_IDEMPOTENCY_BUSY_RETRIES + 1):
+            try:
+                with _send_idempotency_connection(path) as conn:
+                    _init_send_idempotency_db(conn)
+                    conn.commit()
+                _IDEMPOTENCY_SCHEMA_READY.add(key)
+                return True, "ready"
+            except sqlite3.DatabaseError as exc:
+                if _idempotency_database_busy(exc) and attempt < SEND_IDEMPOTENCY_BUSY_RETRIES:
+                    _idempotency_retry_sleep(attempt)
+                    continue
+                return False, "database_busy" if _idempotency_database_busy(exc) else "database_error"
+        return False, "database_busy"
 
 
 def reserve_send_idempotency(
@@ -960,38 +1023,62 @@ def reserve_send_idempotency(
     clean_email = norm_email(email)
     clean_campaign = str(campaign_id or "").strip() or CAMPAIGN_TYPE_COLD
     clean_provider = str(provider or "").strip().lower() or "unknown"
+    clean_profile = str(profile or "").strip()
     path = db_path or send_idempotency_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(path, timeout=30) as conn:
-        _init_send_idempotency_db(conn)
-        conn.execute("BEGIN IMMEDIATE")
-        clean_profile = str(profile or "").strip()
-        if clean_profile == "private_jc_warm":
-            cross_lane = conn.execute(
-                "SELECT 1 FROM send_reservations WHERE email = ? LIMIT 1",
-                (clean_email,),
-            ).fetchone()
-        else:
-            cross_lane = conn.execute(
-                "SELECT 1 FROM send_reservations WHERE email = ? AND profile = 'private_jc_warm' LIMIT 1",
-                (clean_email,),
-            ).fetchone()
-        if cross_lane:
-            return False, "cross_lane_reservation"
+    schema_ok, schema_reason = _ensure_send_idempotency_schema(path)
+    if not schema_ok:
+        return False, schema_reason
+
+    for attempt in range(SEND_IDEMPOTENCY_BUSY_RETRIES + 1):
+        now = datetime.now(timezone.utc).isoformat()
+        conn: sqlite3.Connection | None = None
         try:
-            conn.execute(
-                """
-                INSERT INTO send_reservations
-                    (campaign_id, provider, email, profile, queue_file, status, reserved_at_utc, updated_at_utc)
-                VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?)
-                """,
-                (clean_campaign, clean_provider, clean_email, clean_profile, str(queue_file or ""), now, now),
-            )
+            conn = _send_idempotency_connection(path)
+            conn.execute("BEGIN IMMEDIATE")
+            if clean_profile == "private_jc_warm":
+                cross_lane = conn.execute(
+                    "SELECT 1 FROM send_reservations WHERE email = ? LIMIT 1",
+                    (clean_email,),
+                ).fetchone()
+            else:
+                cross_lane = conn.execute(
+                    "SELECT 1 FROM send_reservations WHERE email = ? AND profile = 'private_jc_warm' LIMIT 1",
+                    (clean_email,),
+                ).fetchone()
+            if cross_lane:
+                conn.rollback()
+                return False, "cross_lane_reservation"
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO send_reservations
+                        (campaign_id, provider, email, profile, queue_file, status, reserved_at_utc, updated_at_utc)
+                    VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?)
+                    """,
+                    (clean_campaign, clean_provider, clean_email, clean_profile, str(queue_file or ""), now, now),
+                )
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return False, "duplicate_reservation"
             conn.commit()
             return True, "reserved"
-        except sqlite3.IntegrityError:
-            return False, "duplicate_reservation"
+        except sqlite3.DatabaseError as exc:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+            if _idempotency_database_busy(exc) and attempt < SEND_IDEMPOTENCY_BUSY_RETRIES:
+                _idempotency_retry_sleep(attempt)
+                continue
+            return False, "database_busy" if _idempotency_database_busy(exc) else "database_error"
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.DatabaseError:
+                    pass
+    return False, "database_busy"
 
 
 def record_send_idempotency_outcome(
@@ -1002,33 +1089,51 @@ def record_send_idempotency_outcome(
     outcome: str,
     info: str = "",
     db_path: Path | None = None,
-) -> None:
+) -> bool:
+    """Persist an outcome without ever turning an already-submitted send into a crash.
+
+    A reservation itself is sufficient to block duplicate submission.  If the
+    outcome update remains busy after bounded retries, leave the reservation in
+    place and return False; callers may stop safely, but must not rewrite an
+    authoritative SENT result as ambiguous merely because bookkeeping was busy.
+    """
     clean_email = norm_email(email)
     clean_campaign = str(campaign_id or "").strip() or CAMPAIGN_TYPE_COLD
     clean_provider = str(provider or "").strip().lower() or "unknown"
     path = db_path or send_idempotency_db_path()
     if not path.exists():
-        return
+        return False
+    schema_ok, _schema_reason = _ensure_send_idempotency_schema(path)
+    if not schema_ok:
+        return False
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(path, timeout=30) as conn:
-        _init_send_idempotency_db(conn)
-        conn.execute(
-            """
-            UPDATE send_reservations
-            SET status = ?, outcome = ?, info = ?, updated_at_utc = ?
-            WHERE campaign_id = ? AND provider = ? AND email = ?
-            """,
-            (
-                str(outcome or "").strip() or "unknown",
-                str(outcome or "").strip()[:100],
-                str(info or "").strip()[:500],
-                now,
-                clean_campaign,
-                clean_provider,
-                clean_email,
-            ),
-        )
-        conn.commit()
+    for attempt in range(SEND_IDEMPOTENCY_BUSY_RETRIES + 1):
+        try:
+            with _send_idempotency_connection(path) as conn:
+                conn.execute(
+                    """
+                    UPDATE send_reservations
+                    SET status = ?, outcome = ?, info = ?, updated_at_utc = ?
+                    WHERE campaign_id = ? AND provider = ? AND email = ?
+                    """,
+                    (
+                        str(outcome or "").strip() or "unknown",
+                        str(outcome or "").strip()[:100],
+                        str(info or "").strip()[:500],
+                        now,
+                        clean_campaign,
+                        clean_provider,
+                        clean_email,
+                    ),
+                )
+                conn.commit()
+            return True
+        except sqlite3.DatabaseError as exc:
+            if _idempotency_database_busy(exc) and attempt < SEND_IDEMPOTENCY_BUSY_RETRIES:
+                _idempotency_retry_sleep(attempt)
+                continue
+            return False
+    return False
 
 
 def release_send_idempotency_reservation(
@@ -1045,17 +1150,27 @@ def release_send_idempotency_reservation(
     path = db_path or send_idempotency_db_path()
     if not path.exists():
         return False
-    with sqlite3.connect(path, timeout=30) as conn:
-        _init_send_idempotency_db(conn)
-        cursor = conn.execute(
-            """
-            DELETE FROM send_reservations
-            WHERE campaign_id = ? AND provider = ? AND email = ? AND status = 'reserved'
-            """,
-            (clean_campaign, clean_provider, clean_email),
-        )
-        conn.commit()
-        return int(cursor.rowcount or 0) == 1
+    schema_ok, _schema_reason = _ensure_send_idempotency_schema(path)
+    if not schema_ok:
+        return False
+    for attempt in range(SEND_IDEMPOTENCY_BUSY_RETRIES + 1):
+        try:
+            with _send_idempotency_connection(path) as conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM send_reservations
+                    WHERE campaign_id = ? AND provider = ? AND email = ? AND status = 'reserved'
+                    """,
+                    (clean_campaign, clean_provider, clean_email),
+                )
+                conn.commit()
+                return int(cursor.rowcount or 0) == 1
+        except sqlite3.DatabaseError as exc:
+            if _idempotency_database_busy(exc) and attempt < SEND_IDEMPOTENCY_BUSY_RETRIES:
+                _idempotency_retry_sleep(attempt)
+                continue
+            return False
+    return False
 
 
 def campaign_id_for_row(row: Dict[str, str], fallback_campaign_type: str) -> str:
@@ -5472,7 +5587,34 @@ def main():
                         queue_file=csv_path.name,
                     )
                     if not reserved:
-                        restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                        restored = restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                        if str(reserve_reason or "").startswith("database_"):
+                            log_row(
+                                log_path,
+                                to_email,
+                                "ERROR",
+                                campaign_log_info(
+                                    "event_type=DEFINITELY_NOT_SUBMITTED "
+                                    "phase=idempotency_reservation "
+                                    f"restored={str(restored).lower()} "
+                                    f"reason={reserve_reason}",
+                                    row_campaign_type,
+                                ),
+                            )
+                            emit_worker_event(
+                                "ERROR",
+                                "idempotency_reservation_unavailable_not_submitted",
+                                phase="idempotency_reservation",
+                                restored=bool(restored),
+                                reserve_reason=str(reserve_reason or ""),
+                            )
+                            error_count += 1
+                            print(
+                                f"[{i}/{len(pending)}] ERROR (not submitted) "
+                                f"{to_email} :: idempotency {reserve_reason}"
+                            )
+                            stop_reason = "idempotency_database_unavailable"
+                            break
                         log_row(
                             log_path,
                             to_email,

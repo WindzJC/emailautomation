@@ -3338,39 +3338,148 @@ def _provider_authoritative_sent_emails(provider: str) -> set[str]:
     return sent
 
 
+_IDEMPOTENCY_ACCOUNTING_CACHE_LOCK = threading.Lock()
+_IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE: tuple[object, ...] | None = None
+_IDEMPOTENCY_ACCOUNTING_CACHE_AT = 0.0
+_IDEMPOTENCY_ACCOUNTING_CACHE_ROWS: tuple[tuple[str, str, str, str, str], ...] = ()
+_IDEMPOTENCY_ACCOUNTING_CACHE_TTL_SECONDS = 5.0
+_IDEMPOTENCY_ACCOUNTING_BUSY_TIMEOUT_MS = 250
+
+
+def _idempotency_accounting_file_signature(path: Path) -> tuple[object, ...] | None:
+    """Track both the main DB and WAL so committed WAL writes invalidate cache."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+
+    def sidecar_signature(suffix: str) -> tuple[int, int] | None:
+        sidecar = Path(f"{path}{suffix}")
+        try:
+            sidecar_stat = sidecar.stat()
+        except OSError:
+            return None
+        return (int(sidecar_stat.st_size), int(sidecar_stat.st_mtime_ns))
+
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        sidecar_signature("-wal"),
+        sidecar_signature("-journal"),
+    )
+
+
+def _reset_idempotency_accounting_cache_for_tests() -> None:
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_AT
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_ROWS
+    with _IDEMPOTENCY_ACCOUNTING_CACHE_LOCK:
+        _IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE = None
+        _IDEMPOTENCY_ACCOUNTING_CACHE_AT = 0.0
+        _IDEMPOTENCY_ACCOUNTING_CACHE_ROWS = ()
+
+
+def _load_idempotency_accounting_rows(path: Path) -> tuple[tuple[str, str, str, str, str], ...]:
+    """Read reservation accounting once per DB version, fail-closed on contention.
+
+    Dashboard queue-safety rendering is a reader of the sender's idempotency
+    database.  Repeated full-table reads from many dashboard clients can keep
+    SQLite shared locks circulating and starve the sender's commit.  This
+    reader is serialized, read-only, briefly cached, and uses a short busy
+    timeout.  If a fresh read cannot be proven, callers receive no accounting
+    rows so safety degrades to BLOCKED rather than guessing.
+    """
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_AT
+    global _IDEMPOTENCY_ACCOUNTING_CACHE_ROWS
+
+    signature = _idempotency_accounting_file_signature(path)
+    if signature is None:
+        return ()
+
+    now = time.monotonic()
+    with _IDEMPOTENCY_ACCOUNTING_CACHE_LOCK:
+        if (
+            signature == _IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE
+            and now - _IDEMPOTENCY_ACCOUNTING_CACHE_AT <= _IDEMPOTENCY_ACCOUNTING_CACHE_TTL_SECONDS
+        ):
+            return _IDEMPOTENCY_ACCOUNTING_CACHE_ROWS
+
+        try:
+            # mode=ro prevents this dashboard reader from creating/mutating
+            # SQLite state.  query_only is a second guard against accidental
+            # writes from future refactors.
+            uri = f"file:{path}?mode=ro"
+            with sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=_IDEMPOTENCY_ACCOUNTING_BUSY_TIMEOUT_MS / 1000.0,
+            ) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only = ON")
+                conn.execute(f"PRAGMA busy_timeout = {_IDEMPOTENCY_ACCOUNTING_BUSY_TIMEOUT_MS}")
+                db_rows = conn.execute(
+                    """
+                    SELECT campaign_id, provider, email, status, outcome
+                    FROM send_reservations
+                    WHERE provider IN ('private', 'sendgrid')
+                    """
+                ).fetchall()
+        except Exception:
+            # Queue safety must fail closed.  Never reuse stale accounting after
+            # the underlying DB signature changed and a fresh read failed.
+            return ()
+
+        rows = tuple(
+            (
+                str(row["campaign_id"] or "").strip(),
+                str(row["provider"] or "").strip().lower(),
+                str(row["email"] or "").strip().lower(),
+                str(row["status"] or "").strip().lower(),
+                str(row["outcome"] or "").strip().lower(),
+            )
+            for row in db_rows
+        )
+
+        ending_signature = _idempotency_accounting_file_signature(path)
+        if ending_signature != signature:
+            # The database changed while it was read.  The SQLite query itself
+            # was consistent, but do not cache it under a newer file version.
+            return rows
+
+        _IDEMPOTENCY_ACCOUNTING_CACHE_SIGNATURE = signature
+        _IDEMPOTENCY_ACCOUNTING_CACHE_AT = time.monotonic()
+        _IDEMPOTENCY_ACCOUNTING_CACHE_ROWS = rows
+        return rows
+
+
 def _provider_idempotency_accounted_emails(provider: str, campaign_id: str = "") -> set[str]:
     path = STATE_DIR / "send_idempotency.sqlite3"
     if not path.exists():
         return set()
+
     normalized_provider = str(provider or "").strip().lower()
-    provider_values = ["private"] if normalized_provider == "private_jc" else ["sendgrid"] if normalized_provider == "sendgrid" else ["private", "sendgrid"]
-    accounted: set[str] = set()
-    try:
-        with sqlite3.connect(path) as conn:
-            conn.row_factory = sqlite3.Row
-            placeholders = ",".join("?" for _ in provider_values)
-            rows = conn.execute(
-                f"""
-                SELECT campaign_id, provider, email, status, outcome
-                FROM send_reservations
-                WHERE provider IN ({placeholders})
-                """,
-                provider_values,
-            ).fetchall()
-    except Exception:
-        return set()
+    provider_values = (
+        {"private"}
+        if normalized_provider == "private_jc"
+        else {"sendgrid"}
+        if normalized_provider == "sendgrid"
+        else {"private", "sendgrid"}
+    )
     expected_campaign = str(campaign_id or "").strip()
-    for row in rows:
-        row_campaign = str(row["campaign_id"] or "").strip()
+    accounted: set[str] = set()
+
+    for row_campaign, row_provider, email, status, outcome in _load_idempotency_accounting_rows(path):
+        if row_provider not in provider_values:
+            continue
         if expected_campaign and row_campaign and row_campaign != expected_campaign:
             continue
-        status = str(row["status"] or "").strip().lower()
-        outcome = str(row["outcome"] or "").strip().lower()
         if not (status or outcome):
             continue
         # A reservation means the row left the live queue under the runtime
         # idempotency lock; later outcome updates refine the state.
-        email = str(row["email"] or "").strip().lower()
         if email:
             accounted.add(email)
     return accounted

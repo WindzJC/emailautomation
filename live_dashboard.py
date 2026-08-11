@@ -38,7 +38,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
@@ -4374,7 +4374,8 @@ def index() -> FileResponse:
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
+    # Keep liveness independent from Starlette/AnyIO synchronous worker capacity.
     return {"status": "ok"}
 
 
@@ -4431,16 +4432,87 @@ DASHBOARD_SNAPSHOT_CACHE_PATH = Path(
     "/opt/astra/emailautomation/data/live_dashboard_snapshot_cache.json"
 )
 
+# The on-disk snapshot is produced outside the request path.  Keep one parsed
+# copy per file signature so a fleet of HTTP/WebSocket clients cannot repeatedly
+# re-read and JSON-decode the same large payload.
+_SNAPSHOT_FILE_CACHE_LOCK = threading.Lock()
+_SNAPSHOT_FILE_CACHE_SIGNATURE: tuple[int, int, int, int] | None = None
+_SNAPSHOT_FILE_CACHE_PAYLOAD: dict[str, object] | None = None
+
+# WebSocket clients used to each reconcile and JSON-serialize a full snapshot
+# every ten seconds.  This small in-process fan-out cache makes one caller the
+# refresh leader and lets every other client reuse the exact same reconciled
+# object and pre-serialized JSON text.
+SNAPSHOT_FANOUT_TTL_SECONDS = float(max(2, min(10, _int_env("DASHBOARD_SNAPSHOT_FANOUT_TTL_SECONDS", 5))))
+SNAPSHOT_FANOUT_WAIT_SECONDS = float(max(1, min(10, _int_env("DASHBOARD_SNAPSHOT_FANOUT_WAIT_SECONDS", 5))))
+SNAPSHOT_WEBSOCKET_HEARTBEAT_SECONDS = float(max(20, min(120, _int_env("DASHBOARD_SNAPSHOT_WEBSOCKET_HEARTBEAT_SECONDS", 30))))
+_SNAPSHOT_FANOUT_LOCK = threading.Lock()
+_SNAPSHOT_FANOUT_CACHE: dict[tuple[int, int], dict[str, object]] = {}
+_SNAPSHOT_FANOUT_INFLIGHT: dict[tuple[int, int], threading.Event] = {}
+_SNAPSHOT_FANOUT_REVISION = 0
+
+
+def _snapshot_file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _reset_snapshot_caches_for_tests() -> None:
+    global _SNAPSHOT_FILE_CACHE_SIGNATURE
+    global _SNAPSHOT_FILE_CACHE_PAYLOAD
+    global _SNAPSHOT_FANOUT_REVISION
+    with _SNAPSHOT_FILE_CACHE_LOCK:
+        _SNAPSHOT_FILE_CACHE_SIGNATURE = None
+        _SNAPSHOT_FILE_CACHE_PAYLOAD = None
+    with _SNAPSHOT_FANOUT_LOCK:
+        _SNAPSHOT_FANOUT_CACHE.clear()
+        waiters = list(_SNAPSHOT_FANOUT_INFLIGHT.values())
+        _SNAPSHOT_FANOUT_INFLIGHT.clear()
+        _SNAPSHOT_FANOUT_REVISION = 0
+    for waiter in waiters:
+        waiter.set()
+
 
 def _load_cached_live_snapshot() -> dict[str, object] | None:
+    global _SNAPSHOT_FILE_CACHE_SIGNATURE
+    global _SNAPSHOT_FILE_CACHE_PAYLOAD
+
+    signature = _snapshot_file_signature(DASHBOARD_SNAPSHOT_CACHE_PATH)
+    if signature is None:
+        return None
+
+    with _SNAPSHOT_FILE_CACHE_LOCK:
+        if (
+            signature == _SNAPSHOT_FILE_CACHE_SIGNATURE
+            and isinstance(_SNAPSHOT_FILE_CACHE_PAYLOAD, dict)
+        ):
+            return _SNAPSHOT_FILE_CACHE_PAYLOAD
+
     try:
         payload = json.loads(DASHBOARD_SNAPSHOT_CACHE_PATH.read_text(encoding="utf-8"))
         cached_snapshot = payload.get("snapshot")
-        if isinstance(cached_snapshot, dict):
-            return cached_snapshot
+        if not isinstance(cached_snapshot, dict):
+            return None
     except (OSError, TypeError, json.JSONDecodeError):
-        pass
-    return None
+        return None
+
+    # Do not cache a payload if the file changed while it was being read.
+    ending_signature = _snapshot_file_signature(DASHBOARD_SNAPSHOT_CACHE_PATH)
+    if ending_signature != signature:
+        return cached_snapshot
+
+    with _SNAPSHOT_FILE_CACHE_LOCK:
+        _SNAPSHOT_FILE_CACHE_SIGNATURE = signature
+        _SNAPSHOT_FILE_CACHE_PAYLOAD = cached_snapshot
+    return cached_snapshot
 
 
 def _reconcile_snapshot_runtime(snapshot: dict[str, object]) -> dict[str, object]:
@@ -4535,12 +4607,96 @@ def _load_or_build_live_snapshot(*, activity_hours: int, tail_lines: int) -> dic
     return _build_live_snapshot(activity_hours=activity_hours, tail_lines=tail_lines)
 
 
+def _snapshot_fanout_entry(*, activity_hours: int, tail_lines: int) -> dict[str, object]:
+    """Return one shared, pre-serialized snapshot for concurrent clients.
+
+    The first caller after the short TTL refreshes the snapshot.  While that
+    refresh is in progress, callers receive the previous known-good entry when
+    one exists instead of starting duplicate disk/systemd/database work.  A
+    cold-start follower waits briefly for the leader rather than creating a
+    thundering herd.
+    """
+    global _SNAPSHOT_FANOUT_REVISION
+
+    key = (int(activity_hours), int(tail_lines))
+    now = time.monotonic()
+    leader = False
+
+    with _SNAPSHOT_FANOUT_LOCK:
+        cached = _SNAPSHOT_FANOUT_CACHE.get(key)
+        if isinstance(cached, dict):
+            refreshed_at = float(cached.get("refreshed_at_monotonic") or 0.0)
+            if now - refreshed_at <= SNAPSHOT_FANOUT_TTL_SECONDS:
+                return cached
+
+        waiter = _SNAPSHOT_FANOUT_INFLIGHT.get(key)
+        if waiter is not None:
+            # Stale-while-refresh: serving the last complete snapshot is safer
+            # for dashboard availability than multiplying expensive readers.
+            if isinstance(cached, dict):
+                return cached
+        else:
+            waiter = threading.Event()
+            _SNAPSHOT_FANOUT_INFLIGHT[key] = waiter
+            leader = True
+
+    if not leader:
+        assert waiter is not None
+        waiter.wait(timeout=SNAPSHOT_FANOUT_WAIT_SECONDS)
+        with _SNAPSHOT_FANOUT_LOCK:
+            completed = _SNAPSHOT_FANOUT_CACHE.get(key)
+            if isinstance(completed, dict):
+                return completed
+        raise RuntimeError("Snapshot refresh is still in progress.")
+
+    try:
+        snapshot_payload = _load_or_build_live_snapshot(
+            activity_hours=activity_hours,
+            tail_lines=tail_lines,
+        )
+        json_text = json.dumps(
+            snapshot_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        with _SNAPSHOT_FANOUT_LOCK:
+            previous = _SNAPSHOT_FANOUT_CACHE.get(key)
+            previous_text = str(previous.get("json_text") or "") if isinstance(previous, dict) else ""
+            if previous_text != json_text:
+                _SNAPSHOT_FANOUT_REVISION += 1
+            revision = _SNAPSHOT_FANOUT_REVISION
+            entry: dict[str, object] = {
+                "snapshot": snapshot_payload,
+                "json_text": json_text,
+                "revision": revision,
+                "refreshed_at_monotonic": time.monotonic(),
+            }
+            _SNAPSHOT_FANOUT_CACHE[key] = entry
+            return entry
+    finally:
+        with _SNAPSHOT_FANOUT_LOCK:
+            active_waiter = _SNAPSHOT_FANOUT_INFLIGHT.pop(key, None)
+        if active_waiter is not None:
+            active_waiter.set()
+
+
 @app.get("/api/snapshot")
 def snapshot(
     hours: int = Query(default=24, ge=1, le=168),
     tail_lines: int = Query(default=12, ge=4, le=50),
-) -> dict[str, object]:
-    return _load_or_build_live_snapshot(activity_hours=hours, tail_lines=tail_lines)
+) -> Response:
+    entry = _snapshot_fanout_entry(activity_hours=hours, tail_lines=tail_lines)
+    # Returning an already-rendered Response prevents FastAPI from repeatedly
+    # JSON-encoding the same large snapshot on the event-loop thread.
+    return Response(
+        content=str(entry.get("json_text") or "{}"),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Astra-Snapshot-Revision": str(int(entry.get("revision") or 0)),
+        },
+    )
 
 
 def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
@@ -7370,14 +7526,32 @@ async def websocket_snapshot_stream(
         await websocket.close(code=4401)
         return
     await websocket.accept()
+    last_revision = -1
+    last_sent_monotonic = 0.0
     try:
         while True:
-            snapshot = await asyncio.to_thread(
-                _load_or_build_live_snapshot,
+            entry = await asyncio.to_thread(
+                _snapshot_fanout_entry,
                 activity_hours=hours,
                 tail_lines=tail_lines,
             )
-            await websocket.send_json(snapshot)
+            revision = int(entry.get("revision") or 0)
+            now = time.monotonic()
+            should_send = (
+                revision != last_revision
+                or now - last_sent_monotonic >= SNAPSHOT_WEBSOCKET_HEARTBEAT_SECONDS
+            )
+            if should_send:
+                payload_text = str(entry.get("json_text") or "")
+                send_text = getattr(websocket, "send_text", None)
+                if callable(send_text):
+                    # The JSON was serialized once by the refresh leader, off
+                    # the event-loop thread. Fan-out is now only a socket write.
+                    await send_text(payload_text)
+                else:  # lightweight compatibility path for test doubles
+                    await websocket.send_json(entry.get("snapshot") or {})
+                last_revision = revision
+                last_sent_monotonic = now
             await asyncio.sleep(10)
     except WebSocketDisconnect:
         return
