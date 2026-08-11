@@ -2411,10 +2411,260 @@ def _emergency_queue_progress_match(
     result["verified_emergency_queue_progress"] = result["safe"]
     return result
 
+
+def _normal_queue_progress_match(
+    runtime_root: Path,
+    *,
+    profile: str,
+    manifest: dict[str, Any],
+    queue_path: Path,
+    queue_state: dict[str, Any],
+    generated: dict[str, Any],
+    validated: dict[str, Any],
+    failed: dict[str, Any],
+    summary: dict[str, Any],
+    expected_mode: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "safe": False,
+        "verified_normal_queue_progress": False,
+        "dispatch_preview_path": "",
+        "original_rows": 0,
+        "preview_rows": 0,
+        "current_rows": 0,
+        "removed_rows": 0,
+        "terminal_sent_rows": 0,
+        "terminal_authoritative_skip_rows": 0,
+        "unresolved_terminal_rows": 0,
+        "failed_predicates": [],
+    }
+
+    preview_id = str(manifest.get("preview_id") or "").strip()
+    if not preview_id:
+        result["failed_predicates"].append("normal_progress_preview_id_present")
+        return result
+
+    candidate_paths = [
+        runtime_root / "_important" / "dispatch_jobs" / "previews" / f"{preview_id}.json",
+        runtime_root / "data" / "state" / "dispatch_previews" / f"{preview_id}.json",
+    ]
+    existing = [path for path in candidate_paths if path.is_file()]
+    if not existing:
+        result["failed_predicates"].append("normal_progress_confirmed_dispatch_preview_exists")
+        return result
+    if len(existing) > 1 and len({sha256_file(path) for path in existing}) != 1:
+        result["failed_predicates"].append("normal_progress_dispatch_preview_copies_match")
+        return result
+
+    dispatch_path = existing[0]
+    result["dispatch_preview_path"] = str(dispatch_path)
+    try:
+        dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        result["failed_predicates"].append("normal_progress_confirmed_dispatch_preview_readable")
+        return result
+    if not isinstance(dispatch, dict):
+        result["failed_predicates"].append("normal_progress_confirmed_dispatch_preview_object")
+        return result
+
+    dispatch_preview_id = str(dispatch.get("preview_id") or "").strip()
+    if dispatch_preview_id and dispatch_preview_id != preview_id:
+        result["failed_predicates"].append("normal_progress_dispatch_preview_id_match")
+
+    plans = dispatch.get("plan_rows_by_queue")
+    if not isinstance(plans, dict):
+        result["failed_predicates"].append("normal_progress_plan_rows_by_queue_present")
+        return result
+    dispatch_queue_key = queue_path.stem.removeprefix("recipients_")
+    result["dispatch_queue_key"] = dispatch_queue_key
+
+    if not dispatch_queue_key.startswith("sendgrid_"):
+        result["failed_predicates"].append(
+            "normal_progress_dispatch_queue_key_valid"
+        )
+        return result
+
+    raw_plan_rows = plans.get(dispatch_queue_key)
+    if not isinstance(raw_plan_rows, list) or not raw_plan_rows:
+        result["failed_predicates"].append("normal_progress_profile_plan_present")
+        return result
+
+    plan_emails: list[str] = []
+    plan_rows_by_email: dict[str, dict[str, str]] = {}
+    plan_headers: list[str] = []
+    plan_header_casefold: set[str] | None = None
+
+    for raw_row in raw_plan_rows:
+        if not isinstance(raw_row, dict):
+            result["failed_predicates"].append("normal_progress_profile_plan_rows_are_objects")
+            continue
+        normalized_row = {str(key): str(value or "") for key, value in raw_row.items()}
+        headers = list(normalized_row)
+        lowered = [header.casefold() for header in headers]
+        if not headers or any(not header for header in headers):
+            result["failed_predicates"].append("normal_progress_profile_plan_headers_present")
+            continue
+        if len(set(lowered)) != len(lowered):
+            result["failed_predicates"].append("normal_progress_profile_plan_headers_unique")
+            continue
+        current_header_set = set(lowered)
+        if plan_header_casefold is None:
+            plan_headers = headers
+            plan_header_casefold = current_header_set
+        elif current_header_set != plan_header_casefold:
+            result["failed_predicates"].append("normal_progress_profile_plan_schema_consistent")
+
+        header_map = {header.casefold(): header for header in headers}
+        email_header = header_map.get("email") or header_map.get("authoremail")
+        email = str(normalized_row.get(email_header, "") or "").strip().lower() if email_header else ""
+        if not email or not EMAIL_RE.fullmatch(email):
+            result["failed_predicates"].append("normal_progress_profile_plan_valid_emails")
+            continue
+        if email in plan_rows_by_email:
+            result["failed_predicates"].append("normal_progress_profile_plan_unique_emails")
+            continue
+        plan_emails.append(email)
+        plan_rows_by_email[email] = normalized_row
+
+    result["failed_predicates"] = list(dict.fromkeys(result["failed_predicates"]))
+    if result["failed_predicates"]:
+        return result
+
+    current = _read_ordered_recipient_rows(queue_path)
+    current_emails = list(current.get("ordered_emails") or [])
+    result["original_rows"] = len(plan_emails)
+    result["preview_rows"] = int(generated.get("row_count") or 0)
+    result["current_rows"] = len(current_emails)
+    if not current.get("safe") or not current_emails:
+        result["failed_predicates"].append("normal_progress_current_queue_rows_valid")
+        return result
+
+    preview_validation_failures = []
+    for label, report in (("generated", generated), ("validated", validated), ("failed", failed)):
+        if (
+            not report.get("exists")
+            or report.get("parse_error")
+            or report.get("missing_fields")
+            or report.get("duplicate_headers")
+            or int(report.get("extra_column_rows") or 0)
+            or int(report.get("blank_email_rows") or 0)
+            or int(report.get("malformed_email_rows") or 0)
+            or int(report.get("conflicting_email_rows") or 0)
+            or int(report.get("duplicate_email_rows") or 0)
+        ):
+            preview_validation_failures.append(label)
+    if preview_validation_failures:
+        result["failed_predicates"].append("normal_progress_preview_artifacts_structurally_valid")
+    if int(validated.get("non_pass_rows") or 0):
+        result["failed_predicates"].append("normal_progress_validated_preview_all_pass")
+    if int(failed.get("row_count") or 0):
+        result["failed_predicates"].append("normal_progress_failed_preview_has_zero_rows")
+
+    generated_emails = list(generated.get("ordered_emails") or [])
+    validated_emails = list(validated.get("ordered_emails") or [])
+    plan_fingerprint = _email_fingerprint(plan_emails)
+    if (
+        int(generated.get("row_count") or 0) != len(plan_emails)
+        or generated_emails != plan_emails
+        or set(generated.get("emails") or set()) != set(plan_emails)
+        or str(generated.get("fingerprint") or "") != plan_fingerprint
+    ):
+        result["failed_predicates"].append("normal_progress_generated_preview_matches_confirmed_plan")
+    if (
+        int(validated.get("row_count") or 0) != len(plan_emails)
+        or validated_emails != plan_emails
+        or set(validated.get("emails") or set()) != set(plan_emails)
+        or str(validated.get("fingerprint") or "") != plan_fingerprint
+    ):
+        result["failed_predicates"].append("normal_progress_validated_preview_matches_confirmed_plan")
+
+    if (
+        int(generated.get("row_count") or 0) != int(validated.get("row_count") or 0)
+        or set(generated.get("emails") or set()) != set(validated.get("emails") or set())
+        or str(generated.get("fingerprint") or "") != str(validated.get("fingerprint") or "")
+        or generated_emails != validated_emails
+    ):
+        result["failed_predicates"].append("normal_progress_generated_validated_preview_match")
+
+    summary_counts = dict(summary.get("counts") or {})
+    if (
+        not summary.get("exists")
+        or summary.get("parse_error")
+        or summary.get("missing_fields")
+        or summary.get("duplicate_fields")
+        or summary_counts.get("total") != len(plan_emails)
+        or summary_counts.get("passed") != len(plan_emails)
+        or summary_counts.get("failed") != 0
+        or str(summary.get("mode") or "") != expected_mode
+    ):
+        result["failed_predicates"].append("normal_progress_preview_summary_matches_confirmed_plan")
+
+    if len(current_emails) >= len(plan_emails):
+        result["failed_predicates"].append("normal_progress_queue_was_reduced")
+    plan_set = set(plan_emails)
+    current_set = set(current_emails)
+    if not current_set.issubset(plan_set):
+        result["failed_predicates"].append("normal_progress_no_new_recipients_added")
+    if [email for email in plan_emails if email in current_set] != current_emails:
+        result["failed_predicates"].append("normal_progress_remaining_queue_order_preserved")
+
+    current_headers = list(current.get("headers") or [])
+    first_plan_headers = {header.casefold(): header for header in plan_headers}
+    if any(header.casefold() not in first_plan_headers for header in current_headers):
+        result["failed_predicates"].append("normal_progress_surviving_queue_headers_in_plan")
+    else:
+        changed_rows = 0
+        for email in current_emails:
+            current_row = (current.get("rows_by_email") or {}).get(email)
+            plan_row = plan_rows_by_email.get(email)
+            if not isinstance(current_row, dict) or not isinstance(plan_row, dict):
+                changed_rows += 1
+                continue
+            plan_row_headers = {str(header).casefold(): str(header) for header in plan_row}
+            if any(
+                str(current_row.get(header) or "")
+                != str(plan_row.get(plan_row_headers.get(header.casefold(), ""), "") or "")
+                for header in current_headers
+            ):
+                changed_rows += 1
+        if changed_rows:
+            result["failed_predicates"].append("normal_progress_surviving_queue_rows_unchanged")
+
+    removed_emails = [email for email in plan_emails if email not in current_set]
+    result["removed_rows"] = len(removed_emails)
+    log_path = runtime_root / "data" / "logs" / f"{profile}_log.csv"
+    terminal = _emergency_terminal_outcomes(log_path, removed_emails)
+    result["terminal_sent_rows"] = terminal["sent_rows"]
+    result["terminal_authoritative_skip_rows"] = terminal["authoritative_skip_rows"]
+    result["unresolved_terminal_rows"] = (
+        int(terminal["missing_rows"]) + int(terminal["generic_rows"]) + int(terminal["ambiguous_rows"])
+    )
+    if not terminal["safe"]:
+        result["failed_predicates"].extend(
+            f"normal_progress_{predicate}" for predicate in terminal["failed_predicates"]
+        )
+
+    try:
+        expected_rows = int(queue_state["row_count"])
+    except (KeyError, TypeError, ValueError):
+        expected_rows = -1
+    if len(current_emails) != expected_rows:
+        result["failed_predicates"].append("normal_progress_current_queue_count_matches_runtime")
+    expected_fingerprint = str(queue_state.get("fingerprint") or "").strip()
+    if _email_fingerprint(current_emails) != expected_fingerprint:
+        result["failed_predicates"].append("normal_progress_current_queue_fingerprint_matches_runtime")
+
+    result["failed_predicates"] = list(dict.fromkeys(result["failed_predicates"]))
+    result["safe"] = not result["failed_predicates"]
+    result["verified_normal_queue_progress"] = result["safe"]
+    return result
+
+
 def _preview_campaign_match(
     runtime_root: Path,
     *,
     profile: str,
+    queue_path: Path,
     queue_state: dict[str, Any],
     preview_paths: Iterable[Path],
     generated: dict[str, Any],
@@ -2430,6 +2680,7 @@ def _preview_campaign_match(
         "takeover_id": "",
         "provenance_path": "",
         "verified_emergency_queue_progress": False,
+        "verified_normal_queue_progress": False,
         "failed_predicates": [],
     }
     if not state_path.is_file():
@@ -2601,6 +2852,35 @@ def _preview_campaign_match(
                         result["failed_predicates"].append(decorated)
 
 
+
+    generated_rows = int(generated.get("row_count") or 0)
+    current_rows = int(queue_state.get("row_count") or 0)
+    if (
+        snapshot_type != "emergency_takeover"
+        and profile.startswith("sendgrid_")
+        and profile != CONTROLLED_SENDGRID_PROFILE
+        and generated_rows > 0
+        and 0 < current_rows < generated_rows
+    ):
+        normal_progress = _normal_queue_progress_match(
+            runtime_root,
+            profile=profile,
+            manifest=manifest,
+            queue_path=queue_path,
+            queue_state=queue_state,
+            generated=generated,
+            validated=validated,
+            failed=failed,
+            summary=summary,
+            expected_mode=expected_mode,
+        )
+        result["normal_queue_progress"] = normal_progress
+        if not normal_progress["safe"]:
+            for predicate in normal_progress["failed_predicates"]:
+                decorated = f"normal_queue_progress:{predicate}"
+                if decorated not in result["failed_predicates"]:
+                    result["failed_predicates"].append(decorated)
+
     ownership_floor = max(
         state_path.stat().st_mtime_ns,
         provenance_path.stat().st_mtime_ns
@@ -2618,6 +2898,12 @@ def _preview_campaign_match(
         result["safe"]
         and isinstance(progress, dict)
         and progress.get("verified_emergency_queue_progress") is True
+    )
+    normal_progress = result.get("normal_queue_progress")
+    result["verified_normal_queue_progress"] = bool(
+        result["safe"]
+        and isinstance(normal_progress, dict)
+        and normal_progress.get("verified_normal_queue_progress") is True
     )
     return result
 
@@ -2781,6 +3067,7 @@ def _preview_safety(
         campaign = _preview_campaign_match(
             runtime_root,
             profile=profile,
+            queue_path=queue_path,
             queue_state=queue_state,
             preview_paths=(preview_path, validated_path, failed_path, summary_path),
             generated=generated,
@@ -2867,7 +3154,13 @@ def _preview_safety(
     verified_emergency_queue_progress = bool(
         campaign.get("verified_emergency_queue_progress")
     )
-    if verified_emergency_queue_progress:
+    verified_normal_queue_progress = bool(
+        campaign.get("verified_normal_queue_progress")
+    )
+    verified_queue_progress = (
+        verified_emergency_queue_progress or verified_normal_queue_progress
+    )
+    if verified_queue_progress:
         progress_compatible_predicates = {
             "generated_row_count_matches_queue",
             "validated_row_count_matches_queue",
@@ -2904,6 +3197,10 @@ def _preview_safety(
         "verified_emergency_queue_progress": (
             verified_emergency_queue_progress
         ),
+        "verified_normal_queue_progress": (
+            verified_normal_queue_progress
+        ),
+        "verified_queue_progress": verified_queue_progress,
         "generated_validation": {
             key: value
             for key, value in generated.items()
