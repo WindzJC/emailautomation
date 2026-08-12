@@ -1611,3 +1611,2182 @@
     white-space: normal;
   }
 }
+
+/* ASTRA_FINAL_RESPONSIVE_LAYOUT_20260812_START */
+
+/*
+ * Final React dashboard responsive authority.
+ * Presentation only.
+ * Loaded after legacy styles.css through dashboard.css.
+ */
+
+/* ---------- Global containment ---------- */
+
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+}
+
+body {
+  overflow-x: clip;
+}
+
+.react-dashboard,
+.react-dashboard *,
+.react-app-shell,
+.react-main,
+.react-sidebar,
+.react-leads-page,
+.react-lead-canvas,
+.react-command-rail-shell,
+.react-lead-workspace,
+.react-lead-workspace > *,
+.react-supporting-panels,
+.react-metric-region {
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.react-dashboard img,
+.react-dashboard svg,
+.react-dashboard canvas {
+  max-width: 100%;
+}
+
+.react-dashboard input,
+.react-dashboard select,
+.react-dashboard textarea,
+.react-dashboard button {
+  max-width: 100%;
+}
+
+/* ---------- Desktop shell ---------- */
+
+.react-app-shell.app-shell,
+.react-app-shell.app-shell.warm-research-shell {
+  width: min(100%, 1600px) !important;
+  max-width: 1600px !important;
+  margin-inline: auto !important;
+  grid-template-columns: 232px minmax(0, 1fr) !important;
+}
+
+.react-main.app-main {
+  width: 100%;
+  min-width: 0;
+}
+
+.react-sidebar.app-rail {
+  min-width: 0;
+}
+
+.react-command-rail-shell,
+.react-lead-workspace.leads-command-main {
+  min-width: 0;
+}
+
+/* ---------- Sender operations ---------- */
+
+.react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.react-dashboard #ops-view .summary-card {
+  min-width: 0;
+}
+
+.react-dashboard #ops-view .sender-status-panel {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.react-dashboard #ops-view .sender-status-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-inline: contain;
+}
+
+.react-dashboard #ops-view .sender-status-table {
+  width: 100%;
+  min-width: 720px;
+}
+
+.react-dashboard #ops-view .sender-status-table th,
+.react-dashboard #ops-view .sender-status-table td {
+  white-space: nowrap;
+}
+
+/* ---------- Lead Ops containment ---------- */
+
+.react-dashboard #leads-view,
+.react-dashboard #leads-view .leads-command-center,
+.react-dashboard #leads-view .leads-control-bar,
+.react-dashboard #leads-view .leads-command-main,
+.react-dashboard #leads-view .leads-command-column,
+.react-dashboard #leads-view .leads-command-section,
+.react-dashboard #leads-view .leads-current-run-panel,
+.react-dashboard #leads-view .current-run-card,
+.react-dashboard #leads-view .dispatch-preview-card {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.react-dashboard #leads-view
+:is(
+  .muted,
+  p,
+  strong,
+  span,
+  code,
+  .operator-empty-state,
+  .dispatch-preview-empty,
+  .lead-ops-progress-module
+) {
+  overflow-wrap: anywhere;
+}
+
+.react-dashboard #leads-view .leads-workflow-nav {
+  width: fit-content;
+  max-width: 100%;
+}
+
+.react-dashboard #leads-view .leads-control-source input,
+.react-dashboard #leads-view .leads-control-source select,
+.react-dashboard #leads-view .leads-control-results input,
+.react-dashboard #leads-view .leads-control-results select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* ---------- Mid-size desktop / tablet ---------- */
+
+@media (max-width: 1180px) {
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    grid-template-columns: 208px minmax(0, 1fr) !important;
+  }
+
+  .react-main.app-main {
+    padding-inline: 18px !important;
+  }
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .react-dashboard #leads-view:not(.warm-research-mode) .leads-command-main {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view:not(.warm-research-mode) .leads-control-bar {
+    grid-template-columns: 1fr 1fr !important;
+    grid-template-areas:
+      "source status"
+      "result actions" !important;
+  }
+}
+
+/* ---------- Tablet ---------- */
+
+@media (max-width: 900px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    width: 100% !important;
+    max-width: none !important;
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-sidebar.app-rail {
+    position: static !important;
+    width: 100%;
+    max-width: 100%;
+    border-right: 0 !important;
+  }
+
+  .react-sidebar-nav .app-rail-tabs {
+    display: flex !important;
+    width: 100%;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    flex: 1 1 0;
+    min-width: 0 !important;
+  }
+
+  .react-main.app-main {
+    width: 100%;
+    padding: 20px 16px 38px !important;
+  }
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .react-dashboard #leads-view .leads-command-main {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+/* ---------- Phone ---------- */
+
+@media (max-width: 640px) {
+  .react-dashboard.page {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .react-sidebar.app-rail {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "tabs"
+      "status" !important;
+    gap: 6px !important;
+    padding: 8px 10px !important;
+  }
+
+  .react-sidebar-brand {
+    display: none !important;
+  }
+
+  .react-sidebar-nav {
+    grid-area: tabs !important;
+    width: 100%;
+  }
+
+  .react-sidebar-nav .app-rail-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 5px;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 38px;
+    padding-inline: 8px !important;
+  }
+
+  .react-sidebar-context {
+    grid-area: status !important;
+    width: 100%;
+    min-width: 0;
+    margin: 0 !important;
+    padding-top: 4px !important;
+  }
+
+  .react-sidebar-context .app-rail-status {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    flex-wrap: wrap !important;
+  }
+
+  .react-sidebar-context .connection,
+  .react-sidebar-context .auth-chip {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .react-sidebar-context .toolbar-status {
+    display: none !important;
+  }
+
+  .react-main.app-main {
+    width: 100%;
+    padding: 14px 10px 30px !important;
+  }
+
+  .react-environment-banner {
+    width: 100%;
+    grid-template-columns: 1fr !important;
+    padding: 10px !important;
+  }
+
+  .react-environment-flags {
+    width: 100%;
+    flex-wrap: wrap !important;
+  }
+
+  .react-page-heading {
+    width: 100%;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 8px;
+  }
+
+  .react-page-heading h2 {
+    font-size: clamp(1.3rem, 7vw, 1.55rem) !important;
+  }
+
+  /* Sender summary becomes readable cards rather than squeezed columns. */
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+
+  .react-dashboard #ops-view .summary-card {
+    min-height: 0 !important;
+    padding: 12px 13px !important;
+  }
+
+  /*
+   * Sender table deliberately scrolls inside its own panel.
+   * The page itself must never horizontally scroll.
+   */
+
+  .react-dashboard #ops-view .sender-status-table-wrap {
+    overflow-x: auto !important;
+  }
+
+  .react-dashboard #ops-view .sender-status-table {
+    min-width: 690px !important;
+  }
+
+  .react-dashboard #ops-view .sender-status-head {
+    padding: 12px !important;
+  }
+
+  /* Cold + Warm workflow tabs */
+
+  .react-dashboard #leads-view .leads-workflow-nav {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100% !important;
+    max-width: 100%;
+    gap: 5px !important;
+  }
+
+  .react-dashboard #leads-view .leads-workflow-nav a {
+    width: 100%;
+    min-width: 0 !important;
+    padding-inline: 7px !important;
+    text-align: center;
+  }
+
+  /* Lead intake / status / actions become one clean column. */
+
+  .react-dashboard #leads-view:not(.warm-research-mode) .leads-control-bar,
+  .react-dashboard #leads-view.warm-research-mode .leads-control-bar {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    grid-template-areas: none !important;
+    width: 100%;
+    gap: 9px !important;
+    padding: 10px !important;
+  }
+
+  .react-dashboard #leads-view .leads-control-source,
+  .react-dashboard #leads-view .leads-control-results,
+  .react-dashboard #leads-view .lead-check-status-card,
+  .react-dashboard #leads-view .leads-control-actions,
+  .react-dashboard #leads-view .leads-current-run-panel {
+    grid-area: auto !important;
+    grid-column: 1 !important;
+    grid-row: auto !important;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .react-dashboard #leads-view .leads-control-actions {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 7px !important;
+  }
+
+  .react-dashboard #leads-view .leads-control-actions .btn,
+  .react-dashboard #leads-view .leads-action-slot .btn,
+  .react-dashboard #leads-view .leads-preview-command .btn,
+  .react-dashboard #leads-view .leads-confirm-command .btn,
+  .react-dashboard #leads-view .leads-start-command .btn {
+    width: 100%;
+    min-width: 0 !important;
+    min-height: 44px;
+  }
+
+  .react-dashboard #leads-view .leads-command-center {
+    padding: 9px !important;
+    gap: 9px !important;
+  }
+
+  .react-dashboard #leads-view .leads-command-main {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 9px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-track-step {
+    min-width: 0;
+  }
+
+  .react-dashboard #leads-view .current-run-metrics,
+  .react-dashboard #leads-view .dispatch-preview-metrics,
+  .react-dashboard #leads-view .dispatch-skip-breakdown,
+  .react-dashboard #leads-view .warm-lane-metrics {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .lead-check-processing-strip,
+  .react-dashboard #leads-view .lead-check-status-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .lead-ops-progress-head {
+    display: grid !important;
+    gap: 6px;
+  }
+
+  .react-dashboard #leads-view .lead-ops-progress-meta span {
+    max-width: 100% !important;
+  }
+
+  .react-dashboard .btn {
+    touch-action: manipulation;
+  }
+}
+
+/* ---------- Small phone ---------- */
+
+@media (max-width: 430px) {
+  .react-main.app-main {
+    padding-inline: 8px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #ops-view .summary-card {
+    padding: 11px !important;
+  }
+
+  .react-dashboard #leads-view .leads-command-center {
+    padding: 8px !important;
+  }
+}
+
+/* ASTRA_FINAL_RESPONSIVE_LAYOUT_20260812_END */
+
+/* ASTRA_VISUAL_REFINEMENT_20260812_START */
+
+/*
+ * Final visual refinement.
+ * Frontend presentation only.
+ * Desktop hierarchy + tablet + phone.
+ */
+
+/* =========================================================
+   GLOBAL WORKSPACE
+   ========================================================= */
+
+.react-dashboard {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.react-app-shell.app-shell,
+.react-app-shell.app-shell.warm-research-shell {
+  width: min(100%, 1580px) !important;
+  max-width: 1580px !important;
+  grid-template-columns: 220px minmax(0, 1fr) !important;
+  gap: 0 !important;
+  margin-inline: auto !important;
+}
+
+.react-sidebar.app-rail {
+  width: 220px;
+  border-radius: 0 !important;
+}
+
+.react-main.app-main {
+  width: 100%;
+  min-width: 0;
+  padding: 26px 26px 48px !important;
+}
+
+.react-page-heading {
+  margin-bottom: 18px;
+}
+
+.react-page-heading h2 {
+  line-height: 1.12;
+}
+
+.react-environment-banner {
+  margin-bottom: 18px;
+}
+
+/* =========================================================
+   SIDEBAR
+   ========================================================= */
+
+.react-sidebar-brand {
+  padding-bottom: 18px;
+}
+
+.react-sidebar-nav .app-rail-tabs {
+  display: grid;
+  gap: 6px;
+}
+
+.react-sidebar-nav .tab-btn {
+  width: 100% !important;
+  min-width: 0 !important;
+  justify-content: flex-start !important;
+  padding-inline: 12px !important;
+}
+
+.react-sidebar-context {
+  min-width: 0;
+}
+
+.react-sidebar-context .app-rail-status {
+  min-width: 0;
+}
+
+.react-sidebar-context .connection,
+.react-sidebar-context .auth-chip {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* =========================================================
+   SENDERS
+   ========================================================= */
+
+.react-dashboard #ops-view {
+  min-width: 0;
+}
+
+.react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+
+.react-dashboard #ops-view .summary-card {
+  min-width: 0;
+  min-height: 104px !important;
+  padding: 14px 15px !important;
+}
+
+.react-dashboard #ops-view .summary-label {
+  line-height: 1.2;
+}
+
+.react-dashboard #ops-view .summary-value {
+  line-height: 1.05;
+}
+
+.react-dashboard #ops-view .ops-progress-strip {
+  margin-top: 10px;
+}
+
+.react-dashboard #ops-view .sender-status-panel {
+  margin-top: 12px;
+}
+
+.react-dashboard #ops-view .sender-status-head {
+  padding: 14px 16px 12px !important;
+}
+
+.react-dashboard #ops-view .sender-status-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto !important;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.react-dashboard #ops-view .sender-status-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: auto;
+}
+
+.react-dashboard #ops-view .sender-status-table th {
+  padding: 8px 11px !important;
+}
+
+.react-dashboard #ops-view .sender-status-table td {
+  height: 48px !important;
+  padding: 8px 11px !important;
+}
+
+.react-dashboard #ops-view .sender-status-pill {
+  min-width: 70px;
+}
+
+.react-dashboard #ops-view .workspace-primary {
+  min-width: 0;
+}
+
+/* =========================================================
+   LEAD OPS — COMMON
+   ========================================================= */
+
+.react-dashboard #leads-view {
+  width: 100%;
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .leads-workflow-nav {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px !important;
+  margin-bottom: 12px;
+  padding: 5px !important;
+}
+
+.react-dashboard #leads-view .leads-workflow-nav a {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+}
+
+.react-dashboard #leads-view .leads-command-center {
+  width: 100%;
+  min-width: 0;
+  padding: 16px !important;
+  gap: 12px !important;
+}
+
+.react-dashboard #leads-view .leads-command-center > * {
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .leads-command-section,
+.react-dashboard #leads-view .leads-current-run-panel,
+.react-dashboard #leads-view .current-run-card,
+.react-dashboard #leads-view .dispatch-preview-card {
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .command-section-head {
+  gap: 10px;
+}
+
+.react-dashboard #leads-view .command-section-head h3 {
+  line-height: 1.2;
+}
+
+/* =========================================================
+   COLD CAMPAIGN — TOP INTAKE AREA
+   ========================================================= */
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-bar {
+  display: grid !important;
+
+  grid-template-columns:
+    minmax(0, 1.18fr)
+    minmax(330px, .82fr) !important;
+
+  grid-template-areas:
+    "source status"
+    "source result"
+    "source actions" !important;
+
+  align-items: start;
+  gap: 10px !important;
+  padding: 12px !important;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-source {
+  grid-area: source !important;
+  min-width: 0;
+  height: 100%;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.lead-check-status-card {
+  grid-area: status !important;
+  min-width: 0;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-results {
+  grid-area: result !important;
+  min-width: 0;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-actions {
+  grid-area: actions !important;
+  min-width: 0;
+}
+
+/* Main campaign / preview area */
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-command-main {
+  display: grid !important;
+
+  grid-template-columns:
+    minmax(330px, .88fr)
+    minmax(0, 1.12fr) !important;
+
+  gap: 12px !important;
+}
+
+.react-dashboard
+#leads-view
+.leads-command-column {
+  min-width: 0;
+}
+
+/* =========================================================
+   WORKFLOW TRACKER
+   ========================================================= */
+
+.react-dashboard #leads-view .workflow-tracker-row {
+  display: grid !important;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+
+.react-dashboard #leads-view .workflow-track-step {
+  min-width: 0;
+  padding-inline: 8px;
+}
+
+.react-dashboard #leads-view .workflow-track-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* =========================================================
+   PREVIEW / CONFIRM
+   ========================================================= */
+
+.react-dashboard #leads-view .dispatch-preview-metrics,
+.react-dashboard #leads-view .current-run-metrics {
+  gap: 7px;
+}
+
+.react-dashboard #leads-view .operator-metric,
+.react-dashboard #leads-view .current-run-metrics > div {
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .leads-preview-command,
+.react-dashboard #leads-view .leads-confirm-command,
+.react-dashboard #leads-view .leads-start-command {
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .leads-action-slot {
+  min-width: 0;
+}
+
+.react-dashboard #leads-view .btn {
+  max-width: 100%;
+}
+
+/* =========================================================
+   WARM OUTREACH
+   ========================================================= */
+
+.react-dashboard
+#leads-view.warm-research-mode
+.leads-control-bar {
+  display: grid !important;
+
+  grid-template-columns:
+    minmax(0, 1.08fr)
+    minmax(330px, .92fr) !important;
+
+  gap: 12px !important;
+  align-items: start;
+}
+
+.react-dashboard
+#leads-view.warm-research-mode
+.react-warm-surface {
+  min-width: 0;
+}
+
+.react-dashboard
+#leads-view.warm-research-mode
+.warm-private-action-panel,
+.react-dashboard
+#leads-view.warm-research-mode
+.warm-research-output-group,
+.react-dashboard
+#leads-view.warm-research-mode
+.warm-private-lane-group,
+.react-dashboard
+#leads-view.warm-research-mode
+.warm-safety-card,
+.react-dashboard
+#leads-view.warm-research-mode
+.warm-run-timeline {
+  min-width: 0;
+}
+
+/* =========================================================
+   1366 / NORMAL LAPTOP
+   ========================================================= */
+
+@media (max-width: 1366px) {
+
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    grid-template-columns: 202px minmax(0, 1fr) !important;
+  }
+
+  .react-sidebar.app-rail {
+    width: 202px;
+  }
+
+  .react-main.app-main {
+    padding: 22px 20px 42px !important;
+  }
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+/* =========================================================
+   TABLET / SMALL LAPTOP
+   ========================================================= */
+
+@media (max-width: 1100px) {
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-command-main {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard
+  #leads-view.warm-research-mode
+  .leads-control-bar {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* =========================================================
+   TOP NAV MODE
+   ========================================================= */
+
+@media (max-width: 900px) {
+
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    width: 100% !important;
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-sidebar.app-rail {
+    position: static !important;
+    width: 100% !important;
+    min-height: 0 !important;
+
+    display: grid !important;
+    grid-template-columns: auto minmax(0, 1fr) !important;
+
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--ui-line);
+  }
+
+  .react-sidebar-brand {
+    align-self: center;
+  }
+
+  .react-sidebar-nav .app-rail-tabs {
+    display: flex !important;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    width: auto !important;
+    justify-content: center !important;
+  }
+
+  .react-sidebar-context {
+    grid-column: 1 / -1;
+  }
+
+  .react-main.app-main {
+    padding: 20px 16px 38px !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-bar {
+    grid-template-columns: 1fr 1fr !important;
+    grid-template-areas:
+      "source status"
+      "result actions" !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+/* =========================================================
+   MOBILE
+   ========================================================= */
+
+@media (max-width: 640px) {
+
+  body {
+    overflow-x: hidden !important;
+  }
+
+  .react-dashboard {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden !important;
+  }
+
+  .react-sidebar.app-rail {
+    display: grid !important;
+
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "tabs"
+      "status" !important;
+
+    gap: 5px !important;
+    padding: 7px 9px !important;
+  }
+
+  .react-sidebar-brand {
+    display: none !important;
+  }
+
+  .react-sidebar-nav {
+    grid-area: tabs !important;
+    width: 100%;
+  }
+
+  .react-sidebar-nav .app-rail-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    width: 100% !important;
+    min-width: 0 !important;
+    min-height: 40px;
+  }
+
+  .react-sidebar-context {
+    grid-area: status !important;
+    width: 100%;
+    margin: 0 !important;
+  }
+
+  .react-sidebar-context .app-rail-status {
+    width: 100%;
+    max-width: 100%;
+    flex-wrap: wrap !important;
+    gap: 5px !important;
+  }
+
+  .react-sidebar-context .toolbar-status {
+    display: none !important;
+  }
+
+  .react-main.app-main {
+    width: 100%;
+    min-width: 0;
+    padding: 14px 9px 30px !important;
+  }
+
+  .react-environment-banner {
+    grid-template-columns: 1fr !important;
+    margin-bottom: 12px;
+    padding: 9px !important;
+  }
+
+  .react-environment-flags {
+    flex-wrap: wrap !important;
+  }
+
+  .react-page-heading {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .react-page-heading h2 {
+    font-size: 1.42rem !important;
+  }
+
+  /* Sender summary */
+
+  .react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+    grid-template-columns: 1fr !important;
+    gap: 7px !important;
+  }
+
+  .react-dashboard #ops-view .summary-card {
+    min-height: 0 !important;
+    padding: 11px 12px !important;
+  }
+
+  /* Sender table stays scrollable INSIDE its panel */
+
+  .react-dashboard #ops-view .sender-status-panel {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .react-dashboard #ops-view .sender-status-table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .react-dashboard #ops-view .sender-status-table {
+    width: max-content;
+    min-width: 690px !important;
+  }
+
+  /* Lead workflow switcher */
+
+  .react-dashboard #leads-view .leads-workflow-nav {
+    width: 100% !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .react-dashboard #leads-view .leads-workflow-nav a {
+    min-width: 0 !important;
+    padding-inline: 7px !important;
+  }
+
+  /* Everything operational becomes single-column */
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-bar,
+  .react-dashboard
+  #leads-view.warm-research-mode
+  .leads-control-bar {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    grid-template-areas: none !important;
+    gap: 8px !important;
+    padding: 9px !important;
+  }
+
+  .react-dashboard #leads-view .leads-control-source,
+  .react-dashboard #leads-view .leads-control-results,
+  .react-dashboard #leads-view .lead-check-status-card,
+  .react-dashboard #leads-view .leads-control-actions,
+  .react-dashboard #leads-view .leads-current-run-panel {
+    grid-area: auto !important;
+    grid-column: 1 !important;
+    grid-row: auto !important;
+
+    width: 100%;
+    min-width: 0;
+  }
+
+  .react-dashboard #leads-view .leads-command-center {
+    padding: 8px !important;
+    gap: 8px !important;
+  }
+
+  .react-dashboard #leads-view .leads-command-main {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+  }
+
+  .react-dashboard #leads-view .current-run-metrics,
+  .react-dashboard #leads-view .dispatch-preview-metrics,
+  .react-dashboard #leads-view .dispatch-skip-breakdown,
+  .react-dashboard #leads-view .warm-lane-metrics {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .leads-control-actions {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    gap: 6px;
+  }
+
+  .react-dashboard #leads-view .btn {
+    width: 100%;
+    min-width: 0 !important;
+    min-height: 44px;
+  }
+
+  .react-dashboard #leads-view input,
+  .react-dashboard #leads-view select,
+  .react-dashboard #leads-view textarea {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .react-dashboard #leads-view .lead-ops-progress-meta span {
+    max-width: 100% !important;
+  }
+}
+
+/* Very small phones */
+
+@media (max-width: 430px) {
+
+  .react-main.app-main {
+    padding-inline: 7px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-tracker-row {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ASTRA_RECORDING_CORRECTIONS_20260812_START */
+
+/* =========================================================
+   Corrections from desktop recording
+   ========================================================= */
+
+/* Keep the desktop operations rail visible while scrolling. */
+@media (min-width: 901px) {
+  .react-sidebar.app-rail {
+    position: sticky !important;
+    top: 0 !important;
+    align-self: start !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+}
+
+/* ---------------------------------------------------------
+   Sender page: prevent Run Progress / Alerts collisions.
+   --------------------------------------------------------- */
+
+.react-dashboard #ops-view .ops-progress-summary-head {
+  display: grid !important;
+  grid-template-columns: max-content minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 12px 18px !important;
+  width: 100%;
+  min-width: 0;
+}
+
+.react-dashboard #ops-view .ops-progress-summary-title {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.react-dashboard #ops-view .ops-progress-summary {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: wrap !important;
+  gap: 6px 20px !important;
+
+  width: 100%;
+  min-width: 0;
+
+  overflow: visible !important;
+  white-space: normal !important;
+}
+
+.react-dashboard #ops-view .ops-progress-summary > * {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.react-dashboard #ops-view .ops-progress-summary-action {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+  .react-dashboard #ops-view .ops-progress-summary-head {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+  }
+
+  .react-dashboard #ops-view .ops-progress-summary-title {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .react-dashboard #ops-view .ops-progress-summary-action {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .react-dashboard #ops-view .ops-progress-summary {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+/* ---------------------------------------------------------
+   Cold intake: stop Upload Source from becoming a huge
+   vertically stretched empty card.
+   --------------------------------------------------------- */
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-bar {
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(360px, .82fr) !important;
+
+  grid-template-areas:
+    "source status"
+    "result result"
+    "actions actions" !important;
+
+  align-items: start !important;
+}
+
+/*
+ * The source panel should size to its actual content,
+ * never to the combined height of the right column.
+ */
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-source {
+  grid-area: source !important;
+
+  display: grid !important;
+  grid-auto-flow: row;
+  grid-auto-rows: max-content;
+  align-content: start !important;
+  align-self: start !important;
+
+  width: 100%;
+  height: auto !important;
+  min-height: 0 !important;
+
+  gap: 12px !important;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.lead-check-status-card {
+  grid-area: status !important;
+  align-self: start !important;
+  height: auto !important;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-results {
+  grid-area: result !important;
+  align-self: start !important;
+  width: 100%;
+  height: auto !important;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-actions {
+  grid-area: actions !important;
+  align-self: start !important;
+
+  width: 100%;
+  min-height: 0 !important;
+}
+
+/* Prevent legacy source-panel spacing from forcing empty height. */
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-source > * {
+  max-width: 100%;
+}
+
+.react-dashboard
+#leads-view:not(.warm-research-mode)
+.leads-control-source .muted {
+  margin-top: 0 !important;
+}
+
+/* ---------------------------------------------------------
+   Campaign controls: make Preview Cap use a sensible width
+   instead of a tiny isolated 150px box.
+   --------------------------------------------------------- */
+
+.react-dashboard
+#leads-view
+.leads-dispatch-grid.leads-command-controls {
+  display: grid !important;
+  grid-template-columns:
+    minmax(220px, 1fr)
+    minmax(190px, 260px) !important;
+  align-items: start !important;
+  gap: 10px !important;
+}
+
+.react-dashboard
+#leads-view
+.leads-command-controls
+.leads-quick-file:not(.dispatch-technical-select) {
+  width: 100% !important;
+  max-width: 260px !important;
+}
+
+.react-dashboard
+#leads-view
+#leads-dispatch-cap {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+/* ---------------------------------------------------------
+   Tablet / phone reflow after desktop corrections.
+   --------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-bar {
+    grid-template-columns: 1fr !important;
+    grid-template-areas:
+      "source"
+      "status"
+      "result"
+      "actions" !important;
+  }
+
+  .react-dashboard
+  #leads-view
+  .leads-dispatch-grid.leads-command-controls {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard
+  #leads-view
+  .leads-command-controls
+  .leads-quick-file:not(.dispatch-technical-select) {
+    max-width: 100% !important;
+  }
+}
+
+/* ASTRA_RECORDING_CORRECTIONS_20260812_END */
+
+/* ASTRA_COLD_INTAKE_FINAL_ALIGNMENT_START */
+
+/*
+ * Cold Campaign desktop intake.
+ * Stack source/result/actions down the left while the
+ * taller Lead Check Status card occupies the right.
+ */
+
+@media (min-width: 901px) {
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-bar {
+    display: grid !important;
+
+    grid-template-columns:
+      minmax(0, 1.08fr)
+      minmax(380px, .92fr) !important;
+
+    grid-template-areas:
+      "source  status"
+      "result  status"
+      "actions status" !important;
+
+    grid-template-rows:
+      auto
+      auto
+      auto !important;
+
+    align-items: start !important;
+    align-content: start !important;
+    gap: 10px 12px !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-source {
+    grid-area: source !important;
+    align-self: start !important;
+    height: auto !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-results {
+    grid-area: result !important;
+    align-self: start !important;
+    height: auto !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .leads-control-actions {
+    grid-area: actions !important;
+    align-self: start !important;
+    height: auto !important;
+  }
+
+  .react-dashboard
+  #leads-view:not(.warm-research-mode)
+  .lead-check-status-card {
+    grid-area: status !important;
+    align-self: start !important;
+    height: auto !important;
+    min-height: 0 !important;
+  }
+}
+
+/* ASTRA_COLD_INTAKE_FINAL_ALIGNMENT_END */
+
+/* ASTRA_MOBILE_390_CONTAINMENT_START */
+
+/*
+ * Final 390px containment correction.
+ * Prevent width:100% + padding from extending beyond viewport.
+ */
+
+@media (max-width: 640px) {
+
+  html,
+  body {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: hidden !important;
+  }
+
+  .react-dashboard,
+  .react-dashboard *,
+  .react-dashboard *::before,
+  .react-dashboard *::after {
+    box-sizing: border-box !important;
+  }
+
+  .react-dashboard,
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell,
+  .react-main.app-main,
+  .react-sidebar.app-rail,
+  .react-sidebar-nav,
+  .react-sidebar-nav .app-rail-tabs,
+  .react-environment-banner,
+  .react-page-heading,
+  .react-lead-canvas,
+  .react-dashboard #ops-view,
+  .react-dashboard #leads-view,
+  .react-dashboard #leads-view .leads-command-center,
+  .react-dashboard #leads-view .leads-workflow-nav,
+  .react-dashboard #leads-view .leads-control-bar {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    overflow-x: clip !important;
+  }
+
+  /* Main Senders / Lead Ops tabs */
+  .react-sidebar-nav .app-rail-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    padding: 8px 6px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis;
+  }
+
+  /* Cold Campaigns / Warm Outreach tabs */
+  .react-dashboard #leads-view .leads-workflow-nav {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+    padding: 5px !important;
+  }
+
+  .react-dashboard #leads-view .leads-workflow-nav a {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    padding: 9px 5px !important;
+    font-size: .72rem !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+  }
+
+  /* Let the current-step message wrap inside the banner on narrow phones. */
+  .react-dashboard #leads-view .workflow-banner-inline {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .react-dashboard #leads-view .workflow-banner-inline strong {
+    width: auto;
+    max-width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* Cards may wrap content, but may never enlarge the page. */
+  .react-dashboard #leads-view .leads-command-center > *,
+  .react-dashboard #leads-view .leads-control-bar > *,
+  .react-dashboard #ops-view .summary-card,
+  .react-dashboard #ops-view .sender-status-panel {
+    width: 100%;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .react-dashboard #leads-view p,
+  .react-dashboard #leads-view span,
+  .react-dashboard #leads-view strong,
+  .react-dashboard #leads-view small {
+    overflow-wrap: anywhere;
+  }
+
+  /*
+   * Sender table is the one intentional exception:
+   * its wrapper stays within the screen while the table
+   * itself can scroll horizontally inside that wrapper.
+   */
+  .react-dashboard #ops-view .sender-status-table-wrap {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+  }
+
+  .react-dashboard #ops-view .sender-status-table {
+    min-width: 690px !important;
+  }
+}
+
+/* ASTRA_MOBILE_390_CONTAINMENT_END */
+
+/* ASTRA_FINAL_UI_POLISH_20260812_START */
+
+/*
+ * Final dashboard UI polish.
+ * Presentation only — no workflow/runtime behavior.
+ */
+
+/* =========================================================
+   GLOBAL VISUAL RHYTHM
+   ========================================================= */
+
+.react-dashboard {
+  --astra-ui-radius: 12px;
+  --astra-ui-radius-sm: 9px;
+  --astra-ui-gap: 12px;
+}
+
+.react-dashboard .panel,
+.react-dashboard .panel-shell,
+.react-dashboard .workspace-card {
+  border-radius: var(--astra-ui-radius) !important;
+}
+
+.react-dashboard .eyebrow {
+  margin-bottom: 4px !important;
+  font-size: .68rem !important;
+  line-height: 1.2 !important;
+  letter-spacing: .075em !important;
+}
+
+.react-dashboard .muted {
+  line-height: 1.45;
+}
+
+.react-page-heading {
+  gap: 10px;
+}
+
+.react-page-heading h2 {
+  margin: 0;
+  font-size: clamp(1.6rem, 2vw, 2rem);
+  letter-spacing: -.025em;
+}
+
+.react-page-heading p {
+  max-width: 820px;
+  margin-top: 5px;
+}
+
+/* =========================================================
+   SIDEBAR / PRIMARY NAVIGATION
+   ========================================================= */
+
+.react-sidebar-nav .app-rail-tabs {
+  gap: 6px !important;
+}
+
+.react-sidebar-nav .tab-btn {
+  min-height: 42px !important;
+  border-radius: 10px !important;
+  font-weight: 760 !important;
+  letter-spacing: -.005em;
+}
+
+.react-sidebar-nav .tab-btn:not(.is-active):not([aria-selected="true"]) {
+  opacity: .82;
+}
+
+.react-sidebar-nav .tab-btn:hover {
+  opacity: 1;
+}
+
+.react-sidebar-nav .tab-btn.is-active,
+.react-sidebar-nav .tab-btn[aria-selected="true"] {
+  opacity: 1;
+  box-shadow:
+    inset 3px 0 0 rgba(129,174,242,.95),
+    inset 0 0 0 1px rgba(129,174,242,.20) !important;
+}
+
+.react-sidebar-context {
+  font-size: .76rem;
+}
+
+/* =========================================================
+   ENVIRONMENT / SAFETY BANNER
+   ========================================================= */
+
+.react-environment-banner {
+  border-radius: 12px !important;
+  padding: 12px 14px !important;
+}
+
+.react-environment-banner strong {
+  font-size: .88rem;
+}
+
+.react-environment-flags {
+  gap: 6px !important;
+}
+
+.react-environment-flags > *,
+.react-dashboard .connection,
+.react-dashboard .auth-chip {
+  min-height: 28px;
+  border-radius: 999px !important;
+}
+
+/* =========================================================
+   BUTTON SYSTEM
+   ========================================================= */
+
+.react-dashboard .btn {
+  min-height: 38px;
+  border-radius: 9px !important;
+  padding: 8px 13px !important;
+  font-weight: 760 !important;
+  line-height: 1.15;
+  text-align: center;
+}
+
+.react-dashboard .btn:hover:not(:disabled):not(.is-locked) {
+  transform: translateY(-1px);
+}
+
+.react-dashboard .btn:active:not(:disabled):not(.is-locked) {
+  transform: translateY(0);
+}
+
+.react-dashboard .btn:disabled,
+.react-dashboard .btn.is-locked {
+  cursor: not-allowed !important;
+  opacity: .68 !important;
+  transform: none !important;
+}
+
+/* =========================================================
+   INPUTS / SELECTS / FILE CONTROLS
+   ========================================================= */
+
+.react-dashboard input:not([type="checkbox"]):not([type="radio"]),
+.react-dashboard select,
+.react-dashboard textarea {
+  min-height: 38px;
+  border-radius: 9px !important;
+  padding-inline: 10px;
+  line-height: 1.25;
+}
+
+.react-dashboard input[type="file"] {
+  min-height: 40px;
+  padding: 4px !important;
+}
+
+.react-dashboard input[type="file"]::file-selector-button {
+  min-height: 31px;
+  margin-right: 9px;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 10px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.react-dashboard label,
+.react-dashboard .label {
+  line-height: 1.3;
+}
+
+/* =========================================================
+   SENDERS — SUMMARY CARDS
+   ========================================================= */
+
+.react-dashboard #ops-view .queue-health-section {
+  margin-top: 18px;
+}
+
+.react-dashboard #ops-view .queue-health-head {
+  margin-bottom: 8px;
+}
+
+.react-dashboard #ops-view .workspace-summary-strip.summary-grid {
+  align-items: stretch;
+}
+
+.react-dashboard #ops-view .summary-card {
+  display: flex !important;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 5px;
+  border-radius: 11px !important;
+}
+
+.react-dashboard #ops-view .summary-label {
+  font-size: .68rem !important;
+  letter-spacing: .075em;
+}
+
+.react-dashboard #ops-view .summary-value {
+  margin-top: 2px;
+  font-size: clamp(1.25rem, 1.6vw, 1.65rem);
+  letter-spacing: -.025em;
+}
+
+.react-dashboard #ops-view .summary-card .muted {
+  margin-top: 2px;
+}
+
+/* =========================================================
+   SENDERS — TABLE
+   ========================================================= */
+
+.react-dashboard #ops-view .sender-status-panel {
+  border-radius: 12px !important;
+}
+
+.react-dashboard #ops-view .sender-status-head {
+  min-height: 54px;
+}
+
+.react-dashboard #ops-view .sender-status-head h2,
+.react-dashboard #ops-view .sender-status-head h3 {
+  margin: 0;
+}
+
+.react-dashboard #ops-view .sender-status-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.react-dashboard #ops-view .sender-status-table th {
+  font-size: .67rem;
+  letter-spacing: .06em;
+  line-height: 1.2;
+}
+
+.react-dashboard #ops-view .sender-status-table td {
+  vertical-align: middle;
+}
+
+.react-dashboard #ops-view .sender-status-table tbody tr {
+  transition: background-color .12s ease;
+}
+
+.react-dashboard #ops-view .sender-status-table tbody tr:hover {
+  background: rgba(255,255,255,.025);
+}
+
+.react-dashboard #ops-view .sender-status-pill {
+  min-height: 26px;
+  padding-inline: 9px;
+  font-size: .7rem;
+}
+
+/* =========================================================
+   LEAD OPS — WORKFLOW NAVIGATION
+   ========================================================= */
+
+.react-dashboard #leads-view .leads-workflow-nav {
+  border-radius: 11px !important;
+}
+
+.react-dashboard #leads-view .leads-workflow-nav a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  border-radius: 8px !important;
+  font-weight: 760;
+  text-align: center;
+}
+
+.react-dashboard #leads-view .leads-workflow-nav a.is-active,
+.react-dashboard #leads-view .leads-workflow-nav a[aria-current="page"] {
+  box-shadow:
+    inset 3px 0 0 rgba(129,174,242,.95),
+    inset 0 0 0 1px rgba(129,174,242,.20) !important;
+}
+
+/* =========================================================
+   LEAD OPS — MAIN CANVAS
+   ========================================================= */
+
+.react-dashboard #leads-view .leads-command-center {
+  border-radius: 13px !important;
+}
+
+.react-dashboard #leads-view .command-section-head {
+  align-items: flex-start;
+}
+
+.react-dashboard #leads-view .command-section-head h3 {
+  margin: 1px 0 0;
+  font-size: 1rem;
+  letter-spacing: -.012em;
+}
+
+.react-dashboard #leads-view .leads-control-source,
+.react-dashboard #leads-view .leads-control-results,
+.react-dashboard #leads-view .lead-check-status-card,
+.react-dashboard #leads-view .leads-current-run-panel {
+  border-radius: 11px !important;
+}
+
+.react-dashboard #leads-view .leads-control-source,
+.react-dashboard #leads-view .leads-control-results {
+  padding: 13px !important;
+}
+
+.react-dashboard #leads-view .leads-control-source > strong,
+.react-dashboard #leads-view .leads-control-results > span:first-child {
+  display: block;
+  margin-bottom: 6px;
+}
+
+/* Reduce nested "box inside box" visual noise */
+.react-dashboard #leads-view .leads-command-center .panel-shell .panel-shell {
+  box-shadow: none !important;
+}
+
+/* =========================================================
+   UPLOAD / CHECK
+   ========================================================= */
+
+.react-dashboard #leads-view .leads-control-source input[type="file"] {
+  width: 100%;
+  max-width: 100%;
+  margin-block: 4px 7px;
+}
+
+.react-dashboard #leads-view .lead-check-status-card {
+  padding: 13px !important;
+}
+
+.react-dashboard #leads-view .lead-check-status-card h3,
+.react-dashboard #leads-view .lead-check-status-card strong {
+  letter-spacing: -.01em;
+}
+
+.react-dashboard #leads-view .lead-check-status-grid {
+  gap: 7px !important;
+}
+
+.react-dashboard #leads-view .lead-check-status-grid > div {
+  border-radius: 8px !important;
+}
+
+.react-dashboard #leads-view .lead-check-guidance {
+  line-height: 1.45;
+}
+
+/* =========================================================
+   WORKFLOW TRACKER
+   ========================================================= */
+
+.react-dashboard #leads-view .workflow-tracker-head {
+  margin-bottom: 7px;
+}
+
+.react-dashboard #leads-view .workflow-track-step {
+  min-height: 76px !important;
+  border-radius: 9px !important;
+}
+
+.react-dashboard #leads-view .workflow-track-number {
+  flex: none;
+}
+
+.react-dashboard #leads-view .workflow-track-copy strong {
+  display: block;
+  line-height: 1.25;
+}
+
+.react-dashboard #leads-view .workflow-track-copy em {
+  display: block;
+  margin-top: 3px;
+  line-height: 1.25;
+}
+
+/* =========================================================
+   CAMPAIGN MODE CARDS
+   ========================================================= */
+
+.react-dashboard #leads-view .dispatch-mode-cards {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px !important;
+}
+
+.react-dashboard #leads-view .dispatch-mode-card {
+  min-width: 0;
+  min-height: 98px;
+  border-radius: 10px !important;
+  padding: 11px !important;
+}
+
+.react-dashboard #leads-view .dispatch-mode-card strong,
+.react-dashboard #leads-view .dispatch-mode-card b {
+  display: block;
+  line-height: 1.25;
+}
+
+.react-dashboard #leads-view .dispatch-mode-card span,
+.react-dashboard #leads-view .dispatch-mode-card small {
+  line-height: 1.4;
+}
+
+.react-dashboard #leads-view .dispatch-mode-card.is-selected {
+  box-shadow:
+    inset 3px 0 0 rgba(129,174,242,.95),
+    inset 0 0 0 1px rgba(129,174,242,.20) !important;
+}
+
+/* =========================================================
+   PREVIEW / CONFIRM / START
+   ========================================================= */
+
+.react-dashboard #leads-view .leads-preview-command,
+.react-dashboard #leads-view .leads-confirm-command,
+.react-dashboard #leads-view .leads-start-command {
+  border-radius: 10px !important;
+}
+
+.react-dashboard #leads-view .dispatch-preview-metrics,
+.react-dashboard #leads-view .current-run-metrics {
+  gap: 7px !important;
+}
+
+.react-dashboard #leads-view .operator-metric,
+.react-dashboard #leads-view .current-run-metrics > div {
+  border-radius: 8px !important;
+}
+
+.react-dashboard #leads-view .leads-preview-command .btn,
+.react-dashboard #leads-view .leads-confirm-command .btn,
+.react-dashboard #leads-view .leads-start-command .btn {
+  min-height: 42px;
+}
+
+/* =========================================================
+   ADVANCED DIAGNOSTICS
+   ========================================================= */
+
+.react-dashboard .advanced-details {
+  border-radius: 10px !important;
+}
+
+.react-dashboard .advanced-details > summary {
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.react-dashboard .advanced-details > summary:hover {
+  background: rgba(255,255,255,.02);
+}
+
+/* =========================================================
+   WARM OUTREACH
+   ========================================================= */
+
+.react-dashboard #leads-view.warm-research-mode .warm-private-action-panel,
+.react-dashboard #leads-view.warm-research-mode .warm-research-output-group,
+.react-dashboard #leads-view.warm-research-mode .warm-private-lane-group,
+.react-dashboard #leads-view.warm-research-mode .warm-safety-card,
+.react-dashboard #leads-view.warm-research-mode .warm-run-timeline {
+  border-radius: 10px !important;
+}
+
+.react-dashboard #leads-view.warm-research-mode .warm-private-action-panel {
+  padding: 12px !important;
+}
+
+/* =========================================================
+   RESPONSIVE UI — TABLET
+   ========================================================= */
+
+@media (max-width: 1100px) {
+
+  .react-dashboard #leads-view .dispatch-mode-cards {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .dispatch-mode-card {
+    min-height: 0;
+  }
+}
+
+/* =========================================================
+   RESPONSIVE UI — MOBILE
+   ========================================================= */
+
+@media (max-width: 640px) {
+
+  .react-page-heading h2 {
+    font-size: 1.42rem !important;
+  }
+
+  .react-page-heading p {
+    font-size: .86rem;
+  }
+
+  .react-environment-banner {
+    padding: 10px !important;
+  }
+
+  .react-dashboard .btn {
+    min-height: 44px !important;
+  }
+
+  .react-dashboard input:not([type="checkbox"]):not([type="radio"]),
+  .react-dashboard select,
+  .react-dashboard textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  /*
+   * 16px mobile input font prevents iOS-style automatic
+   * viewport zoom when controls receive focus.
+   */
+
+  .react-sidebar-nav .tab-btn {
+    min-height: 42px !important;
+    font-size: .75rem;
+  }
+
+  .react-dashboard #leads-view .leads-workflow-nav a {
+    min-height: 42px;
+    font-size: .7rem !important;
+  }
+
+  .react-dashboard #ops-view .summary-card {
+    padding: 12px !important;
+  }
+
+  .react-dashboard #ops-view .summary-value {
+    font-size: 1.35rem;
+  }
+
+  .react-dashboard #leads-view .leads-command-center {
+    padding: 8px !important;
+  }
+
+  .react-dashboard #leads-view .leads-control-source,
+  .react-dashboard #leads-view .leads-control-results,
+  .react-dashboard #leads-view .lead-check-status-card {
+    padding: 11px !important;
+  }
+
+  .react-dashboard #leads-view .dispatch-mode-cards {
+    grid-template-columns: 1fr !important;
+  }
+
+  .react-dashboard #leads-view .dispatch-mode-card {
+    min-height: 0;
+    padding: 10px !important;
+  }
+
+  .react-dashboard #leads-view .workflow-track-step {
+    min-height: 0 !important;
+    padding: 9px !important;
+  }
+
+  .react-dashboard #leads-view .leads-preview-command,
+  .react-dashboard #leads-view .leads-confirm-command,
+  .react-dashboard #leads-view .leads-start-command {
+    padding: 9px !important;
+  }
+
+  .react-dashboard .advanced-details > summary {
+    min-height: 46px;
+  }
+}
+
+/* ASTRA_FINAL_UI_POLISH_20260812_END */
+
+/* ASTRA_VISUAL_REFINEMENT_20260812_END */
