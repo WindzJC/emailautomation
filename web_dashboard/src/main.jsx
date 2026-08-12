@@ -13,20 +13,19 @@ export function StatusPill({ children, tone = "neutral" }) {
 
 export function Sidebar({ brand, navigation, status }) {
   return (
-    <aside className="app-rail react-sidebar" aria-label="Primary navigation">
+    <header className="app-rail react-sidebar" aria-label="Primary navigation">
       <div className="react-sidebar-brand">
-        <span className="react-brand-mark" aria-hidden="true">EA</span>
+        <span className="react-brand-mark" aria-hidden="true">Astra</span>
         <LegacyNode html={brand} />
       </div>
       <nav className="react-sidebar-nav" aria-label="Workspace">
-        <p className="react-sidebar-label">Workspace</p>
         <LegacyNode html={navigation} />
       </nav>
       <div className="react-sidebar-context">
-        <p className="react-sidebar-label">Environment</p>
         <LegacyNode html={status} />
+        <EnvironmentBanner />
       </div>
-    </aside>
+    </header>
   );
 }
 
@@ -73,11 +72,12 @@ export function MetricCard({ children }) {
   );
 }
 
-export function SenderTable({ progress, details }) {
+export function SenderTable({ progress, details, controls }) {
   return (
     <section className="react-sender-console" aria-label="Sender operations">
       <LegacyNode html={progress} />
       <LegacyNode html={details} />
+      <CommandBar html={controls} />
     </section>
   );
 }
@@ -128,9 +128,8 @@ export function SendersDashboard({ view }) {
       <SenderTable
         progress={view.progress}
         details={view.progressDetails}
+        controls={view.commandBar}
       />
-
-      <CommandBar html={view.commandBar} />
 
       <section className="react-supporting-panels">
         <LegacyNode html={view.profileDetail} />
@@ -142,27 +141,51 @@ export function SendersDashboard({ view }) {
 
 export function LeadStepper({ status, steps }) {
   return (
-    <>
+    <section className="operator-stepper" aria-label="Current workflow progress">
       <LegacyNode html={status} />
-      <div className="react-stepper-shell">
-        <p className="react-section-label">
-          <span className="react-cold-copy">Dispatch workflow</span>
-          <span className="react-warm-copy">Warm outreach workflow</span>
-        </p>
+      <div className="react-stepper-shell react-legacy-stepper">
         <LegacyNode html={steps} />
       </div>
-    </>
+      <ol className="operator-flow-line" aria-label="Workflow steps">
+        <li><span>1</span><strong>Source</strong></li>
+        <li><span>2</span><strong className="react-cold-copy">Campaign</strong><strong className="react-warm-copy">Review</strong></li>
+        <li><span>3</span><strong>Preview</strong></li>
+        <li><span>4</span><strong>Confirm</strong></li>
+      </ol>
+    </section>
   );
 }
 
 export function SourcePanel({ html }) {
-  return <LegacyNode html={html} />;
+  return (
+    <section className="operator-step operator-step-source">
+      <header className="operator-step-heading">
+        <h3>Source</h3>
+      </header>
+      <LegacyNode html={html} />
+    </section>
+  );
 }
 
 export function CommandRail({ left, right }) {
   return (
     <div className="leads-command-main react-lead-workspace">
-      <LegacyNode html={left} />
+      <section className="operator-step operator-step-campaign">
+        <header className="operator-step-heading">
+          <span className="operator-step-number">2</span>
+          <div>
+            <p className="operator-step-kicker">
+              <span className="react-cold-copy">Choose the write set</span>
+              <span className="react-warm-copy">Review current output</span>
+            </p>
+            <h3>
+              <span className="react-cold-copy">Campaign</span>
+              <span className="react-warm-copy">Review</span>
+            </h3>
+          </div>
+        </header>
+        <LegacyNode html={left} />
+      </section>
       <div className="react-command-rail-shell">
         <LegacyNode html={right} />
       </div>
@@ -175,6 +198,20 @@ export function WarmResearchPanel({ children }) {
 }
 
 export function LeadOpsDashboard({ view }) {
+  useEffect(() => {
+    const root = document.getElementById("leads-view");
+    if (!root) return undefined;
+    const revealCampaignChoices = () => {
+      root.querySelectorAll("details.dispatch-secondary-modes").forEach((details) => {
+        details.open = true;
+      });
+    };
+    revealCampaignChoices();
+    const observer = new MutationObserver(revealCampaignChoices);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <section id="leads-view" className="dashboard-view workspace-view leads-workspace react-workspace react-leads-page hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
       <PageHeading
@@ -198,9 +235,9 @@ export function LeadOpsDashboard({ view }) {
         <a href="/?tab=leads&amp;workflow=warm" data-leads-workflow="warm">Warm Outreach</a>
       </nav>
       <section className="leads-command-center operator-workflow-section react-lead-canvas">
-        <LegacyNode html={view.heading} />
-        <WarmResearchPanel><SourcePanel html={view.source} /></WarmResearchPanel>
+        <div className="react-legacy-command-heading"><LegacyNode html={view.heading} /></div>
         <LeadStepper status={view.workflowStatus} steps={view.workflowSteps} />
+        <WarmResearchPanel><SourcePanel html={view.source} /></WarmResearchPanel>
         <CommandRail left={view.commandLeft} right={view.commandRight} />
         <LegacyNode html={view.diagnostics} />
       </section>
@@ -214,7 +251,6 @@ export function AppShell({ template }) {
       <div className="app-shell react-app-shell">
         <Sidebar {...template.sidebar} />
         <main className="app-main react-main">
-          <EnvironmentBanner />
           <SendersDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
         </main>
