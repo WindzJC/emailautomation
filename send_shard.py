@@ -4366,6 +4366,8 @@ def main():
     last_heartbeat_monotonic = 0.0
     last_recipient_for_audit = ""
     runtime_lock_context = None
+    provider_submission_active = False
+    deferred_stop_requested = False
 
     def emit_worker_event(event_type: str, reason: str, **fields: object) -> None:
         if not worker_event_log_path:
@@ -4414,8 +4416,21 @@ def main():
             pass
 
     def request_stop(_signum, _frame) -> None:
+        nonlocal deferred_stop_requested
         # Signal handlers must avoid file I/O and lock acquisition.
+        # Once provider submission begins, interruption must wait until
+        # the attempt has reached a safe durable bookkeeping boundary.
+        if provider_submission_active:
+            deferred_stop_requested = True
+            return
         # The KeyboardInterrupt cleanup block records the final stop.
+        raise KeyboardInterrupt
+
+    def honor_deferred_stop() -> None:
+        nonlocal deferred_stop_requested
+        if not deferred_stop_requested:
+            return
+        deferred_stop_requested = False
         raise KeyboardInterrupt
 
     previous_sigint = signal.getsignal(signal.SIGINT)
@@ -5116,13 +5131,100 @@ def main():
             return ""
         return domain_wait_for_slot(domain_log_path, args.max_messages_1h)
 
-    def finalize_domain_attempt_slot(reservation_token: str, email: str, outcome: str, info: str = "") -> None:
+    def finalize_domain_attempt_slot(
+        reservation_token: str,
+        email: str,
+        outcome: str,
+        info: str = "",
+    ) -> bool:
         if not reservation_token:
-            return
+            return True
         try:
-            domain_finalize_attempt(domain_log_path, reservation_token, email, outcome, info)
-        except Exception:
-            pass
+            domain_finalize_attempt(
+                domain_log_path,
+                reservation_token,
+                email,
+                outcome,
+                info,
+            )
+            return True
+        except Exception as exc:
+            error_text = single_line(str(exc))
+            try:
+                emit_worker_event(
+                    "ERROR",
+                    "domain_finalize_failed",
+                    recipient=email,
+                    outcome=outcome,
+                    error=error_text,
+                )
+            except Exception:
+                pass
+            print(
+                "ERROR: domain attempt finalization failed"
+                f" recipient={email}"
+                f" outcome={outcome}"
+                f" error={error_text}"
+            )
+            return False
+
+    def submit_provider_message(
+        msg,
+        email: str,
+        subject_text: str,
+        body_text: str,
+        html_body,
+        cid,
+    ):
+        nonlocal provider_submission_active
+        provider_submission_active = True
+        try:
+            return send_one(
+                msg,
+                email,
+                subject_text,
+                body_text,
+                html_body,
+                cid,
+            )
+        except BaseException:
+            provider_submission_active = False
+            raise
+
+    def finalize_accepted_send(
+        *,
+        reservation_token: str,
+        email: str,
+        campaign_id: str,
+        campaign_type: str,
+        send_info: str,
+        idempotency_reserved: bool,
+    ) -> bool:
+        log_row(
+            log_path,
+            email,
+            "SENT",
+            campaign_log_info(
+                send_info,
+                campaign_type,
+            ),
+        )
+
+        if idempotency_reserved:
+            record_send_idempotency_outcome(
+                campaign_id=campaign_id,
+                provider=args.provider,
+                email=email,
+                outcome="sent",
+                info=send_info,
+            )
+
+        return finalize_domain_attempt_slot(
+            reservation_token,
+            email,
+            "sent",
+            send_info,
+        )
 
     def prevent_blocked_retry(
         *,
@@ -5328,6 +5430,7 @@ def main():
             next_index = pending_index
 
             for idx in range(pending_index, len(pending)):
+                honor_deferred_stop()
                 if stop_at_reached():
                     print("STOP: schedule_end reached (--stop_at_local).")
                     stop_reason = "schedule_end"
@@ -5358,6 +5461,7 @@ def main():
                 idempotency_reserved = False
                 queue_claim_receipt: Optional[Dict[str, object]] = None
                 submission_attempted = False
+                accepted_send_bookkeeping_failed = False
                 last_recipient_for_audit = to_email
                 audit_worker(
                     "running",
@@ -5714,7 +5818,7 @@ def main():
                             )
                             continue
                         submission_attempted = True
-                        send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                        send_result = submit_provider_message(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = ""
                         if args.provider == "sendgrid" and send_result.get("message_id"):
                             send_info = f"sg_message_id={send_result['message_id']}"
@@ -5732,16 +5836,14 @@ def main():
                                 )
                             last_success_sent_at_utc = now_sent_utc
 
-                        log_row(log_path, to_email, "SENT", campaign_log_info(send_info, row_campaign_type))
-                        if idempotency_reserved:
-                            record_send_idempotency_outcome(
-                                campaign_id=row_campaign_id,
-                                provider=args.provider,
-                                email=to_email,
-                                outcome="sent",
-                                info=send_info,
-                            )
-                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "sent", send_info)
+                        domain_finalized = finalize_accepted_send(
+                            reservation_token=attempt_slot_token,
+                            email=to_email,
+                            campaign_id=row_campaign_id,
+                            campaign_type=row_campaign_type,
+                            send_info=send_info,
+                            idempotency_reserved=idempotency_reserved,
+                        )
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
@@ -5789,6 +5891,18 @@ def main():
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
+
+                        provider_submission_active = False
+
+                        if not domain_finalized:
+                            print(
+                                "STOP: domain_finalize_failed after accepted send; "
+                                "recipient will not be retried"
+                            )
+                            stop_reason = "domain_finalize_failed"
+                            break
+
+                        honor_deferred_stop()
 
                         if quality_reason:
                             print(f"STOP: {quality_reason}")
@@ -5901,6 +6015,7 @@ def main():
                             stop_reason = circuit_reason
                             break
 
+                        honor_deferred_stop()
                         smtp_close(smtp)
                         smtp = None
                         audit_sleep(retry_wait_s, action="AUTH_RETRY_WAIT")
@@ -5918,7 +6033,7 @@ def main():
                             ):
                                 stop_reason = "globally_blocked_before_retry"
                                 break
-                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_result = submit_provider_message(msg, to_email, subject_text, body_text, html_body, cid)
                             send_info = "auth_retry_ok"
                             if args.provider == "sendgrid" and send_result.get("message_id"):
                                 send_info = f"auth_retry_ok sg_message_id={send_result['message_id']}"
@@ -5936,16 +6051,14 @@ def main():
                                     )
                                 last_success_sent_at_utc = now_sent_utc
 
-                            log_row(log_path, to_email, "SENT", campaign_log_info(send_info, row_campaign_type))
-                            if idempotency_reserved:
-                                record_send_idempotency_outcome(
-                                    campaign_id=row_campaign_id,
-                                    provider=args.provider,
-                                    email=to_email,
-                                    outcome="sent",
-                                    info=send_info,
-                                )
-                            finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
+                            domain_finalized = finalize_accepted_send(
+                                reservation_token=retry_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                campaign_type=row_campaign_type,
+                                send_info=send_info,
+                                idempotency_reserved=idempotency_reserved,
+                            )
                             print(f"[{i}/{len(pending)}] SENT (auth retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
@@ -5966,6 +6079,18 @@ def main():
                                 gmail_messages_24h += 1
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
+
+                            provider_submission_active = False
+
+                            if not domain_finalized:
+                                print(
+                                    "STOP: domain_finalize_failed after accepted send; "
+                                    "recipient will not be retried"
+                                )
+                                stop_reason = "domain_finalize_failed"
+                                break
+
+                            honor_deferred_stop()
 
                             if quality_reason:
                                 print(f"STOP: {quality_reason}")
@@ -6085,6 +6210,7 @@ def main():
                         stop_reason = circuit_reason
                         break
 
+                    honor_deferred_stop()
                     smtp_close(smtp)
                     smtp = None
                     audit_sleep_with_jitter(max(args.interval, 60), jitter=10)
@@ -6103,7 +6229,7 @@ def main():
                             stop_reason = "globally_blocked_before_retry"
                             break
 
-                        send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                        send_result = submit_provider_message(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = "reconnect_ok"
                         if args.provider == "sendgrid" and send_result.get("message_id"):
                             send_info = f"reconnect_ok sg_message_id={send_result['message_id']}"
@@ -6121,16 +6247,14 @@ def main():
                                 )
                             last_success_sent_at_utc = now_sent_utc
 
-                        log_row(log_path, to_email, "SENT", campaign_log_info(send_info, row_campaign_type))
-                        if idempotency_reserved:
-                            record_send_idempotency_outcome(
-                                campaign_id=row_campaign_id,
-                                provider=args.provider,
-                                email=to_email,
-                                outcome="sent",
-                                info=send_info,
-                            )
-                        finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
+                        domain_finalized = finalize_accepted_send(
+                            reservation_token=retry_slot_token,
+                            email=to_email,
+                            campaign_id=row_campaign_id,
+                            campaign_type=row_campaign_type,
+                            send_info=send_info,
+                            idempotency_reserved=idempotency_reserved,
+                        )
                         print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
@@ -6151,6 +6275,18 @@ def main():
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
+
+                        provider_submission_active = False
+
+                        if not domain_finalized:
+                            print(
+                                "STOP: domain_finalize_failed after accepted send; "
+                                "recipient will not be retried"
+                            )
+                            stop_reason = "domain_finalize_failed"
+                            break
+
+                        honor_deferred_stop()
 
                         if quality_reason:
                             print(f"STOP: {quality_reason}")
@@ -6201,6 +6337,7 @@ def main():
                             stop_reason = circuit_reason
                             break
 
+                        honor_deferred_stop()
                         audit_sleep(wait_s, action="THROTTLE_WAIT")
                         smtp_close(smtp)
                         smtp = None
@@ -6220,7 +6357,7 @@ def main():
                                 stop_reason = "globally_blocked_before_retry"
                                 break
 
-                            send_result = send_one(msg, to_email, subject_text, body_text, html_body, cid)
+                            send_result = submit_provider_message(msg, to_email, subject_text, body_text, html_body, cid)
                             send_info = "throttle_retry_ok"
                             if args.provider == "sendgrid" and send_result.get("message_id"):
                                 send_info = f"throttle_retry_ok sg_message_id={send_result['message_id']}"
@@ -6238,16 +6375,14 @@ def main():
                                     )
                                 last_success_sent_at_utc = now_sent_utc
 
-                            log_row(log_path, to_email, "SENT", campaign_log_info(send_info, row_campaign_type))
-                            if idempotency_reserved:
-                                record_send_idempotency_outcome(
-                                    campaign_id=row_campaign_id,
-                                    provider=args.provider,
-                                    email=to_email,
-                                    outcome="sent",
-                                    info=send_info,
-                                )
-                            finalize_domain_attempt_slot(retry_slot_token, to_email, "sent", send_info)
+                            domain_finalized = finalize_accepted_send(
+                                reservation_token=retry_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                campaign_type=row_campaign_type,
+                                send_info=send_info,
+                                idempotency_reserved=idempotency_reserved,
+                            )
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
@@ -6268,6 +6403,18 @@ def main():
                                 gmail_messages_24h += 1
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
+
+                            provider_submission_active = False
+
+                            if not domain_finalized:
+                                print(
+                                    "STOP: domain_finalize_failed after accepted send; "
+                                    "recipient will not be retried"
+                                )
+                                stop_reason = "domain_finalize_failed"
+                                break
+
+                            honor_deferred_stop()
 
                             if quality_reason:
                                 print(f"STOP: {quality_reason}")
@@ -6302,7 +6449,26 @@ def main():
                         break
 
                 except Exception as e:
+                    accepted_send_bookkeeping_failed = (
+                        provider_submission_active
+                    )
+                    provider_submission_active = False
                     err_text = str(e)
+                    if accepted_send_bookkeeping_failed:
+                        finalize_domain_attempt_slot(
+                            attempt_slot_token,
+                            to_email,
+                            "sent",
+                            "accepted_send_bookkeeping_failed",
+                        )
+                        error_count += 1
+                        print(
+                            "STOP: accepted-send bookkeeping failed "
+                            "after provider submission; recipient "
+                            "will not be retried"
+                        )
+                        stop_reason = "accepted_send_bookkeeping_failed"
+                        break
                     if not submission_attempted:
                         finalize_domain_attempt_slot(
                             attempt_slot_token,
@@ -6431,6 +6597,21 @@ def main():
                     if not stop_reason and circuit_reason:
                         print(f"STOP: {circuit_reason} after errors")
                         stop_reason = circuit_reason
+
+                if (
+                    accepted_send_bookkeeping_failed
+                    and not stop_reason
+                ):
+                    print(
+                        "STOP: accepted-send bookkeeping failed "
+                        "after provider submission; recipient "
+                        "will not be retried"
+                    )
+                    stop_reason = (
+                        "accepted_send_bookkeeping_failed"
+                    )
+
+                honor_deferred_stop()
 
                 max_submission_attempts = max(
                     0,
