@@ -19,6 +19,7 @@ SYSTEMCTL_BIN = os.environ.get(
 PROFILE_RE = re.compile(r"^[a-z0-9_]+$")
 START_VERIFY_ATTEMPTS = 20
 START_VERIFY_INTERVAL_SECONDS = 0.1
+START_ACTIVE_STABILITY_SAMPLES = 2
 RUNTIME_OVERLAY_CACHE_TTL_SECONDS = 5.0
 RUNTIME_OVERLAY_STALE_SECONDS = 60.0
 RUNTIME_OVERLAY_SYSTEMCTL_TIMEOUT_SECONDS = 10
@@ -71,6 +72,7 @@ def _control(
         "is-active",
         "is-failed",
         "show-active",
+        "show-start",
     }:
         raise ValueError(f"Unsupported systemd sender action: {action}")
 
@@ -90,6 +92,20 @@ def _control(
             unit,
             "--property=ActiveState",
             "--value",
+        ]
+    elif action == "show-start":
+        command = [
+            SYSTEMCTL_BIN,
+            "show",
+            unit,
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=LoadState",
+            "--property=Result",
+            "--property=ExecMainCode",
+            "--property=ExecMainStatus",
+            "--property=ExecCondition",
+            "--no-pager",
         ]
     else:
         command = [SYSTEMCTL_BIN, action, unit]
@@ -115,6 +131,103 @@ def _active_state(profile_name: str) -> str:
     if result.returncode != 0:
         return "unknown"
     return str(result.stdout or "").strip().lower() or "unknown"
+
+
+def _start_state(profile_name: str) -> dict[str, object]:
+    result = _control("show-start", profile_name)
+    if result.returncode != 0:
+        return {
+            "active_state": "unknown",
+            "sub_state": "unknown",
+            "load_state": "unknown",
+            "result": "unknown",
+            "exec_main_code": "",
+            "exec_main_status": None,
+            "exec_condition_status": None,
+        }
+
+    properties: dict[str, str] = {}
+    for raw_line in str(result.stdout or "").splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        properties[key.strip()] = value.strip()
+
+    def parsed_status(value: str) -> int | None:
+        try:
+            return int(value.strip())
+        except (TypeError, ValueError):
+            return None
+
+    exec_condition_status = None
+    exec_condition = properties.get("ExecCondition", "")
+    match = re.search(r"(?:^|[;\s])status=(\d+)(?:/[^;\s}]*)?", exec_condition)
+    if match:
+        exec_condition_status = parsed_status(match.group(1))
+
+    return {
+        "active_state": properties.get("ActiveState", "").strip().lower() or "unknown",
+        "sub_state": properties.get("SubState", "").strip().lower() or "unknown",
+        "load_state": properties.get("LoadState", "").strip().lower() or "unknown",
+        "result": properties.get("Result", "").strip().lower() or "unknown",
+        "exec_main_code": properties.get("ExecMainCode", "").strip().lower(),
+        "exec_main_status": parsed_status(properties.get("ExecMainStatus", "")),
+        "exec_condition_status": exec_condition_status,
+    }
+
+
+def _start_state_summary(state: dict[str, object]) -> str:
+    parts = [
+        f"state={state.get('active_state') or 'unknown'}",
+        f"substate={state.get('sub_state') or 'unknown'}",
+        f"result={state.get('result') or 'unknown'}",
+    ]
+    load_state = str(state.get("load_state") or "unknown")
+    if load_state != "loaded":
+        parts.append(f"load_state={load_state}")
+    condition_status = state.get("exec_condition_status")
+    if condition_status not in (None, 0):
+        parts.append(f"exec_condition_status={condition_status}")
+    main_status = state.get("exec_main_status")
+    if main_status not in (None, 0):
+        parts.append(f"exec_main_status={main_status}")
+    return " ".join(parts)
+
+
+def _start_failure_message(unit: str, state: dict[str, object]) -> str:
+    summary = _start_state_summary(state)
+    active_state = str(state.get("active_state") or "unknown")
+    load_state = str(state.get("load_state") or "unknown")
+    result = str(state.get("result") or "unknown")
+    condition_status = state.get("exec_condition_status")
+    main_status = state.get("exec_main_status")
+
+    if load_state not in {"loaded", "unknown"}:
+        return f"CONFIGURATION_ERROR: {unit} could not be loaded; {summary}."
+    if result == "exec-condition" or condition_status not in (None, 0):
+        return f"REFUSED: {unit} ExecCondition rejected startup; {summary}."
+    if main_status == 75:
+        return f"LOCK_CONFLICT: {unit} could not acquire its profile lock; {summary}."
+    if active_state == "failed" or result not in {"", "success", "unknown"}:
+        return f"FAILED: {unit} failed during startup; {summary}."
+    if active_state in {"inactive", "dead"}:
+        return f"EXITED: {unit} exited before startup was stable; {summary}."
+    if active_state == "deactivating":
+        return f"REFUSED: {unit} entered deactivating during startup; {summary}."
+    return f"VERIFICATION_TIMEOUT: unable to verify start of {unit}; {summary}."
+
+
+def _safe_control_error(result: subprocess.CompletedProcess[str]) -> str:
+    text = str(result.stderr or result.stdout or "").strip()
+    if not text:
+        return ""
+    text = " ".join(text.split())
+    text = re.sub(
+        r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*=\s*\S+",
+        r"\1=[redacted]",
+        text,
+    )
+    return text[:300]
 
 
 def _is_active(profile_name: str) -> bool:
@@ -254,40 +367,43 @@ def _reset_runtime_overlay_cache_for_tests() -> None:
 
 def _verify_started_state(profile_name: str) -> tuple[bool, str]:
     unit = unit_name(profile_name)
-    last_state = "unknown"
+    last: dict[str, object] = {
+        "active_state": "unknown",
+        "sub_state": "unknown",
+        "load_state": "unknown",
+        "result": "unknown",
+        "exec_main_status": None,
+        "exec_condition_status": None,
+    }
+    stable_active_samples = 0
     for attempt in range(START_VERIFY_ATTEMPTS):
-        last_state = _active_state(profile_name)
-        if last_state in {"active", "reloading"}:
-            return True, f"STARTED: {unit}; verified state={last_state}."
-        if last_state == "failed":
-            return False, f"FAILED: {unit} entered the failed state during startup."
-        if last_state == "deactivating":
-            return False, f"REFUSED: {unit} entered the deactivating state during startup."
+        last = _start_state(profile_name)
+        active_state = str(last.get("active_state") or "unknown")
+        if active_state in {"active", "reloading"}:
+            stable_active_samples += 1
+            if stable_active_samples >= START_ACTIVE_STABILITY_SAMPLES:
+                return (
+                    True,
+                    f"STARTED: {unit}; verified stable state={active_state}.",
+                )
+        else:
+            stable_active_samples = 0
+        if active_state in {"failed", "deactivating"}:
+            return False, _start_failure_message(unit, last)
         if attempt + 1 < START_VERIFY_ATTEMPTS:
             time.sleep(START_VERIFY_INTERVAL_SECONDS)
 
+    last_state = str(last.get("active_state") or "unknown")
     if last_state == "activating":
         return (
             True,
-            f"STARTING: {unit}; state is still activating after bounded verification.",
+            f"STARTING: {unit}; still activating after bounded verification; "
+            f"{_start_state_summary(last)}.",
         )
-    if last_state in {"inactive", "dead"}:
-        return (
-            False,
-            f"REFUSED: start was skipped for {unit}; "
-            f"state remained {last_state} after bounded verification.",
-        )
+    message = _start_failure_message(unit, last)
     if last_state == "unknown":
-        return (
-            False,
-            f"VERIFICATION_TIMEOUT: unable to verify start of {unit}; "
-            "systemd state remained unknown until verification timed out.",
-        )
-    return (
-        False,
-        f"VERIFICATION_TIMEOUT: unable to verify start of {unit}; "
-        f"unexpected state={last_state} after bounded verification.",
-    )
+        message = message[:-1] + "; verification timed out."
+    return False, message
 
 
 def _profile_runtime_fields(profile_name: str) -> dict[str, object]:
@@ -568,10 +684,12 @@ def start_sender(
     result = _control("start", profile_name)
 
     if result.returncode != 0:
+        detail = _safe_control_error(result)
         return (
             False,
             f"Unable to start {unit} "
-            f"(systemctl exit {result.returncode}).",
+            f"(systemctl exit {result.returncode})"
+            + (f": {detail}" if detail else "."),
         )
 
     return _verify_started_state(profile_name)
@@ -598,10 +716,12 @@ def stop_sender(
     result = _control("stop", profile_name)
 
     if result.returncode != 0:
+        detail = _safe_control_error(result)
         return (
             False,
             f"Unable to stop {unit} "
-            f"(systemctl exit {result.returncode}).",
+            f"(systemctl exit {result.returncode})"
+            + (f": {detail}" if detail else "."),
         )
 
     final_state = _active_state(profile_name)
@@ -613,6 +733,9 @@ def stop_sender(
         "deactivating",
     }:
         return False, f"{unit} remained active."
+
+    if final_state == "unknown":
+        return False, f"Unable to verify that {unit} stopped."
 
     return True, f"Stopped {unit}."
 

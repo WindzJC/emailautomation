@@ -236,10 +236,11 @@ describe("individual sender Start controls", () => {
   });
 
   it("clears pending state after a failed Start response without retrying", async () => {
+    const backendFailure = "REFUSED: astra-sender@private_jc.service ExecCondition rejected startup; state=inactive substate=dead result=exec-condition exec_condition_status=1.";
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({
       ok: false,
       blocked: true,
-      message: "Synthetic Start refused.",
+      message: backendFailure,
     }, 409)));
     root = await bootController(fetchMock);
 
@@ -252,10 +253,10 @@ describe("individual sender Start controls", () => {
     expect(senderRowStartButton()).toHaveTextContent("Start");
     expect(senderRowStartButton()).not.toBeDisabled();
     expect(document.getElementById("message-bar")).toHaveTextContent(
-      "Synthetic Start refused.",
+      backendFailure,
     );
     expect(document.querySelector(".profile-action-feedback.error")).toHaveTextContent(
-      "Synthetic Start refused.",
+      backendFailure,
     );
   });
 });

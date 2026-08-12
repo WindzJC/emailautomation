@@ -163,6 +163,23 @@ def test_systemd_backend_start_and_stop_target_only_selected_profile(
                 "active\n" if profile in active else "inactive\n",
                 "",
             )
+        if action == "show-start":
+            state = "active" if profile in active else "inactive"
+            sub_state = "running" if profile in active else "dead"
+            return subprocess.CompletedProcess(
+                [],
+                0,
+                (
+                    f"ActiveState={state}\n"
+                    f"SubState={sub_state}\n"
+                    "LoadState=loaded\n"
+                    "Result=success\n"
+                    "ExecMainCode=exited\n"
+                    "ExecMainStatus=0\n"
+                    "ExecCondition={ status=0/SUCCESS }\n"
+                ),
+                "",
+            )
         if action == "start":
             active.add(profile)
             return subprocess.CompletedProcess([], 0, "", "")
@@ -371,6 +388,7 @@ def test_cloud_env_template_contains_placeholders_only() -> None:
     profile_template = (CLOUD / "profile-env.example").read_text(
         encoding="utf-8"
     )
+    readme = (CLOUD / "README.md").read_text(encoding="utf-8")
 
     assert "DASHBOARD_AUTH_PASSWORD=REPLACE_" in template
     assert "DASHBOARD_SESSION_SECRET=REPLACE_" in template
@@ -382,6 +400,7 @@ def test_cloud_env_template_contains_placeholders_only() -> None:
     )
     for profile, credential in CREDENTIAL_ENV_BY_PROFILE.items():
         assert f"# {profile}.env: {credential}" in profile_template
+        assert f"| `{profile}` |" in readme
     assert "ASTRA_EXPECTED_GIT_COMMIT=REPLACE_" in profile_template
 
 

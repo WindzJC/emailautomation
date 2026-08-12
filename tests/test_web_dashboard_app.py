@@ -859,6 +859,7 @@ class WebDashboardAppTests(unittest.TestCase):
     def test_leads_workspace_uses_operator_first_layout(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
+        react_source = REACT_MAIN.read_text(encoding="utf-8")
         leads_start = html.index('<section id="leads-view"')
         leads_end = html.index("</main>", leads_start)
         leads_html = html[leads_start:leads_end]
@@ -1088,7 +1089,6 @@ class WebDashboardAppTests(unittest.TestCase):
             ".workflow-banner-meta",
             ".leads-control-check-chips",
             ".leads-source-actions-label",
-            "#leads-view.react-leads-page:not(.warm-research-mode) .react-lead-workspace.leads-command-main",
             ".btn.is-loading::before",
             ".btn.is-next-action:not(:disabled)",
             ".dispatch-next-step-banner",
@@ -1099,6 +1099,21 @@ class WebDashboardAppTests(unittest.TestCase):
             ".leads-alert-card",
         ]:
             self.assertIn(expected, styles)
+
+        self.assertIn(
+            '<div className="leads-command-main react-lead-workspace">',
+            react_source,
+        )
+        self.assertIn(
+            "<CommandRail left={view.commandLeft} right={view.commandRight} />",
+            react_source,
+        )
+        self.assertRegex(
+            styles,
+            r"#leads-view\.react-leads-page:not\(\.warm-research-mode\)\s*"
+            r"\.react-lead-workspace\.leads-command-main\s*\{[^}]*"
+            r"grid-template-columns:\s*minmax\(0,\s*1fr\)\s*!important;",
+        )
 
         self.assertIn("#leads-view .leads-page-title {\n  order: 1;", styles)
         self.assertIn("#leads-view .leads-command-center {\n  order: 2;", styles)

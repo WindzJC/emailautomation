@@ -1012,6 +1012,11 @@ class LiveDashboardTests(unittest.TestCase):
             "snapshot": snapshot,
         }
         history_events: list[str] = []
+        backend_failure = (
+            "REFUSED: astra-sender@private_jc.service ExecCondition rejected "
+            "startup; state=inactive substate=dead result=exec-condition "
+            "exec_condition_status=1."
+        )
 
         with patch.object(
             live_dashboard.runtime_control,
@@ -1036,7 +1041,7 @@ class LiveDashboardTests(unittest.TestCase):
         ), patch.object(
             live_dashboard.runtime_control,
             "start_sender",
-            return_value=(False, "Start refused or skipped."),
+            return_value=(False, backend_failure),
         ), patch.object(
             live_dashboard,
             "_append_campaign_history",
@@ -1050,6 +1055,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertTrue(body["blocked"])
         self.assertEqual("sender_start_verification_failed", body["error"])
         self.assertEqual("BLOCKED", body["status"])
+        self.assertEqual(backend_failure, body["message"])
         self.assertEqual(
             ["start_profile_requested", "start_profile_blocked"],
             history_events,

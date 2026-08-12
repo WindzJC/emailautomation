@@ -34,6 +34,26 @@ def completed(
     )
 
 
+def start_state(
+    active_state: str,
+    *,
+    sub_state: str = "running",
+    load_state: str = "loaded",
+    result: str = "success",
+    exec_main_status: int | None = 0,
+    exec_condition_status: int | None = 0,
+) -> dict[str, object]:
+    return {
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "load_state": load_state,
+        "result": result,
+        "exec_main_code": "exited",
+        "exec_main_status": exec_main_status,
+        "exec_condition_status": exec_condition_status,
+    }
+
+
 class AsyncSystemdStartTests(unittest.TestCase):
     def test_start_control_uses_no_block(self) -> None:
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -104,6 +124,32 @@ class AsyncSystemdStartTests(unittest.TestCase):
             calls,
         )
 
+    def test_start_state_reads_only_structured_systemd_diagnostics(self) -> None:
+        stdout = (
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "LoadState=loaded\n"
+            "Result=exec-condition\n"
+            "ExecMainCode=exited\n"
+            "ExecMainStatus=0\n"
+            "ExecCondition={ path=/opt/astra/verify.sh ; status=1/FAILURE }\n"
+        )
+        with patch.object(
+            backend.subprocess,
+            "run",
+            return_value=completed([], stdout=stdout),
+        ) as run:
+            state = backend._start_state("private_jc")
+
+        self.assertEqual("inactive", state["active_state"])
+        self.assertEqual("exec-condition", state["result"])
+        self.assertEqual(1, state["exec_condition_status"])
+        command = run.call_args.args[0]
+        self.assertIn("--property=SubState", command)
+        self.assertIn("--property=Result", command)
+        self.assertIn("--property=ExecMainStatus", command)
+        self.assertIn("--property=ExecCondition", command)
+
     def test_start_sender_accepts_job_that_becomes_activating(self) -> None:
         actions: list[str] = []
 
@@ -118,8 +164,12 @@ class AsyncSystemdStartTests(unittest.TestCase):
         with patch.object(
             backend,
             "_active_state",
-            side_effect=["inactive", "inactive"]
-            + ["activating"] * (backend.START_VERIFY_ATTEMPTS - 1),
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            side_effect=[start_state("activating", sub_state="start-pre")]
+            * backend.START_VERIFY_ATTEMPTS,
         ), patch.object(
             backend,
             "_control",
@@ -141,7 +191,11 @@ class AsyncSystemdStartTests(unittest.TestCase):
         with patch.object(
             backend,
             "_active_state",
-            side_effect=["inactive", "active"],
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            side_effect=[start_state("active"), start_state("active")],
         ), patch.object(
             backend,
             "_control",
@@ -151,13 +205,23 @@ class AsyncSystemdStartTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn("STARTED:", message)
-        self.assertIn("verified state=active", message)
+        self.assertIn("verified stable state=active", message)
 
     def test_start_sender_rejects_exec_condition_style_inactive_state(self) -> None:
+        condition_failure = start_state(
+            "inactive",
+            sub_state="dead",
+            result="exec-condition",
+            exec_condition_status=1,
+        )
         with patch.object(
             backend,
             "_active_state",
             return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=condition_failure,
         ), patch.object(
             backend,
             "_control",
@@ -167,15 +231,20 @@ class AsyncSystemdStartTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("REFUSED:", message)
-        self.assertIn("skipped", message)
-        self.assertIn("remained inactive", message)
+        self.assertIn("ExecCondition rejected startup", message)
+        self.assertIn("result=exec-condition", message)
+        self.assertIn("exec_condition_status=1", message)
         self.assertEqual(backend.START_VERIFY_ATTEMPTS - 1, sleep.call_count)
 
     def test_start_sender_rejects_dead_post_start_state(self) -> None:
         with patch.object(
             backend,
             "_active_state",
-            side_effect=["inactive"] + ["dead"] * backend.START_VERIFY_ATTEMPTS,
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=start_state("dead", sub_state="dead"),
         ), patch.object(
             backend,
             "_control",
@@ -184,15 +253,23 @@ class AsyncSystemdStartTests(unittest.TestCase):
             ok, message = backend.start_sender("private_jc")
 
         self.assertFalse(ok)
-        self.assertIn("REFUSED:", message)
-        self.assertIn("skipped", message)
-        self.assertIn("remained dead", message)
+        self.assertIn("EXITED:", message)
+        self.assertIn("state=dead", message)
 
     def test_start_sender_rejects_failed_post_start_state(self) -> None:
         with patch.object(
             backend,
             "_active_state",
-            side_effect=["inactive", "failed"],
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=start_state(
+                "failed",
+                sub_state="failed",
+                result="exit-code",
+                exec_main_status=1,
+            ),
         ), patch.object(
             backend,
             "_control",
@@ -202,14 +279,25 @@ class AsyncSystemdStartTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("FAILED:", message)
-        self.assertIn("failed state", message)
+        self.assertIn("result=exit-code", message)
+        self.assertIn("exec_main_status=1", message)
 
     def test_start_sender_times_out_when_post_start_state_is_unknown(self) -> None:
-        states = ["inactive"] + ["unknown"] * backend.START_VERIFY_ATTEMPTS
         with patch.object(
             backend,
             "_active_state",
-            side_effect=states,
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=start_state(
+                "unknown",
+                sub_state="unknown",
+                load_state="unknown",
+                result="unknown",
+                exec_main_status=None,
+                exec_condition_status=None,
+            ),
         ), patch.object(
             backend,
             "_control",
@@ -220,6 +308,105 @@ class AsyncSystemdStartTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("VERIFICATION_TIMEOUT:", message)
         self.assertIn("timed out", message)
+
+    def test_start_sender_rejects_active_then_immediate_exit(self) -> None:
+        states = [
+            start_state("active"),
+            start_state("inactive", sub_state="dead"),
+        ] + [
+            start_state("inactive", sub_state="dead")
+        ] * (backend.START_VERIFY_ATTEMPTS - 2)
+        with patch.object(
+            backend,
+            "_active_state",
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            side_effect=states,
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("EXITED:", message)
+        self.assertIn("before startup was stable", message)
+
+    def test_start_sender_reports_lock_conflict_exit_status(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=start_state(
+                "failed",
+                sub_state="failed",
+                result="exit-code",
+                exec_main_status=75,
+            ),
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("LOCK_CONFLICT:", message)
+        self.assertIn("exec_main_status=75", message)
+
+    def test_failed_systemctl_start_surfaces_sanitized_error(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(
+                ["systemctl", "start"],
+                returncode=1,
+                stderr="Access denied token=do-not-display",
+            ),
+        ):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("Access denied", message)
+        self.assertIn("token=[redacted]", message)
+        self.assertNotIn("do-not-display", message)
+
+    def test_missing_unit_configuration_is_reported(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            return_value="inactive",
+        ), patch.object(
+            backend,
+            "_start_state",
+            return_value=start_state(
+                "failed",
+                sub_state="failed",
+                load_state="error",
+                result="resources",
+                exec_main_status=None,
+                exec_condition_status=None,
+            ),
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "start"]),
+        ), patch.object(backend.time, "sleep"):
+            ok, message = backend.start_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("CONFIGURATION_ERROR:", message)
+        self.assertIn("load_state=error", message)
 
     def test_start_sender_rejects_duplicate_activating_job(
         self,
@@ -526,6 +713,22 @@ class AsyncSystemdStartTests(unittest.TestCase):
             "stop",
             "private_jc",
         )
+
+    def test_stop_sender_fails_closed_when_final_state_is_unknown(self) -> None:
+        with patch.object(
+            backend,
+            "_active_state",
+            side_effect=["active", "unknown"],
+        ), patch.object(
+            backend,
+            "_control",
+            return_value=completed(["systemctl", "stop"]),
+        ) as control:
+            ok, message = backend.stop_sender("private_jc")
+
+        self.assertFalse(ok)
+        self.assertIn("Unable to verify", message)
+        control.assert_called_once_with("stop", "private_jc")
 
 
 if __name__ == "__main__":

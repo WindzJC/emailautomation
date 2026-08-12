@@ -78,6 +78,7 @@ environment.
 | `private_jordan` | private SMTP | `recipients_2.csv` | `private_jordan_message_preview.csv` | `PRIVATE_JORDAN_APP_PW` |
 | `sendgrid_alison` | SendGrid API | `recipients_sendgrid_4.csv` | `sendgrid_alison_message_preview.csv` | `SENDGRID_API_KEY` |
 | `sendgrid_annette` | SendGrid API | `recipients_sendgrid_1.csv` | `sendgrid_annette_message_preview.csv` | `SENDGRID_API_KEY` |
+| `sendgrid_controlled_test` | SendGrid API, controlled test | `recipients_sendgrid_controlled_test.csv` | `sendgrid_controlled_test_message_preview.csv` | `SENDGRID_API_KEY` |
 | `sendgrid_fiorela` | SendGrid API | `recipients_sendgrid_5.csv` | `sendgrid_fiorela_message_preview.csv` | `SENDGRID_API_KEY` |
 | `sendgrid_jodi` | SendGrid API | `recipients_sendgrid_3.csv` | `sendgrid_jodi_message_preview.csv` | `SENDGRID_API_KEY` |
 | `sendgrid_jordan` | SendGrid API | `recipients_sendgrid_2.csv` | `sendgrid_jordan_message_preview.csv` | `SENDGRID_API_KEY` |
