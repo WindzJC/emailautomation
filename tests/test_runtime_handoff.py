@@ -1064,7 +1064,7 @@ def test_preview_validation_mode_is_derived_from_profile_pitch():
 def test_controlled_sendgrid_profile_is_literal_eval_handoff_safe():
     profile = runtime_handoff._profile_runtime_layout()["sendgrid_controlled_test"]
 
-    assert profile["recipient_allowlist"] == "astraproductionsbyjc+sendgridtest@gmail.com"
+    assert profile["recipient_allowlist"] == "bebelyndcuriana@gmail.com"
     assert profile["csv"] == "recipients_sendgrid_controlled_test.csv"
     assert profile["log"] == "sendgrid_controlled_test_log.csv"
     assert profile["max_total"] == 1
@@ -1074,7 +1074,7 @@ def test_controlled_sendgrid_profile_is_literal_eval_handoff_safe():
 
 
 def test_controlled_sendgrid_preview_uses_exact_manual_lane_safety(tmp_path):
-    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    recipient = "bebelyndcuriana@gmail.com"
     queue = _write_controlled_sendgrid_runtime(tmp_path, [recipient])
     queue_state = runtime_handoff._read_queue_state(
         queue,
@@ -1099,7 +1099,7 @@ def test_controlled_sendgrid_preview_uses_exact_manual_lane_safety(tmp_path):
 def test_controlled_sendgrid_recompute_skips_only_campaign_source_lineage(
     tmp_path,
 ):
-    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    recipient = "bebelyndcuriana@gmail.com"
     _write_controlled_sendgrid_runtime(tmp_path, [recipient])
 
     safety = runtime_handoff.recompute_queue_safety(tmp_path)
@@ -1142,7 +1142,7 @@ def test_controlled_sendgrid_preview_rejects_queue_count_other_than_one(tmp_path
     queue = _write_controlled_sendgrid_runtime(
         tmp_path,
         [
-            "astraproductionsbyjc+sendgridtest@gmail.com",
+            "bebelyndcuriana@gmail.com",
             "second@example.test",
         ],
     )
@@ -1168,7 +1168,7 @@ def test_controlled_sendgrid_preview_rejects_queue_count_other_than_one(tmp_path
         (["wrong@example.test"], "controlled_recipient_allowlist_exact"),
         (
             [
-                "astraproductionsbyjc+sendgridtest@gmail.com",
+                "bebelyndcuriana@gmail.com",
                 "second@example.test",
             ],
             "controlled_queue_count_one",
@@ -1206,7 +1206,7 @@ def test_controlled_sendgrid_preview_preserves_runtime_blocks(
     blocked_by,
     expected_predicate,
 ):
-    recipient = "astraproductionsbyjc+sendgridtest@gmail.com"
+    recipient = "bebelyndcuriana@gmail.com"
     queue = _write_controlled_sendgrid_runtime(tmp_path, [recipient])
     if blocked_by == "suppression":
         (tmp_path / "data/state/suppressed.csv").write_text(

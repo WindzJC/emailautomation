@@ -58,7 +58,7 @@ SMTP_PRESETS = {
 DEFAULT_DOMAIN = "barnesnoblemarketing.com"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
 CONTROLLED_SENDGRID_PROFILE = "sendgrid_controlled_test"
-CONTROLLED_SENDGRID_RECIPIENT = "astraproductionsbyjc+sendgridtest@gmail.com"
+CONTROLLED_SENDGRID_RECIPIENT = "bebelyndcuriana@gmail.com"
 ROOT = settings.APP_ROOT
 SHARDS_DIR = settings.SHARDS_DIR
 LOGS_DIR = settings.LOGS_DIR
@@ -572,7 +572,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "groups_to_display": [363425],
         "dashboard_manual_only": True,
         "controlled_test": True,
-        "recipient_allowlist": "astraproductionsbyjc+sendgridtest@gmail.com",
+        "recipient_allowlist": "bebelyndcuriana@gmail.com",
         "require_preview_recipient_fingerprint": True,
     },
 

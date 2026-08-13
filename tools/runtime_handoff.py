@@ -151,7 +151,7 @@ PITCH_VALIDATION_MODES = {
 }
 CONTROLLED_SENDGRID_PROFILE = "sendgrid_controlled_test"
 CONTROLLED_SENDGRID_RECIPIENT = (
-    "astraproductionsbyjc+sendgridtest@gmail.com"
+    "bebelyndcuriana@gmail.com"
 )
 COMMIT_COMPATIBILITY_FILE_ENV = "ASTRA_HANDOFF_COMMIT_COMPATIBILITY_FILE"
 COMMIT_COMPATIBILITY_ROOT_KEY = "commit_compatibility_mappings"

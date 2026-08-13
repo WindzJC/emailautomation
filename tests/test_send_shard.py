@@ -266,6 +266,7 @@ class SendShardTests(unittest.TestCase):
 
     def test_controlled_sendgrid_queue_requires_one_allowlisted_recipient(self) -> None:
         allowed = {send_shard.CONTROLLED_SENDGRID_RECIPIENT}
+        self.assertEqual("bebelyndcuriana@gmail.com", send_shard.CONTROLLED_SENDGRID_RECIPIENT)
         self.assertEqual(
             "",
             send_shard.controlled_sendgrid_queue_error(
@@ -276,9 +277,20 @@ class SendShardTests(unittest.TestCase):
         self.assertIn(
             "hard-allowlisted",
             send_shard.controlled_sendgrid_queue_error(
-                [{"Email": "other@example.test"}],
+                [{"Email": "astraproductionsbyjc+sendgridtest@gmail.com"}],
                 allowed,
             ),
+        )
+        self.assertIn(
+            "hard-allowlisted",
+            send_shard.controlled_sendgrid_queue_error(
+                [{"Email": "production-recipient@example.test"}],
+                allowed,
+            ),
+        )
+        self.assertIn(
+            "exactly one",
+            send_shard.controlled_sendgrid_queue_error([], allowed),
         )
         self.assertIn(
             "exactly one",
@@ -622,7 +634,7 @@ class SendShardTests(unittest.TestCase):
             "simple@example.test",
             " SIMPLE@EXAMPLE.TEST ",
             "Author Name <author@example.test>",
-            "astraproductionsbyjc+sendgridtest@gmail.com",
+            "bebelyndcuriana@gmail.com",
             "invalid@@example.test",
             "",
         )
@@ -1431,7 +1443,7 @@ class SendShardTests(unittest.TestCase):
             controlled_queue = shards / "recipients_sendgrid_controlled_test.csv"
             controlled_queue.write_text(
                 "Email,FirstName,BookTitle\n"
-                "astraproductionsbyjc+sendgridtest@gmail.com,Astra,Controlled Test\n",
+                "bebelyndcuriana@gmail.com,Astra,Controlled Test\n",
                 encoding="utf-8",
             )
             (logs / "sendgrid_annette_log.csv").write_text(
