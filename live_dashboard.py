@@ -4467,6 +4467,22 @@ _SNAPSHOT_FANOUT_REVISION = 0
 _SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-snapshot")
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-webhook")
 _AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-automation")
+# Start requests perform fresh queue/readiness checks before issuing exactly one
+# runtime-control action. Keep that complete transaction off the event loop and
+# serialize it so concurrent clicks cannot multiply full snapshot scans or race
+# each other past the active-sender precondition on a small production host.
+_SENDER_START_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-sender-start")
+
+
+async def _run_sender_start_request_async(
+    action: Callable[..., JSONResponse],
+    *args: object,
+) -> JSONResponse:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _SENDER_START_EXECUTOR,
+        partial(action, *args),
+    )
 
 
 def _snapshot_file_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -5365,6 +5381,10 @@ def start() -> JSONResponse:
 
 
 @app.post("/api/start/{profile_name}")
+async def start_profile_endpoint(profile_name: str) -> JSONResponse:
+    return await _run_sender_start_request_async(start_profile, profile_name)
+
+
 def start_profile(profile_name: str) -> JSONResponse:
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)

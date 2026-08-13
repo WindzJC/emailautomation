@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import subprocess
+import threading
 from contextlib import ExitStack
 from io import BytesIO, StringIO
 import tempfile
@@ -8038,6 +8039,121 @@ class DashboardStabilizationTests(unittest.TestCase):
                 inspect.iscoroutinefunction(endpoint),
                 getattr(endpoint, "__name__", repr(endpoint)),
             )
+
+    def test_slow_start_verification_keeps_event_loop_responsive(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_start(profile_name: str) -> live_dashboard.JSONResponse:
+            self.assertEqual("private_jc", profile_name)
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return live_dashboard.JSONResponse({"ok": True})
+
+        async def scenario() -> tuple[dict[str, str], live_dashboard.JSONResponse]:
+            start_task = asyncio.create_task(
+                live_dashboard.start_profile_endpoint("private_jc")
+            )
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            self.assertTrue(started.is_set())
+            health_started = time.perf_counter()
+            health_payload = await live_dashboard.health()
+            self.assertLess(time.perf_counter() - health_started, 0.05)
+            release.set()
+            return health_payload, await asyncio.wait_for(start_task, timeout=2)
+
+        with patch.object(
+            live_dashboard,
+            "start_profile",
+            side_effect=slow_start,
+        ) as start_profile:
+            health_payload, response = asyncio.run(scenario())
+
+        self.assertEqual({"status": "ok"}, health_payload)
+        self.assertEqual(200, response.status_code)
+        start_profile.assert_called_once_with("private_jc")
+
+    def test_concurrent_start_requests_are_serialized(self) -> None:
+        state_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+        calls: list[str] = []
+
+        def slow_start(profile_name: str) -> live_dashboard.JSONResponse:
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                calls.append(profile_name)
+            time.sleep(0.05)
+            with state_lock:
+                active -= 1
+            return live_dashboard.JSONResponse({"ok": True})
+
+        async def scenario() -> list[live_dashboard.JSONResponse]:
+            return list(
+                await asyncio.gather(
+                    live_dashboard.start_profile_endpoint("private_jc"),
+                    live_dashboard.start_profile_endpoint("sendgrid_alison"),
+                )
+            )
+
+        with patch.object(
+            live_dashboard,
+            "start_profile",
+            side_effect=slow_start,
+        ):
+            responses = asyncio.run(scenario())
+
+        self.assertEqual(1, maximum_active)
+        self.assertEqual(["private_jc", "sendgrid_alison"], calls)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+
+    def test_cancelled_queued_start_does_not_execute_or_freeze_dashboard(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        def slow_start(profile_name: str) -> live_dashboard.JSONResponse:
+            calls.append(profile_name)
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return live_dashboard.JSONResponse({"ok": True})
+
+        async def scenario() -> dict[str, str]:
+            running = asyncio.create_task(
+                live_dashboard.start_profile_endpoint("private_jc")
+            )
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            self.assertTrue(started.is_set())
+            queued = asyncio.create_task(
+                live_dashboard.start_profile_endpoint("sendgrid_alison")
+            )
+            await asyncio.sleep(0.01)
+            queued.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await queued
+            health_payload = await live_dashboard.health()
+            release.set()
+            await asyncio.wait_for(running, timeout=2)
+            await asyncio.sleep(0.05)
+            return health_payload
+
+        with patch.object(
+            live_dashboard,
+            "start_profile",
+            side_effect=slow_start,
+        ):
+            health_payload = asyncio.run(scenario())
+
+        self.assertEqual({"status": "ok"}, health_payload)
+        self.assertEqual(["private_jc"], calls)
 
     def test_snapshot_executor_keeps_event_loop_responsive_during_cold_refresh(self) -> None:
         calls = 0
