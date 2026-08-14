@@ -758,8 +758,8 @@ def build_queue_safety_report(
         unsafe_reasons.append("OUTSIDE_INTENDED_SOURCE")
     if blocked_source_reject_overlap:
         unsafe_reasons.append("INTENDED_SOURCE_OVERLAPS_REJECT")
-    if sendgrid_sent_overlap and not allow_sendgrid_already_sent:
-        unsafe_reasons.append("SENDGRID_ALREADY_SENT_OVERLAP")
+    # Successful history is informational. Suppression, invalidity, queue
+    # duplication and current-campaign idempotency remain separate blockers.
 
     return {
         "safe": not unsafe_reasons,
@@ -781,7 +781,7 @@ def build_queue_safety_report(
         "overlap_with_triaged_keep": len(shard_emails & keep_emails),
         "overlap_with_triaged_reject": len(reject_overlap),
         "sendgrid_already_sent_overlap_count": len(sendgrid_sent_overlap),
-        "sendgrid_already_sent_overlap_allowed": bool(allow_sendgrid_already_sent and sendgrid_sent_overlap),
+        "sendgrid_already_sent_overlap_allowed": bool(sendgrid_sent_overlap),
         "outside_intended_source_count": len(outside_intended),
         "outside_checked_output_count": len(outside_checked),
         "intended_source_reject_overlap_count": len(source_reject_overlap),

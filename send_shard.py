@@ -73,6 +73,7 @@ SENDGRID_DAILY_CAP = 0  # 0 = disabled (no global daily cap)
 SENDGRID_COUNTERS_PATH = settings.SENDGRID_COUNTERS_PATH
 SENDGRID_GLOBAL_COUNTER_KEY = "__global__"
 DOMAIN_SLOT_TTL_SECONDS = max(30, int(os.environ.get("DOMAIN_SLOT_TTL_SECONDS", "300")))
+SENDGRID_RATE_STATE_DB_PATH = STATE_DIR / "sendgrid_rate_state.sqlite3"
 ASTRA_PHYSICAL_MAILING_ADDRESS = os.environ.get("ASTRA_PHYSICAL_MAILING_ADDRESS", "").strip()
 SENDGRID_SKIP_PRUNE_ON_STARTUP = os.environ.get("SENDGRID_SKIP_PRUNE_ON_STARTUP", "").strip() == "1"
 RUNTIME_LOCKS_DIR = STATE_DIR / "locks"
@@ -91,6 +92,8 @@ SEND_IDEMPOTENCY_BUSY_RETRIES = max(0, min(8, _env_int("SEND_IDEMPOTENCY_BUSY_RE
 SEND_IDEMPOTENCY_BUSY_BACKOFF_MS = max(10, min(2000, _env_int("SEND_IDEMPOTENCY_BUSY_BACKOFF_MS", 100)))
 _IDEMPOTENCY_SCHEMA_LOCK = threading.Lock()
 _IDEMPOTENCY_SCHEMA_READY: set[str] = set()
+_SENDGRID_RATE_SCHEMA_LOCK = threading.Lock()
+_SENDGRID_RATE_SCHEMA_READY: set[str] = set()
 
 
 def configured_sendgrid_max_messages_1h() -> int:
@@ -1050,13 +1053,16 @@ def reserve_send_idempotency(
             conn.execute("BEGIN IMMEDIATE")
             if clean_profile == "private_jc_warm":
                 cross_lane = conn.execute(
-                    "SELECT 1 FROM send_reservations WHERE email = ? LIMIT 1",
-                    (clean_email,),
+                    "SELECT 1 FROM send_reservations "
+                    "WHERE campaign_id = ? AND email = ? LIMIT 1",
+                    (clean_campaign, clean_email),
                 ).fetchone()
             else:
                 cross_lane = conn.execute(
-                    "SELECT 1 FROM send_reservations WHERE email = ? AND profile = 'private_jc_warm' LIMIT 1",
-                    (clean_email,),
+                    "SELECT 1 FROM send_reservations "
+                    "WHERE campaign_id = ? AND email = ? "
+                    "AND profile = 'private_jc_warm' LIMIT 1",
+                    (clean_campaign, clean_email),
                 ).fetchone()
             if cross_lane:
                 conn.rollback()
@@ -2664,7 +2670,7 @@ class GlobalBlockRefresher:
         self._sets: Dict[str, Set[str]] = {}
         self.reload_count = 0
 
-    def _current_signature(self) -> tuple[object, ...]:
+    def _source_paths(self) -> List[Path]:
         paths = [
             self.unsubscribed_path,
             self.suppressed_path,
@@ -2675,7 +2681,28 @@ class GlobalBlockRefresher:
             paths.extend(
                 (self.sendgrid_suppression_path, self.sendgrid_events_path)
             )
+        return paths
+
+    def _current_signature(self) -> tuple[object, ...]:
+        paths = self._source_paths()
         return tuple(_block_source_signature(path) for path in paths)
+
+    def acknowledge_nonblocking_append(self, path: Path) -> bool:
+        """Advance cache metadata only when the known-success log is the sole change."""
+        if self._signature is None:
+            return False
+        paths = self._source_paths()
+        target = Path(path)
+        current = tuple(_block_source_signature(candidate) for candidate in paths)
+        changed = [
+            candidate
+            for candidate, previous, latest in zip(paths, self._signature, current)
+            if previous != latest
+        ]
+        if changed and all(candidate == target for candidate in changed):
+            self._signature = current
+            return True
+        return False
 
     def refresh(self, *, force: bool = False) -> bool:
         signature = self._current_signature()
@@ -3770,6 +3797,238 @@ def profile_aggregate_spacing_seconds(
     return aggregate_spacing_seconds(max_messages_1h)
 
 
+def _sendgrid_rate_connection(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def _init_sendgrid_rate_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sendgrid_rate_slots (
+            token TEXT PRIMARY KEY,
+            reserved_at_epoch REAL NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('SLOT', 'ATTEMPT')),
+            finalized_at_epoch REAL,
+            outcome TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sendgrid_rate_slots_reserved_at "
+        "ON sendgrid_rate_slots(reserved_at_epoch)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sendgrid_rate_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _ensure_sendgrid_rate_schema(path: Path) -> None:
+    key = str(path.resolve())
+    if key in _SENDGRID_RATE_SCHEMA_READY:
+        return
+    with _SENDGRID_RATE_SCHEMA_LOCK:
+        if key in _SENDGRID_RATE_SCHEMA_READY:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _sendgrid_rate_connection(path) as conn:
+            _init_sendgrid_rate_schema(conn)
+            conn.commit()
+        _SENDGRID_RATE_SCHEMA_READY.add(key)
+
+
+def _legacy_sendgrid_rate_rows(
+    domain_log_path: Path,
+    now: datetime,
+) -> List[Tuple[str, float, str, str]]:
+    """Load only still-live legacy limiter rows during one-time DB bootstrap."""
+    if not domain_log_path.exists():
+        return []
+    cutoff = now - timedelta(hours=1)
+    slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
+    rows: List[Tuple[str, float, str, str]] = []
+    with domain_log_path.open(newline="", encoding="utf-8-sig") as handle:
+        for ordinal, row in enumerate(csv.DictReader(handle), start=1):
+            status = str(row.get("Status") or "").strip().upper()
+            timestamp = _parse_ts_safe(row.get("TimestampUTC") or "")
+            if timestamp is None:
+                continue
+            if status in {"ATTEMPT", "SENT"} and timestamp >= cutoff:
+                normalized_status = "ATTEMPT"
+            elif status == "SLOT" and timestamp >= slot_cutoff:
+                normalized_status = "SLOT"
+            else:
+                continue
+            info = str(row.get("Info") or "")
+            token_match = re.search(r"(?:^|\s)token=([A-Za-z0-9_-]+)", info)
+            token = token_match.group(1) if token_match else _short_sha256(
+                "legacy_sendgrid_rate", timestamp.isoformat(), ordinal, info
+            )
+            rows.append((token, timestamp.timestamp(), normalized_status, info[:300]))
+    return rows
+
+
+def _bootstrap_sendgrid_rate_state(
+    conn: sqlite3.Connection,
+    domain_log_path: Path,
+    now: datetime,
+) -> None:
+    initialized = conn.execute(
+        "SELECT 1 FROM sendgrid_rate_meta WHERE key = 'legacy_bootstrap_complete'"
+    ).fetchone()
+    if initialized:
+        return
+    for token, reserved_at, status, outcome in _legacy_sendgrid_rate_rows(
+        domain_log_path, now
+    ):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sendgrid_rate_slots
+                (token, reserved_at_epoch, status, finalized_at_epoch, outcome)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                token,
+                reserved_at,
+                status,
+                reserved_at if status == "ATTEMPT" else None,
+                outcome,
+            ),
+        )
+    conn.execute(
+        "INSERT INTO sendgrid_rate_meta(key, value) VALUES('legacy_bootstrap_complete', ?)",
+        (now.isoformat(),),
+    )
+
+
+def sendgrid_wait_for_slot(
+    state_path: Path,
+    domain_log_path: Path,
+    max_messages_1h: int,
+    jitter_sec: int = 5,
+    *,
+    minimum_spacing_seconds: float = 0.0,
+    now_fn=None,
+    sleep_fn=None,
+) -> str:
+    """Reserve one slot from the small shared SendGrid rolling-rate database."""
+    if max_messages_1h <= 0:
+        return ""
+    _ensure_sendgrid_rate_schema(state_path)
+    reservation_token = uuid.uuid4().hex
+    clock = now_fn or (lambda: datetime.now(timezone.utc))
+    sleeper = sleep_fn or time.sleep
+    smooth_spacing = max(0.0, float(minimum_spacing_seconds or 0.0))
+    while True:
+        now = clock()
+        now_epoch = now.timestamp()
+        cutoff_epoch = now_epoch - 3600.0
+        slot_cutoff_epoch = now_epoch - float(DOMAIN_SLOT_TTL_SECONDS)
+        with _sendgrid_rate_connection(state_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _bootstrap_sendgrid_rate_state(conn, domain_log_path, now)
+            conn.execute(
+                "DELETE FROM sendgrid_rate_slots "
+                "WHERE (status = 'ATTEMPT' AND reserved_at_epoch < ?) "
+                "OR (status = 'SLOT' AND reserved_at_epoch < ?)",
+                (cutoff_epoch, slot_cutoff_epoch),
+            )
+            active_rows = conn.execute(
+                "SELECT reserved_at_epoch, status FROM sendgrid_rate_slots "
+                "ORDER BY reserved_at_epoch"
+            ).fetchall()
+            rolling_wait_until = None
+            if len(active_rows) >= max_messages_1h:
+                rolling_wait_until = min(
+                    float(reserved_at)
+                    + (3600.0 if status == "ATTEMPT" else float(DOMAIN_SLOT_TTL_SECONDS))
+                    for reserved_at, status in active_rows
+                )
+            spacing_wait_until = None
+            if smooth_spacing > 0 and active_rows:
+                spacing_wait_until = float(active_rows[-1][0]) + smooth_spacing
+                if spacing_wait_until <= now_epoch:
+                    spacing_wait_until = None
+            waits = [value for value in (rolling_wait_until, spacing_wait_until) if value is not None]
+            wait_until = max(waits) if waits else None
+            if len(active_rows) < max_messages_1h and wait_until is None:
+                conn.execute(
+                    "INSERT INTO sendgrid_rate_slots(token, reserved_at_epoch, status) "
+                    "VALUES (?, ?, 'SLOT')",
+                    (reservation_token, now_epoch),
+                )
+                conn.commit()
+                return reservation_token
+            conn.commit()
+        wait_seconds = max(0.001, float(wait_until or now_epoch + 1.0) - clock().timestamp())
+        if rolling_wait_until is not None:
+            wait_seconds += random.randint(0, max(0, int(jitter_sec)))
+        sleeper(wait_seconds)
+
+
+def _append_domain_attempt(
+    domain_log_path: Path,
+    reservation_token: str,
+    email: str,
+    outcome: str,
+    info: str = "",
+) -> None:
+    """Append audit history without rereading or rewriting earlier rows."""
+    domain_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with domain_log_path.open("a+", newline="", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0, os.SEEK_END)
+        writer = csv.DictWriter(handle, fieldnames=_domain_log_fieldnames())
+        if handle.tell() == 0:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "TimestampUTC": datetime.now(timezone.utc).isoformat(),
+                "Email": email,
+                "Status": "ATTEMPT",
+                "Info": _domain_attempt_info(reservation_token, outcome, info),
+            }
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def sendgrid_finalize_attempt(
+    state_path: Path,
+    domain_log_path: Path,
+    reservation_token: str,
+    email: str,
+    outcome: str,
+    info: str = "",
+) -> None:
+    if not reservation_token:
+        return
+    _ensure_sendgrid_rate_schema(state_path)
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    with _sendgrid_rate_connection(state_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "UPDATE sendgrid_rate_slots "
+            "SET status = 'ATTEMPT', finalized_at_epoch = ?, outcome = ? "
+            "WHERE token = ? AND status = 'SLOT'",
+            (now_epoch, str(outcome or "")[:300], reservation_token),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise RuntimeError("SendGrid rate slot is missing or already finalized.")
+        conn.commit()
+    _append_domain_attempt(
+        domain_log_path, reservation_token, email, outcome, info
+    )
+
+
 def domain_wait_for_slot(
     domain_log_path: Path,
     max_messages_1h: int,
@@ -4623,7 +4882,11 @@ def main():
             log_paths = [p for p in log_paths if _path_matches_dedupe_scope(p, dedupe_scope, "log")]
             recipient_paths = [p for p in recipient_paths if _path_matches_dedupe_scope(p, dedupe_scope, "recipient")]
 
-        global_done = load_done_from_logs(log_paths)
+        # Private JC and SendGrid successful history is audit evidence, not a
+        # lifetime suppression list. Same-campaign protection is enforced by
+        # the campaign-scoped idempotency database below.
+        if args.provider not in {"private", "sendgrid"}:
+            global_done = load_done_from_logs(log_paths)
 
         current_csv = csv_path.resolve()
         for p in recipient_paths:
@@ -4631,7 +4894,11 @@ def main():
                 continue
             other_recipients |= load_queue_emails_from_csv(p)
 
-    if args.prune_sent and not is_recontact_cold_campaign(args.campaign_type):
+    if (
+        args.prune_sent
+        and args.provider not in {"private", "sendgrid"}
+        and not is_recontact_cold_campaign(args.campaign_type)
+    ):
         sent_for_prune = set(already_done)
         if args.global_dedupe:
             sent_for_prune |= global_done
@@ -4725,7 +4992,6 @@ def main():
                 continue
             is_always_send = email_addr in always_send_set
             row_campaign_type = normalize_campaign_type(get_row_value_ci(row, ["campaign_type", "CampaignType", "campaign type"]) or args.campaign_type)
-            is_recontact_row = is_recontact_cold_campaign(row_campaign_type)
             if exclude_logged_always_send and is_always_send and email_addr in current_already_done:
                 continue
             if not is_always_send:
@@ -4753,12 +5019,13 @@ def main():
                 if risk_tokens & blocked_risk_values:
                     snapshot_stats["skipped_risky_rows"] += 1
                     continue
-            if not is_always_send and not is_recontact_row:
-                if email_addr in current_already_done:
-                    continue
-                if args.global_dedupe and email_addr in global_done:
-                    snapshot_stats["skipped_global_logs"] += 1
-                    continue
+            if not is_always_send:
+                if args.provider not in {"private", "sendgrid"}:
+                    if email_addr in current_already_done:
+                        continue
+                    if args.global_dedupe and email_addr in global_done:
+                        snapshot_stats["skipped_global_logs"] += 1
+                        continue
                 if args.global_dedupe and email_addr in other_recipients:
                     snapshot_stats["skipped_global_recipients"] += 1
                     continue
@@ -4849,13 +5116,6 @@ def main():
             return
 
     domain_log_path = _resolve_log_path(args.domain_log) if args.domain_log else log_path
-    authoritative_sent_paths = authoritative_send_log_paths(
-        log_path,
-        domain_log_path,
-        profile_name=str(args.profile or ""),
-        provider=str(args.provider or ""),
-        current_csv=csv_path,
-    )
     global_block_refresher = GlobalBlockRefresher(
         unsubscribed_path=unsub_csv_path,
         suppressed_path=suppress_csv_path,
@@ -5198,6 +5458,16 @@ def main():
             str(args.provider or ""),
             args.max_messages_1h,
         )
+        if (
+            args.provider == "sendgrid"
+            and str(args.profile or "") in PRODUCTION_SENDGRID_PROFILES
+        ):
+            return sendgrid_wait_for_slot(
+                SENDGRID_RATE_STATE_DB_PATH,
+                domain_log_path,
+                args.max_messages_1h,
+                minimum_spacing_seconds=smooth_spacing,
+            )
         return domain_wait_for_slot(
             domain_log_path,
             args.max_messages_1h,
@@ -5213,13 +5483,29 @@ def main():
         if not reservation_token:
             return True
         try:
-            domain_finalize_attempt(
-                domain_log_path,
-                reservation_token,
-                email,
-                outcome,
-                info,
-            )
+            if (
+                args.provider == "sendgrid"
+                and str(args.profile or "") in PRODUCTION_SENDGRID_PROFILES
+            ):
+                sendgrid_finalize_attempt(
+                    SENDGRID_RATE_STATE_DB_PATH,
+                    domain_log_path,
+                    reservation_token,
+                    email,
+                    outcome,
+                    info,
+                )
+                global_block_refresher.acknowledge_nonblocking_append(
+                    domain_log_path
+                )
+            else:
+                domain_finalize_attempt(
+                    domain_log_path,
+                    reservation_token,
+                    email,
+                    outcome,
+                    info,
+                )
             return True
         except Exception as exc:
             error_text = single_line(str(exc))
@@ -5282,6 +5568,7 @@ def main():
                 campaign_type,
             ),
         )
+        global_block_refresher.acknowledge_nonblocking_append(log_path)
 
         if idempotency_reserved:
             record_send_idempotency_outcome(
@@ -5558,7 +5845,7 @@ def main():
                     next_index = idx + 1
                     continue
 
-                if not is_recontact_cold_campaign(row_campaign_type) and email_logged_sent_for_runtime(
+                if args.provider not in {"private", "sendgrid"} and email_logged_sent_for_runtime(
                     log_path,
                     to_email,
                     preview_sent_emails=preview_sent_emails,
@@ -5720,20 +6007,6 @@ def main():
                         continue
 
                 if not no_send_mode and args.provider in {"private", "sendgrid"}:
-                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info(
-                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family",
-                                row_campaign_type,
-                            ),
-                        )
-                        if to_email not in always_send_set:
-                            remove_email_from_csv(csv_path, to_email)
-                        next_index = idx + 1
-                        continue
                     queue_claim_receipt = claim_queue_row_with_receipt(csv_path, to_email)
                     if queue_claim_receipt is None:
                         log_row(
@@ -5741,18 +6014,6 @@ def main():
                             to_email,
                             "SKIP",
                             campaign_log_info("event_type=SKIPPED_QUEUE_ROW_ALREADY_CLAIMED", row_campaign_type),
-                        )
-                        next_index = idx + 1
-                        continue
-                    if email_logged_authoritative_sent_any(authoritative_sent_paths, to_email):
-                        log_row(
-                            log_path,
-                            to_email,
-                            "SKIP",
-                            campaign_log_info(
-                                f"event_type={SKIPPED_ALREADY_SENT_SAME_FAMILY} skip_reason=authoritative_same_family_after_claim",
-                                row_campaign_type,
-                            ),
                         )
                         next_index = idx + 1
                         continue

@@ -3406,13 +3406,9 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
                 f"authoritative_source={','.join(str(path) for path in suppression_paths)} "
                 f"fingerprint={_email_fingerprint(profile_suppressed)}"
             )
-        if profile_sent:
-            reasons.append("queue overlaps authoritative sent logs")
-            details.append(
-                f"profile={profile} queue={queue_path} overlap_count={len(profile_sent)} "
-                f"authoritative_source={','.join(str(path) for path in log_paths)} "
-                f"fingerprint={_email_fingerprint(profile_sent)}"
-            )
+        # Successful history remains visible in the report but is not a
+        # permanent suppression. Current-campaign idempotency below remains a
+        # fail-closed blocker.
         if profile_idempotency:
             idempotency_path = runtime_root / "data/state/send_idempotency.sqlite3"
             reasons.append("queue overlaps current idempotency state")

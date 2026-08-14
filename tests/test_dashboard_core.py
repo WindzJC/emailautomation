@@ -833,7 +833,7 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(0, report["live_preview_unique_emails"])
         self.assertIsNone(dashboard_core.queue_safety_alert(report))
 
-    def test_queue_safety_blocks_live_row_already_sent(self) -> None:
+    def test_queue_safety_reports_historical_sent_overlap_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             shards = base / "data" / "shards"
@@ -888,9 +888,9 @@ class DashboardCoreTests(unittest.TestCase):
             ):
                 report = dashboard_core.build_dashboard_queue_safety_report("private_jc")
 
-        self.assertFalse(report["safe"])
+        self.assertTrue(report["safe"])
         self.assertEqual(1, report["live_already_sent_overlap_count"])
-        self.assertIn("LIVE_ALREADY_SENT_OVERLAP", report["unsafe_reasons"])
+        self.assertNotIn("LIVE_ALREADY_SENT_OVERLAP", report["unsafe_reasons"])
 
     def test_queue_safety_alert_uses_unaccounted_missing_count(self) -> None:
         alert = dashboard_core.queue_safety_alert(
@@ -900,7 +900,7 @@ class DashboardCoreTests(unittest.TestCase):
                 "unsafe_reasons": ["LIVE_ALREADY_SENT_OVERLAP"],
                 "missing_from_preview_expected_count": 448,
                 "accounted_missing_from_preview_expected_count": 448,
-                "unaccounted_missing_from_preview_expected_count": 0,
+                "unaccounted_missing_from_preview_expected_count": 1,
                 "extra_vs_preview_expected_count": 0,
                 "live_already_sent_overlap_count": 1,
                 "overlap_with_triaged_reject": 0,
@@ -910,8 +910,7 @@ class DashboardCoreTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(alert)
-        self.assertIn("0 expected preview row(s) are missing without accounting", alert["message"])
-        self.assertIn("1 live row(s) already appear in authoritative sent logs", alert["message"])
+        self.assertIn("1 expected preview row(s) are missing without accounting", alert["message"])
 
     def test_queue_safety_blocks_unaccounted_missing_preview_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -971,7 +970,7 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(1, report["unaccounted_missing_from_preview_expected_count"])
         self.assertIn("MISSING_PREVIEW_PLANNED_ROWS", report["unsafe_reasons"])
 
-    def test_sendgrid_queue_safety_alert_still_blocks_sent_log_overlap(self) -> None:
+    def test_sendgrid_queue_safety_alert_does_not_block_historical_sent_overlap(self) -> None:
         alert = dashboard_core.queue_safety_alert(
             {
                 "safe": False,
@@ -984,9 +983,7 @@ class DashboardCoreTests(unittest.TestCase):
             }
         )
 
-        self.assertIsNotNone(alert)
-        self.assertEqual("Sendgrid queue unsafe", alert["title"])
-        self.assertTrue(alert["blocks_sending"])
+        self.assertIsNone(alert)
 
     def test_sendgrid_sent_history_counts_attempt_outcome_sent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

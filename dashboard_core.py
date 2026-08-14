@@ -3556,17 +3556,15 @@ def _apply_preview_queue_match(
     report["extra_vs_preview_expected_fingerprint"] = set_fingerprint(extra) if extra else ""
     report["live_already_sent_overlap_count"] = len(live_sent_overlap)
     report["live_already_sent_overlap_fingerprint"] = set_fingerprint(live_sent_overlap) if live_sent_overlap else ""
-    if missing and not unaccounted_missing and not extra and not live_sent_overlap:
+    if missing and not unaccounted_missing and not extra:
         report["partial_consumption_verified"] = True
         report["message"] = "Queue partially consumed — remaining recipients verified safe."
-    if unaccounted_missing or extra or live_sent_overlap:
+    if unaccounted_missing or extra:
         reasons = list(report.get("unsafe_reasons") or [])
         if unaccounted_missing:
             reasons.append("MISSING_PREVIEW_PLANNED_ROWS")
         if extra:
             reasons.append("EXTRA_ROWS_NOT_IN_PREVIEW")
-        if live_sent_overlap:
-            reasons.append("LIVE_ALREADY_SENT_OVERLAP")
         report["unsafe_reasons"] = reasons
         report["safe"] = False
 
@@ -3617,14 +3615,11 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
     outside_checked = int(report.get("outside_checked_output_count") or 0)
     outside_intended = int(report.get("outside_intended_source_count") or 0)
     source_reject_overlap = int(report.get("blocked_intended_source_reject_overlap_count") if "blocked_intended_source_reject_overlap_count" in report else report.get("intended_source_reject_overlap_count") or 0)
-    sendgrid_sent_overlap = int(report.get("sendgrid_already_sent_overlap_count") or 0)
     if "unaccounted_missing_from_preview_expected_count" in report:
         preview_missing = int(report.get("unaccounted_missing_from_preview_expected_count") or 0)
     else:
         preview_missing = int(report.get("missing_from_preview_expected_count") or 0)
     preview_extra = int(report.get("extra_vs_preview_expected_count") or 0)
-    live_sent_overlap = int(report.get("live_already_sent_overlap_count") or 0)
-    sendgrid_sent_allowed = bool(report.get("sendgrid_already_sent_overlap_allowed"))
     missing_header_shards = report.get("missing_required_header_shards")
     missing_header_count = len(missing_header_shards) if isinstance(missing_header_shards, list) else 0
     missing_header_text = ""
@@ -3642,9 +3637,7 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
             missing_header_text = " Required header issue(s): " + "; ".join(parts) + "."
     explicit_message = str(report.get("message") or "").strip()
     unsafe_reasons = {str(reason) for reason in (report.get("unsafe_reasons") or []) if str(reason or "").strip()}
-    count_violations = reject_overlap + outside_checked + outside_intended + source_reject_overlap + missing_header_count + preview_missing + preview_extra + live_sent_overlap
-    if "SENDGRID_ALREADY_SENT_OVERLAP" in unsafe_reasons and not sendgrid_sent_allowed:
-        count_violations += sendgrid_sent_overlap
+    count_violations = reject_overlap + outside_checked + outside_intended + source_reject_overlap + missing_header_count + preview_missing + preview_extra
     real_error_reasons = unsafe_reasons - {
         "TRIAGED_REJECT_OVERLAP",
         "OUTSIDE_CHECKED_OUTPUT",
@@ -3665,8 +3658,7 @@ def queue_safety_alert(report: Dict[str, object]) -> Dict[str, str] | None:
             f"{outside_checked} are outside the latest checked output, and "
             f"{outside_intended} are outside the intended source. "
             f"{preview_missing} expected preview row(s) are missing without accounting, "
-            f"{preview_extra} live row(s) are not in the selected preview, and "
-            f"{live_sent_overlap} live row(s) already appear in authoritative sent logs."
+            f"{preview_extra} live row(s) are not in the selected preview."
             f"{missing_header_text} "
             "Freeze sending and rebuild queues from the current campaign source."
         )

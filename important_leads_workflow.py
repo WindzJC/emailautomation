@@ -2726,48 +2726,6 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
         skipped_reason_total = sum(int(value or 0) for value in reasons.values())
         if skipped_rows != skipped_reason_total:
             raise RuntimeError("Dispatch preview skipped row count does not match skipped reasons. Re-run Preview Dispatch.")
-    if not is_recontact_cold_campaign(preview.get("campaign_type")):
-        if int(preview.get("planned_authoritative_sent_overlap_count") or preview.get("planned_sent_log_overlap_count") or 0) > 0:
-            raise RuntimeError("Dispatch preview overlaps authoritative sent/contact logs. Re-run Preview Dispatch.")
-        raw_paths = preview.get("authoritative_send_log_paths")
-        log_paths = [Path(str(path)) for path in raw_paths if str(path or "").strip()] if isinstance(raw_paths, list) else []
-        if not log_paths:
-            try:
-                _jc_path, _sendgrid_paths, jc_log_path, sendgrid_log_paths = _dispatch_profile_paths()
-                log_paths = [jc_log_path, *sendgrid_log_paths]
-            except Exception:
-                log_paths = []
-        private_log_paths = [
-            path for path in log_paths
-            if "private_jc" in path.name.lower()
-        ]
-        sendgrid_log_paths = [
-            path for path in log_paths
-            if "sendgrid" in path.name.lower()
-        ]
-        private_sent = _sent_email_set(private_log_paths)
-        sendgrid_sent = _sent_email_set(sendgrid_log_paths)
-
-        planned_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
-        planned_private_overlap = {
-            norm_email(row.get("Email", ""))
-            for row in (planned_rows_by_queue.get("private_jc") or [])
-            if isinstance(row, dict) and norm_email(row.get("Email", "")) in private_sent
-        }
-        planned_sendgrid_overlap: set[str] = set()
-        for queue_key in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"):
-            planned_sendgrid_overlap |= {
-                norm_email(row.get("Email", ""))
-                for row in (planned_rows_by_queue.get(queue_key) or [])
-                if isinstance(row, dict) and norm_email(row.get("Email", "")) in sendgrid_sent
-            }
-        planned_overlap = planned_private_overlap | planned_sendgrid_overlap
-        if planned_overlap:
-            raise RuntimeError(
-                f"Dispatch preview overlaps same-lane authoritative sent/contact logs for {len(planned_overlap)} planned recipient(s). Re-run Preview Dispatch."
-            )
-
-
 def load_dispatch_run_history(history_path: Path = DISPATCH_RUN_HISTORY_PATH) -> List[Dict[str, object]]:
     if not history_path.exists():
         return []
@@ -3068,7 +3026,10 @@ def _build_dispatch_plan(
     try:
         source_mode = _normalize_dispatch_source_mode(dispatch_source_mode)
         normalized_campaign_type = normalize_campaign_type(campaign_type)
-        allow_previously_sent = is_recontact_cold_campaign(normalized_campaign_type)
+        # Successful delivery is historical evidence, not permanent
+        # suppression. Queue and campaign idempotency still prevent duplicate
+        # submission inside the current dispatch.
+        allow_previously_sent = True
         source_state = _dispatch_source_snapshot(
             source_mode=source_mode,
             cleaned_path=master_path,
@@ -3244,14 +3205,10 @@ def _build_dispatch_plan(
             if email in (jc_sent | sendgrid_sent) and allow_previously_sent:
                 previously_sent_allowed += 1
 
-            prefer_sendgrid = allow_previously_sent and email in sendgrid_sent and email not in jc_sent
-            if not allow_previously_sent:
-                # Fresh cold campaigns should use both available delivery routes.
-                # Try Private JC first, then alternate with SendGrid while keeping
-                # the existing fallback path if either route rejects the row. If
-                # JC already sent the row, preserve the existing JC skip evidence
-                # before considering SendGrid as a fallback route.
-                prefer_sendgrid = added_astra > added_sendgrid and email not in jc_sent
+            # Preserve the existing balanced allocation across both delivery
+            # lanes. Historical success is evidence only and does not choose or
+            # block the lane for this distinct campaign.
+            prefer_sendgrid = added_astra > added_sendgrid
 
             def add_to_astra() -> bool:
                 nonlocal added_astra, other_family_sent_history_allowed
@@ -3803,9 +3760,10 @@ def _confirm_dispatch_preview_impl(
     sendgrid_log_paths = _confirm_sendgrid_log_paths(preview)
     sendgrid_sent_emails = _sent_email_set(sendgrid_log_paths)
     campaign_type = normalize_campaign_type(preview.get("campaign_type") or CAMPAIGN_TYPE_COLD)
-    allow_previously_sent = is_recontact_cold_campaign(campaign_type)
+    is_recontact_campaign = is_recontact_cold_campaign(campaign_type)
+    allow_previously_sent = True
     recontact_recency = preview.get("recontact_recency") if isinstance(preview.get("recontact_recency"), dict) else {}
-    if allow_previously_sent and bool(recontact_recency.get("high_risk")) and not allow_high_risk_recontact:
+    if is_recontact_campaign and bool(recontact_recency.get("high_risk")) and not allow_high_risk_recontact:
         raise RuntimeError(
             "Recontact preview has high recent-contact overlap. Confirm requires explicit override."
         )

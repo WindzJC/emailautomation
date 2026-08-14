@@ -2970,7 +2970,7 @@ def test_historical_campaign_metadata_does_not_become_sent_overlap(tmp_path):
     assert safety["queue_sent_overlap"] == 0
 
 
-def test_authoritative_sent_log_overlap_blocks_with_exact_profile_details(tmp_path):
+def test_authoritative_sent_log_overlap_is_reported_without_blocking_future_campaign(tmp_path):
     repo = tmp_path / "repo"
     _write_runtime(repo, ["current@example.test"])
     (repo / "data/logs/private_jc_log.csv").write_text(
@@ -2981,11 +2981,10 @@ def test_authoritative_sent_log_overlap_blocks_with_exact_profile_details(tmp_pa
 
     safety = runtime_handoff.recompute_queue_safety(repo)
 
-    assert safety["safe"] is False
+    assert safety["safe"] is True
     assert safety["queue_sent_overlap"] == 1
     assert safety["profiles"][0]["sent_overlap_count"] == 1
-    assert "profile=private_jc" in safety["failure_details"][0]
-    assert "private_jc_log.csv" in safety["failure_details"][0]
+    assert safety["failure_details"] == []
 
 
 def test_suppression_overlap_remains_fail_closed(tmp_path):

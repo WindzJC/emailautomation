@@ -1655,7 +1655,7 @@ class SendShardTests(unittest.TestCase):
             self.assertIn("phase=global_block_refresh", log_text)
             self.assertIn("event_type=DEFINITELY_NOT_SUBMITTED", log_text)
 
-    def test_preflight_reports_prune_without_mutating_shard_csv(self) -> None:
+    def test_preflight_does_not_prune_successful_history_or_mutate_shard_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
             profile["interval"] = 35
@@ -1708,12 +1708,12 @@ class SendShardTests(unittest.TestCase):
                     if path.is_file()
                 },
             )
-            self.assertIn("PRUNE: would remove 1 from recipients_sendgrid_1.csv (preflight only)", stdout.getvalue())
+            self.assertNotIn("PRUNE:", stdout.getvalue())
             self.assertIn("PACE RESOLVED: profile=sendgrid_annette", stdout.getvalue())
             self.assertIn("effective_spacing=35s", stdout.getvalue())
             self.assertIn("PREFLIGHT: ok (no sending).", stdout.getvalue())
 
-    def test_startup_guard_skips_initial_prune_without_mutating_shard_csv(self) -> None:
+    def test_startup_guard_does_not_prune_successful_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
             original_csv = csv_path.read_text(encoding="utf-8")
@@ -1747,10 +1747,11 @@ class SendShardTests(unittest.TestCase):
                 send_shard.main()
 
             self.assertEqual(original_csv, csv_path.read_text(encoding="utf-8"))
-            self.assertIn("PRUNE: startup would remove 1 from recipients_sendgrid_1.csv (guard active)", stdout.getvalue())
+            self.assertNotIn("PRUNE:", stdout.getvalue())
+            self.assertIn("DRYRUN already-sent@example.com", stdout.getvalue())
             self.assertIn("DRY RUN: no emails will be sent.", stdout.getvalue())
 
-    def test_startup_without_guard_prunes_shard_csv(self) -> None:
+    def test_startup_without_guard_still_preserves_successful_history_recipient(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile = self._build_sendgrid_runtime_fixture(tmpdir)
 
@@ -1785,10 +1786,10 @@ class SendShardTests(unittest.TestCase):
             with csv_path.open(newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(
-                ["astraproductionsbyjc@gmail.com", "fresh@example.com"],
+                ["already-sent@example.com", "astraproductionsbyjc@gmail.com", "fresh@example.com"],
                 [row["Email"] for row in rows],
             )
-            self.assertIn("PRUNE: removed 1 from recipients_sendgrid_1.csv", stdout.getvalue())
+            self.assertNotIn("PRUNE:", stdout.getvalue())
             self.assertIn("DRY RUN: no emails will be sent.", stdout.getvalue())
 
     def test_repeat_worker_refreshes_after_suppression_only_initial_snapshot(self) -> None:
@@ -2435,7 +2436,7 @@ class SendShardTests(unittest.TestCase):
             send_shard.profile_aggregate_spacing_seconds("private_jc", "private", 30),
         )
 
-    def test_concurrent_sendgrid_slots_form_one_smooth_shared_stream(self) -> None:
+    def test_concurrent_sendgrid_slots_form_one_smooth_shared_sqlite_stream(self) -> None:
         class FakeClock:
             def __init__(self) -> None:
                 self.current = datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc)
@@ -2451,6 +2452,7 @@ class SendShardTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             domain_log = Path(tmpdir) / "sendgrid_domain_log.csv"
+            rate_db = Path(tmpdir) / "sendgrid_rate_state.sqlite3"
             domain_log.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
             clock = FakeClock()
             barrier = threading.Barrier(5)
@@ -2459,7 +2461,8 @@ class SendShardTests(unittest.TestCase):
 
             def reserve() -> None:
                 barrier.wait()
-                token = domain_wait_for_slot(
+                token = send_shard.sendgrid_wait_for_slot(
+                    rate_db,
                     domain_log,
                     600,
                     jitter_sec=0,
@@ -2478,17 +2481,122 @@ class SendShardTests(unittest.TestCase):
 
             self.assertTrue(all(not worker.is_alive() for worker in workers))
             self.assertEqual(5, len(tokens))
-            with domain_log.open(newline="", encoding="utf-8-sig") as handle:
-                rows = list(csv.DictReader(handle))
+            with send_shard._sendgrid_rate_connection(rate_db) as conn:
+                timestamps = [
+                    datetime.fromtimestamp(row[0], timezone.utc)
+                    for row in conn.execute(
+                        "SELECT reserved_at_epoch FROM sendgrid_rate_slots "
+                        "ORDER BY reserved_at_epoch"
+                    ).fetchall()
+                ]
 
-        timestamps = sorted(_parse_ts_safe(row["TimestampUTC"]) for row in rows)
         self.assertEqual(5, len(timestamps))
-        self.assertTrue(all(timestamp is not None for timestamp in timestamps))
         gaps = [
             (later - earlier).total_seconds()
             for earlier, later in zip(timestamps, timestamps[1:])
         ]
         self.assertTrue(all(gap >= 6.0 for gap in gaps), gaps)
+
+    def test_sendgrid_rate_state_bootstraps_history_once_and_appends_audit(self) -> None:
+        now = datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc)
+
+        class Clock:
+            current = now
+
+            @classmethod
+            def read(cls) -> datetime:
+                return cls.current
+
+            @classmethod
+            def sleep(cls, seconds: float) -> None:
+                cls.current += timedelta(seconds=seconds)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            domain_log = root / "sendgrid_domain_log.csv"
+            rate_db = root / "sendgrid_rate_state.sqlite3"
+            original = (
+                "TimestampUTC,Email,Status,Info\n"
+                f"{(now - timedelta(minutes=5)).isoformat()},old@example.com,ATTEMPT,outcome=sent\n"
+            ).encode()
+            domain_log.write_bytes(original)
+
+            token = send_shard.sendgrid_wait_for_slot(
+                rate_db,
+                domain_log,
+                600,
+                jitter_sec=0,
+                minimum_spacing_seconds=6.0,
+                now_fn=Clock.read,
+                sleep_fn=Clock.sleep,
+            )
+            send_shard.sendgrid_finalize_attempt(
+                rate_db,
+                domain_log,
+                token,
+                "new@example.com",
+                "sent",
+            )
+            Clock.current += timedelta(seconds=6)
+            with patch.object(
+                send_shard,
+                "_legacy_sendgrid_rate_rows",
+                side_effect=AssertionError("historical CSV was rescanned"),
+            ), patch.object(
+                send_shard,
+                "_write_domain_log_rows",
+                side_effect=AssertionError("historical CSV was rewritten"),
+            ):
+                second = send_shard.sendgrid_wait_for_slot(
+                    rate_db,
+                    domain_log,
+                    600,
+                    jitter_sec=0,
+                    minimum_spacing_seconds=6.0,
+                    now_fn=Clock.read,
+                    sleep_fn=Clock.sleep,
+                )
+                send_shard.sendgrid_finalize_attempt(
+                    rate_db,
+                    domain_log,
+                    second,
+                    "second@example.com",
+                    "sent",
+                )
+
+            final_bytes = domain_log.read_bytes()
+            self.assertTrue(final_bytes.startswith(original))
+            self.assertEqual(3, len(list(csv.DictReader(io.StringIO(final_bytes.decode())))))
+            with send_shard._sendgrid_rate_connection(rate_db) as conn:
+                self.assertEqual(
+                    3,
+                    conn.execute("SELECT COUNT(*) FROM sendgrid_rate_slots").fetchone()[0],
+                )
+
+    def test_success_log_append_does_not_reload_global_block_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            log_path = root / "sendgrid_annette_log.csv"
+            log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            empty_csv = root / "empty.csv"
+            empty_csv.write_text("Email\n", encoding="utf-8")
+            refresher = send_shard.GlobalBlockRefresher(
+                unsubscribed_path=empty_csv,
+                suppressed_path=empty_csv,
+                sendgrid_suppression_path=empty_csv,
+                sendgrid_events_path=root / "events.jsonl",
+                authoritative_log_paths=[log_path],
+                ledger_path=root / "ledger.sqlite3",
+                include_sendgrid_sources=False,
+            )
+            with patch.object(
+                send_shard, "load_ledger_blocked_emails", return_value=set()
+            ) as load_ledger:
+                refresher.refresh(force=True)
+                send_shard.log_row(log_path, "history@example.com", "SENT")
+                self.assertTrue(refresher.acknowledge_nonblocking_append(log_path))
+                self.assertEqual("", refresher.classification("fresh@example.com"))
+            self.assertEqual(1, load_ledger.call_count)
 
     def test_sendgrid_429_classification_remains_throttle_protected(self) -> None:
         self.assertEqual("TEMP_THROTTLE", send_shard.classify_sendgrid_runtime_error("HTTP error 429"))
@@ -3825,7 +3933,7 @@ class SendShardTests(unittest.TestCase):
                     with queue_path.open(newline="", encoding="utf-8-sig") as handle:
                         self.assertEqual([row], list(csv.DictReader(handle)))
 
-    def test_warm_reservation_blocks_cross_lane_reservation(self) -> None:
+    def test_cross_lane_idempotency_blocks_same_campaign_but_allows_future_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "idempotency.sqlite3"
             cold_reserved, _ = send_shard.reserve_send_idempotency(
@@ -3837,7 +3945,15 @@ class SendShardTests(unittest.TestCase):
                 db_path=db_path,
             )
             warm_reserved, reason = send_shard.reserve_send_idempotency(
-                campaign_id="warm-campaign",
+                campaign_id="cold-campaign",
+                provider="private",
+                email="synthetic@example.com",
+                profile="private_jc_warm",
+                queue_file="recipients_private_jc_warm.csv",
+                db_path=db_path,
+            )
+            future_reserved, future_reason = send_shard.reserve_send_idempotency(
+                campaign_id="future-campaign",
                 provider="private",
                 email="synthetic@example.com",
                 profile="private_jc_warm",
@@ -3848,6 +3964,41 @@ class SendShardTests(unittest.TestCase):
         self.assertTrue(cold_reserved)
         self.assertFalse(warm_reserved)
         self.assertEqual("cross_lane_reservation", reason)
+        self.assertTrue(future_reserved)
+        self.assertEqual("reserved", future_reason)
+
+    def test_sendgrid_idempotency_allows_history_only_in_distinct_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "idempotency.sqlite3"
+            first, _ = send_shard.reserve_send_idempotency(
+                campaign_id="campaign-one",
+                provider="sendgrid",
+                email="synthetic@example.com",
+                profile="sendgrid_annette",
+                queue_file="recipients_sendgrid_1.csv",
+                db_path=db_path,
+            )
+            future, _ = send_shard.reserve_send_idempotency(
+                campaign_id="campaign-two",
+                provider="sendgrid",
+                email="synthetic@example.com",
+                profile="sendgrid_alison",
+                queue_file="recipients_sendgrid_4.csv",
+                db_path=db_path,
+            )
+            duplicate, reason = send_shard.reserve_send_idempotency(
+                campaign_id="campaign-two",
+                provider="sendgrid",
+                email="synthetic@example.com",
+                profile="sendgrid_jordan",
+                queue_file="recipients_sendgrid_2.csv",
+                db_path=db_path,
+            )
+
+        self.assertTrue(first)
+        self.assertTrue(future)
+        self.assertFalse(duplicate)
+        self.assertEqual("duplicate_reservation", reason)
 
 
 if __name__ == "__main__":

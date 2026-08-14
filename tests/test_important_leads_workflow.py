@@ -1419,22 +1419,22 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["dispatch_eligible_row_count"], 9)
             self.assertFalse(report["verification_required"])
             self.assertEqual(report["added_astra"], 3)
-            self.assertEqual(report["skipped_astra_already_sent"], 1)
+            self.assertEqual(report["skipped_astra_already_sent"], 0)
             self.assertEqual(report["skipped_astra_already_queued"], 1)
-            self.assertEqual(report["added_sendgrid"], 2)
-            self.assertEqual(report["skipped_sendgrid_already_sent"], 1)
+            self.assertEqual(report["added_sendgrid"], 3)
+            self.assertEqual(report["skipped_sendgrid_already_sent"], 0)
             self.assertEqual(report["skipped_sendgrid_already_queued"], 1)
-            self.assertEqual(report["skipped_already_sent_same_family"], 2)
+            self.assertEqual(report["skipped_already_sent_same_family"], 0)
             self.assertEqual(report["already_sent_other_family_allowed"], 2)
             self.assertEqual(report["skipped_already_queued"], 1)
             self.assertEqual(report["suppressed_skipped"], 1)
             self.assertEqual(report["duplicate_master_skipped"], 1)
             self.assertEqual(report["assigned_sg1"], 1)
             self.assertEqual(report["assigned_sg2"], 1)
-            self.assertEqual(report["assigned_sg3"], 0)
+            self.assertEqual(report["assigned_sg3"], 1)
             self.assertEqual(report["assigned_sg4"], 0)
             self.assertEqual(report["assigned_sg5"], 0)
-            self.assertEqual(report["skipped_both"], 2)
+            self.assertEqual(report["skipped_both"], 1)
 
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
@@ -2205,7 +2205,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_fresh_cold_preview_excludes_sendgrid_already_sent_before_safety(self) -> None:
+    def test_future_fresh_cold_campaign_allows_successful_sendgrid_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -2286,17 +2286,21 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 lead_ledger_db_path=ledger_db_path,
                 preview_dir=preview_dir,
             )
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(0, preview["skipped_already_sent"])
             self.assertEqual(0, preview["skipped_rows"])
             self.assertEqual({}, preview["exclusion_reason_counts"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
-            sendgrid_emails: list[str] = []
-            for path in sg_queues:
-                with path.open(newline="", encoding="utf-8-sig") as handle:
-                    sendgrid_emails.extend(row["Email"] for row in csv.DictReader(handle))
-            self.assertEqual([], sendgrid_emails)
+            sendgrid_emails = [
+                row["Email"]
+                for queue_name in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5")
+                for row in preview["plan_rows_by_queue"][queue_name]
+            ]
+            self.assertEqual(
+                ["beta@example.com"],
+                sorted(sendgrid_emails),
+            )
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
             try:
                 alpha_id = lead_ledger.deterministic_lead_id("alpha@example.com")
@@ -2697,7 +2701,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 campaign_type="recontact_cold",
                 preview_dir=preview_dir,
             )
-            self.assertEqual(2, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["rows_to_add_private_jc"])
 
             report = confirm_dispatch_preview(
                 preview["preview_id"],
@@ -2711,16 +2716,16 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("completed", report["status"])
             self.assertEqual("recontact_cold", report["campaign_type"])
             self.assertEqual(0, report["confirm_filtered_sendgrid_already_sent"])
-            self.assertEqual(2, sum(report["rows_written_sendgrid_shards"].values()))
-            self.assertEqual(0, report["rows_written_private_jc"])
+            self.assertEqual(1, sum(report["rows_written_sendgrid_shards"].values()))
+            self.assertEqual(1, report["rows_written_private_jc"])
             self.assertEqual(2, report["total_rows_would_write"])
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
-                self.assertEqual([], [row["Email"] for row in csv.DictReader(handle)])
+                self.assertEqual(["alpha@example.com"], [row["Email"] for row in csv.DictReader(handle)])
             sendgrid_emails: list[str] = []
             for path in sg_queues:
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     sendgrid_emails.extend(row["Email"] for row in csv.DictReader(handle))
-            self.assertEqual(["alpha@example.com", "beta@example.com"], sendgrid_emails)
+            self.assertEqual(["beta@example.com"], sendgrid_emails)
 
     def test_confirm_dispatch_preview_failure_preserves_staged_files_and_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3233,13 +3238,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(100, capped["selected_rows"])
             self.assertEqual(0, capped["skipped_already_contacted"])
-            self.assertEqual(90, capped["rows_to_add_private_jc"])
-            self.assertEqual(10, capped["rows_to_add_sendgrid"])
-            self.assertEqual(2, capped["assigned_sg1"])
-            self.assertEqual(2, capped["assigned_sg2"])
-            self.assertEqual(2, capped["assigned_sg3"])
-            self.assertEqual(2, capped["assigned_sg4"])
-            self.assertEqual(2, capped["assigned_sg5"])
+            self.assertEqual(50, capped["rows_to_add_private_jc"])
+            self.assertEqual(50, capped["rows_to_add_sendgrid"])
+            self.assertEqual(10, capped["assigned_sg1"])
+            self.assertEqual(10, capped["assigned_sg2"])
+            self.assertEqual(10, capped["assigned_sg3"])
+            self.assertEqual(10, capped["assigned_sg4"])
+            self.assertEqual(10, capped["assigned_sg5"])
 
     def test_preview_dispatch_cap_stops_after_lane_fallback_fills_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3255,13 +3260,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(100, capped["selected_rows"])
             self.assertEqual(0, capped["skipped_already_contacted"])
-            self.assertEqual(10, capped["rows_to_add_sendgrid"])
-            self.assertEqual(90, capped["rows_to_add_private_jc"])
-            self.assertEqual(2, capped["assigned_sg1"])
-            self.assertEqual(2, capped["assigned_sg2"])
-            self.assertEqual(2, capped["assigned_sg3"])
-            self.assertEqual(2, capped["assigned_sg4"])
-            self.assertEqual(2, capped["assigned_sg5"])
+            self.assertEqual(50, capped["rows_to_add_sendgrid"])
+            self.assertEqual(50, capped["rows_to_add_private_jc"])
+            self.assertEqual(10, capped["assigned_sg1"])
+            self.assertEqual(10, capped["assigned_sg2"])
+            self.assertEqual(10, capped["assigned_sg3"])
+            self.assertEqual(10, capped["assigned_sg4"])
+            self.assertEqual(10, capped["assigned_sg5"])
 
     def test_preview_dispatch_master_leads_missing_source_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3419,8 +3424,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
     def test_preview_dispatch_scopes_ledger_contact_history_by_lane(self) -> None:
         scenarios = [
-            ("private_jc", "private_jc", "delivered", 0, 1, 0, {}),
-            ("private_jc_warm", "private_jc_warm", "delivered", 0, 1, 0, {}),
+            ("private_jc", "private_jc", "delivered", 1, 0, 0, {}),
+            ("private_jc_warm", "private_jc_warm", "delivered", 1, 0, 0, {}),
             ("sendgrid_jordan", "sendgrid_2", "delivered", 1, 0, 0, {}),
             ("private_jc", "private_jc", "complaint", 0, 0, 0, {"bad_contact_history": 1}),
         ]
@@ -3477,7 +3482,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 self.assertEqual(expected_contacted, preview["skipped_already_contacted"])
                 self.assertEqual(expected_reasons, preview["exclusion_reason_counts"])
 
-    def test_preview_dispatch_skips_only_when_both_lanes_were_contacted(self) -> None:
+    def test_preview_dispatch_allows_future_campaign_after_both_lanes_contacted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3526,9 +3531,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=tmp / "previews",
             )
 
-            self.assertEqual(0, preview["total_planned_unique_count"])
-            self.assertEqual(1, preview["skipped_already_contacted"])
-            self.assertEqual({"already_contacted": 1}, preview["exclusion_reason_counts"])
+            self.assertEqual(1, preview["total_planned_unique_count"])
+            self.assertEqual(0, preview["skipped_already_contacted"])
+            self.assertEqual({}, preview["exclusion_reason_counts"])
 
     def test_warm_private_queue_blocks_astra_but_allows_sendgrid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3640,7 +3645,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(0, preview["history_source_category_counts"]["already_contacted_from_contact_history"])
             self.assertEqual(0, preview["history_source_category_counts"]["already_sent_from_actual_send_log"])
 
-    def test_fresh_cold_preview_excludes_authoritative_sendgrid_domain_sent_history(self) -> None:
+    def test_fresh_cold_preview_allows_authoritative_sendgrid_domain_sent_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3723,7 +3728,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 },
                 planned_emails,
             )
-            self.assertFalse(sendgrid_planned_emails & authoritative_sent)
+            self.assertEqual({"domain-sent@example.com"}, sendgrid_planned_emails & authoritative_sent)
             self.assertEqual(0, preview["skipped_already_sent"])
             self.assertEqual(0, preview["skipped_rows"])
             self.assertEqual({}, preview["exclusion_reason_counts"])
@@ -3762,7 +3767,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
         _validate_dispatch_preview_contract(preview)
 
-    def test_fresh_cold_preview_contract_blocks_sent_log_overlap(self) -> None:
+    def test_future_campaign_preview_contract_allows_sent_log_overlap(self) -> None:
         preview = {
             "campaign_type": "cold",
             "dispatch_source_mode": "triaged_keep",
@@ -3786,8 +3791,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             },
         }
 
-        with self.assertRaisesRegex(RuntimeError, "overlaps authoritative sent/contact logs"):
-            _validate_dispatch_preview_contract(preview)
+        _validate_dispatch_preview_contract(preview)
 
     def test_fresh_cold_preview_contract_blocks_skipped_math_mismatch(self) -> None:
         preview = {

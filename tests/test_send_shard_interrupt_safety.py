@@ -144,6 +144,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
         domain_calls = []
 
         def domain_finalize(
+            _state_path,
             path,
             token,
             email,
@@ -306,7 +307,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(
                     send_shard,
-                    "domain_wait_for_slot",
+                    "sendgrid_wait_for_slot",
                     return_value="synthetic-slot-token",
                 )
             )
@@ -314,7 +315,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(
                     send_shard,
-                    "domain_finalize_attempt",
+                    "sendgrid_finalize_attempt",
                     side_effect=domain_finalize,
                 )
             )
