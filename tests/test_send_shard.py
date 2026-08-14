@@ -5,6 +5,7 @@ import csv
 import imaplib
 import io
 import json
+import os
 import smtplib
 import sys
 import tempfile
@@ -193,17 +194,31 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(get_personalization_name(old_row), "Alice")
         self.assertEqual(get_personalization_name(blocked_new_row), "")
 
-    def test_sendgrid_profile_defaults_use_35s_pacing_and_keep_noon_stop(self) -> None:
-        for profile_name in [
-            "sendgrid_annette",
-            "sendgrid_jordan",
-            "sendgrid_jodi",
-            "sendgrid_alison",
-            "sendgrid_fiorela",
-        ]:
+    def test_production_sendgrid_profiles_use_shared_smooth_pacing_and_keep_noon_stop(self) -> None:
+        self.assertEqual(
+            {
+                "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
+                "sendgrid_jodi",
+                "sendgrid_jordan",
+            },
+            set(send_shard.PRODUCTION_SENDGRID_PROFILES),
+        )
+        self.assertNotIn(send_shard.CONTROLLED_SENDGRID_PROFILE, send_shard.PRODUCTION_SENDGRID_PROFILES)
+        self.assertEqual(
+            {"sendgrid_domain_log.csv"},
+            {
+                str(send_shard.PROFILES[name]["domain_log"])
+                for name in send_shard.PRODUCTION_SENDGRID_PROFILES
+            },
+        )
+        for profile_name in send_shard.PRODUCTION_SENDGRID_PROFILES:
             profile = send_shard.PROFILES[profile_name]
             self.assertEqual(35, profile["interval"])
-            self.assertEqual(35, profile["cooldown_seconds"])
+            self.assertEqual(0, profile["cooldown_seconds"])
+            self.assertEqual(1, profile["batch_size"])
+            self.assertFalse(bool(profile.get("human_mode")))
             self.assertEqual("12:00", profile["stop_at_local"])
 
     def test_controlled_sendgrid_profile_is_isolated_and_hard_limited(self) -> None:
@@ -307,6 +322,8 @@ class SendShardTests(unittest.TestCase):
         profile = send_shard.PROFILES["private_jc"]
         self.assertEqual(60, profile["interval"])
         self.assertEqual(60, profile["cooldown_seconds"])
+        self.assertEqual(30, profile["max_messages_1h"])
+        self.assertTrue(profile["human_mode"])
         self.assertEqual("12:00", profile["stop_at_local"])
 
     def test_attempt_outcome_sent_counts_as_authoritative_sent(self) -> None:
@@ -2385,7 +2402,96 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual("lead1@example.com", ordered[1]["Email"])
 
     def test_sendgrid_hourly_cap_matches_parallel_pacing(self) -> None:
-        self.assertEqual(180, PROVIDER_LIMIT_DEFAULTS["sendgrid"]["max_messages_1h"])
+        self.assertEqual(600, PROVIDER_LIMIT_DEFAULTS["sendgrid"]["max_messages_1h"])
+        self.assertEqual(6.0, send_shard.aggregate_spacing_seconds(600))
+
+    def test_sendgrid_hourly_cap_environment_override_drives_spacing(self) -> None:
+        with patch.dict(os.environ, {"SENDGRID_MAX_MESSAGES_1H": "600"}):
+            limit = send_shard.configured_sendgrid_max_messages_1h()
+        self.assertEqual(600, limit)
+        self.assertEqual(6.0, send_shard.aggregate_spacing_seconds(limit))
+
+        with patch.dict(os.environ, {"SENDGRID_MAX_MESSAGES_1H": "not-a-number"}):
+            self.assertEqual(600, send_shard.configured_sendgrid_max_messages_1h())
+        with patch.dict(os.environ, {"SENDGRID_MAX_MESSAGES_1H": "0"}):
+            self.assertEqual(1, send_shard.configured_sendgrid_max_messages_1h())
+
+    def test_smooth_aggregate_spacing_is_scoped_to_production_sendgrid_profiles(self) -> None:
+        for profile_name in send_shard.PRODUCTION_SENDGRID_PROFILES:
+            self.assertEqual(
+                6.0,
+                send_shard.profile_aggregate_spacing_seconds(profile_name, "sendgrid", 600),
+            )
+        self.assertEqual(
+            0.0,
+            send_shard.profile_aggregate_spacing_seconds(
+                send_shard.CONTROLLED_SENDGRID_PROFILE,
+                "sendgrid",
+                600,
+            ),
+        )
+        self.assertEqual(
+            0.0,
+            send_shard.profile_aggregate_spacing_seconds("private_jc", "private", 30),
+        )
+
+    def test_concurrent_sendgrid_slots_form_one_smooth_shared_stream(self) -> None:
+        class FakeClock:
+            def __init__(self) -> None:
+                self.current = datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc)
+                self.lock = threading.Lock()
+
+            def now(self) -> datetime:
+                with self.lock:
+                    return self.current
+
+            def sleep(self, seconds: float) -> None:
+                with self.lock:
+                    self.current += timedelta(seconds=seconds)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            domain_log = Path(tmpdir) / "sendgrid_domain_log.csv"
+            domain_log.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            clock = FakeClock()
+            barrier = threading.Barrier(5)
+            tokens: list[str] = []
+            token_lock = threading.Lock()
+
+            def reserve() -> None:
+                barrier.wait()
+                token = domain_wait_for_slot(
+                    domain_log,
+                    600,
+                    jitter_sec=0,
+                    minimum_spacing_seconds=send_shard.aggregate_spacing_seconds(600),
+                    now_fn=clock.now,
+                    sleep_fn=clock.sleep,
+                )
+                with token_lock:
+                    tokens.append(token)
+
+            workers = [threading.Thread(target=reserve) for _ in range(5)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(5, len(tokens))
+            with domain_log.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+
+        timestamps = sorted(_parse_ts_safe(row["TimestampUTC"]) for row in rows)
+        self.assertEqual(5, len(timestamps))
+        self.assertTrue(all(timestamp is not None for timestamp in timestamps))
+        gaps = [
+            (later - earlier).total_seconds()
+            for earlier, later in zip(timestamps, timestamps[1:])
+        ]
+        self.assertTrue(all(gap >= 6.0 for gap in gaps), gaps)
+
+    def test_sendgrid_429_classification_remains_throttle_protected(self) -> None:
+        self.assertEqual("TEMP_THROTTLE", send_shard.classify_sendgrid_runtime_error("HTTP error 429"))
 
     def test_slot_reservations_expire_faster_than_sent_rows(self) -> None:
         now = datetime(2026, 3, 13, 13, 0, tzinfo=timezone.utc)

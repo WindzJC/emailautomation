@@ -93,7 +93,11 @@ _IDEMPOTENCY_SCHEMA_LOCK = threading.Lock()
 _IDEMPOTENCY_SCHEMA_READY: set[str] = set()
 
 
-SENDGRID_MAX_MESSAGES_1H = max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 180))
+def configured_sendgrid_max_messages_1h() -> int:
+    return max(1, _env_int("SENDGRID_MAX_MESSAGES_1H", 600))
+
+
+SENDGRID_MAX_MESSAGES_1H = configured_sendgrid_max_messages_1h()
 
 PROVIDER_LIMIT_DEFAULTS = {
     "private": {"max_messages_1h": 80},
@@ -440,7 +444,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
-        "cooldown_seconds": 35,
+        "cooldown_seconds": 0,
         "repeat": True,
         "stop_at_local": "12:00",
         "max_total": 201,
@@ -463,7 +467,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
-        "cooldown_seconds": 35,
+        "cooldown_seconds": 0,
         "repeat": True,
         "stop_at_local": "12:00",
         "max_total": 201,
@@ -486,7 +490,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
-        "cooldown_seconds": 35,
+        "cooldown_seconds": 0,
         "repeat": True,
         "stop_at_local": "12:00",
         "max_total": 201,
@@ -509,7 +513,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
-        "cooldown_seconds": 35,
+        "cooldown_seconds": 0,
         "repeat": True,
         "stop_at_local": "12:00",
         "max_total": 201,
@@ -532,7 +536,7 @@ PROFILES: Dict[str, Dict[str, object]] = {
         "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
-        "cooldown_seconds": 35,
+        "cooldown_seconds": 0,
         "repeat": True,
         "stop_at_local": "12:00",
         "max_total": 201,
@@ -578,6 +582,15 @@ PROFILES: Dict[str, Dict[str, object]] = {
 
 
 }
+
+
+PRODUCTION_SENDGRID_PROFILES = (
+    "sendgrid_alison",
+    "sendgrid_annette",
+    "sendgrid_fiorela",
+    "sendgrid_jodi",
+    "sendgrid_jordan",
+)
 
 
 def _managed_path(base_dir: Path, value: object) -> Path:
@@ -3706,7 +3719,7 @@ def classify_sendgrid_runtime_error(text: str) -> str:
     return "OTHER"
 
 
-# ===== Rolling 1h guard (PrivateEmail shared bucket) =====
+# ===== Shared rolling-hour provider guard =====
 def _parse_ts_safe(ts: str) -> Optional[datetime]:
     try:
         return datetime.fromisoformat((ts or "").strip().replace("Z", "+00:00"))
@@ -3736,12 +3749,43 @@ def _domain_attempt_info(reservation_token: str, outcome: str, info: str = "") -
     return details[:300]
 
 
-def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec: int = 5) -> str:
+def aggregate_spacing_seconds(max_messages_1h: int) -> float:
+    """Return the smooth spacing for one shared rolling-hour attempt stream."""
+    try:
+        limit = int(max_messages_1h)
+    except (TypeError, ValueError):
+        return 0.0
+    if limit <= 0:
+        return 0.0
+    return 3600.0 / limit
+
+
+def profile_aggregate_spacing_seconds(
+    profile_name: str,
+    provider: str,
+    max_messages_1h: int,
+) -> float:
+    if provider != "sendgrid" or profile_name not in PRODUCTION_SENDGRID_PROFILES:
+        return 0.0
+    return aggregate_spacing_seconds(max_messages_1h)
+
+
+def domain_wait_for_slot(
+    domain_log_path: Path,
+    max_messages_1h: int,
+    jitter_sec: int = 5,
+    *,
+    minimum_spacing_seconds: float = 0.0,
+    now_fn=None,
+    sleep_fn=None,
+) -> str:
     """
     Domain-wide rolling 60-min limiter using a file lock.
     Counts ATTEMPT rows in the last hour plus only active SLOT reservations.
     Legacy SENT rows are still counted during the transition away from SENT-based
     limiting so the rolling window stays conservative until old rows age out.
+    When minimum_spacing_seconds is positive, the same lock also serializes
+    reservations into one smooth aggregate stream rather than allowing a burst.
     """
     if max_messages_1h <= 0:
         return ""
@@ -3754,8 +3798,11 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
             w.writeheader()
 
     reservation_token = uuid.uuid4().hex
+    clock = now_fn or (lambda: datetime.now(timezone.utc))
+    sleeper = sleep_fn or time.sleep
+    smooth_spacing = max(0.0, float(minimum_spacing_seconds or 0.0))
     while True:
-        now = datetime.now(timezone.utc)
+        now = clock()
         cutoff = now - timedelta(hours=1)
         slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
 
@@ -3766,6 +3813,7 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
             rows = list(csv.DictReader(f))
 
             expiry_times: List[datetime] = []
+            pacing_times: List[datetime] = []
             for r in rows:
                 st = (r.get("Status") or "").strip().upper()
                 if st not in ("ATTEMPT", "SENT", "SLOT"):
@@ -3775,14 +3823,29 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
                     continue
                 if st in {"ATTEMPT", "SENT"} and t >= cutoff:
                     expiry_times.append(t + timedelta(hours=1))
+                    pacing_times.append(t)
                     continue
                 if st == "SLOT" and t >= slot_cutoff:
                     expiry_times.append(t + timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS))
+                    pacing_times.append(t)
 
             expiry_times.sort()
             used = len(expiry_times)
+            rolling_wait_until = expiry_times[0] if used >= max_messages_1h and expiry_times else None
+            spacing_wait_until = None
+            if smooth_spacing > 0 and pacing_times:
+                spacing_wait_until = max(pacing_times) + timedelta(seconds=smooth_spacing)
+                if spacing_wait_until <= now:
+                    spacing_wait_until = None
 
-            if used < max_messages_1h:
+            wait_until_candidates = [
+                candidate
+                for candidate in (rolling_wait_until, spacing_wait_until)
+                if candidate is not None
+            ]
+            wait_until = max(wait_until_candidates) if wait_until_candidates else None
+
+            if used < max_messages_1h and wait_until is None:
                 f.seek(0, os.SEEK_END)
                 w = csv.DictWriter(f, fieldnames=_domain_log_fieldnames())
                 w.writerow({
@@ -3796,11 +3859,12 @@ def domain_wait_for_slot(domain_log_path: Path, max_messages_1h: int, jitter_sec
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 return reservation_token
 
-            earliest = expiry_times[0] if expiry_times else (now + timedelta(seconds=30))
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-        wait_s = max(1, int((earliest - datetime.now(timezone.utc)).total_seconds())) + random.randint(0, jitter_sec)
-        time.sleep(wait_s)
+        wait_s = max(0.001, (wait_until - clock()).total_seconds()) if wait_until else 1.0
+        if rolling_wait_until is not None:
+            wait_s += random.randint(0, max(0, int(jitter_sec)))
+        sleeper(wait_s)
 
 
 def domain_finalize_attempt(domain_log_path: Path, reservation_token: str, email: str, outcome: str, info: str = "") -> None:
@@ -5129,7 +5193,16 @@ def main():
             return ""
         if args.provider not in ("private", "sendgrid") or not args.max_messages_1h:
             return ""
-        return domain_wait_for_slot(domain_log_path, args.max_messages_1h)
+        smooth_spacing = profile_aggregate_spacing_seconds(
+            str(args.profile or ""),
+            str(args.provider or ""),
+            args.max_messages_1h,
+        )
+        return domain_wait_for_slot(
+            domain_log_path,
+            args.max_messages_1h,
+            minimum_spacing_seconds=smooth_spacing,
+        )
 
     def finalize_domain_attempt_slot(
         reservation_token: str,

@@ -33,6 +33,7 @@ from send_shard import (
     DOMAIN_SLOT_TTL_SECONDS,
     PROFILES,
     PROVIDER_LIMIT_DEFAULTS,
+    aggregate_spacing_seconds,
     profile_runtime_lock_status,
 )
 from sendgrid_hygiene import (
@@ -408,7 +409,7 @@ def dashboard_send_cap_per_profile() -> int:
 
 
 def dashboard_sendgrid_hourly_target_cap() -> int:
-    return max(1, math.ceil(dashboard_send_target_total() / SENDGRID_TARGET_WINDOW_HOURS))
+    return sendgrid_hourly_cap_limit()
 
 
 def sendgrid_hourly_cap_limit() -> int:
@@ -421,13 +422,13 @@ def sendgrid_hourly_cap_limit() -> int:
         if value > 0:
             return value
     try:
-        return max(1, int(PROVIDER_LIMIT_DEFAULTS.get("sendgrid", {}).get("max_messages_1h") or 1000))
+        return max(1, int(PROVIDER_LIMIT_DEFAULTS.get("sendgrid", {}).get("max_messages_1h") or 600))
     except Exception:
-        return 1000
+        return 600
 
 
 def build_sendgrid_hourly_cap_status(now: Optional[datetime] = None) -> Dict[str, object]:
-    """Expose the dashboard-selected rolling 1h SendGrid pacing target."""
+    """Expose the configured rolling 1h SendGrid pacing target."""
     limit = dashboard_sendgrid_hourly_target_cap()
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=1)
@@ -1900,6 +1901,11 @@ def load_profile_snapshot(
     interval_seconds = max(0, int(cfg.get("interval") or 0))
     cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
     effective_spacing_seconds = cooldown_seconds if bool(cfg.get("repeat")) and cooldown_seconds > 0 else interval_seconds
+    if profile_name in SENDGRID_PROFILES:
+        effective_spacing_seconds = max(
+            1,
+            math.ceil(aggregate_spacing_seconds(sendgrid_hourly_cap_limit())),
+        )
     provider_name = str(cfg.get("provider") or "").strip().lower()
     pacing = provider_pacing_status(profile_name, provider_name, cooldown_seconds)
     effective_cooldown_seconds = max(cooldown_seconds, int(pacing.get("recommended_cooldown_seconds") or 0))

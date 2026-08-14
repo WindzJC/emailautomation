@@ -1498,7 +1498,7 @@ class DashboardCoreTests(unittest.TestCase):
                     "from_email": "alpha@example.com",
                     "always_send": "probe@example.com",
                     "interval": 35,
-                    "cooldown_seconds": 35,
+                    "cooldown_seconds": 0,
                     "repeat": True,
                     "stop_at_local": "12:00",
                     "max_total": 100,
@@ -1519,10 +1519,10 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(5000, snapshot["profiles"][0]["max_total"])
         self.assertEqual(100, snapshot["profiles"][0]["configured_max_total"])
         self.assertEqual(35, snapshot["profiles"][0]["interval_seconds"])
-        self.assertEqual(35, snapshot["profiles"][0]["effective_spacing_seconds"])
-        self.assertEqual(103, snapshot["profiles"][0]["effective_pace_per_hour"])
+        self.assertEqual(6, snapshot["profiles"][0]["effective_spacing_seconds"])
+        self.assertEqual(600, snapshot["profiles"][0]["effective_pace_per_hour"])
 
-    def test_build_snapshot_applies_outside_tmux_sendgrid_cooldown_from_last_send(self) -> None:
+    def test_build_snapshot_does_not_apply_removed_sendgrid_profile_cooldown(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             profiles = {
@@ -1533,7 +1533,7 @@ class DashboardCoreTests(unittest.TestCase):
                     "from_email": "alpha@example.com",
                     "always_send": "probe@example.com",
                     "interval": 35,
-                    "cooldown_seconds": 35,
+                    "cooldown_seconds": 0,
                     "repeat": True,
                     "max_total": 100,
                 }
@@ -1572,8 +1572,8 @@ class DashboardCoreTests(unittest.TestCase):
 
         profile = snapshot["profiles"][0]
         self.assertEqual("ERROR", profile["last_status"])
-        self.assertEqual("cooldown", profile["runtime_state"])
-        self.assertEqual(20, profile["cooldown_remaining_seconds"])
+        self.assertEqual("running", profile["runtime_state"])
+        self.assertEqual(0, profile["cooldown_remaining_seconds"])
         self.assertTrue(profile["tmux_running"])
         self.assertEqual("2026-03-13T12:04:45+00:00", profile["last_sent_timestamp_utc"])
 
@@ -1716,7 +1716,7 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(1, snapshot["summary"]["recent_unmapped"])
         self.assertEqual("2026-03-13T12:04:30+00:00", snapshot["webhook_health"]["last_received_iso"])
 
-    def test_start_sendgrid_profile_uses_dashboard_send_cap_override(self) -> None:
+    def test_start_sendgrid_profile_uses_configured_shared_hourly_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             python_bin = base / "python"
@@ -1780,12 +1780,12 @@ class DashboardCoreTests(unittest.TestCase):
                 "--max_total",
                 "5000",
                 "--max_messages_1h",
-                "278",
+                "600",
             ],
             calls,
         )
         send_keys_commands = [cmd for cmd in calls if cmd[:3] == ["tmux", "send-keys", "-t"]]
-        self.assertTrue(any("--max_total 5000 --max_messages_1h 278" in " ".join(cmd) for cmd in send_keys_commands))
+        self.assertTrue(any("--max_total 5000 --max_messages_1h 600" in " ".join(cmd) for cmd in send_keys_commands))
 
     def test_run_sendgrid_launcher_preflights_start_all_sendgrid_profiles_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2092,7 +2092,7 @@ class DashboardCoreTests(unittest.TestCase):
         ]
         self.assertEqual(2, len(preflight_calls))
 
-    def test_sendgrid_hourly_cap_status_uses_dashboard_window_target(self) -> None:
+    def test_sendgrid_hourly_cap_status_uses_configured_provider_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             settings_path = base / "dashboard_run_settings.json"
@@ -2119,7 +2119,7 @@ class DashboardCoreTests(unittest.TestCase):
             ):
                 status = dashboard_core.build_sendgrid_hourly_cap_status()
 
-        self.assertEqual(556, status["cap"])
+        self.assertEqual(600, status["cap"])
 
     def test_start_private_profile_requires_password_env_value(self) -> None:
         profiles = {
