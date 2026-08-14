@@ -215,7 +215,7 @@ class SendShardTests(unittest.TestCase):
         )
         for profile_name in send_shard.PRODUCTION_SENDGRID_PROFILES:
             profile = send_shard.PROFILES[profile_name]
-            self.assertEqual(35, profile["interval"])
+            self.assertEqual(0, profile["interval"])
             self.assertEqual(0, profile["cooldown_seconds"])
             self.assertEqual(1, profile["batch_size"])
             self.assertFalse(bool(profile.get("human_mode")))
