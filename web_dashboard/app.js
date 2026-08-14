@@ -39,6 +39,8 @@ const els = {
   sendCapSaveBtn: document.getElementById("send-cap-save-btn"),
   refreshBtn: document.getElementById("refresh-btn"),
   wallboardBtn: document.getElementById("wallboard-btn"),
+  startReadyBtn: document.getElementById("start-ready-btn"),
+  startReadyStatus: document.getElementById("start-ready-status"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
   leadsImportantInputPath: document.getElementById("leads-important-input-path"),
@@ -193,6 +195,9 @@ let senderStatusPanel = null;
 let warmSenderLeadStatusRequested = false;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
+let startReadyBusy = false;
+let startReadyJobId = "";
+let startReadyPollTimer = null;
 let activeDashboardTab = "ops";
 let activeLeadWorkflow = "cold";
 const tabPanelMounts = {
@@ -9525,6 +9530,119 @@ async function postAction(path, options = {}) {
   }
 }
 
+function renderStartReadyStatus(payload = {}, title = "Start Ready Senders") {
+  if (!els.startReadyStatus) return;
+  const ready = Array.isArray(payload.ready_profiles) ? payload.ready_profiles : [];
+  const skipped = Array.isArray(payload.skipped_profiles) ? payload.skipped_profiles : [];
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  const items = results.length ? results : [...ready, ...skipped];
+  const message = String(payload.message || "").trim();
+  const rows = items.map((item) => {
+    const status = String(item?.status || "SKIPPED").toUpperCase();
+    const label = escapeHtml(item?.label || item?.profile || "Sender");
+    const reason = escapeHtml(item?.reason || "");
+    const pending = Number(item?.pending_count || 0);
+    return `<li class="start-ready-item status-${status.toLowerCase()}">`
+      + `<span class="start-ready-item-state">${escapeHtml(status)}</span>`
+      + `<strong>${label}</strong>`
+      + `<span>${pending.toLocaleString()} pending${reason ? ` · ${reason}` : ""}</span>`
+      + "</li>";
+  }).join("");
+  els.startReadyStatus.innerHTML = `
+    <div class="start-ready-head">
+      <strong>${escapeHtml(title)}</strong>
+      ${message ? `<span>${escapeHtml(message)}</span>` : ""}
+    </div>
+    ${rows ? `<ul class="start-ready-list">${rows}</ul>` : ""}
+  `;
+  els.startReadyStatus.classList.remove("hidden");
+}
+
+function resetStartReadyButton() {
+  startReadyBusy = false;
+  startReadyJobId = "";
+  if (startReadyPollTimer) clearTimeout(startReadyPollTimer);
+  startReadyPollTimer = null;
+  if (els.startReadyBtn) {
+    els.startReadyBtn.disabled = false;
+    els.startReadyBtn.textContent = "Start Ready Senders";
+  }
+}
+
+async function pollStartReadyJob(jobId) {
+  if (!startReadyBusy || jobId !== startReadyJobId) return;
+  try {
+    const response = await fetch(`/api/start-ready/status/${encodeURIComponent(jobId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false || !data.job) {
+      throw new Error(data.message || `Status request failed (${response.status}).`);
+    }
+    const job = data.job;
+    renderStartReadyStatus(job, "Start Ready Senders progress");
+    if (["COMPLETE", "FAILED"].includes(String(job.status || "").toUpperCase())) {
+      const failed = String(job.status || "").toUpperCase() === "FAILED";
+      resetStartReadyButton();
+      showMessage(job.message || "Start Ready Senders finished.", failed ? "error" : "success");
+      await fetchSnapshot();
+      return;
+    }
+    startReadyPollTimer = setTimeout(() => void pollStartReadyJob(jobId), 750);
+  } catch (err) {
+    resetStartReadyButton();
+    showMessage(`Start Ready Senders status failed: ${err}`, "error");
+  }
+}
+
+async function startReadySenders() {
+  if (startReadyBusy) return;
+  startReadyBusy = true;
+  if (els.startReadyBtn) {
+    els.startReadyBtn.disabled = true;
+    els.startReadyBtn.textContent = "Checking readiness...";
+  }
+  try {
+    const planResponse = await fetch("/api/start-ready");
+    const plan = await planResponse.json().catch(() => ({}));
+    if (!planResponse.ok || plan.ok === false) {
+      throw new Error(plan.message || `Readiness request failed (${planResponse.status}).`);
+    }
+    renderStartReadyStatus(plan, "Start Ready Senders review");
+    const ready = Array.isArray(plan.ready_profiles) ? plan.ready_profiles : [];
+    if (!ready.length) {
+      resetStartReadyButton();
+      showMessage("No operational production senders are currently ready.", "info");
+      return;
+    }
+    const readyLines = ready.map((item) => `✓ ${item.label || item.profile} (${Number(item.pending_count || 0).toLocaleString()} pending)`);
+    const skipped = Array.isArray(plan.skipped_profiles) ? plan.skipped_profiles : [];
+    const skippedLines = skipped.map((item) => `- ${item.label || item.profile}: ${item.reason || "Not ready"}`);
+    const confirmed = window.confirm(
+      `LIVE SENDER ACTION\n\nStart ${ready.length} ready operational sender(s), sequentially?\n\n`
+      + readyLines.join("\n")
+      + (skippedLines.length ? `\n\nSkipped:\n${skippedLines.join("\n")}` : "")
+      + "\n\nThe server will recompute every sender's safety immediately before Start. "
+      + "No retries will be attempted, and the sequence cannot be cancelled after confirmation.",
+    );
+    if (!confirmed) {
+      resetStartReadyButton();
+      showMessage("Start Ready Senders cancelled. No Start request was submitted.", "info");
+      return;
+    }
+    if (els.startReadyBtn) els.startReadyBtn.textContent = "Starting ready senders...";
+    const response = await fetch("/api/start-ready", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false || !data.job?.job_id) {
+      throw new Error(data.message || `Start request failed (${response.status}).`);
+    }
+    startReadyJobId = String(data.job.job_id);
+    renderStartReadyStatus(data.job, "Start Ready Senders progress");
+    await pollStartReadyJob(startReadyJobId);
+  } catch (err) {
+    resetStartReadyButton();
+    showMessage(`Start Ready Senders failed: ${err}`, "error");
+  }
+}
+
 async function saveSendCap() {
   const rawValue = Number(els.sendCapInput?.value || 0);
   if (![5000, 10000].includes(rawValue)) {
@@ -9810,6 +9928,7 @@ async function bootstrapDashboard() {
 }
 
 if (els.refreshBtn) els.refreshBtn.addEventListener("click", () => fetchSnapshot());
+if (els.startReadyBtn) els.startReadyBtn.addEventListener("click", () => startReadySenders());
 if (els.sendCapSaveBtn) els.sendCapSaveBtn.addEventListener("click", () => saveSendCap());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));

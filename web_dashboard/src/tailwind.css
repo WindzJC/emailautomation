@@ -359,6 +359,75 @@
   color: #e7c57d;
 }
 
+.start-ready-status {
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgba(104, 151, 211, .24);
+  border-radius: 7px;
+  background: rgba(10, 19, 30, .92);
+}
+
+.start-ready-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #dce8f7;
+  font-size: .75rem;
+}
+
+.start-ready-head span {
+  color: #93a3b8;
+  font-size: .68rem;
+  text-align: right;
+}
+
+.start-ready-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.start-ready-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 7px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(151, 170, 195, .12);
+  border-radius: 6px;
+  color: #a8b5c7;
+  font-size: .67rem;
+}
+
+.start-ready-item strong { color: #e2eaf5; }
+.start-ready-item > span:last-child {
+  grid-column: 2;
+  overflow-wrap: anywhere;
+}
+.start-ready-item-state {
+  align-self: center;
+  color: #7f91a8;
+  font-size: .56rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.start-ready-item.status-ready,
+.start-ready-item.status-started { border-color: rgba(56, 194, 132, .28); }
+.start-ready-item.status-ready .start-ready-item-state,
+.start-ready-item.status-started .start-ready-item-state { color: #6fdda7; }
+.start-ready-item.status-starting .start-ready-item-state { color: #edc574; }
+.start-ready-item.status-refused .start-ready-item-state { color: #ef8c91; }
+
+@media (max-width: 720px) {
+  .start-ready-head { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .start-ready-head span { text-align: left; }
+  .start-ready-list { grid-template-columns: 1fr; }
+}
+
 .react-command-bar select,
 .react-command-bar input {
   min-height: 38px;
@@ -2852,11 +2921,16 @@
   #ops-view .workspace-status-row .toolbar-field-note,
   #ops-view .workspace-status-row .toolbar-actions {
     grid-column: 1 / -1;
+    flex-wrap: wrap;
   }
 
   #ops-view .workspace-status-row .toolbar-actions .btn {
     min-width: 0;
     flex: 1;
+  }
+
+  #ops-view .workspace-status-row #start-ready-btn {
+    flex: 1 0 100%;
   }
 
   .leads-workflow-nav {

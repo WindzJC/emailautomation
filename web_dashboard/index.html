@@ -442,6 +442,7 @@
                   </label>
                   <div id="send-cap-note" class="toolbar-field-note muted">6 PM-12 PM window</div>
                   <div class="toolbar-actions">
+                    <button id="start-ready-btn" class="btn btn-primary" type="button">Start Ready Senders</button>
                     <button id="stop-btn" class="btn btn-danger" type="button">Stop All</button>
                     <button id="refresh-btn" class="btn btn-secondary" type="button">Refresh</button>
                     <button id="send-cap-save-btn" class="btn btn-secondary btn-quiet" type="button">Save</button>
@@ -450,6 +451,7 @@
                 <p class="manual-start-warning">
                   <strong>Live sender action:</strong> Manual Start/Resume can launch real workers and consume queues. Auto-start remains separate.
                 </p>
+                <section id="start-ready-status" class="start-ready-status hidden" aria-live="polite"></section>
                 <section id="message-bar" class="message-bar hidden"></section>
               </header>
             </section>

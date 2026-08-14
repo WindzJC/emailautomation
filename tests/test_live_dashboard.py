@@ -8018,6 +8018,252 @@ class LiveDashboardTests(unittest.TestCase):
         lead_state.assert_not_called()
 
 
+class StartReadySendersTests(unittest.TestCase):
+    def setUp(self) -> None:
+        live_dashboard._reset_start_ready_jobs_for_tests()
+
+    def tearDown(self) -> None:
+        live_dashboard._reset_start_ready_jobs_for_tests()
+
+    @staticmethod
+    def _operational_snapshot(*, warm_pending: int = 0) -> dict[str, object]:
+        return {
+            "profiles": [
+                {
+                    "name": profile,
+                    "pending_count": warm_pending if profile == "private_jc_warm" else 5,
+                }
+                for profile in live_dashboard.OPERATIONAL_PRODUCTION_PROFILES
+            ]
+            + [
+                {"name": "sendgrid_controlled_test", "pending_count": 1},
+                {"name": "private_annette", "pending_count": 99},
+            ]
+        }
+
+    def test_plan_selects_six_ready_and_skips_empty_warm_without_legacy_or_controlled(self) -> None:
+        report = {"ok": True, "warning_reasons": [], "queue_safety_status": "safe"}
+        with patch.object(live_dashboard, "_build_live_snapshot", return_value=self._operational_snapshot()), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_manual_live_action_block_response",
+            return_value=None,
+        ), patch.object(
+            live_dashboard,
+            "_build_start_preconditions_report",
+            return_value=report,
+        ):
+            plan = live_dashboard._build_start_ready_plan()
+
+        self.assertEqual(6, plan["ready_count"])
+        self.assertEqual(
+            {
+                "private_jc",
+                "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
+                "sendgrid_jodi",
+                "sendgrid_jordan",
+            },
+            {item["profile"] for item in plan["ready_profiles"]},
+        )
+        warm = next(item for item in plan["skipped_profiles"] if item["profile"] == "private_jc_warm")
+        self.assertEqual("Empty queue (SAFE_IDLE_EMPTY_QUEUE).", warm["reason"])
+        all_profiles = {item["profile"] for item in plan["ready_profiles"] + plan["skipped_profiles"]}
+        self.assertNotIn("sendgrid_controlled_test", all_profiles)
+        self.assertNotIn("private_annette", all_profiles)
+
+    def test_warm_requires_its_existing_separate_lane_readiness(self) -> None:
+        snapshot = self._operational_snapshot(warm_pending=2)
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
+            live_dashboard,
+            "warm_private_jc_lane_status",
+            return_value={"ready": False, "message": "Explicit warm confirmation required."},
+        ), patch.object(live_dashboard, "_build_start_preconditions_report") as generic_report:
+            item = live_dashboard._evaluate_start_ready_profile(
+                "private_jc_warm",
+                snapshot=snapshot,
+                active_profiles=set(),
+            )
+
+        self.assertEqual("SKIPPED", item["status"])
+        self.assertEqual("Explicit warm confirmation required.", item["reason"])
+        generic_report.assert_not_called()
+
+    def test_worker_dispatches_ready_profiles_sequentially_once_without_retry(self) -> None:
+        ready = [
+            {"profile": "private_jc", "label": "JC", "status": "READY", "pending_count": 2},
+            {"profile": "sendgrid_annette", "label": "Annette", "status": "READY", "pending_count": 3},
+        ]
+        live_dashboard._START_READY_JOBS["job-sequence"] = {"job_id": "job-sequence", "status": "PLANNING"}
+        live_dashboard._START_READY_ACTIVE_JOB_ID = "job-sequence"
+        starts: list[str] = []
+
+        def start_once(profile: str) -> object:
+            starts.append(profile)
+            return live_dashboard.JSONResponse({"ok": True, "status": "STARTED", "message": "Started."})
+
+        with patch.object(
+            live_dashboard,
+            "_build_start_ready_plan",
+            return_value={"ready_profiles": ready, "skipped_profiles": []},
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_evaluate_start_ready_profile",
+            side_effect=lambda profile, **_: next(dict(item) for item in ready if item["profile"] == profile),
+        ), patch.object(live_dashboard, "start_profile", side_effect=start_once):
+            live_dashboard._run_start_ready_job("job-sequence")
+
+        self.assertEqual(["private_jc", "sendgrid_annette"], starts)
+        job = live_dashboard._start_ready_job_snapshot("job-sequence")
+        self.assertEqual("COMPLETE", job["status"])
+        self.assertEqual(["STARTED", "STARTED"], [item["status"] for item in job["results"]])
+
+    def test_start_refusal_aborts_remaining_and_never_retries(self) -> None:
+        ready = [
+            {"profile": "private_jc", "label": "JC", "status": "READY", "pending_count": 2},
+            {"profile": "sendgrid_annette", "label": "Annette", "status": "READY", "pending_count": 3},
+        ]
+        live_dashboard._START_READY_JOBS["job-refusal"] = {"job_id": "job-refusal", "status": "PLANNING"}
+        live_dashboard._START_READY_ACTIVE_JOB_ID = "job-refusal"
+        with patch.object(
+            live_dashboard,
+            "_build_start_ready_plan",
+            return_value={"ready_profiles": ready, "skipped_profiles": []},
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_evaluate_start_ready_profile",
+            side_effect=lambda profile, **_: next(dict(item) for item in ready if item["profile"] == profile),
+        ), patch.object(
+            live_dashboard,
+            "start_profile",
+            return_value=live_dashboard.JSONResponse(
+                {"ok": False, "message": "Authority refused Start."},
+                status_code=409,
+            ),
+        ) as start_profile:
+            live_dashboard._run_start_ready_job("job-refusal")
+
+        start_profile.assert_called_once_with("private_jc")
+        job = live_dashboard._start_ready_job_snapshot("job-refusal")
+        self.assertEqual("FAILED", job["status"])
+        self.assertEqual("REFUSED", job["results"][0]["status"])
+        self.assertEqual("SKIPPED", job["results"][1]["status"])
+
+    def test_queue_safety_change_aborts_before_any_start(self) -> None:
+        ready = [
+            {"profile": "private_jc", "label": "JC", "status": "READY", "pending_count": 2},
+            {"profile": "sendgrid_annette", "label": "Annette", "status": "READY", "pending_count": 3},
+        ]
+        live_dashboard._START_READY_JOBS["job-unsafe"] = {"job_id": "job-unsafe", "status": "PLANNING"}
+        live_dashboard._START_READY_ACTIVE_JOB_ID = "job-unsafe"
+        with patch.object(
+            live_dashboard,
+            "_build_start_ready_plan",
+            return_value={"ready_profiles": ready, "skipped_profiles": []},
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_evaluate_start_ready_profile",
+            return_value={
+                "profile": "private_jc",
+                "label": "JC",
+                "status": "SKIPPED",
+                "reason": "Queue safety changed.",
+                "queue_safety_status": "unsafe",
+            },
+        ), patch.object(live_dashboard, "start_profile") as start_profile:
+            live_dashboard._run_start_ready_job("job-unsafe")
+
+        start_profile.assert_not_called()
+        job = live_dashboard._start_ready_job_snapshot("job-unsafe")
+        self.assertEqual("FAILED", job["status"])
+        self.assertEqual(["SKIPPED", "SKIPPED"], [item["status"] for item in job["results"]])
+
+    def test_unexpected_start_exception_fails_current_and_skips_remaining_without_retry(self) -> None:
+        ready = [
+            {"profile": "private_jc", "label": "JC", "status": "READY", "pending_count": 2},
+            {"profile": "sendgrid_annette", "label": "Annette", "status": "READY", "pending_count": 3},
+        ]
+        live_dashboard._START_READY_JOBS["job-error"] = {"job_id": "job-error", "status": "PLANNING"}
+        live_dashboard._START_READY_ACTIVE_JOB_ID = "job-error"
+        with patch.object(
+            live_dashboard,
+            "_build_start_ready_plan",
+            return_value={"ready_profiles": ready, "skipped_profiles": []},
+        ), patch.object(live_dashboard, "_build_live_snapshot", return_value={}), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_evaluate_start_ready_profile",
+            side_effect=lambda profile, **_: next(dict(item) for item in ready if item["profile"] == profile),
+        ), patch.object(
+            live_dashboard,
+            "start_profile",
+            side_effect=RuntimeError("synthetic runtime failure"),
+        ) as start_profile:
+            live_dashboard._run_start_ready_job("job-error")
+
+        start_profile.assert_called_once_with("private_jc")
+        job = live_dashboard._start_ready_job_snapshot("job-error")
+        self.assertEqual("FAILED", job["status"])
+        self.assertEqual(["FAILED", "SKIPPED"], [item["status"] for item in job["results"]])
+        self.assertEqual("", live_dashboard._START_READY_ACTIVE_JOB_ID)
+
+    def test_duplicate_bulk_request_is_rejected_without_dispatch(self) -> None:
+        live_dashboard._START_READY_ACTIVE_JOB_ID = "existing-job"
+        live_dashboard._START_READY_JOBS["existing-job"] = {
+            "job_id": "existing-job",
+            "status": "RUNNING",
+        }
+        with patch.object(live_dashboard._SENDER_START_EXECUTOR, "submit") as submit:
+            response = asyncio.run(live_dashboard.start_ready_endpoint())
+
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("start_ready_already_running", json.loads(response.body)["error"])
+        submit.assert_not_called()
+
+    def test_post_accepts_no_browser_profile_list_and_recomputes_in_worker(self) -> None:
+        submitted: list[tuple[object, str]] = []
+        with patch.object(
+            live_dashboard._SENDER_START_EXECUTOR,
+            "submit",
+            side_effect=lambda action, job_id: submitted.append((action, job_id)),
+        ):
+            response = asyncio.run(live_dashboard.start_ready_endpoint())
+
+        body = json.loads(response.body)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual("PLANNING", body["status"])
+        self.assertEqual(1, len(submitted))
+        self.assertIs(live_dashboard._run_start_ready_job, submitted[0][0])
+        self.assertEqual([], body["job"]["results"])
+        self.assertEqual(0, len(inspect.signature(live_dashboard.start_ready_endpoint).parameters))
+
+    def test_health_remains_async_while_start_ready_job_is_queued(self) -> None:
+        with patch.object(live_dashboard._SENDER_START_EXECUTOR, "submit", return_value=object()):
+            response = asyncio.run(live_dashboard.start_ready_endpoint())
+
+        self.assertEqual(202, response.status_code)
+        self.assertEqual({"status": "ok"}, asyncio.run(live_dashboard.health()))
+
+
 class DashboardStabilizationTests(unittest.TestCase):
     def setUp(self) -> None:
         live_dashboard._reset_snapshot_caches_for_tests()

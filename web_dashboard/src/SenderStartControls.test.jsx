@@ -95,7 +95,7 @@ function startCalls(fetchMock) {
   return fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/start/"));
 }
 
-function baseFetchMock(startHandler) {
+function baseFetchMock(startHandler, startReadyHandler = null) {
   return vi.fn((url, options = {}) => {
     const pathName = String(url);
     if (pathName === "/api/auth/status") {
@@ -110,11 +110,26 @@ function baseFetchMock(startHandler) {
     if (pathName.startsWith("/api/snapshot")) {
       return Promise.resolve(jsonResponse(READY_SNAPSHOT));
     }
+    if (pathName === "/api/start-ready" || pathName.startsWith("/api/start-ready/status/")) {
+      return startReadyHandler
+        ? startReadyHandler(pathName, options)
+        : Promise.resolve(jsonResponse({ ok: true, ready_profiles: [], skipped_profiles: [] }));
+    }
     if (pathName.startsWith("/api/start/")) {
       return startHandler(pathName, options);
     }
     return Promise.resolve(jsonResponse({ ok: true }));
   });
+}
+
+function startReadyButton() {
+  return document.getElementById("start-ready-btn");
+}
+
+function startReadyPosts(fetchMock) {
+  return fetchMock.mock.calls.filter(([url, options = {}]) => (
+    String(url) === "/api/start-ready" && options.method === "POST"
+  ));
 }
 
 function senderRowStartButton() {
@@ -258,5 +273,126 @@ describe("individual sender Start controls", () => {
     expect(document.querySelector(".profile-action-feedback.error")).toHaveTextContent(
       backendFailure,
     );
+  });
+});
+
+describe("Start Ready Senders controls", () => {
+  let root;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => root.unmount());
+      root = null;
+    }
+    cleanup();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+  });
+
+  const plan = {
+    ok: true,
+    ready_count: 2,
+    ready_profiles: [
+      { profile: "private_jc", label: "JC", status: "READY", pending_count: 8, reason: "Ready to start." },
+      { profile: "sendgrid_annette", label: "Annette", status: "READY", pending_count: 12, reason: "Ready to start." },
+    ],
+    skipped_profiles: [
+      { profile: "private_jc_warm", label: "Warm Outreach", status: "SKIPPED", pending_count: 0, reason: "Empty queue (SAFE_IDLE_EMPTY_QUEUE)." },
+    ],
+  };
+
+  it("shows the plan, requires explicit confirmation, and submits one bulk transaction", async () => {
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          status: "PLANNING",
+          job: { job_id: "job-1", status: "PLANNING", results: [], message: "Recomputing." },
+        }, 202));
+      }
+      if (pathName === "/api/start-ready/status/job-1") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          job: {
+            job_id: "job-1",
+            status: "COMPLETE",
+            message: "Completed without retries.",
+            results: [
+              { profile: "private_jc", label: "JC", status: "STARTED", pending_count: 8, reason: "Started." },
+              { profile: "sendgrid_annette", label: "Annette", status: "STARTING", pending_count: 12, reason: "Activating." },
+              ...plan.skipped_profiles,
+            ],
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    expect(startReadyButton()).toHaveTextContent("Start Ready Senders");
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(16));
+
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(window.confirm.mock.calls[0][0]).toContain("Start 2 ready operational sender(s), sequentially?");
+    expect(window.confirm.mock.calls[0][0]).toContain("Warm Outreach: Empty queue (SAFE_IDLE_EMPTY_QUEUE).");
+    expect(window.confirm.mock.calls[0][0]).not.toContain("sendgrid_controlled_test");
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+    expect(document.getElementById("start-ready-status")).toHaveTextContent("STARTEDJC8 pending · Started.");
+    expect(document.getElementById("start-ready-status")).toHaveTextContent("STARTINGAnnette12 pending · Activating.");
+    expect(startReadyButton()).not.toBeDisabled();
+  });
+
+  it("cancellation submits zero Start transactions and leaves the dashboard usable", async () => {
+    const fetchMock = baseFetchMock(
+      () => Promise.resolve(jsonResponse({ ok: true })),
+      () => Promise.resolve(jsonResponse(plan)),
+    );
+    root = await bootController(fetchMock);
+    window.confirm.mockReturnValue(false);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+
+    expect(startReadyPosts(fetchMock)).toHaveLength(0);
+    expect(startReadyButton()).not.toBeDisabled();
+    expect(document.getElementById("message-bar")).toHaveTextContent(
+      "Start Ready Senders cancelled. No Start request was submitted.",
+    );
+    fireEvent.click(document.getElementById("refresh-btn"));
+    await act(async () => flushMicrotasks());
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/snapshot")).length).toBeGreaterThan(1);
+  });
+
+  it("locks rapid duplicate clicks while readiness is pending", async () => {
+    const pending = deferredResponse();
+    const fetchMock = baseFetchMock(
+      () => Promise.resolve(jsonResponse({ ok: true })),
+      () => pending.promise,
+    );
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    fireEvent.click(startReadyButton());
+
+    expect(startReadyButton()).toBeDisabled();
+    expect(startReadyButton()).toHaveTextContent("Checking readiness...");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/api/start-ready")).toHaveLength(1);
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ ok: true, ready_profiles: [], skipped_profiles: plan.skipped_profiles }));
+      await flushMicrotasks();
+    });
+    expect(startReadyButton()).not.toBeDisabled();
+    expect(startReadyPosts(fetchMock)).toHaveLength(0);
   });
 });

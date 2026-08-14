@@ -4473,11 +4473,34 @@ _AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ast
 # each other past the active-sender precondition on a small production host.
 _SENDER_START_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-sender-start")
 
+OPERATIONAL_PRODUCTION_PROFILES = (
+    "private_jc",
+    "private_jc_warm",
+    "sendgrid_alison",
+    "sendgrid_annette",
+    "sendgrid_fiorela",
+    "sendgrid_jodi",
+    "sendgrid_jordan",
+)
+_OPERATIONAL_PROFILE_LABELS = {
+    "private_jc": "JC",
+    "private_jc_warm": "Warm Outreach",
+    "sendgrid_alison": "Alison",
+    "sendgrid_annette": "Annette",
+    "sendgrid_fiorela": "Fiorela",
+    "sendgrid_jodi": "Jodi",
+    "sendgrid_jordan": "Jordan",
+}
+_START_READY_JOB_LOCK = threading.Lock()
+_START_READY_JOBS: dict[str, dict[str, object]] = {}
+_START_READY_ACTIVE_JOB_ID = ""
+_START_READY_JOB_LIMIT = 20
+
 
 async def _run_sender_start_request_async(
-    action: Callable[..., JSONResponse],
+    action: Callable[..., object],
     *args: object,
-) -> JSONResponse:
+) -> object:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _SENDER_START_EXECUTOR,
@@ -5362,6 +5385,357 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
             "snapshot": snapshot,
         }
     )
+
+
+def _snapshot_profile_for_start_ready(
+    snapshot: dict[str, object],
+    profile_name: str,
+) -> dict[str, object]:
+    profiles = snapshot.get("profiles")
+    if not isinstance(profiles, list):
+        return {}
+    for profile in profiles:
+        if isinstance(profile, dict) and str(profile.get("name") or "") == profile_name:
+            return profile
+    return {}
+
+
+def _evaluate_start_ready_profile(
+    profile_name: str,
+    *,
+    snapshot: dict[str, object],
+    active_profiles: set[str],
+) -> dict[str, object]:
+    label = _OPERATIONAL_PROFILE_LABELS.get(profile_name, profile_name)
+    cfg = PROFILES.get(profile_name)
+    if not isinstance(cfg, dict) or profile_name not in OPERATIONAL_PRODUCTION_PROFILES:
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": "Not an operational production sender.",
+            "pending_count": 0,
+        }
+    if bool(cfg.get("controlled_test")) or bool(cfg.get("legacy_compatibility")):
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": "Non-production or legacy sender profiles are excluded.",
+            "pending_count": 0,
+        }
+
+    profile = _snapshot_profile_for_start_ready(snapshot, profile_name)
+    if not profile:
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": "Current profile status is unavailable.",
+            "pending_count": 0,
+        }
+    pending_count = max(0, int(profile.get("pending_count") or 0))
+    if profile_name in active_profiles:
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": "Already active or starting.",
+            "pending_count": pending_count,
+        }
+    if pending_count <= 0:
+        reason = (
+            "Empty queue (SAFE_IDLE_EMPTY_QUEUE)."
+            if profile_name == "private_jc_warm"
+            else "Empty queue."
+        )
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": reason,
+            "pending_count": 0,
+        }
+
+    live_action_block = _manual_live_action_block_response(profile_name)
+    if live_action_block is not None:
+        payload = _response_json_payload(live_action_block)
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": str(payload.get("message") or "Live sender actions are disabled."),
+            "pending_count": pending_count,
+        }
+
+    if profile_name == "private_jc_warm":
+        lane = warm_private_jc_lane_status()
+        if not bool(lane.get("ready")):
+            return {
+                "profile": profile_name,
+                "label": label,
+                "status": "SKIPPED",
+                "reason": str(lane.get("message") or "Warm confirmation is required."),
+                "pending_count": pending_count,
+                "queue_safety_status": "unsafe" if lane.get("integrity_reason") else "unknown",
+            }
+
+    report = _build_start_preconditions_report(
+        profile_name=profile_name,
+        snapshot=snapshot,
+    )
+    if not bool(report.get("ok")):
+        reasons = [
+            str(reason)
+            for reason in (report.get("blocked_reasons") or [])
+            if str(reason or "").strip()
+        ]
+        return {
+            "profile": profile_name,
+            "label": label,
+            "status": "SKIPPED",
+            "reason": " ".join(reasons) or "Existing Start preconditions refused this sender.",
+            "pending_count": pending_count,
+            "queue_safety_status": str(report.get("queue_safety_status") or "unknown"),
+        }
+    return {
+        "profile": profile_name,
+        "label": label,
+        "status": "READY",
+        "reason": "Ready to start.",
+        "pending_count": pending_count,
+        "warnings": list(report.get("warning_reasons") or []),
+        "queue_safety_status": str(report.get("queue_safety_status") or "unknown"),
+    }
+
+
+def _build_start_ready_plan() -> dict[str, object]:
+    snapshot = _build_live_snapshot()
+    active_profiles = _active_sender_names()
+    items = [
+        _evaluate_start_ready_profile(
+            profile_name,
+            snapshot=snapshot,
+            active_profiles=active_profiles,
+        )
+        for profile_name in OPERATIONAL_PRODUCTION_PROFILES
+    ]
+    ready = [dict(item) for item in items if item.get("status") == "READY"]
+    skipped = [dict(item) for item in items if item.get("status") != "READY"]
+    return {
+        "ok": True,
+        "generated_at_utc": iso_utc(),
+        "ready_count": len(ready),
+        "ready_profiles": ready,
+        "skipped_profiles": skipped,
+        "operational_profile_count": len(OPERATIONAL_PRODUCTION_PROFILES),
+    }
+
+
+def _start_ready_job_snapshot(job_id: str) -> dict[str, object] | None:
+    with _START_READY_JOB_LOCK:
+        job = _START_READY_JOBS.get(job_id)
+        return dict(job) if isinstance(job, dict) else None
+
+
+def _reset_start_ready_jobs_for_tests() -> None:
+    global _START_READY_ACTIVE_JOB_ID
+    with _START_READY_JOB_LOCK:
+        _START_READY_JOBS.clear()
+        _START_READY_ACTIVE_JOB_ID = ""
+
+
+def _update_start_ready_job(job_id: str, **updates: object) -> None:
+    with _START_READY_JOB_LOCK:
+        job = _START_READY_JOBS.get(job_id)
+        if isinstance(job, dict):
+            job.update(updates)
+            job["updated_at_utc"] = iso_utc()
+
+
+def _response_json_payload(response: JSONResponse) -> dict[str, object]:
+    try:
+        payload = json.loads(bytes(response.body).decode("utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mark_start_ready_remaining_skipped(
+    items: list[dict[str, object]],
+    start_index: int,
+    reason: str,
+) -> None:
+    for item in items[start_index:]:
+        if item.get("status") == "READY":
+            item["status"] = "SKIPPED"
+            item["reason"] = reason
+
+
+def _run_start_ready_job(job_id: str) -> None:
+    global _START_READY_ACTIVE_JOB_ID
+    ready: list[dict[str, object]] = []
+    items: list[dict[str, object]] = []
+    current_index = -1
+    try:
+        plan = _build_start_ready_plan()
+        ready = [dict(item) for item in plan.get("ready_profiles") or []]
+        skipped = [dict(item) for item in plan.get("skipped_profiles") or []]
+        items = ready + skipped
+        _update_start_ready_job(
+            job_id,
+            status="RUNNING" if ready else "COMPLETE",
+            plan=plan,
+            results=items,
+            message=(
+                f"Starting {len(ready)} ready sender(s) sequentially."
+                if ready
+                else "No operational production senders are ready."
+            ),
+        )
+        aborted = False
+        for index, planned in enumerate(ready):
+            current_index = index
+            profile_name = str(planned.get("profile") or "")
+            planned["status"] = "STARTING"
+            planned["reason"] = "Rechecking current safety before Start."
+            _update_start_ready_job(job_id, results=items, current_profile=profile_name)
+
+            fresh_snapshot = _build_live_snapshot()
+            current = _evaluate_start_ready_profile(
+                profile_name,
+                snapshot=fresh_snapshot,
+                active_profiles=_active_sender_names(),
+            )
+            if current.get("status") != "READY":
+                planned.update(current)
+                if str(current.get("queue_safety_status") or "") == "unsafe":
+                    aborted = True
+                    _mark_start_ready_remaining_skipped(
+                        ready,
+                        index + 1,
+                        "Sequence aborted because queue safety became unsafe.",
+                    )
+                    break
+                _update_start_ready_job(job_id, results=items)
+                continue
+
+            response = start_profile(profile_name)
+            payload = _response_json_payload(response)
+            ok = response.status_code < 400 and payload.get("ok") is not False
+            if ok:
+                status = str(payload.get("status") or "STARTED").strip().upper()
+                planned["status"] = status if status in {"STARTED", "STARTING"} else "STARTED"
+                planned["reason"] = str(payload.get("message") or "Start accepted.")
+            else:
+                planned["status"] = "REFUSED"
+                planned["reason"] = str(payload.get("message") or "Start was refused.")
+                aborted = True
+                _mark_start_ready_remaining_skipped(
+                    ready,
+                    index + 1,
+                    "Sequence aborted after a sender Start refusal; no retry was attempted.",
+                )
+                break
+            _update_start_ready_job(job_id, results=items)
+
+        final_status = "FAILED" if aborted else "COMPLETE"
+        _update_start_ready_job(
+            job_id,
+            status=final_status,
+            results=items,
+            current_profile="",
+            completed_at_utc=iso_utc(),
+            message=(
+                "Start Ready Senders stopped safely after a refusal or global safety change."
+                if aborted
+                else "Start Ready Senders completed without retries."
+            ),
+        )
+    except Exception as exc:
+        if 0 <= current_index < len(ready):
+            ready[current_index]["status"] = "FAILED"
+            ready[current_index]["reason"] = f"Start failed safely: {type(exc).__name__}. No retry was attempted."
+            _mark_start_ready_remaining_skipped(
+                ready,
+                current_index + 1,
+                "Sequence aborted after an unexpected Start error; no retry was attempted.",
+            )
+        _update_start_ready_job(
+            job_id,
+            status="FAILED",
+            results=items,
+            current_profile="",
+            completed_at_utc=iso_utc(),
+            message=f"Start Ready Senders failed safely: {type(exc).__name__}.",
+        )
+    finally:
+        with _START_READY_JOB_LOCK:
+            if _START_READY_ACTIVE_JOB_ID == job_id:
+                _START_READY_ACTIVE_JOB_ID = ""
+
+
+@app.get("/api/start-ready")
+async def start_ready_plan_endpoint() -> JSONResponse:
+    plan = await _run_sender_start_request_async(_build_start_ready_plan)
+    return JSONResponse(plan if isinstance(plan, dict) else {"ok": False})
+
+
+@app.post("/api/start-ready")
+async def start_ready_endpoint() -> JSONResponse:
+    global _START_READY_ACTIVE_JOB_ID
+    with _START_READY_JOB_LOCK:
+        active_job = _START_READY_JOBS.get(_START_READY_ACTIVE_JOB_ID)
+        if isinstance(active_job, dict) and str(active_job.get("status") or "") in {"PLANNING", "RUNNING"}:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "start_ready_already_running",
+                    "message": "Start Ready Senders is already running.",
+                    "job": dict(active_job),
+                },
+                status_code=409,
+            )
+        job_id = f"start_ready_{uuid.uuid4().hex}"
+        job = {
+            "job_id": job_id,
+            "status": "PLANNING",
+            "created_at_utc": iso_utc(),
+            "updated_at_utc": iso_utc(),
+            "current_profile": "",
+            "results": [],
+            "cancellable": False,
+            "message": "Recomputing operational sender readiness.",
+        }
+        _START_READY_JOBS[job_id] = job
+        _START_READY_ACTIVE_JOB_ID = job_id
+        while len(_START_READY_JOBS) > _START_READY_JOB_LIMIT:
+            oldest = next(iter(_START_READY_JOBS))
+            if oldest == job_id:
+                break
+            _START_READY_JOBS.pop(oldest, None)
+    _SENDER_START_EXECUTOR.submit(_run_start_ready_job, job_id)
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": "PLANNING",
+            "message": "Start Ready Senders accepted. Eligibility will be recomputed server-side.",
+            "job": dict(job),
+        },
+        status_code=202,
+    )
+
+
+@app.get("/api/start-ready/status/{job_id}")
+async def start_ready_status_endpoint(job_id: str) -> JSONResponse:
+    job = _start_ready_job_snapshot(str(job_id or "").strip())
+    if job is None:
+        return JSONResponse(
+            {"ok": False, "message": "Start Ready Senders job not found."},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True, "job": job})
 
 
 @app.post("/api/start")
