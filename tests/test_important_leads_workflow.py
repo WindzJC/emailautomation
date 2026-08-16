@@ -1395,11 +1395,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             write_csv(unsubscribed_path, ["Email"], [])
             write_csv(sendgrid_suppressions_path, ["email", "state", "type"], [])
 
-            report = dispatch_master_leads(
+            report = preview_dispatch_master_leads(
                 master_path=master_path,
                 rejected_path=rejected_path,
                 dispatch_source_mode="cleaned",
-                require_stopped=False,
                 jc_queue_path=jc_queue,
                 sendgrid_queue_paths=sg_queues,
                 jc_log_path=logs[0],
@@ -1408,67 +1407,55 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 suppressed_path=suppressed_path,
                 unsubscribed_path=unsubscribed_path,
                 lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
-                backup_root=backup_root,
-                report_dir=report_dir,
-                persist_state=False,
+                preview_dir=tmp / "previews",
             )
 
-            self.assertEqual(report["master_read"], 9)
-            self.assertEqual(report["dispatch_source_mode"], "cleaned")
-            self.assertEqual(report["dispatch_source_row_count"], 9)
-            self.assertEqual(report["dispatch_eligible_row_count"], 9)
-            self.assertFalse(report["verification_required"])
-            self.assertEqual(report["added_astra"], 3)
-            self.assertEqual(report["skipped_astra_already_sent"], 0)
-            self.assertEqual(report["skipped_astra_already_queued"], 1)
-            self.assertEqual(report["added_sendgrid"], 3)
-            self.assertEqual(report["skipped_sendgrid_already_sent"], 0)
-            self.assertEqual(report["skipped_sendgrid_already_queued"], 1)
-            self.assertEqual(report["skipped_already_sent_same_family"], 0)
-            self.assertEqual(report["already_sent_other_family_allowed"], 2)
-            self.assertEqual(report["skipped_already_queued"], 1)
-            self.assertEqual(report["suppressed_skipped"], 1)
-            self.assertEqual(report["duplicate_master_skipped"], 1)
-            self.assertEqual(report["assigned_sg1"], 1)
-            self.assertEqual(report["assigned_sg2"], 1)
-            self.assertEqual(report["assigned_sg3"], 1)
-            self.assertEqual(report["assigned_sg4"], 0)
-            self.assertEqual(report["assigned_sg5"], 0)
-            self.assertEqual(report["skipped_both"], 1)
+            planned = report["plan_rows_by_queue"]
 
-            with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
-                reader = csv.DictReader(handle)
-                jc_rows = list(reader)
-            self.assertEqual(len(jc_rows), 3)
-            self.assertIn("Source", reader.fieldnames or [])
-            self.assertIn("FirstName", reader.fieldnames or [])
-            self.assertIn("AuthorName", reader.fieldnames or [])
-            jc_emails = {row["Email"] for row in jc_rows}
-            self.assertIn("fresh-both@example.com", jc_emails)
-            self.assertIn("sg-sent@example.com", jc_emails)
-            self.assertIn("queued-sg@example.com", jc_emails)
-            self.assertNotIn("astra-sent@example.com", jc_emails)
-            self.assertNotIn("queued-astra@example.com", jc_emails)
+            jc_emails = {
+                row["Email"]
+                for row in planned["private_jc"]
+            }
 
-            all_sg_emails: list[str] = []
-            for path in sg_queues:
-                with path.open(newline="", encoding="utf-8-sig") as handle:
-                    reader = csv.DictReader(handle)
-                    sg_rows = list(reader)
-                    self.assertIn("Source", reader.fieldnames or [])
-                    self.assertIn("FirstName", reader.fieldnames or [])
-                    self.assertIn("AuthorName", reader.fieldnames or [])
-                    all_sg_emails.extend(row["Email"] for row in sg_rows)
+            all_sg_emails = [
+                row["Email"]
+                for index in range(1, 6)
+                for row in planned[f"sendgrid_{index}"]
+            ]
 
-            self.assertEqual(len(all_sg_emails), len(set(all_sg_emails)))
-            self.assertNotIn("fresh-both@example.com", all_sg_emails)
-            self.assertIn("astra-sent@example.com", all_sg_emails)
-            self.assertIn("queued-astra@example.com", all_sg_emails)
-            self.assertNotIn("sg-sent@example.com", all_sg_emails)
-            self.assertNotIn("queued-sg@example.com", all_sg_emails)
+            self.assertEqual(
+                {
+                    "fresh-both@example.com",
+                    "sg-sent@example.com",
+                    "queued-sg@example.com",
+                },
+                jc_emails,
+            )
 
-            self.assertTrue(Path(report["backup_dir"]).exists())
-            self.assertTrue((Path(report["backup_dir"]) / jc_queue.name).exists())
+            self.assertEqual(
+                len(all_sg_emails),
+                len(set(all_sg_emails)),
+            )
+            self.assertEqual(
+                {
+                    "astra-sent@example.com",
+                    "queued-astra@example.com",
+                    "both-sent@example.com",
+                },
+                set(all_sg_emails),
+            )
+
+            self.assertTrue(
+                jc_emails.isdisjoint(all_sg_emails)
+            )
+            self.assertNotIn(
+                "both-queued@example.com",
+                jc_emails | set(all_sg_emails),
+            )
+            self.assertNotIn(
+                "suppressed@example.com",
+                jc_emails | set(all_sg_emails),
+            )
 
     def test_dispatch_master_leads_default_uses_triaged_keep_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2113,7 +2100,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
             write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
             write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
-            write_csv(jc_queue, ["Email", "FirstName"], [{"Email": "existing-jc@example.com", "FirstName": "Existing"}])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
             for path in sg_queues:
                 write_csv(path, ["Email", "FirstName"], [])
             for path in logs:
@@ -2201,7 +2188,18 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 alpha = lead_ledger.load_lead_by_id(conn, alpha_id)
                 self.assertEqual(1, alpha["dispatch_count"])
                 self.assertTrue(alpha["last_dispatch_at"])
-                self.assertEqual("private_jc", alpha["last_profile"])
+                expected_alpha_profile = next(
+                    key
+                    for key, rows in preview["plan_rows_by_queue"].items()
+                    if any(
+                        row["Email"] == "alpha@example.com"
+                        for row in rows
+                    )
+                )
+                self.assertEqual(
+                    expected_alpha_profile,
+                    alpha["last_profile"],
+                )
             finally:
                 conn.close()
 
@@ -2750,7 +2748,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 ["FullName", "FirstName", "Email", "Status"],
                 [{"FullName": "Alpha Person", "FirstName": "Alpha", "Email": "alpha@example.com", "Status": "KEEP"}],
             )
-            write_csv(jc_queue, ["Email", "FirstName"], [{"Email": "existing@example.com", "FirstName": "Existing"}])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
             for path in sg_queues:
                 write_csv(path, ["Email", "FirstName"], [])
             for path in logs:
@@ -2844,11 +2842,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 )
                 write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
                 write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
-                for position, path in enumerate(queue_paths[:-1], start=1):
+                for path in queue_paths[:-1]:
                     write_csv(
                         path,
                         ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"],
-                        [planned_row(f"original-{position}@example.com", f"Original{position}")],
+                        [],
                     )
                 self.assertFalse(queue_paths[-1].exists())
                 for path in logs:

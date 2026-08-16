@@ -12,6 +12,12 @@ import live_dashboard
 
 
 class LiveDashboardAuthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
+
+    def tearDown(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
+
     def test_dashboard_auth_blocks_protected_routes_until_login_and_enforces_upload_limit(self) -> None:
         async def noop_background_loop() -> None:
             return None

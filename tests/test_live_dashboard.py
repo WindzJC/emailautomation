@@ -3249,11 +3249,16 @@ class LiveDashboardTests(unittest.TestCase):
             self._write_csv(rejected, headers, [])
             self._write_csv(verified, headers, [])
             for queue in queues:
-                self._write_csv(queue, headers, [{"Email": "dupe@example.com", "FirstName": "Dupe", "AuthorEmail": "dupe@example.com", "AuthorName": "Dupe Author", "BookTitle": "Dupe Book"}])
+                self._write_csv(queue, headers, [])
             for log in logs:
                 self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
-            for path in [suppressions, suppressed, unsubscribed]:
-                self._write_csv(path, ["Email"], [])
+            self._write_csv(suppressions, ["Email"], [])
+            self._write_csv(
+                suppressed,
+                ["Email"],
+                [{"Email": "dupe@example.com"}],
+            )
+            self._write_csv(unsubscribed, ["Email"], [])
 
             preview = important_leads_workflow.preview_dispatch_master_leads(
                 master_path=master,
@@ -3285,9 +3290,17 @@ class LiveDashboardTests(unittest.TestCase):
             confirmed = json.loads(Path(str(report["confirmed_summary_path"])).read_text(encoding="utf-8"))
             self.assertEqual(0, confirmed["private_jc_added"])
             self.assertEqual(0, confirmed["sendgrid_added"])
-            self.assertIn("already_queued", confirmed["report"]["exclusion_reason_counts"])
-            self.assertIn("Zero-add dispatch confirmed", report["message"])
-            self.assertIn("already queued", report["message"])
+            reason_counts = confirmed["report"]["exclusion_reason_counts"]
+            self.assertTrue(
+                any(
+                    "suppress" in str(key).lower()
+                    for key in reason_counts
+                )
+            )
+            self.assertIn(
+                "Zero-add dispatch confirmed",
+                report["message"],
+            )
             self.assertEqual(report["confirmed_summary_path"], report["confirmed_summary_archive_path"])
             send_via_sendgrid.assert_not_called()
 

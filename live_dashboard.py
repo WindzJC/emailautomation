@@ -91,6 +91,7 @@ from important_leads_verify import (
     verify_master_leads,
 )
 from important_leads_workflow import (
+    assert_dispatch_destination_queues_empty,
     DISPATCH_CAP_ALL,
     DISPATCH_SOURCE_CLEANED,
     DISPATCH_SOURCE_STRICT_VERIFIED,
@@ -6914,6 +6915,46 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         recontact_override = bool(getattr(payload, "recontact_recency_override", False) if payload else False)
         if is_recontact_cold_campaign(preview_campaign_type) and bool(recontact_recency.get("high_risk")) and not recontact_override:
             raise RuntimeError("Recontact preview has high recent-contact overlap. Confirm requires explicit override.")
+
+        queue_paths_map = preview.get("queue_paths") or {}
+        queue_keys = (
+            "private_jc",
+            "sendgrid_1",
+            "sendgrid_2",
+            "sendgrid_3",
+            "sendgrid_4",
+            "sendgrid_5",
+        )
+        if not isinstance(queue_paths_map, dict):
+            raise RuntimeError(
+                "Dispatch preview is missing queue paths. Re-run Preview Dispatch."
+            )
+        queue_paths = [
+            Path(str(queue_paths_map.get(key) or ""))
+            for key in queue_keys
+        ]
+        if len(queue_paths) != 6 or not all(
+            str(path).strip() for path in queue_paths
+        ):
+            raise RuntimeError(
+                "Dispatch preview is missing queue files. Re-run Preview Dispatch."
+            )
+
+        try:
+            assert_dispatch_destination_queues_empty(queue_paths)
+        except RuntimeError as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "reason": "recipient_queues_not_empty",
+                    "error": "recipient_queues_not_empty",
+                    "message": str(exc),
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=409,
+            )
+
         job = _start_important_dispatch_job(
             preview_id=preview_id,
             campaign_type=preview_campaign_type,

@@ -3663,6 +3663,30 @@ def _confirm_plan_rows_by_queue(
     return filtered, removed
 
 
+
+def assert_dispatch_destination_queues_empty(
+    queue_paths: Sequence[Path],
+) -> Dict[Path, List[Dict[str, str]]]:
+    """Fail closed if a cold-dispatch destination queue still has recipients."""
+    existing_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
+    nonempty: List[str] = []
+
+    for path in queue_paths:
+        _headers, rows = _read_queue_rows(path)
+        existing_rows_by_path[path] = rows
+        if rows:
+            nonempty.append(f"{path.name}={len(rows)}")
+
+    if nonempty:
+        raise RuntimeError(
+            "Refusing to confirm dispatch: recipient queues are not empty. "
+            "Finish the current recipient queues before confirming a new dispatch. "
+            f"Nonempty queues: {', '.join(nonempty)}"
+        )
+
+    return existing_rows_by_path
+
+
 def confirm_dispatch_preview(
     preview_id: str,
     *,
@@ -3838,10 +3862,8 @@ def _confirm_dispatch_preview_impl(
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
         raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
-    existing_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
+    existing_rows_by_path = assert_dispatch_destination_queues_empty(queue_paths)
     for path in queue_paths:
-        _headers, rows = _read_queue_rows(path)
-        existing_rows_by_path[path] = rows
         _snapshot_file(path, _snapshots)
     _rollback_dirs.append(backup_dir)
     _copy_queue_backups(queue_paths, backup_dir)
