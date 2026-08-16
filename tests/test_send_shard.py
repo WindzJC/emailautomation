@@ -2402,6 +2402,148 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual("astraproductionsbyjc@gmail.com", ordered[0]["Email"])
         self.assertEqual("lead1@example.com", ordered[1]["Email"])
 
+    def _run_private_always_send_inspection(
+        self,
+        *,
+        queue_emails: list[str],
+        always_send: str,
+        mode: str,
+    ) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "data/shards"
+            logs = root / "data/logs"
+            state = root / "data/state"
+            for path in (shards, logs, state):
+                path.mkdir(parents=True)
+
+            queue = shards / "recipients_private_jc.csv"
+            self._write_csv(
+                queue,
+                [
+                    "Email",
+                    "FirstName",
+                    "AuthorEmail",
+                    "AuthorName",
+                    "BookTitle",
+                    "campaign_type",
+                    "campaign_id",
+                ],
+                [
+                    {
+                        "Email": email,
+                        "FirstName": f"Lead{index}",
+                        "AuthorEmail": email,
+                        "AuthorName": f"Lead {index}",
+                        "BookTitle": f"Book {index}",
+                        "campaign_type": "cold",
+                        "campaign_id": "campaign-preview-test",
+                    }
+                    for index, email in enumerate(queue_emails, start=1)
+                ],
+            )
+            log = logs / "private_jc_log.csv"
+            self._write_csv(log, ["TimestampUTC", "Email", "Status", "Info"], [])
+            unsubscribed = state / "unsubscribed.csv"
+            suppressed = state / "suppressed.csv"
+            sendgrid_suppressed = state / "sendgrid_suppressions.csv"
+            self._write_csv(unsubscribed, ["Email"], [])
+            self._write_csv(suppressed, ["Email"], [])
+            self._write_csv(
+                sendgrid_suppressed,
+                [
+                    "email",
+                    "status",
+                    "code",
+                    "reason",
+                    "last_seen_utc",
+                    "is_permanent",
+                    "ttl_until_utc",
+                ],
+                [],
+            )
+            events = state / "sendgrid_events.jsonl"
+            events.write_text("", encoding="utf-8")
+            profile = {
+                **send_shard.PROFILES["private_jc"],
+                "csv": queue.name,
+                "log": log.name,
+                "unsub_csv": unsubscribed.name,
+                "suppress_csv": suppressed.name,
+                "sendgrid_suppression_csv": sendgrid_suppressed.name,
+                "always_send": always_send,
+                "interval": 0,
+                "cooldown_seconds": 0,
+                "repeat": False,
+                "global_dedupe": False,
+                "prune_sent": False,
+                "require_valid_status": False,
+                "block_risky_rows": False,
+            }
+            with ExitStack() as stack:
+                for obj, attribute, value in (
+                    (settings, "APP_ROOT", root),
+                    (settings, "SHARDS_DIR", shards),
+                    (settings, "LOGS_DIR", logs),
+                    (settings, "STATE_DIR", state),
+                    (settings, "WEBHOOK_EVENTS_PATH", events),
+                    (settings, "LEAD_LEDGER_DB_PATH", state / "lead_ledger.sqlite3"),
+                    (send_shard, "ROOT", root),
+                    (send_shard, "SHARDS_DIR", shards),
+                    (send_shard, "LOGS_DIR", logs),
+                    (send_shard, "STATE_DIR", state),
+                    (send_shard, "DEFAULT_UNSUB_CSV", unsubscribed),
+                    (send_shard, "DEFAULT_SUPPRESS_CSV", suppressed),
+                    (send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sendgrid_suppressed),
+                ):
+                    stack.enter_context(patch.object(obj, attribute, value))
+                stack.enter_context(
+                    patch.dict(send_shard.PROFILES, {"private_jc": profile}, clear=False)
+                )
+                stack.enter_context(
+                    patch.object(sys, "argv", ["send_shard.py", "--profile", "private_jc", mode])
+                )
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                send_shard.main()
+
+            output_path = (
+                root / "data/message_previews/private_jc_message_preview.csv"
+                if mode == "--preview_messages"
+                else log
+            )
+            with output_path.open(newline="", encoding="utf-8") as handle:
+                return [row["Email"] for row in csv.DictReader(handle)]
+
+    def test_preview_does_not_inject_missing_always_send_recipient(self) -> None:
+        emails = self._run_private_always_send_inspection(
+            queue_emails=["lead1@example.test"],
+            always_send="control@example.test",
+            mode="--preview_messages",
+        )
+
+        self.assertEqual(["lead1@example.test"], emails)
+
+    def test_preview_retains_and_prioritizes_queued_always_send_recipient(self) -> None:
+        emails = self._run_private_always_send_inspection(
+            queue_emails=["lead1@example.test", "control@example.test", "lead2@example.test"],
+            always_send="control@example.test",
+            mode="--preview_messages",
+        )
+
+        self.assertEqual(
+            ["control@example.test", "lead1@example.test", "lead2@example.test"],
+            emails,
+        )
+
+    def test_non_preview_mode_preserves_missing_always_send_injection(self) -> None:
+        emails = self._run_private_always_send_inspection(
+            queue_emails=["lead1@example.test"],
+            always_send="control@example.test",
+            mode="--dry_run",
+        )
+
+        self.assertEqual(["control@example.test", "lead1@example.test"], emails)
+
     def test_sendgrid_hourly_cap_matches_parallel_pacing(self) -> None:
         self.assertEqual(600, PROVIDER_LIMIT_DEFAULTS["sendgrid"]["max_messages_1h"])
         self.assertEqual(6.0, send_shard.aggregate_spacing_seconds(600))
