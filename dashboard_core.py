@@ -34,12 +34,16 @@ from send_shard import (
     PROFILES,
     PROVIDER_LIMIT_DEFAULTS,
     aggregate_spacing_seconds,
+    authoritative_send_log_paths,
+    load_authoritative_history_email_sets,
+    load_bad_sendgrid_event_emails,
     profile_runtime_lock_status,
 )
 from sendgrid_hygiene import (
     WEBHOOK_DEDUPE_DB as SENDGRID_WEBHOOK_DEDUPE_DB,
     WEBHOOK_EVENTS_JSONL,
     domain_from_email,
+    load_active_suppressed_emails,
     load_events_jsonl,
     load_suppression_records,
     load_webhook_dedupe_stats,
@@ -3511,6 +3515,73 @@ def _provider_idempotency_accounted_emails(provider: str, campaign_id: str = "")
     return accounted
 
 
+def private_jc_authoritative_blocked_emails(
+    *,
+    invalid_outcomes: set[str] | None = None,
+) -> set[str]:
+    """Load the runtime-authoritative exclusions used by Private JC rebuilds.
+
+    Cross-family SendGrid send history is deliberately absent: it remains
+    recontact-eligible unless an independent suppression, unsubscribe, bad
+    outcome, or authoritative INVALID outcome blocks the recipient.
+    """
+    if invalid_outcomes is None:
+        invalid_outcomes = set()
+        history_paths = [Path(path).resolve() for path in authoritative_send_log_paths()]
+        loaded = load_authoritative_history_email_sets(history_paths)
+        for path in history_paths:
+            invalid_outcomes |= set(loaded.get(path, {}).get("invalid") or set())
+
+    sendgrid_suppressed, _summary = load_active_suppressed_emails(
+        settings.SENDGRID_SUPPRESSIONS_PATH
+    )
+    blocked = set(sendgrid_suppressed)
+    blocked |= _private_jc_runtime_email_set(settings.SUPPRESSED_PATH)
+    blocked |= _private_jc_runtime_email_set(settings.UNSUBSCRIBED_PATH)
+    blocked |= load_bad_sendgrid_event_emails(settings.WEBHOOK_EVENTS_PATH)
+    blocked |= {
+        str(value or "").strip().lower()
+        for value in invalid_outcomes
+        if str(value or "").strip()
+    }
+    return blocked
+
+
+def _private_jc_runtime_email_set(path: Path) -> set[str]:
+    """Read the same explicit recipient fields used by queue repair."""
+    if not path.exists():
+        return set()
+    emails: set[str] = set()
+    with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
+        for row in csv.DictReader(handle):
+            for key in ("Email", "email", "AuthorEmail", "author_email"):
+                email = str(row.get(key) or "").strip().lower()
+                if email:
+                    emails.add(email)
+                    break
+    return emails
+
+
+def private_jc_removal_accounting_reason(
+    email: str,
+    *,
+    private_terminal_emails: set[str],
+    global_blocked_emails: set[str],
+    idempotency_protected_emails: set[str],
+) -> str:
+    """Return the canonical reason a planned Private JC row may stay removed."""
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return ""
+    if normalized in global_blocked_emails:
+        return "global_blocked"
+    if normalized in private_terminal_emails:
+        return "private_terminal"
+    if normalized in idempotency_protected_emails:
+        return "idempotency_protected"
+    return ""
+
+
 def _apply_preview_queue_match(
     report: Dict[str, object],
     provider: str,
@@ -3534,10 +3605,28 @@ def _apply_preview_queue_match(
     accounted_missing = set()
     live_sent_overlap: set[str] = set()
     if provider in {"private_jc", "sendgrid", "all"}:
-        accounted_missing = missing & (
-            _provider_log_accounted_missing_emails(provider, scan_context=context)
-            | _provider_idempotency_accounted_emails(provider, campaign_id=campaign_id)
+        private_terminal = _provider_log_accounted_missing_emails(
+            provider, scan_context=context
         )
+        idempotency_protected = _provider_idempotency_accounted_emails(
+            provider, campaign_id=campaign_id
+        )
+        if provider == "private_jc" and missing:
+            global_blocked = private_jc_authoritative_blocked_emails()
+            accounted_missing = {
+                email
+                for email in missing
+                if private_jc_removal_accounting_reason(
+                    email,
+                    private_terminal_emails=private_terminal,
+                    global_blocked_emails=global_blocked,
+                    idempotency_protected_emails=idempotency_protected,
+                )
+            }
+        else:
+            accounted_missing = missing & (
+                private_terminal | idempotency_protected
+            )
         live_sent_overlap = live & _provider_authoritative_sent_emails(
             provider, scan_context=context
         )

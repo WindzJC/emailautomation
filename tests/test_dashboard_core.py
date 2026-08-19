@@ -673,6 +673,10 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 "build_queue_safety_report",
                 side_effect=fake_report,
+            ), patch.object(
+                dashboard_core,
+                "private_jc_authoritative_blocked_emails",
+                return_value=set(),
             ):
                 report = dashboard_core.build_dashboard_queue_safety_report("private_jc")
 
@@ -687,6 +691,189 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual(0, report["live_already_sent_overlap_count"])
         self.assertEqual("Queue partially consumed — remaining recipients verified safe.", report["message"])
         self.assertIsNone(dashboard_core.queue_safety_alert(report))
+
+    def test_private_queue_safety_accounts_canonical_rebuild_exclusion(self) -> None:
+        planned_rows = [
+            {"Email": "remaining@example.test"},
+            {"Email": "globally-blocked@example.test"},
+        ]
+        context = SimpleNamespace(
+            preview=lambda: {
+                "campaign_type": "cold",
+                "plan_rows_by_queue": {"private_jc": planned_rows},
+            },
+            csv_cache=SimpleNamespace(
+                email_set=lambda _path: {"remaining@example.test"},
+            ),
+        )
+        report = {"safe": True, "unsafe_reasons": []}
+
+        with patch.object(
+            dashboard_core,
+            "_provider_log_accounted_missing_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "_provider_idempotency_accounted_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "_provider_authoritative_sent_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "private_jc_authoritative_blocked_emails",
+            return_value={"globally-blocked@example.test"},
+        ):
+            dashboard_core._apply_preview_queue_match(
+                report,
+                "private_jc",
+                [Path("recipients_private_jc.csv")],
+                scan_context=context,
+            )
+
+        self.assertTrue(report["safe"])
+        self.assertTrue(report["partial_consumption_verified"])
+        self.assertEqual(1, report["accounted_missing_from_preview_expected_count"])
+        self.assertEqual(0, report["unaccounted_missing_from_preview_expected_count"])
+
+    def test_private_queue_safety_rejects_unexplained_and_cross_family_history_only_removals(self) -> None:
+        planned_rows = [
+            {"Email": "remaining@example.test"},
+            {"Email": "unexplained@example.test"},
+            {"Email": "sendgrid-history-only@example.test"},
+        ]
+        context = SimpleNamespace(
+            preview=lambda: {
+                "campaign_type": "cold",
+                "plan_rows_by_queue": {"private_jc": planned_rows},
+            },
+            csv_cache=SimpleNamespace(
+                email_set=lambda _path: {"remaining@example.test"},
+            ),
+        )
+        report = {"safe": True, "unsafe_reasons": []}
+
+        # Cross-family send history is intentionally not supplied as Private
+        # terminal evidence. Without an independent canonical block, the row
+        # remains recontact-eligible and its unexplained removal fails closed.
+        with patch.object(
+            dashboard_core,
+            "_provider_log_accounted_missing_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "_provider_idempotency_accounted_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "_provider_authoritative_sent_emails",
+            return_value=set(),
+        ), patch.object(
+            dashboard_core,
+            "private_jc_authoritative_blocked_emails",
+            return_value=set(),
+        ):
+            dashboard_core._apply_preview_queue_match(
+                report,
+                "private_jc",
+                [Path("recipients_private_jc.csv")],
+                scan_context=context,
+            )
+
+        self.assertFalse(report["safe"])
+        self.assertEqual(0, report["accounted_missing_from_preview_expected_count"])
+        self.assertEqual(2, report["unaccounted_missing_from_preview_expected_count"])
+        self.assertIn("MISSING_PREVIEW_PLANNED_ROWS", report["unsafe_reasons"])
+
+    def test_private_jc_authoritative_blocked_emails_combines_runtime_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = Path(tmpdir)
+            suppressed = state / "suppressed.csv"
+            unsubscribed = state / "unsubscribed.csv"
+            sendgrid_suppressions = state / "sendgrid_suppressions.csv"
+            webhook_events = state / "sendgrid_events.jsonl"
+            history = (state / "sender_history.csv").resolve()
+            suppressed.write_text(
+                "Email\nglobal-suppressed@example.test\n",
+                encoding="utf-8",
+            )
+            unsubscribed.write_text(
+                "Email\nunsubscribed@example.test\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                settings,
+                "SENDGRID_SUPPRESSIONS_PATH",
+                sendgrid_suppressions,
+            ), patch.object(
+                settings,
+                "SUPPRESSED_PATH",
+                suppressed,
+            ), patch.object(
+                settings,
+                "UNSUBSCRIBED_PATH",
+                unsubscribed,
+            ), patch.object(
+                settings,
+                "WEBHOOK_EVENTS_PATH",
+                webhook_events,
+            ), patch.object(
+                dashboard_core,
+                "load_active_suppressed_emails",
+                return_value=({"sendgrid-suppressed@example.test"}, {}),
+            ), patch.object(
+                dashboard_core,
+                "load_bad_sendgrid_event_emails",
+                return_value={"webhook-bad@example.test"},
+            ), patch.object(
+                dashboard_core,
+                "authoritative_send_log_paths",
+                return_value=[history],
+            ), patch.object(
+                dashboard_core,
+                "load_authoritative_history_email_sets",
+                return_value={
+                    history: {
+                        "sent": {"sendgrid-history-only@example.test"},
+                        "invalid": {"invalid-outcome@example.test"},
+                    }
+                },
+            ):
+                blocked = dashboard_core.private_jc_authoritative_blocked_emails()
+
+        self.assertEqual(
+            {
+                "sendgrid-suppressed@example.test",
+                "global-suppressed@example.test",
+                "unsubscribed@example.test",
+                "webhook-bad@example.test",
+                "invalid-outcome@example.test",
+            },
+            blocked,
+        )
+        self.assertNotIn("sendgrid-history-only@example.test", blocked)
+
+    def test_private_jc_canonical_accounting_keeps_terminal_and_idempotency_guards(self) -> None:
+        self.assertEqual(
+            "private_terminal",
+            dashboard_core.private_jc_removal_accounting_reason(
+                "private-sent@example.test",
+                private_terminal_emails={"private-sent@example.test"},
+                global_blocked_emails=set(),
+                idempotency_protected_emails=set(),
+            ),
+        )
+        self.assertEqual(
+            "idempotency_protected",
+            dashboard_core.private_jc_removal_accounting_reason(
+                "reserved@example.test",
+                private_terminal_emails=set(),
+                global_blocked_emails=set(),
+                idempotency_protected_emails={"reserved@example.test"},
+            ),
+        )
 
     def test_preview_campaign_id_prefers_campaign_type_before_preview_id(self) -> None:
         self.assertEqual(

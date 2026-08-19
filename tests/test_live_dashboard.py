@@ -2617,6 +2617,7 @@ class LiveDashboardTests(unittest.TestCase):
                 ["Email", "Status"],
                 [
                     {"Email": "sg-history-only@example.com", "Status": "SENT"},
+                    {"Email": "bad-event@example.com", "Status": "SENT"},
                     {"Email": "invalid-outcome@example.com", "Status": "INVALID"},
                 ],
             )

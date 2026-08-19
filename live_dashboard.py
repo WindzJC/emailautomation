@@ -74,6 +74,8 @@ from dashboard_core import (
     load_dashboard_run_settings,
     message_preview_output_paths,
     message_preview_path_for_profile,
+    private_jc_authoritative_blocked_emails,
+    private_jc_removal_accounting_reason,
     profile_expected_pitch_mode,
     save_dashboard_send_cap_per_profile,
 )
@@ -148,7 +150,6 @@ from send_shard import (
     get_row_value_ci,
     authoritative_send_log_paths,
     load_authoritative_history_email_sets,
-    load_bad_sendgrid_event_emails,
     norm_email,
     is_recontact_cold_campaign,
     normalize_campaign_type,
@@ -157,7 +158,6 @@ from sendgrid_hygiene import (
     WEBHOOK_EVENTS_JSONL,
     append_events_jsonl,
     dedupe_webhook_events,
-    load_active_suppressed_emails,
     normalize_webhook_events,
     update_suppressions_from_events,
 )
@@ -7059,13 +7059,9 @@ def _private_jc_repair_headers(queue_headers: list[str]) -> list[str]:
 
 
 def _private_jc_repair_global_blocked_emails(*, invalid_outcomes: set[str] | None = None) -> set[str]:
-    sendgrid_suppressed, _summary = load_active_suppressed_emails(settings.SENDGRID_SUPPRESSIONS_PATH)
-    blocked = set(sendgrid_suppressed)
-    blocked |= _private_jc_repair_email_set(settings.SUPPRESSED_PATH)
-    blocked |= _private_jc_repair_email_set(settings.UNSUBSCRIBED_PATH)
-    blocked |= load_bad_sendgrid_event_emails(settings.WEBHOOK_EVENTS_PATH)
-    blocked |= set(invalid_outcomes or set())
-    return blocked
+    return private_jc_authoritative_blocked_emails(
+        invalid_outcomes=invalid_outcomes,
+    )
 
 
 def _private_jc_repair_authoritative_history_sets() -> dict[str, object]:
@@ -7252,17 +7248,6 @@ def _private_jc_repair_rebuild_rows(
         if email in seen:
             counts["duplicate_removed"] += 1
             continue
-        if email in blocked:
-            counts["suppressed_or_bad_outcome_removed"] += 1
-            continue
-        if email in private_sent:
-            counts["already_sent_same_family_removed"] += 1
-            continue
-        if email in sendgrid_sent:
-            # Cross-family SendGrid history is intentionally not itself
-            # a Private JC exclusion.
-            counts["other_family_sent_history_allowed"] += 1
-
         row_campaign_type = normalize_campaign_type(
             get_row_value_ci(
                 row,
@@ -7285,10 +7270,28 @@ def _private_jc_repair_rebuild_rows(
             if str(value or "").strip()
         }
 
-        if (
+        idempotency_protected = (
             row_campaign_id in protected_campaigns
             or email in warm_lane_emails
-        ):
+        )
+        if email in sendgrid_sent and email not in blocked and email not in private_sent:
+            # Cross-family SendGrid history is intentionally not itself
+            # a Private JC exclusion.
+            counts["other_family_sent_history_allowed"] += 1
+
+        accounting_reason = private_jc_removal_accounting_reason(
+            email,
+            private_terminal_emails=private_sent,
+            global_blocked_emails=blocked,
+            idempotency_protected_emails={email} if idempotency_protected else set(),
+        )
+        if accounting_reason == "global_blocked":
+            counts["suppressed_or_bad_outcome_removed"] += 1
+            continue
+        if accounting_reason == "private_terminal":
+            counts["already_sent_same_family_removed"] += 1
+            continue
+        if accounting_reason == "idempotency_protected":
             counts["idempotency_protected_removed"] += 1
             continue
 
