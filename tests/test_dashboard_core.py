@@ -131,6 +131,13 @@ class DashboardCoreTests(unittest.TestCase):
                 readiness = dashboard_core.build_profile_message_readiness("sendgrid_annette")
 
         self.assertEqual("PASS", readiness["status"])
+        self.assertFalse(readiness["preview_sync_required"])
+        self.assertTrue(readiness["generated_row_count_matches_queue"])
+        self.assertTrue(readiness["validated_row_count_matches_queue"])
+        self.assertTrue(readiness["generated_email_set_matches_queue"])
+        self.assertTrue(readiness["validated_email_set_matches_queue"])
+        self.assertTrue(readiness["generated_fingerprint_matches_queue"])
+        self.assertTrue(readiness["validated_fingerprint_matches_queue"])
         self.assertEqual(2, readiness["recipient_row_count"])
         self.assertEqual(True, readiness["book_title_column_present"])
         self.assertEqual(1, readiness["rows_with_book_title"])
@@ -210,9 +217,11 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertTrue(safety["safe"])
         self.assertEqual("STALE", stale["status"])
+        self.assertTrue(stale["preview_sync_required"])
         self.assertFalse(stale["preview_recipient_fingerprint_matches"])
         self.assertIn("fingerprint", " ".join(stale["reasons"]))
         self.assertEqual("PASS", current["status"])
+        self.assertFalse(current["preview_sync_required"])
         self.assertTrue(current["preview_recipient_fingerprint_matches"])
 
     def test_profile_message_readiness_marks_partial_preview_stale(self) -> None:

@@ -647,9 +647,32 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     preview_path = message_preview_path_for_profile(profile_name)
     validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
     _preview_fields, preview_row_count, _preview_rows = _csv_row_count_with_fieldnames(preview_path)
+    _validated_fields, validated_row_count, validated_rows = _csv_row_count_with_fieldnames(validated_path)
     queue_recipient_fingerprint = _recipient_fingerprint(rows)
     preview_recipient_fingerprint = _recipient_fingerprint(_preview_rows)
+    validated_recipient_fingerprint = _recipient_fingerprint(validated_rows)
+    queue_recipient_emails = [_normalized_email_for_readiness(row) for row in rows]
+    preview_recipient_emails = [_normalized_email_for_readiness(row) for row in _preview_rows]
+    validated_recipient_emails = [_normalized_email_for_readiness(row) for row in validated_rows]
+    generated_row_count_matches_queue = preview_row_count == row_count
+    validated_row_count_matches_queue = validated_row_count == row_count
+    generated_email_set_matches_queue = set(preview_recipient_emails) == set(queue_recipient_emails)
+    validated_email_set_matches_queue = set(validated_recipient_emails) == set(queue_recipient_emails)
+    generated_fingerprint_matches_queue = preview_recipient_fingerprint == queue_recipient_fingerprint
+    validated_fingerprint_matches_queue = validated_recipient_fingerprint == queue_recipient_fingerprint
+    alignment_checks = {
+        "generated_row_count_matches_queue": generated_row_count_matches_queue,
+        "validated_row_count_matches_queue": validated_row_count_matches_queue,
+        "generated_email_set_matches_queue": generated_email_set_matches_queue,
+        "validated_email_set_matches_queue": validated_email_set_matches_queue,
+        "generated_fingerprint_matches_queue": generated_fingerprint_matches_queue,
+        "validated_fingerprint_matches_queue": validated_fingerprint_matches_queue,
+    }
+    failed_alignment_predicates = [
+        predicate for predicate, passed in alignment_checks.items() if not passed
+    ]
     preview_exists = preview_path.exists() or (pre_rendered_message and row_count > 0)
+    validated_exists = validated_path.exists() or (pre_rendered_message and row_count > 0)
     validation_artifacts = [path for path in (validated_path, failed_path, summary_path) if path.exists()]
     validation_time_utc = max((iso_mtime(path) for path in validation_artifacts), default="")
     preview_time_utc = iso_mtime(preview_path) if preview_exists else ""
@@ -663,7 +686,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     actual_mode = profile_actual_pitch_mode(profile_name)
     reasons: List[str] = []
     validation_status = "PASS" if pre_rendered_message and row_count > 0 else "NOT RUN"
-    if preview_exists and failed_count is not None:
+    if preview_exists and validated_exists and failed_count is not None:
         validation_status = "FAIL" if failed_count > 0 else "PASS"
 
     status = "PASS"
@@ -708,27 +731,34 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     if status == "PASS" and not preview_exists:
         status = "NOT RUN"
         reasons.append("Rendered message preview CSV is missing.")
+    if status == "PASS" and not validated_exists:
+        status = "NOT RUN"
+        reasons.append("Validated message preview CSV is missing.")
     if status == "PASS" and validation_status == "NOT RUN":
         status = "NOT RUN"
         reasons.append("Preview validation has not run.")
-    if status == "PASS" and not pre_rendered_message and preview_exists and preview_row_count != row_count:
+    if status == "PASS" and not pre_rendered_message and failed_alignment_predicates:
         status = "STALE"
-        reasons.append(
-            f"Preview row count {preview_row_count} does not match recipient queue row count {row_count}."
-        )
-    if (
-        status == "PASS"
-        and bool(cfg.get("require_preview_recipient_fingerprint"))
-        and queue_recipient_fingerprint != preview_recipient_fingerprint
-    ):
-        status = "STALE"
-        reasons.append("Preview recipient fingerprint does not match the controlled queue.")
+        if not generated_row_count_matches_queue:
+            reasons.append(
+                f"Preview row count {preview_row_count} does not match recipient queue row count {row_count}."
+            )
+        if not validated_row_count_matches_queue:
+            reasons.append(
+                f"Validated preview row count {validated_row_count} does not match recipient queue row count {row_count}."
+            )
+        if not generated_email_set_matches_queue or not validated_email_set_matches_queue:
+            reasons.append("Preview recipient email sets do not match the current queue.")
+        if not generated_fingerprint_matches_queue or not validated_fingerprint_matches_queue:
+            reasons.append("Preview recipient fingerprints do not match the current queue.")
     if status == "PASS" and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
         status = "STALE"
         reasons.append("Preview CSV is older than the recipient queue.")
     if status == "PASS" and validation_mtime and preview_mtime and validation_mtime < preview_mtime:
         status = "STALE"
         reasons.append("Validation is older than the preview CSV.")
+
+    preview_sync_required = status == "STALE" and bool(failed_alignment_predicates)
 
     return {
         "status": status,
@@ -742,6 +772,9 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "duplicate_email_count": duplicate_count,
         "preview_csv_exists": preview_exists,
         "preview_row_count": preview_row_count,
+        "validated_preview_csv_exists": validated_exists,
+        "validated_preview_row_count": validated_row_count,
+        "failed_preview_row_count": int(failed_count or 0),
         "preview_validation_status": validation_status,
         "last_preview_generated_utc": preview_time_utc,
         "last_validation_time_utc": validation_time_utc,
@@ -751,9 +784,13 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         "preview_csv_name": preview_path.name,
         "queue_recipient_fingerprint": queue_recipient_fingerprint,
         "preview_recipient_fingerprint": preview_recipient_fingerprint,
+        "validated_recipient_fingerprint": validated_recipient_fingerprint,
         "preview_recipient_fingerprint_matches": (
             queue_recipient_fingerprint == preview_recipient_fingerprint
         ),
+        **alignment_checks,
+        "failed_alignment_predicates": failed_alignment_predicates,
+        "preview_sync_required": preview_sync_required,
         "reasons": reasons,
     }
 

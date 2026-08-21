@@ -60,6 +60,10 @@ class LiveDashboardAuthTests(unittest.TestCase):
                 self.assertEqual("live", auth_status["dashboard_mode"])
                 self.assertTrue(auth_status["auto_start_allowed"])
                 self.assertEqual(401, client.get("/api/snapshot").status_code)
+                self.assertEqual(
+                    401,
+                    client.post("/api/profiles/private_jc/preview-validate").status_code,
+                )
                 self.assertEqual(401, client.post("/api/leads/verify-important", json={}).status_code)
                 self.assertEqual(401, client.post("/api/leads/dispatch-important", json={}).status_code)
                 self.assertEqual(

@@ -157,6 +157,74 @@ class LiveDashboardTests(unittest.TestCase):
         with path.open(newline="", encoding="utf-8-sig") as handle:
             return list(csv.DictReader(handle))
 
+    def _preview_sync_stack(
+        self,
+        *,
+        preview_path: Path,
+        validated_path: Path,
+        failed_path: Path,
+        summary_path: Path,
+        queue_snapshots: list[dict[str, object]] | None = None,
+        readiness: dict[str, object] | None = None,
+        use_real_queue_snapshot: bool = False,
+    ) -> ExitStack:
+        passing_readiness = {
+            "status": "PASS",
+            "recipient_row_count": 1,
+            "preview_row_count": 1,
+            "validated_preview_row_count": 1,
+            "failed_preview_row_count": 0,
+            "generated_row_count_matches_queue": True,
+            "validated_row_count_matches_queue": True,
+            "generated_email_set_matches_queue": True,
+            "validated_email_set_matches_queue": True,
+            "generated_fingerprint_matches_queue": True,
+            "validated_fingerprint_matches_queue": True,
+        }
+        stable_snapshot = {
+            "path": Path("synthetic-queue.csv"),
+            "sha256": "a" * 64,
+            "recipient_fingerprint": "b" * 64,
+            "row_count": 1,
+        }
+        stack = ExitStack()
+        stack.enter_context(patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True))
+        stack.enter_context(patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None))
+        stack.enter_context(patch.object(live_dashboard, "_preview_sync_authority_error", return_value=""))
+        stack.enter_context(patch.object(live_dashboard, "_active_sender_names", return_value=set()))
+        stack.enter_context(patch.object(live_dashboard, "detect_running_preview_profiles", return_value=set()))
+        stack.enter_context(patch.object(live_dashboard, "_preview_sync_runtime_job", return_value=None))
+        stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}))
+        stack.enter_context(patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path))
+        stack.enter_context(
+            patch.object(
+                live_dashboard,
+                "message_preview_output_paths",
+                return_value=(validated_path, failed_path, summary_path),
+            )
+        )
+        if use_real_queue_snapshot:
+            pass
+        elif queue_snapshots is None:
+            stack.enter_context(patch.object(live_dashboard, "_protected_queue_snapshot", return_value=stable_snapshot))
+        else:
+            stack.enter_context(patch.object(live_dashboard, "_protected_queue_snapshot", side_effect=queue_snapshots))
+        stack.enter_context(
+            patch.object(
+                live_dashboard,
+                "build_profile_message_readiness",
+                return_value=readiness or passing_readiness,
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                live_dashboard,
+                "build_dashboard_queue_safety_report",
+                return_value={"safe": True},
+            )
+        )
+        return stack
+
     def test_preview_validate_profile_runs_preview_then_validation_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -164,48 +232,76 @@ class LiveDashboardTests(unittest.TestCase):
             validated_path = tmp / "sendgrid_annette_message_preview_validated.csv"
             failed_path = tmp / "sendgrid_annette_message_preview_failed.csv"
             summary_path = tmp / "sendgrid_annette_message_preview_summary.txt"
+            queue_path = tmp / "recipients_sendgrid_annette.csv"
+            queue_path.write_text(
+                "Email,FirstName,BookTitle\nreader@example.com,Ava,Launch\n",
+                encoding="utf-8",
+            )
+            queue_before = queue_path.read_bytes()
+            queue_checksum_before = hashlib.sha256(queue_before).hexdigest()
             calls: list[list[str]] = []
 
             def fake_run(command, **kwargs):
                 calls.append([str(part) for part in command])
-                if "send_shard.py" in command:
+                if "send_shard.py" in command and "--preview_messages" in command:
                     preview_path.write_text(
                         "Email,FirstName,BookTitle,Subject,Body\nreader@example.com,Ava,Launch,Subject,Body\n",
                         encoding="utf-8",
                     )
-                else:
+                elif "tools/validate_message_preview.py" in command:
                     validated_path.write_text("Email\nreader@example.com\n", encoding="utf-8")
                     failed_path.write_text("Email\n", encoding="utf-8")
                     summary_path.write_text("failed rows: 0\n", encoding="utf-8")
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
+                stdout = "PREFLIGHT: ok (no sending).\n" if "--preflight" in command else ""
+                return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
-            with (
-                patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
-                patch.object(live_dashboard, "_active_sender_names", return_value=set()),
-                patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None),
-                patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
-                patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path),
-                patch.object(live_dashboard, "message_preview_output_paths", return_value=(validated_path, failed_path, summary_path)),
-                patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
-                patch.object(live_dashboard, "subprocess") as subprocess_mock,
-            ):
+            with self._preview_sync_stack(
+                preview_path=preview_path,
+                validated_path=validated_path,
+                failed_path=failed_path,
+                summary_path=summary_path,
+                use_real_queue_snapshot=True,
+            ), patch.object(
+                live_dashboard,
+                "PROFILES",
+                {
+                    "sendgrid_annette": {
+                        "provider": "sendgrid",
+                        "csv": str(queue_path),
+                        "pitch": "pitch1",
+                    }
+                },
+            ), patch.object(live_dashboard.runtime_control, "start_sender") as start_sender, patch.object(
+                live_dashboard,
+                "subprocess",
+            ) as subprocess_mock:
                 subprocess_mock.run.side_effect = fake_run
                 subprocess_mock.TimeoutExpired = subprocess.TimeoutExpired
                 response = live_dashboard.preview_validate_profile("sendgrid_annette")
+            queue_after = queue_path.read_bytes()
+            queue_checksum_after = hashlib.sha256(queue_after).hexdigest()
 
         payload = json.loads(response.body)
         self.assertTrue(payload["ok"])
         self.assertEqual("PASS", payload["result"]["validation_status"])
         self.assertEqual(1, payload["result"]["preview_row_count"])
+        self.assertEqual(1, payload["result"]["validated_row_count"])
+        self.assertEqual(0, payload["result"]["failed_preview_row_count"])
+        self.assertTrue(payload["result"]["queue_unchanged"])
+        self.assertEqual(0, payload["result"]["emails_sent"])
+        self.assertFalse(payload["result"]["sender_started"])
+        self.assertTrue(payload["result"]["ready"])
         self.assertEqual("consignment", payload["result"]["pitch_mode"])
         self.assertEqual("send_shard.py", calls[0][1])
         self.assertEqual("tools/validate_message_preview.py", calls[1][1])
         self.assertIn("--preview_messages", calls[0])
         self.assertIn("--fail-on-errors", calls[1])
-        self.assertEqual(
-            ["preview_validate_started", "preview_validate_completed"],
-            [call.args[0]["event_type"] for call in history_mock.call_args_list],
-        )
+        self.assertIn("deploy/cloud/verify.sh", calls[2][0])
+        self.assertIn("--preflight", calls[3])
+        self.assertEqual(4, len(calls))
+        self.assertEqual(queue_before, queue_after)
+        self.assertEqual(queue_checksum_before, queue_checksum_after)
+        start_sender.assert_not_called()
 
     def test_background_automation_does_not_auto_start_senders_by_default(self) -> None:
         def exercise_monitor_start(**kwargs):
@@ -389,20 +485,17 @@ class LiveDashboardTests(unittest.TestCase):
     def test_preview_validate_profile_blocks_active_sender(self) -> None:
         with (
             patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
-            patch.object(
-                live_dashboard.runtime_control,
-                "list_active_sender_snapshots",
-                return_value=[SimpleNamespace(name="sendgrid_annette", runtime_state="running")],
-            ),
+            patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None),
+            patch.object(live_dashboard, "_preview_sync_authority_error", return_value=""),
+            patch.object(live_dashboard, "_active_sender_names", return_value={"sendgrid_annette"}),
             patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
-            patch.object(live_dashboard, "append_campaign_run_history"),
         ):
             response = live_dashboard.preview_validate_profile("sendgrid_annette")
 
         payload = json.loads(response.body)
         self.assertEqual(409, response.status_code)
         self.assertFalse(payload["ok"])
-        self.assertEqual("profile_active", payload["error"])
+        self.assertEqual("sender_active", payload["error"])
 
     def test_preview_validate_profile_returns_validation_failure_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -424,23 +517,128 @@ class LiveDashboardTests(unittest.TestCase):
                 summary_path.write_text("failed rows: 1\nfailure reasons:\n- missing_book_title: 1\n", encoding="utf-8")
                 return SimpleNamespace(returncode=1, stdout="", stderr="")
 
-            with (
-                patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
-                patch.object(live_dashboard, "_active_sender_names", return_value=set()),
-                patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None),
-                patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}),
-                patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path),
-                patch.object(live_dashboard, "message_preview_output_paths", return_value=(validated_path, failed_path, summary_path)),
-                patch.object(live_dashboard, "append_campaign_run_history") as history_mock,
-                patch.object(live_dashboard.subprocess, "run", side_effect=fake_run),
-            ):
+            with self._preview_sync_stack(
+                preview_path=preview_path,
+                validated_path=validated_path,
+                failed_path=failed_path,
+                summary_path=summary_path,
+            ), patch.object(live_dashboard.subprocess, "run", side_effect=fake_run), patch.object(
+                live_dashboard.runtime_control,
+                "start_sender",
+            ) as start_sender:
                 response = live_dashboard.preview_validate_profile("private_jc")
 
         payload = json.loads(response.body)
-        self.assertTrue(payload["ok"])
+        self.assertEqual(422, response.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("validation_failed", payload["error"])
         self.assertEqual("FAIL", payload["result"]["validation_status"])
         self.assertEqual(["missing_book_title: 1"], payload["result"]["validation_reasons"])
-        self.assertEqual("preview_validate_completed", history_mock.call_args_list[-1].args[0]["event_type"])
+        start_sender.assert_not_called()
+
+    def test_preview_validate_profile_surfaces_generation_failure_without_starting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            preview_path = tmp / "private_jc_message_preview.csv"
+            validated_path = tmp / "private_jc_message_preview_validated.csv"
+            failed_path = tmp / "private_jc_message_preview_failed.csv"
+            summary_path = tmp / "private_jc_message_preview_summary.txt"
+            with self._preview_sync_stack(
+                preview_path=preview_path,
+                validated_path=validated_path,
+                failed_path=failed_path,
+                summary_path=summary_path,
+            ), patch.object(
+                live_dashboard.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=2, stdout="", stderr="synthetic failure"),
+            ) as run_mock, patch.object(live_dashboard.runtime_control, "start_sender") as start_sender:
+                response = live_dashboard.preview_validate_profile("private_jc")
+
+        payload = json.loads(response.body)
+        self.assertEqual(500, response.status_code)
+        self.assertEqual("preview_failed", payload["error"])
+        self.assertIn("No email was sent", payload["message"])
+        self.assertEqual(1, run_mock.call_count)
+        self.assertIn("--preview_messages", run_mock.call_args.args[0])
+        start_sender.assert_not_called()
+
+    def test_preview_validate_profile_fails_closed_if_queue_checksum_changes(self) -> None:
+        before = {
+            "path": Path("synthetic-queue.csv"),
+            "sha256": "a" * 64,
+            "recipient_fingerprint": "b" * 64,
+            "row_count": 1,
+        }
+        changed = {**before, "sha256": "c" * 64}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            preview_path = tmp / "private_jc_message_preview.csv"
+            with self._preview_sync_stack(
+                preview_path=preview_path,
+                validated_path=tmp / "private_jc_message_preview_validated.csv",
+                failed_path=tmp / "private_jc_message_preview_failed.csv",
+                summary_path=tmp / "private_jc_message_preview_summary.txt",
+                queue_snapshots=[before, changed],
+            ), patch.object(
+                live_dashboard.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_mock:
+                response = live_dashboard.preview_validate_profile("private_jc")
+
+        payload = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("queue_changed_during_preview_sync", payload["error"])
+        self.assertEqual(1, run_mock.call_count)
+
+    def test_preview_validate_profile_serializes_overlapping_requests(self) -> None:
+        self.assertTrue(live_dashboard._begin_preview_sync("private_jc"))
+        try:
+            with patch.object(
+                live_dashboard.runtime_control,
+                "is_known_profile",
+                return_value=True,
+            ), patch.object(
+                live_dashboard,
+                "_manual_live_action_block_response",
+                return_value=None,
+            ), patch.object(
+                live_dashboard,
+                "_preview_sync_authority_error",
+                return_value="",
+            ), patch.object(
+                live_dashboard,
+                "_active_sender_names",
+                return_value=set(),
+            ), patch.object(
+                live_dashboard,
+                "detect_running_preview_profiles",
+                return_value=set(),
+            ), patch.object(
+                live_dashboard,
+                "_build_live_snapshot",
+                return_value={"profiles": []},
+            ), patch.object(live_dashboard.subprocess, "run") as run_mock:
+                response = live_dashboard.preview_validate_profile("sendgrid_annette")
+        finally:
+            live_dashboard._finish_preview_sync("private_jc")
+
+        payload = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("preview_sync_active", payload["error"])
+        run_mock.assert_not_called()
+
+    def test_preview_validate_profile_rejects_unknown_profile(self) -> None:
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=False), patch.object(
+            live_dashboard.subprocess,
+            "run",
+        ) as run_mock:
+            response = live_dashboard.preview_validate_profile("unknown_profile")
+
+        self.assertEqual(404, response.status_code)
+        self.assertFalse(json.loads(response.body)["ok"])
+        run_mock.assert_not_called()
 
     def test_bulk_start_is_permanently_disabled_and_has_no_side_effects(self) -> None:
         with patch.object(

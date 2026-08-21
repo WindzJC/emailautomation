@@ -7100,6 +7100,9 @@ function senderStatusBadge(profile) {
   if (queueSafetyBlockedForProfile(profile)) {
     return { label: "Blocked", tone: "bad" };
   }
+  if (profilePreviewSyncRequired(profile) && !profileHasIndependentBlocker(profile)) {
+    return { label: "Sync Required", tone: "warn" };
+  }
   if (pendingCount > 0 && queueSafetyVerifiedSubset(queueSafety)) return { label: "Resume", tone: "good" };
   if (canStartProfile(profile, lastSnapshot)) return { label: "Ready", tone: "good" };
   if (pendingCount <= 0) return { label: "Complete", tone: "good" };
@@ -7690,6 +7693,9 @@ function profileDisplayStatus(profile) {
   const runtimeState = String(profile?.runtime_state || "").trim();
   if (runtimeState === "cooldown") return { label: "Cooldown", tone: "warn" };
   if (["starting", "running", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
+  if (profilePreviewSyncRequired(profile) && !profileHasIndependentBlocker(profile)) {
+    return { label: "Sync Required", tone: "warn" };
+  }
   const readiness = String(profile?.readiness_label || "").trim();
   if (readiness && readiness !== "Ready") return { label: readiness, tone: profile?.readiness_tone || "bad" };
   return { label: profile?.runtime_label || "Stopped", tone: "bad" };
@@ -7717,6 +7723,20 @@ function messageReadinessTone(status) {
   return "not-run";
 }
 
+function profilePreviewSyncRequired(profile) {
+  return Boolean(profile?.message_readiness?.preview_sync_required);
+}
+
+function profileHasIndependentBlocker(profile, snapshot = lastSnapshot) {
+  const readinessLabel = String(profile?.readiness_label || "").trim().toLowerCase();
+  const readinessTone = String(profile?.readiness_tone || "").trim().toLowerCase();
+  const messageStatus = String(profile?.message_readiness?.status || "").trim().toUpperCase();
+  return queueSafetyBlockedForProfile(profile, snapshot)
+    || readinessTone === "bad"
+    || ["blocked", "not ready"].includes(readinessLabel)
+    || messageStatus === "FAIL";
+}
+
 function yesNo(value) {
   return value ? "Yes" : "No";
 }
@@ -7740,9 +7760,24 @@ function renderMessageReadiness(profile) {
         ? queueSafetyBlockMessageForProfile(profile)
         : "Render the current queue without sending, then validate the preview.";
   const status = String(readiness.status || "NOT RUN").trim().toUpperCase() || "NOT RUN";
-  const tone = messageReadinessTone(status);
+  const syncRequired = Boolean(readiness.preview_sync_required) && !profileHasIndependentBlocker(profile);
+  const displayStatus = syncRequired ? "SYNC REQUIRED" : status;
+  const tone = messageReadinessTone(syncRequired ? "STALE" : status);
+  const emailSetsMatch = Boolean(
+    readiness.generated_email_set_matches_queue
+    && readiness.validated_email_set_matches_queue
+  );
+  const fingerprintsMatch = Boolean(
+    readiness.generated_fingerprint_matches_queue
+    && readiness.validated_fingerprint_matches_queue
+  );
   const items = [
-    ["Rows", Number(readiness.recipient_row_count || 0).toLocaleString()],
+    ["Queue rows", Number(readiness.recipient_row_count || 0).toLocaleString()],
+    ["Generated preview", Number(readiness.preview_row_count || 0).toLocaleString()],
+    ["Validated preview", Number(readiness.validated_preview_row_count || 0).toLocaleString()],
+    ["Failed preview rows", Number(readiness.failed_preview_row_count || 0).toLocaleString()],
+    ["Email sets", emailSetsMatch ? "Match" : "Mismatch"],
+    ["Fingerprints", fingerprintsMatch ? "Match" : "Mismatch"],
     ["BookTitle column", yesNo(readiness.book_title_column_present)],
     ["BookTitle rows", Number(readiness.rows_with_book_title || 0).toLocaleString()],
     ["Fallback rows", Number(readiness.fallback_row_count || 0).toLocaleString()],
@@ -7760,7 +7795,7 @@ function renderMessageReadiness(profile) {
     <section class="message-readiness message-readiness-${escapeHtml(tone)}">
       <div class="message-readiness-head">
         <span>Message Readiness</span>
-        <strong>${escapeHtml(status)}</strong>
+        <strong>${escapeHtml(displayStatus)}</strong>
       </div>
       <div class="message-readiness-actions">
         <button
@@ -7769,7 +7804,7 @@ function renderMessageReadiness(profile) {
           data-profile="${escapeHtml(profileName)}"
           ${actionDisabled ? "disabled" : ""}
           title="${escapeHtml(actionTitle)}"
-        >${escapeHtml(previewRunning ? "Running..." : "Run Preview + Validate")}</button>
+        >${escapeHtml(previewRunning ? "Synchronizing..." : "Regenerate & Validate Preview")}</button>
       </div>
       <div class="message-readiness-grid">
         ${items.map(([label, value]) => `
@@ -7780,6 +7815,7 @@ function renderMessageReadiness(profile) {
         `).join("")}
       </div>
       ${previewState.message ? `<p class="message-readiness-feedback message-readiness-feedback-${escapeHtml(previewState.kind || "info")}">${escapeHtml(previewState.message)}</p>` : ""}
+      ${syncRequired ? `<p class="message-readiness-reason">Preview artifacts are stale relative to the current queue.</p>` : ""}
       ${reasons.length ? `<p class="message-readiness-reason">${escapeHtml(reasons.join(" "))}</p>` : ""}
     </section>
   `;
@@ -8221,6 +8257,7 @@ function canStartProfile(profile, snapshot = lastSnapshot) {
   }
   return profilePendingCount(profile) > 0
     && !queueSafetyBlockedForProfile(profile, snapshot)
+    && !profilePreviewSyncRequired(profile)
     && !isProfileActive(profile)
     && !Boolean(profile?.restart_blocked);
 }
@@ -9359,7 +9396,8 @@ function rerenderCurrentSelection() {
 async function runProfilePreviewValidation(profileName) {
   const profile = String(profileName || "").trim();
   if (!profile) return;
-  profilePreviewValidationState.set(profile, { kind: "loading", message: "Generating preview and validating..." });
+  if (profilePreviewValidationState.get(profile)?.kind === "loading") return;
+  profilePreviewValidationState.set(profile, { kind: "loading", message: "Regenerating and validating the current preview..." });
   rerenderCurrentSelection();
   try {
     const data = await fetchJson(`/api/profiles/${encodeURIComponent(profile)}/preview-validate`, {
@@ -9373,18 +9411,18 @@ async function runProfilePreviewValidation(profileName) {
       : "";
     profilePreviewValidationState.set(profile, {
       kind: passed ? "success" : "error",
-      message: `${passed ? "Preview validation passed" : "Preview validation failed"} (${Number(result.preview_row_count || 0).toLocaleString()} row(s)).${reasonText}`,
+      message: `${passed ? "Preview synchronized and validated" : "Preview synchronization failed"} (${Number(result.preview_row_count || 0).toLocaleString()} row(s)).${reasonText}`,
     });
     if (data.snapshot) {
       renderSnapshot(data.snapshot);
     } else {
       await fetchSnapshot();
     }
-    showMessage(data.message || (passed ? "Preview validation passed." : "Preview validation failed."), passed ? "success" : "error");
+    showMessage(data.message || (passed ? "Preview synchronized and validated." : "Preview synchronization failed."), passed ? "success" : "error");
   } catch (err) {
-    profilePreviewValidationState.set(profile, { kind: "error", message: `Preview validation failed: ${err}` });
+    profilePreviewValidationState.set(profile, { kind: "error", message: `Preview synchronization failed: ${err}` });
     rerenderCurrentSelection();
-    showMessage(`Preview validation failed: ${err}`, "error");
+    showMessage(`Preview synchronization failed: ${err}`, "error");
   }
 }
 

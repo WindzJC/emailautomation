@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import csv
+import hashlib
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -55,6 +57,7 @@ except Exception:  # pragma: no cover - dependency fallback
 import runtime_control
 import runtime_audit
 import settings
+from runtime_authority import AuthorityError, assert_send_authorized
 from dashboard_security import (
     DashboardSecurityStatus,
     require_dashboard_startup_security,
@@ -4496,6 +4499,8 @@ _START_READY_JOB_LOCK = threading.Lock()
 _START_READY_JOBS: dict[str, dict[str, object]] = {}
 _START_READY_ACTIVE_JOB_ID = ""
 _START_READY_JOB_LIMIT = 20
+_PREVIEW_SYNC_LOCK = threading.Lock()
+_PREVIEW_SYNC_ACTIVE_PROFILE = ""
 
 
 async def _run_sender_start_request_async(
@@ -5154,10 +5159,142 @@ def _active_sender_names() -> set[str]:
 
 
 def _active_preview_names(profile_names: list[str] | None = None) -> set[str]:
+    with _PREVIEW_SYNC_LOCK:
+        dashboard_sync_profile = _PREVIEW_SYNC_ACTIVE_PROFILE
     try:
-        return detect_running_preview_profiles(profile_names)
+        names = detect_running_preview_profiles(profile_names)
     except Exception:
-        return set()
+        names = set()
+    if dashboard_sync_profile and (
+        profile_names is None or dashboard_sync_profile in profile_names
+    ):
+        names.add(dashboard_sync_profile)
+    return names
+
+
+def _begin_preview_sync(profile_name: str) -> bool:
+    global _PREVIEW_SYNC_ACTIVE_PROFILE
+    with _PREVIEW_SYNC_LOCK:
+        if _PREVIEW_SYNC_ACTIVE_PROFILE:
+            return False
+        _PREVIEW_SYNC_ACTIVE_PROFILE = profile_name
+        return True
+
+
+def _finish_preview_sync(profile_name: str) -> None:
+    global _PREVIEW_SYNC_ACTIVE_PROFILE
+    with _PREVIEW_SYNC_LOCK:
+        if _PREVIEW_SYNC_ACTIVE_PROFILE == profile_name:
+            _PREVIEW_SYNC_ACTIVE_PROFILE = ""
+
+
+def _profile_queue_path(profile_name: str) -> Path:
+    cfg = PROFILES.get(profile_name)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Unknown profile: {profile_name}")
+    configured = Path(str(cfg.get("csv") or ""))
+    if not configured.name:
+        raise ValueError(f"Profile {profile_name} has no recipient queue configured")
+    return configured if configured.is_absolute() else settings.SHARDS_DIR / configured.name
+
+
+def _protected_queue_snapshot(profile_name: str) -> dict[str, object]:
+    path = _profile_queue_path(profile_name)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("Recipient queue must be a regular non-symlink file.")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise RuntimeError("Recipient queue verification requires O_NOFOLLOW support.")
+    descriptor = os.open(path, os.O_RDONLY | nofollow)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise RuntimeError("Recipient queue changed while it was being opened.")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    readiness = build_profile_message_readiness(profile_name)
+    return {
+        "path": path,
+        "sha256": digest.hexdigest(),
+        "recipient_fingerprint": str(readiness.get("queue_recipient_fingerprint") or ""),
+        "row_count": int(readiness.get("recipient_row_count") or 0),
+    }
+
+
+def _queue_snapshot_unchanged(
+    before: dict[str, object],
+    after: dict[str, object],
+) -> bool:
+    return all(
+        before.get(key) == after.get(key)
+        for key in ("path", "sha256", "recipient_fingerprint", "row_count")
+    )
+
+
+def _preview_sync_queue_integrity_response(
+    profile_name: str,
+    before: dict[str, object],
+    *,
+    phase: str,
+) -> JSONResponse | None:
+    try:
+        after = _protected_queue_snapshot(profile_name)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "queue_snapshot_failed",
+                "profile": profile_name,
+                "message": f"Recipient queue could not be verified after {phase}: {exc}",
+            },
+            status_code=409,
+        )
+    if _queue_snapshot_unchanged(before, after):
+        return None
+    return JSONResponse(
+        {
+            "ok": False,
+            "blocked": True,
+            "error": "queue_changed_during_preview_sync",
+            "profile": profile_name,
+            "message": f"Recipient queue changed during {phase}. Synchronization failed closed.",
+            "snapshot": _build_live_snapshot(),
+        },
+        status_code=409,
+    )
+
+
+def _preview_sync_authority_error() -> str:
+    try:
+        authority = assert_send_authorized(settings.APP_ROOT)
+    except AuthorityError as exc:
+        return str(exc)
+    expected = str(os.environ.get("ASTRA_EXPECTED_GIT_COMMIT") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        return "ASTRA_EXPECTED_GIT_COMMIT must be the exact deployed Git commit."
+    if expected != str(authority.get("expected_git_commit") or "").strip():
+        return "Protected expected Git commit does not match runtime authority."
+    return ""
+
+
+def _preview_sync_runtime_job() -> dict[str, object] | None:
+    for directory in (
+        IMPORTANT_LEADS_CHECK_JOBS,
+        IMPORTANT_LEADS_VERIFY_JOBS,
+        IMPORTANT_LEADS_DISPATCH_JOBS,
+    ):
+        active = _find_active_dashboard_job(directory)
+        if active:
+            return active
+    return None
 
 
 def _preview_validation_reason_counts(summary_path: Path, limit: int = 5) -> list[str]:
@@ -5213,179 +5350,334 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
     profile_name = str(profile_name or "").strip()
     if not runtime_control.is_known_profile(profile_name):
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
-    if profile_name in _active_sender_names():
+    live_action_block = _manual_live_action_block_response(profile_name)
+    if live_action_block is not None:
+        return live_action_block
+    authority_error = _preview_sync_authority_error()
+    if authority_error:
         return JSONResponse(
             {
                 "ok": False,
                 "blocked": True,
-                "error": "profile_active",
+                "error": "preview_sync_authority_invalid",
                 "profile": profile_name,
-                "message": f"Preview validation blocked: {profile_name} is actively sending.",
-                "snapshot": _build_live_snapshot(),
+                "message": f"Preview synchronization blocked: {authority_error}",
             },
             status_code=409,
         )
-    active_dispatch = _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS)
-    if active_dispatch:
+    active_senders = sorted(_active_sender_names())
+    if active_senders:
         return JSONResponse(
             {
                 "ok": False,
                 "blocked": True,
-                "error": "dispatch_active",
+                "error": "sender_active",
                 "profile": profile_name,
-                "job": active_dispatch,
-                "message": "Preview validation blocked while dispatch confirm/rebuild is running.",
+                "active_profiles": active_senders,
+                "message": "Preview synchronization blocked while a sender is active.",
                 "snapshot": _build_live_snapshot(),
             },
             status_code=409,
         )
-
-    python_bin = settings.APP_ROOT / ".venv" / "bin" / "python"
-    if not python_bin.exists():
-        python_bin = Path("python")
-    preview_cmd = [str(python_bin), "send_shard.py", "--profile", profile_name, "--preview_messages"]
-    expected_mode = profile_expected_pitch_mode(profile_name)
-    validate_cmd = [
-        str(python_bin),
-        "tools/validate_message_preview.py",
-        "--profile",
-        profile_name,
-        "--pitch-mode",
-        expected_mode,
-        "--fail-on-errors",
-    ]
-    preview_path = message_preview_path_for_profile(profile_name)
-    validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
-    _append_campaign_history(
-        "preview_validate_started",
-        profile=profile_name,
-        snapshot=_build_live_snapshot(),
-        preview_file=str(preview_path),
-        validation_status="RUNNING",
-    )
-
-    try:
-        preview_proc = subprocess.run(
-            preview_cmd,
-            cwd=settings.APP_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=900,
-        )
-    except subprocess.TimeoutExpired:
-        _append_campaign_history(
-            "preview_validate_completed",
-            profile=profile_name,
-            snapshot=_build_live_snapshot(),
-            preview_file=str(preview_path),
-            preview_row_count=_count_csv_rows(preview_path),
-            validation_status="TIMEOUT",
-            blocked_reasons=["Preview generation timed out."],
-        )
+    active_previews = sorted(_active_preview_names())
+    if active_previews:
         return JSONResponse(
             {
                 "ok": False,
-                "error": "preview_timeout",
+                "blocked": True,
+                "error": "preview_sync_active",
                 "profile": profile_name,
-                "message": "Preview generation timed out before validation could run.",
+                "active_profiles": active_previews,
+                "message": "Another preview synchronization is already running.",
                 "snapshot": _build_live_snapshot(),
             },
-            status_code=504,
+            status_code=409,
         )
-    if preview_proc.returncode != 0:
-        _append_campaign_history(
-            "preview_validate_completed",
-            profile=profile_name,
-            snapshot=_build_live_snapshot(),
-            preview_file=str(preview_path),
-            preview_row_count=_count_csv_rows(preview_path),
-            validation_status="PREVIEW_FAILED",
-            blocked_reasons=["Preview generation failed."],
-        )
+    active_runtime_job = _preview_sync_runtime_job()
+    if active_runtime_job:
         return JSONResponse(
             {
                 "ok": False,
-                "error": "preview_failed",
+                "blocked": True,
+                "error": "runtime_job_active",
                 "profile": profile_name,
-                "returncode": int(preview_proc.returncode),
-                "message": "Preview generation failed. No email was sent.",
+                "job": active_runtime_job,
+                "message": "Preview synchronization blocked while a runtime mutation job is active.",
                 "snapshot": _build_live_snapshot(),
             },
-            status_code=500,
+            status_code=409,
+        )
+    if not _begin_preview_sync(profile_name):
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "preview_sync_active",
+                "profile": profile_name,
+                "message": "Another preview synchronization is already running.",
+            },
+            status_code=409,
         )
 
     try:
-        validate_proc = subprocess.run(
-            validate_cmd,
-            cwd=settings.APP_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-        )
-    except subprocess.TimeoutExpired:
-        _append_campaign_history(
-            "preview_validate_completed",
-            profile=profile_name,
-            snapshot=_build_live_snapshot(),
-            preview_file=str(preview_path),
-            preview_row_count=_count_csv_rows(preview_path),
-            validation_status="TIMEOUT",
-            blocked_reasons=["Preview validation timed out."],
-        )
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "validation_timeout",
-                "profile": profile_name,
-                "preview_path": str(preview_path),
-                "preview_row_count": _count_csv_rows(preview_path),
-                "message": "Preview validation timed out.",
-                "snapshot": _build_live_snapshot(),
-            },
-            status_code=504,
-        )
+        try:
+            queue_before = _protected_queue_snapshot(profile_name)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "queue_snapshot_failed",
+                    "profile": profile_name,
+                    "message": f"Preview synchronization blocked: {exc}",
+                },
+                status_code=409,
+            )
 
-    validation_passed = validate_proc.returncode == 0
-    reason_counts = _preview_validation_reason_counts(summary_path)
-    result = {
-        "profile": profile_name,
-        "pitch_mode": expected_mode,
-        "preview_path": str(preview_path),
-        "preview_row_count": _count_csv_rows(preview_path),
-        "validation_passed": validation_passed,
-        "validation_status": "PASS" if validation_passed else "FAIL",
-        "validation_returncode": int(validate_proc.returncode),
-        "validation_reasons": reason_counts,
-        "validated_path": str(validated_path),
-        "failed_path": str(failed_path),
-        "summary_path": str(summary_path),
-        "timestamp_utc": iso_utc(),
-    }
-    history_snapshot = _build_live_snapshot()
-    _append_campaign_history(
-        "preview_validate_completed",
-        profile=profile_name,
-        snapshot=history_snapshot,
-        preview_file=str(preview_path),
-        preview_row_count=int(result["preview_row_count"]),
-        validation_status=str(result["validation_status"]),
-        blocked_reasons=reason_counts,
-    )
-    snapshot = _build_live_snapshot()
-    return JSONResponse(
-        {
-            "ok": True,
-            "message": (
-                f"Preview + validation passed for {profile_name}."
-                if validation_passed
-                else f"Preview generated but validation failed for {profile_name}."
+        python_bin = settings.APP_ROOT / ".venv" / "bin" / "python"
+        if not python_bin.exists():
+            python_bin = Path("python")
+        preview_cmd = [str(python_bin), "send_shard.py", "--profile", profile_name, "--preview_messages"]
+        expected_mode = profile_expected_pitch_mode(profile_name)
+        validate_cmd = [
+            str(python_bin),
+            "tools/validate_message_preview.py",
+            "--profile",
+            profile_name,
+            "--pitch-mode",
+            expected_mode,
+            "--fail-on-errors",
+        ]
+        preview_path = message_preview_path_for_profile(profile_name)
+        validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
+        try:
+            preview_proc = subprocess.run(
+                preview_cmd,
+                cwd=settings.APP_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=900,
+            )
+        except subprocess.TimeoutExpired:
+            integrity_error = _preview_sync_queue_integrity_response(
+                profile_name,
+                queue_before,
+                phase="preview generation",
+            )
+            if integrity_error is not None:
+                return integrity_error
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "preview_timeout",
+                    "profile": profile_name,
+                    "message": "Preview generation timed out before validation could run.",
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=504,
+            )
+        integrity_error = _preview_sync_queue_integrity_response(
+            profile_name,
+            queue_before,
+            phase="preview generation",
+        )
+        if integrity_error is not None:
+            return integrity_error
+        if preview_proc.returncode != 0:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "preview_failed",
+                    "profile": profile_name,
+                    "returncode": int(preview_proc.returncode),
+                    "message": "Preview generation failed. No email was sent.",
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=500,
+            )
+
+        try:
+            validate_proc = subprocess.run(
+                validate_cmd,
+                cwd=settings.APP_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            integrity_error = _preview_sync_queue_integrity_response(
+                profile_name,
+                queue_before,
+                phase="preview validation",
+            )
+            if integrity_error is not None:
+                return integrity_error
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "validation_timeout",
+                    "profile": profile_name,
+                    "preview_row_count": _count_csv_rows(preview_path),
+                    "message": "Preview validation timed out.",
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=504,
+            )
+        integrity_error = _preview_sync_queue_integrity_response(
+            profile_name,
+            queue_before,
+            phase="preview validation",
+        )
+        if integrity_error is not None:
+            return integrity_error
+
+        validation_passed = validate_proc.returncode == 0
+        reason_counts = _preview_validation_reason_counts(summary_path)
+        readiness = build_profile_message_readiness(profile_name)
+        queue_safety = (
+            build_controlled_sendgrid_queue_safety_report(profile_name)
+            if bool(PROFILES.get(profile_name, {}).get("controlled_test"))
+            else build_dashboard_queue_safety_report(_queue_safety_provider_for_start(profile_name))
+        )
+        result = {
+            "profile": profile_name,
+            "pitch_mode": expected_mode,
+            "queue_row_count": int(readiness.get("recipient_row_count") or 0),
+            "preview_row_count": int(readiness.get("preview_row_count") or 0),
+            "validated_row_count": int(readiness.get("validated_preview_row_count") or 0),
+            "failed_preview_row_count": int(readiness.get("failed_preview_row_count") or 0),
+            "queue_equals_preview": bool(readiness.get("generated_fingerprint_matches_queue")),
+            "queue_equals_validated": bool(readiness.get("validated_fingerprint_matches_queue")),
+            "fingerprints_match": bool(
+                readiness.get("generated_fingerprint_matches_queue")
+                and readiness.get("validated_fingerprint_matches_queue")
             ),
-            "result": result,
-            "snapshot": snapshot,
+            "queue_unchanged": True,
+            "validation_passed": validation_passed,
+            "validation_status": "PASS" if validation_passed else "FAIL",
+            "validation_returncode": int(validate_proc.returncode),
+            "validation_reasons": reason_counts,
+            "queue_safety": "PASS" if bool(queue_safety.get("safe")) else "FAIL",
+            "message_readiness": str(readiness.get("status") or "NOT RUN"),
+            "emails_sent": 0,
+            "sender_started": False,
+            "timestamp_utc": iso_utc(),
         }
-    )
+        if not validation_passed:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "validation_failed",
+                    "profile": profile_name,
+                    "message": f"Preview generated but validation failed for {profile_name}.",
+                    "result": result,
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=422,
+            )
+
+        verify_cmd = [
+            str(settings.APP_ROOT / "deploy" / "cloud" / "verify.sh"),
+            "--profile",
+            profile_name,
+            "--require-authority",
+        ]
+        preflight_cmd = [str(python_bin), "send_shard.py", "--profile", profile_name, "--preflight"]
+        try:
+            verify_proc = subprocess.run(
+                verify_cmd,
+                cwd=settings.APP_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+            preflight_proc = subprocess.run(
+                preflight_cmd,
+                cwd=settings.APP_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            integrity_error = _preview_sync_queue_integrity_response(
+                profile_name,
+                queue_before,
+                phase="post-sync verification",
+            )
+            if integrity_error is not None:
+                return integrity_error
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "preview_sync_verification_timeout",
+                    "profile": profile_name,
+                    "message": "Preview synchronization verification timed out. Sender was not started.",
+                    "snapshot": _build_live_snapshot(),
+                },
+                status_code=504,
+            )
+        integrity_error = _preview_sync_queue_integrity_response(
+            profile_name,
+            queue_before,
+            phase="post-sync verification",
+        )
+        if integrity_error is not None:
+            return integrity_error
+        deployment_verify_passed = verify_proc.returncode == 0
+        preflight_passed = (
+            preflight_proc.returncode == 0
+            and "PREFLIGHT: ok (no sending)." in str(preflight_proc.stdout or "")
+        )
+        result["deployment_verify"] = "PASS" if deployment_verify_passed else "FAIL"
+        result["preflight"] = "PASS" if preflight_passed else "FAIL"
+        alignment_passed = all(
+            bool(readiness.get(predicate))
+            for predicate in (
+                "generated_row_count_matches_queue",
+                "validated_row_count_matches_queue",
+                "generated_email_set_matches_queue",
+                "validated_email_set_matches_queue",
+                "generated_fingerprint_matches_queue",
+                "validated_fingerprint_matches_queue",
+            )
+        )
+        ready = (
+            alignment_passed
+            and int(readiness.get("failed_preview_row_count") or 0) == 0
+            and str(readiness.get("status") or "") == "PASS"
+            and bool(queue_safety.get("safe"))
+            and deployment_verify_passed
+            and preflight_passed
+        )
+        result["ready"] = ready
+        snapshot = _build_live_snapshot()
+        if not ready:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "error": "preview_sync_postcheck_failed",
+                    "profile": profile_name,
+                    "message": "Preview synchronization completed, but independent readiness checks still block sending.",
+                    "result": result,
+                    "snapshot": snapshot,
+                },
+                status_code=409,
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": f"Preview synchronized and validated for {profile_name}. Sender was not started.",
+                "result": result,
+                "snapshot": snapshot,
+            }
+        )
+    finally:
+        _finish_preview_sync(profile_name)
 
 
 def _snapshot_profile_for_start_ready(
