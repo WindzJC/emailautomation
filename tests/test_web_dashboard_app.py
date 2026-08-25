@@ -1333,7 +1333,11 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("Start unavailable — no pending leads.", source)
         self.assertIn('noPendingQueue ? "No queue" : "Start"', source)
         self.assertIn("|| noPendingQueue", source)
-        self.assertIn("|| (!warmProfile && !stopAvailable && !startAvailable)", source)
+        self.assertIn(
+            "|| (!warmProfile && !stopAvailable && !previewSyncAvailable && !startAvailable)",
+            source,
+        )
+        self.assertIn('previewSyncAvailable ? "preview_sync" : "start"', source)
         self.assertIn("profilePendingCount(profile) > 0", source)
         self.assertIn("pendingCount <= 0", source)
 

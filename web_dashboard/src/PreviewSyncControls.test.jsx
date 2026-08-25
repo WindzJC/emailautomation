@@ -138,8 +138,36 @@ function fetchMockFor(initialSnapshot, syncHandler = null) {
 
 function syncButton() {
   return document.querySelector(
-    '#profile-detail .preview-validate-profile-btn[data-profile="private_jc"]',
+    '#profile-detail .detail-command-actions .preview-validate-profile-btn[data-profile="private_jc"]',
   );
+}
+
+function senderSyncButton() {
+  return document.querySelector(
+    '.sender-status-action-btn[data-profile="private_jc"][data-action="preview_sync"]',
+  );
+}
+
+function senderStartButton() {
+  return document.querySelector(
+    '.sender-status-action-btn[data-profile="private_jc"][data-action="start"]',
+  );
+}
+
+function profileStartButton() {
+  return document.querySelector(
+    '#profile-detail .start-profile-btn[data-profile="private_jc"]',
+  );
+}
+
+function syncPosts(fetchMock) {
+  return fetchMock.mock.calls.filter(([url, options = {}]) => (
+    String(url) === "/api/profiles/private_jc/preview-validate" && options.method === "POST"
+  ));
+}
+
+function startPosts(fetchMock) {
+  return fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/start/"));
 }
 
 describe("safe preview synchronization controls", () => {
@@ -157,12 +185,22 @@ describe("safe preview synchronization controls", () => {
     document.body.innerHTML = "";
   });
 
-  it("shows SYNC REQUIRED with non-PII alignment details and serializes rapid clicks", async () => {
+  it("replaces sender-row and Profile Detail Start with one serialized SYNC REQUIRED action", async () => {
     const pending = deferredResponse();
     const staleSnapshot = snapshot();
     const fetchMock = fetchMockFor(staleSnapshot, () => pending.promise);
     root = await bootController(fetchMock);
 
+    expect(document.querySelector(".sender-status-table tbody tr")).toHaveTextContent("Sync Required");
+    expect(senderSyncButton()).toHaveTextContent("Regenerate & Validate Preview");
+    expect(senderSyncButton()).not.toBeDisabled();
+    expect(senderStartButton()).not.toBeInTheDocument();
+    expect(profileStartButton()).not.toBeInTheDocument();
+    const whyBlockedButton = document.querySelector(
+      '.sender-status-sync-details-btn[data-profile="private_jc"]',
+    );
+    expect(whyBlockedButton).toHaveAttribute("title", "Show Why Blocked preview details");
+    fireEvent.click(whyBlockedButton);
     expect(document.getElementById("profile-detail")).toHaveTextContent("SYNC REQUIRED");
     expect(document.getElementById("profile-detail")).toHaveTextContent(/Queue rows\s+974/);
     expect(document.getElementById("profile-detail")).toHaveTextContent(/Generated preview\s+1,030/);
@@ -171,15 +209,21 @@ describe("safe preview synchronization controls", () => {
     expect(document.getElementById("profile-detail")).toHaveTextContent(/Fingerprints\s+Mismatch/);
     expect(syncButton()).toHaveTextContent("Regenerate & Validate Preview");
 
-    fireEvent.click(syncButton());
-    fireEvent.click(syncButton());
+    fireEvent.click(senderSyncButton());
+    fireEvent.click(senderSyncButton());
 
-    expect(syncButton()).toHaveTextContent("Synchronizing...");
+    expect(senderSyncButton()).toHaveTextContent("Syncing...");
+    expect(senderSyncButton()).toBeDisabled();
+    expect(syncButton()).toHaveTextContent("Syncing...");
     expect(syncButton()).toBeDisabled();
-    const syncPosts = fetchMock.mock.calls.filter(([url, options = {}]) => (
-      String(url) === "/api/profiles/private_jc/preview-validate" && options.method === "POST"
-    ));
-    expect(syncPosts).toHaveLength(1);
+    expect(syncPosts(fetchMock)).toEqual([[
+      "/api/profiles/private_jc/preview-validate",
+      {
+        credentials: "same-origin",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      },
+    ]]);
 
     const currentSnapshot = snapshot({
       readiness: messageReadiness({
@@ -208,7 +252,52 @@ describe("safe preview synchronization controls", () => {
 
     expect(document.getElementById("profile-detail")).not.toHaveTextContent("SYNC REQUIRED");
     expect(document.getElementById("profile-detail")).toHaveTextContent("PASS");
-    expect(syncPosts).toHaveLength(1);
+    expect(senderSyncButton()).not.toBeInTheDocument();
+    expect(senderStartButton()).toHaveTextContent("Start");
+    expect(profileStartButton()).toHaveTextContent("Start");
+    expect(syncPosts(fetchMock)).toHaveLength(1);
+    expect(startPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it("runs Profile Detail sync exactly once without auto-starting", async () => {
+    const pending = deferredResponse();
+    const fetchMock = fetchMockFor(snapshot(), () => pending.promise);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(syncButton());
+    fireEvent.click(syncButton());
+
+    expect(syncButton()).toHaveTextContent("Syncing...");
+    expect(syncButton()).toBeDisabled();
+    expect(syncPosts(fetchMock)).toHaveLength(1);
+    expect(startPosts(fetchMock)).toHaveLength(0);
+
+    await act(async () => {
+      pending.resolve(jsonResponse({
+        ok: true,
+        message: "Preview synchronized and validated. Sender was not started.",
+        result: { validation_passed: true, preview_row_count: 974 },
+        snapshot: snapshot({
+          readiness: messageReadiness({
+            status: "PASS",
+            preview_sync_required: false,
+            preview_row_count: 974,
+            validated_preview_row_count: 974,
+            generated_row_count_matches_queue: true,
+            validated_row_count_matches_queue: true,
+            generated_email_set_matches_queue: true,
+            validated_email_set_matches_queue: true,
+            generated_fingerprint_matches_queue: true,
+            validated_fingerprint_matches_queue: true,
+            reasons: [],
+          }),
+        }),
+      }));
+      await flushMicrotasks(12);
+    });
+
+    expect(profileStartButton()).toHaveTextContent("Start");
+    expect(startPosts(fetchMock)).toHaveLength(0);
   });
 
   it("does not classify a matching preview as SYNC REQUIRED", async () => {
@@ -231,6 +320,8 @@ describe("safe preview synchronization controls", () => {
 
     expect(document.getElementById("profile-detail")).not.toHaveTextContent("SYNC REQUIRED");
     expect(document.getElementById("profile-detail")).toHaveTextContent("PASS");
+    expect(senderStartButton()).toHaveTextContent("Start");
+    expect(profileStartButton()).toHaveTextContent("Start");
   });
 
   it("surfaces a failed synchronization and restores the non-pending control", async () => {
@@ -241,13 +332,15 @@ describe("safe preview synchronization controls", () => {
     }, 422)));
     root = await bootController(fetchMock);
 
-    fireEvent.click(syncButton());
+    fireEvent.click(senderSyncButton());
     await act(async () => flushMicrotasks(12));
 
-    const syncPosts = fetchMock.mock.calls.filter(([url, options = {}]) => (
-      String(url) === "/api/profiles/private_jc/preview-validate" && options.method === "POST"
-    ));
-    expect(syncPosts).toHaveLength(1);
+    expect(syncPosts(fetchMock)).toHaveLength(1);
+    expect(startPosts(fetchMock)).toHaveLength(0);
+    expect(senderStartButton()).not.toBeInTheDocument();
+    expect(profileStartButton()).not.toBeInTheDocument();
+    expect(senderSyncButton()).toHaveTextContent("Regenerate & Validate Preview");
+    expect(senderSyncButton()).not.toBeDisabled();
     expect(syncButton()).toHaveTextContent("Regenerate & Validate Preview");
     expect(syncButton()).not.toBeDisabled();
     expect(document.getElementById("profile-detail")).toHaveTextContent(
@@ -263,6 +356,10 @@ describe("safe preview synchronization controls", () => {
 
     expect(document.querySelector(".sender-status-table tbody tr")).toHaveTextContent("Blocked");
     expect(document.getElementById("profile-detail")).not.toHaveTextContent("SYNC REQUIRED");
-    expect(syncButton()).toBeDisabled();
+    expect(senderSyncButton()).not.toBeInTheDocument();
+    expect(profileStartButton()).toBeDisabled();
+    expect(document.querySelector(
+      '#profile-detail .message-readiness .preview-validate-profile-btn[data-profile="private_jc"]',
+    )).toBeDisabled();
   });
 });

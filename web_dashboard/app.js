@@ -7129,8 +7129,11 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const warmStatus = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
       const status = senderStatusBadge(profile);
       const pendingAction = pendingProfileActions.get(profile.name) || "";
+      const previewSyncState = profilePreviewValidationState.get(profile.name) || {};
+      const previewSyncPending = previewSyncState.kind === "loading";
       const stopAvailable = warmProfile ? Boolean(warmStatus.running) : canStopProfile(profile);
       const startAvailable = canStartProfile(profile, snapshot);
+      const previewSyncAvailable = !warmProfile && profilePreviewSyncActionAvailable(profile, snapshot);
       const pendingCount = warmProfile
         ? Number(warmStatus.queued_remaining_count ?? warmStatus.remaining ?? 0)
         : profilePendingCount(profile);
@@ -7146,14 +7149,15 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         ? "stop"
         : warmProfile
           ? warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"
-          : "start";
+          : previewSyncAvailable ? "preview_sync" : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : action === "stop" ? "Stop" : action === "open_lead_ops" ? status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : status.label === "Complete" ? "Complete" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
+        : action === "stop" ? "Stop" : action === "preview_sync" ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview" : action === "open_lead_ops" ? status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : status.label === "Complete" ? "Complete" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
       const actionDisabled = Boolean(pendingAction)
+        || previewSyncPending
         || action === "no_queue"
         || (!warmProfile && noPendingQueue)
-        || (!warmProfile && !stopAvailable && !startAvailable);
+        || (!warmProfile && !stopAvailable && !previewSyncAvailable && !startAvailable);
       const warmMax = Number(profile?.max_total ?? profile?.configured_max_total ?? profile?.max_messages_per_run ?? 0);
       const warmMetadata = warmProfile
         ? `<span class="sender-status-profile-meta">Private JC sender · same limits as JC · ${warmMax > 0 ? `max ${warmMax.toLocaleString()}` : "no run cap"}</span>`
@@ -7180,7 +7184,9 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               ${warmMetadata}
             </div>
           </td>
-          <td><span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
+          <td>${status.label === "Sync Required"
+            ? `<button class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)} sender-status-sync-details-btn" type="button" data-profile="${escapeHtml(profile.name || "")}" title="Show Why Blocked preview details">${escapeHtml(status.label)}</button>`
+            : `<span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>`}</td>
           <td>${pendingCount.toLocaleString()}</td>
           <td>${acceptedCount.toLocaleString()}</td>
           <td>${Number(profile.awaiting_outcome || 0).toLocaleString()}</td>
@@ -7191,7 +7197,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
-              title="${warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : action === "no_queue" || noPendingQueue ? "No pending leads." : ""}"
+              title="${action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : action === "no_queue" || noPendingQueue ? "No pending leads." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           </td>
@@ -7737,6 +7743,12 @@ function profileHasIndependentBlocker(profile, snapshot = lastSnapshot) {
     || messageStatus === "FAIL";
 }
 
+function profilePreviewSyncActionAvailable(profile, snapshot = lastSnapshot) {
+  return profilePreviewSyncRequired(profile)
+    && !profileHasIndependentBlocker(profile, snapshot)
+    && !isProfileActive(profile);
+}
+
 function yesNo(value) {
   return value ? "Yes" : "No";
 }
@@ -7804,7 +7816,7 @@ function renderMessageReadiness(profile) {
           data-profile="${escapeHtml(profileName)}"
           ${actionDisabled ? "disabled" : ""}
           title="${escapeHtml(actionTitle)}"
-        >${escapeHtml(previewRunning ? "Synchronizing..." : "Regenerate & Validate Preview")}</button>
+        >${escapeHtml(previewRunning ? "Syncing..." : "Regenerate & Validate Preview")}</button>
       </div>
       <div class="message-readiness-grid">
         ${items.map(([label, value]) => `
@@ -9145,6 +9157,9 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const activity = profileActivityState(profile);
   const runtimeClass = `detail-runtime-${activity.tone || "neutral"}`;
   const pendingAction = pendingProfileActions.get(profile.name) || "";
+  const previewSyncState = profilePreviewValidationState.get(profile.name) || {};
+  const previewSyncPending = previewSyncState.kind === "loading";
+  const previewSyncAvailable = profilePreviewSyncActionAvailable(profile, snapshot);
   const pendingCount = Number(profile.pending_count || 0);
   const noPendingQueue = !canStopProfile(profile) && pendingCount <= 0;
   const startDisabled = Boolean(pendingAction) || !canStartProfile(profile, snapshot);
@@ -9222,9 +9237,19 @@ function updateProfileDetailNode(node, snapshot, profile) {
   );
 
   refs.startButton.dataset.profile = profile.name || "";
-  refs.startButton.disabled = startDisabled;
-  refs.startButton.title = noPendingQueue ? "Start unavailable — no pending leads." : "";
-  setNodeText(refs.startButton, pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start");
+  refs.startButton.classList.toggle("start-profile-btn", !previewSyncAvailable);
+  refs.startButton.classList.toggle("preview-validate-profile-btn", previewSyncAvailable);
+  refs.startButton.dataset.action = previewSyncAvailable ? "preview_sync" : "start";
+  refs.startButton.disabled = previewSyncAvailable ? previewSyncPending : startDisabled;
+  refs.startButton.title = previewSyncAvailable
+    ? "Regenerate and validate the current preview without starting the sender."
+    : noPendingQueue ? "Start unavailable — no pending leads." : "";
+  setNodeText(
+    refs.startButton,
+    previewSyncAvailable
+      ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview"
+      : pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start",
+  );
 
   refs.stopButton.dataset.profile = profile.name || "";
   refs.stopButton.disabled = stopDisabled;
@@ -9496,6 +9521,11 @@ async function handleProfileDetailClick(event) {
 }
 
 async function handleSenderStatusClick(event) {
+  const syncDetailsButton = event.target.closest(".sender-status-sync-details-btn[data-profile]");
+  if (syncDetailsButton && senderStatusPanel?.contains(syncDetailsButton)) {
+    selectProfileByName(syncDetailsButton.getAttribute("data-profile") || "");
+    return;
+  }
   const actionButton = event.target.closest(".sender-status-action-btn[data-profile][data-action]");
   if (actionButton && senderStatusPanel?.contains(actionButton)) {
     if (actionButton.disabled) return;
@@ -9503,6 +9533,10 @@ async function handleSenderStatusClick(event) {
     const action = actionButton.getAttribute("data-action") || "";
     if (profile === "private_jc_warm" && action === "open_lead_ops") {
       setLeadWorkflow("warm");
+      return;
+    }
+    if (profile && action === "preview_sync") {
+      void runProfilePreviewValidation(profile);
       return;
     }
     if (!profile || !["start", "stop"].includes(action)) return;
