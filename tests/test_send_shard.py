@@ -236,7 +236,9 @@ class SendShardTests(unittest.TestCase):
         }
 
         for profile_name, (from_email, signature_name) in expected.items():
-            self.assertEqual(from_email, send_shard.PROFILES[profile_name]["from_email"])
+            profile = send_shard.PROFILES[profile_name]
+            self.assertEqual(from_email, profile["from_email"])
+            self.assertEqual("bnmarketing.us,astraproductionsbyjc.com", profile["my_domains"])
             self.assertEqual(signature_name, send_shard.SIGNATURE_BY_FROM[from_email])
             self.assertTrue((Path(send_shard.__file__).resolve().parent / signature_name).is_file())
 
@@ -248,9 +250,20 @@ class SendShardTests(unittest.TestCase):
         self.assertFalse(
             any(address.endswith("@barnesnoblemarketing.com") for address in send_shard.SIGNATURE_BY_FROM)
         )
+        self.assertFalse(
+            any(
+                "barnesnoblemarketing.com" in str(profile.get("my_domains", "")).split(",")
+                for profile in send_shard.PROFILES.values()
+                if profile.get("provider") == "sendgrid" and profile.get("send_enabled", True)
+            )
+        )
 
     def test_unconfigured_sendgrid_profiles_fail_closed_before_runtime_work(self) -> None:
-        for profile_name in ("sendgrid_annette", "sendgrid_fiorela"):
+        for profile_name in (
+            "sendgrid_annette",
+            "sendgrid_fiorela",
+            send_shard.CONTROLLED_SENDGRID_PROFILE,
+        ):
             self.assertFalse(send_shard.profile_send_available(profile_name))
             self.assertIn("bnmarketing.us", send_shard.profile_send_unavailable_reason(profile_name))
             output = io.StringIO()
@@ -294,9 +307,15 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(1, profile["max_per_run"])
         self.assertEqual(1, profile["max_submission_attempts"])
         self.assertFalse(profile["repeat"])
+        self.assertFalse(profile["send_enabled"])
+        self.assertEqual(
+            "Controlled SendGrid test requires a verified bnmarketing.us test identity before enabling.",
+            profile["send_disabled_reason"],
+        )
         self.assertTrue(profile["dashboard_manual_only"])
         self.assertTrue(profile["global_dedupe"])
         self.assertTrue(profile["suppress_invalid"])
+        self.assertTrue(profile["require_preview_recipient_fingerprint"])
         self.assertEqual(
             "sendgrid_controlled_test_message_preview.csv",
             dashboard_core.message_preview_path_for_profile(
@@ -396,6 +415,7 @@ class SendShardTests(unittest.TestCase):
                 **send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE],
                 "csv": queue_path.name,
                 "log": log_path.name,
+                "send_enabled": True,
             }
             stdout = io.StringIO()
 
@@ -1599,6 +1619,7 @@ class SendShardTests(unittest.TestCase):
             )
             profile.clear()
             profile.update(send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE])
+            profile["send_enabled"] = True
 
             output, send_mock = self._run_synthetic_sendgrid(
                 fixture,
