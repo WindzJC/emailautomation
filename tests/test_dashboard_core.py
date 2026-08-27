@@ -19,6 +19,52 @@ from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
+    def test_unconfigured_sendgrid_profile_is_blocked_in_readiness_and_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            shards.mkdir()
+            previews.mkdir()
+            queue = shards / "recipients_sendgrid_1.csv"
+            queue.write_text("Email,BookTitle\nreader@example.com,Book\n", encoding="utf-8")
+            profiles = {
+                "sendgrid_annette": {
+                    "provider": "sendgrid",
+                    "csv": queue.name,
+                    "log": "sendgrid_annette_log.csv",
+                    "pitch": "pitch1",
+                    "send_enabled": False,
+                    "send_disabled_reason": "Annette bnmarketing.us From identity and signature are not configured.",
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                SHARDS_DIR=shards,
+                MESSAGE_PREVIEW_DIR=previews,
+                PROFILES=profiles,
+            ):
+                readiness = dashboard_core.build_profile_message_readiness("sendgrid_annette")
+                health = dashboard_core.build_profile_health_status(
+                    {"name": "sendgrid_annette", "runtime_state": "stopped", "run_errors": 0},
+                    webhook_health={},
+                    private_bounce_guard={},
+                )
+
+        self.assertEqual("FAIL", readiness["status"])
+        self.assertFalse(readiness["send_available"])
+        self.assertIn("not configured", " ".join(readiness["reasons"]).lower())
+        self.assertEqual("Not Configured", health["readiness_label"])
+        self.assertEqual("PROFILE_NOT_CONFIGURED", health["reason_code"])
+
+    def test_tmux_start_refuses_unconfigured_sendgrid_profiles_without_side_effects(self) -> None:
+        with patch.object(dashboard_core, "active_or_locked_sender_profiles") as active_profiles:
+            for profile_name in ("sendgrid_annette", "sendgrid_fiorela"):
+                ok, message = dashboard_core.start_sendgrid_profile(profile_name, 0)
+                self.assertFalse(ok)
+                self.assertIn("not configured for sending", message)
+        active_profiles.assert_not_called()
+
     def test_cloud_service_flag_disables_repository_dotenv_loading(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"

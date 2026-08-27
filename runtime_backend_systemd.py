@@ -9,7 +9,7 @@ from dataclasses import replace
 from typing import List
 
 import dashboard_core
-from send_shard import PROFILES
+from send_shard import PROFILES, profile_send_unavailable_reason
 
 
 SYSTEMCTL_BIN = os.environ.get(
@@ -668,6 +668,10 @@ def start_sender(
 
     if not is_known_profile(profile_name):
         return False, f"Unknown profile: {profile_name}"
+
+    unavailable_reason = profile_send_unavailable_reason(profile_name)
+    if unavailable_reason:
+        return False, f"{profile_name} is not configured for sending: {unavailable_reason}"
 
     state = _active_state(profile_name)
     unit = unit_name(profile_name)

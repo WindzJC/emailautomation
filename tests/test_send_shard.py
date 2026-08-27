@@ -198,8 +198,6 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(
             {
                 "sendgrid_alison",
-                "sendgrid_annette",
-                "sendgrid_fiorela",
                 "sendgrid_jodi",
                 "sendgrid_jordan",
             },
@@ -220,6 +218,64 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(1, profile["batch_size"])
             self.assertFalse(bool(profile.get("human_mode")))
             self.assertEqual("12:00", profile["stop_at_local"])
+
+    def test_bnmarketing_sendgrid_identities_and_signatures_are_exact(self) -> None:
+        expected = {
+            "sendgrid_alison": (
+                "alisonaguiar@bnmarketing.us",
+                "sig_sendgrid_alison_bnmarketing.png",
+            ),
+            "sendgrid_jodi": (
+                "jodihorowitz@bnmarketing.us",
+                "sig_sendgrid_jodi_bnmarketing.png",
+            ),
+            "sendgrid_jordan": (
+                "jordankendrick@bnmarketing.us",
+                "sig_sendgrid_jordan_bnmarketing.png",
+            ),
+        }
+
+        for profile_name, (from_email, signature_name) in expected.items():
+            self.assertEqual(from_email, send_shard.PROFILES[profile_name]["from_email"])
+            self.assertEqual(signature_name, send_shard.SIGNATURE_BY_FROM[from_email])
+            self.assertTrue((Path(send_shard.__file__).resolve().parent / signature_name).is_file())
+
+        self.assertNotIn("alisonaguair@bnmarketing.us", send_shard.SIGNATURE_BY_FROM)
+        self.assertNotEqual(
+            "alisonaguair@bnmarketing.us",
+            send_shard.PROFILES["sendgrid_alison"]["from_email"],
+        )
+        self.assertFalse(
+            any(address.endswith("@barnesnoblemarketing.com") for address in send_shard.SIGNATURE_BY_FROM)
+        )
+
+    def test_unconfigured_sendgrid_profiles_fail_closed_before_runtime_work(self) -> None:
+        for profile_name in ("sendgrid_annette", "sendgrid_fiorela"):
+            self.assertFalse(send_shard.profile_send_available(profile_name))
+            self.assertIn("bnmarketing.us", send_shard.profile_send_unavailable_reason(profile_name))
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["send_shard.py", "--profile", profile_name, "--preflight"]):
+                with redirect_stdout(output):
+                    result = send_shard.main()
+            self.assertEqual(1, result)
+            self.assertIn("REFUSED", output.getvalue())
+            self.assertIn("not configured for sending", output.getvalue())
+
+    def test_legacy_private_profile_definitions_remain_unchanged(self) -> None:
+        expected = {
+            "private_annette": ("recipients_1.csv", "private_annette_log.csv", "annettedanek-akey@barnesnoblemarketing.com"),
+            "private_fiorela": ("recipients_5.csv", "private_fiorela_log.csv", "fiorelladelima@barnesnoblemarketing.com"),
+            "private_alison": ("recipients_4.csv", "private_alison_log.csv", "alisonaguair@barnesnoblemarketing.com"),
+            "private_jodi": ("recipients_3.csv", "private_jodi_horowitz_log.csv", "jodihorowitz@barnesnoblemarketing.com"),
+            "private_jordan": ("recipients_2.csv", "private_jordan_kendrick_log.csv", "jordankendrick@barnesnoblemarketing.com"),
+        }
+        for profile_name, (queue_name, log_name, from_email) in expected.items():
+            profile = send_shard.PROFILES[profile_name]
+            self.assertEqual("private", profile["provider"])
+            self.assertEqual(queue_name, profile["csv"])
+            self.assertEqual(log_name, profile["log"])
+            self.assertEqual(from_email, profile["from_email"])
+            self.assertNotIn("send_enabled", profile)
 
     def test_controlled_sendgrid_profile_is_isolated_and_hard_limited(self) -> None:
         profile = send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE]
@@ -1413,6 +1469,10 @@ class SendShardTests(unittest.TestCase):
             "sendgrid_suppression_csv": sg_suppress.name,
             "interval": 0,
             "repeat": False,
+            # Synthetic behavior tests exercise a configured sender without
+            # weakening the real Annette production profile definition.
+            "send_enabled": True,
+            "send_disabled_reason": "",
         }
         return base, shards, logs, state, csv_path, unsub, suppress, sg_suppress, counters, profile
 

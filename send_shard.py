@@ -460,14 +460,17 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
+        # TODO: configure Annette bnmarketing.us From identity and signature before enabling this SendGrid profile.
+        "send_enabled": False,
+        "send_disabled_reason": "Annette bnmarketing.us From identity and signature are not configured.",
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
         "csv": "recipients_sendgrid_2.csv",
         "log": "sendgrid_jordan_log.csv",
         "pitch": "pitch2",
-        "from_email": "jordankendrick@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "jordankendrick@bnmarketing.us",
+        "my_domains": "bnmarketing.us,barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -489,8 +492,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_3.csv",
         "log": "sendgrid_jodi_log.csv",
         "pitch": "pitch3",
-        "from_email": "jodihorowitz@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "jodihorowitz@bnmarketing.us",
+        "my_domains": "bnmarketing.us,barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -512,8 +515,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_4.csv",
         "log": "sendgrid_alison_log.csv",
         "pitch": "pitch4",
-        "from_email": "alisonaguair@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "alisonaguiar@bnmarketing.us",
+        "my_domains": "bnmarketing.us,barnesnoblemarketing.com,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -552,6 +555,9 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
+        # TODO: configure Fiorela bnmarketing.us From identity and signature before enabling this SendGrid profile.
+        "send_enabled": False,
+        "send_disabled_reason": "Fiorela bnmarketing.us From identity and signature are not configured.",
     },
     "sendgrid_controlled_test": {
         "provider": "sendgrid",
@@ -587,12 +593,31 @@ PROFILES: dict[str, dict[str, object]] = {
 }
 
 
-PRODUCTION_SENDGRID_PROFILES = (
-    "sendgrid_alison",
-    "sendgrid_annette",
-    "sendgrid_fiorela",
-    "sendgrid_jodi",
-    "sendgrid_jordan",
+def profile_send_unavailable_reason(
+    profile_name: str,
+    config: dict[str, object] | None = None,
+) -> str:
+    """Return the configured fail-closed reason for a known unavailable profile."""
+    cfg = config if isinstance(config, dict) else PROFILES.get(str(profile_name or "").strip())
+    if not isinstance(cfg, dict) or bool(cfg.get("send_enabled", True)):
+        return ""
+    return str(cfg.get("send_disabled_reason") or "Sender profile is not configured.").strip()
+
+
+def profile_send_available(profile_name: str) -> bool:
+    return not profile_send_unavailable_reason(profile_name)
+
+
+PRODUCTION_SENDGRID_PROFILES = tuple(
+    profile_name
+    for profile_name in (
+        "sendgrid_alison",
+        "sendgrid_annette",
+        "sendgrid_fiorela",
+        "sendgrid_jodi",
+        "sendgrid_jordan",
+    )
+    if profile_send_available(profile_name)
 )
 
 
@@ -1279,15 +1304,21 @@ def restore_claimed_queue_row(
 SIGNATURE_CID = "sigimg"
 
 SIGNATURE_BY_FROM: dict[str, str] = {
-    # --- PrivateEmail 5 accounts (each different) ---
-    "jordankendrick@barnesnoblemarketing.com":"sig_private_jordan.png",
-    "jodihorowitz@barnesnoblemarketing.com":  "sig_private_jodi.png",
-    "alisonaguair@barnesnoblemarketing.com": "sig_private_alison.png",
-    "fiorelladelima@barnesnoblemarketing.com": "sig_private_fiorela.png",
-    "annettedanek-akey@barnesnoblemarketing.com": "sig_private_annette.png",
+    # --- SendGrid bnmarketing.us identities ---
+    "jordankendrick@bnmarketing.us": "sig_sendgrid_jordan_bnmarketing.png",
+    "jodihorowitz@bnmarketing.us": "sig_sendgrid_jodi_bnmarketing.png",
+    "alisonaguiar@bnmarketing.us": "sig_sendgrid_alison_bnmarketing.png",
+
+    # TODO: Add Annette's verified bnmarketing.us From address and
+    #       dedicated SendGrid signature here when that account is ready.
+    # TODO: Add Fiorella's verified bnmarketing.us From address and
+    #       dedicated SendGrid signature here when that account is ready.
+
+    # --- Astra / JC identities ---
     "jc@astraproductions.co": "LOGO ASTRA bg.png",
     "astraproductionsbyjc@gmail.com": "LOGO ASTRA bg.png",
 }
+
 SIGNATURE_BY_PITCH = {
     }
 
@@ -4407,6 +4438,15 @@ def main() -> int | None:
             for k, v in sorted(cfg.items()):
                 print(f"    {k}: {v}")
         return
+    unavailable_reason = profile_send_unavailable_reason(str(args.profile or ""))
+    informational_only = bool(
+        getattr(args, "status", False)
+        or getattr(args, "status_sendgrid", False)
+        or getattr(args, "resync_sendgrid", False)
+    )
+    if unavailable_reason and not informational_only:
+        print(f"REFUSED: profile {args.profile} is not configured for sending: {unavailable_reason}")
+        return 1
     if args.profile and not args.status:
         print(f"PROFILE: {args.profile}")
 

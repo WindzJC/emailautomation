@@ -37,6 +37,8 @@ from send_shard import (
     authoritative_send_log_paths,
     load_authoritative_history_email_sets,
     load_bad_sendgrid_event_emails,
+    profile_send_available,
+    profile_send_unavailable_reason,
     profile_runtime_lock_status,
 )
 from sendgrid_hygiene import (
@@ -105,7 +107,8 @@ DASHBOARD_PROFILES = (
 START_ALL_PROFILES = [
     name
     for name in SENDGRID_PROFILES
-    if not bool(PROFILES.get(name, {}).get("dashboard_manual_only"))
+    if profile_send_available(name)
+    and not bool(PROFILES.get(name, {}).get("dashboard_manual_only"))
 ]
 SENDGRID_TARGET_WINDOW_HOURS = 18
 SENDGRID_SEND_TARGET_OPTIONS = (5000, 10000)
@@ -622,6 +625,7 @@ def _validation_failed_count(failed_path: Path, summary_path: Path) -> Optional[
 
 def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     cfg = PROFILES.get(profile_name, {})
+    unavailable_reason = profile_send_unavailable_reason(profile_name, cfg)
     csv_path = _profile_csv_path(cfg)
     fieldnames, row_count, rows = _csv_row_count_with_fieldnames(csv_path)
     field_by_lower = {field.lower(): field for field in fieldnames}
@@ -690,6 +694,9 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         validation_status = "FAIL" if failed_count > 0 else "PASS"
 
     status = "PASS"
+    if unavailable_reason:
+        status = "FAIL"
+        reasons.append(f"Profile is not configured for sending: {unavailable_reason}")
     if pre_rendered_message:
         required = {"authoremail", "emailsubject", "emailbody", "contactpath"}
         missing = sorted(required - set(field_by_lower))
@@ -762,6 +769,8 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
 
     return {
         "status": status,
+        "send_available": not bool(unavailable_reason),
+        "send_unavailable_reason": unavailable_reason,
         "recipient_file": csv_path.name,
         "recipient_row_count": row_count,
         "book_title_column_present": book_title_present,
@@ -1624,6 +1633,9 @@ def stop_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
 def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TMUX_SESSION_NAME) -> tuple[bool, str]:
     if profile_name not in SENDGRID_PROFILES:
         return False, f"Unknown profile: {profile_name}"
+    unavailable_reason = profile_send_unavailable_reason(profile_name)
+    if unavailable_reason:
+        return False, f"{profile_name} is not configured for sending: {unavailable_reason}"
     if profile_name in active_or_locked_sender_profiles([profile_name]):
         return False, f"{profile_name} is already running or locked."
     if not PYTHON_BIN.exists():
@@ -2759,6 +2771,24 @@ def build_profile_health_status(
     run_issue_state = _run_issue_state(profile)
     is_sendgrid = _profile_uses_sendgrid(profile)
     is_private = _profile_uses_private(profile)
+
+    unavailable_reason = profile_send_unavailable_reason(name, PROFILES.get(name))
+    if unavailable_reason:
+        note = f"Sender is unavailable: {unavailable_reason}"
+        return {
+            "label": "Not Configured",
+            "tone": "bad",
+            "note": note,
+            "reason_code": "PROFILE_NOT_CONFIGURED",
+            "reason_note": note,
+            "readiness_label": "Not Configured",
+            "readiness_tone": "bad",
+            "readiness_note": "Configure the verified From identity and signature before enabling this sender.",
+            "telemetry_label": "Historical",
+            "telemetry_tone": "neutral",
+            "telemetry_note": "Historical queue and delivery records remain available while sending is disabled.",
+            "run_issue_state": run_issue_state,
+        }
 
     if is_sendgrid and (_looks_like_auth_401(evidence) or ("auth_error" in evidence and "sendgrid" in evidence)):
         return {

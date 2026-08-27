@@ -97,7 +97,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
         )
 
         profile = {
-            **send_shard.PROFILES["sendgrid_annette"],
+            **send_shard.PROFILES["sendgrid_jordan"],
             "csv": queue.name,
             "log": recipient_log.name,
             "domain_log": domain_log.name,
@@ -340,7 +340,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
                 patch.dict(
                     send_shard.PROFILES,
                     {
-                        "sendgrid_annette":
+                        "sendgrid_jordan":
                             fixture["profile"],
                     },
                     clear=False,
@@ -365,7 +365,7 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
                     [
                         "send_shard.py",
                         "--profile",
-                        "sendgrid_annette",
+                        "sendgrid_jordan",
                     ],
                 )
             )

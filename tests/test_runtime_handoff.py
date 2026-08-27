@@ -3702,7 +3702,7 @@ def test_send_shard_real_send_refuses_missing_authority_but_preflight_skips_gate
         patch.object(
             sys,
             "argv",
-            ["send_shard.py", "--profile", "sendgrid_annette"],
+            ["send_shard.py", "--profile", "sendgrid_jordan"],
         ),
         redirect_stdout(output),
     ):

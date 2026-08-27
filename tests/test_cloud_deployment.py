@@ -138,6 +138,25 @@ def test_unknown_systemd_profiles_fail_closed() -> None:
         assert "Unknown profile" in message
 
 
+def test_unconfigured_systemd_profiles_refuse_before_systemctl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_control(action: str, profile: str) -> subprocess.CompletedProcess[str]:
+        calls.append((action, profile))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(runtime_backend_systemd, "_control", fake_control)
+
+    for profile in ("sendgrid_annette", "sendgrid_fiorela"):
+        ok, message = runtime_backend_systemd.start_sender(profile)
+        assert not ok
+        assert "not configured for sending" in message
+
+    assert calls == []
+
+
 def test_systemd_backend_start_and_stop_target_only_selected_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
