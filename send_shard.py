@@ -23,18 +23,17 @@ import traceback
 import unicodedata
 import uuid
 from collections import OrderedDict, deque
+from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr
 from getpass import getpass
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
-import settings
 import runtime_audit
-from runtime_authority import AuthorityError, assert_send_authorized
+import settings
 from provider_pacing import (
     mark_recovery_started,
     provider_pacing_status,
@@ -44,6 +43,7 @@ from provider_pacing import (
     throttle_pause_seconds,
 )
 from recipient_file_lock import lock_files
+from runtime_authority import AuthorityError, assert_send_authorized
 from sendgrid_hygiene import (
     load_active_suppressed_emails,
     load_suppression_email_tokens,
@@ -205,7 +205,7 @@ def build_sendgrid_astra_custom_args(
     queue_name: str,
     message_ordinal: int,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     recipient_id = _short_sha256("recipient", profile_name, recipient_email.lower())
     message_key = _short_sha256("message", profile_name, run_id, recipient_id, queue_name, message_ordinal)
     normalized_campaign_type = normalize_campaign_type(campaign_type)
@@ -274,7 +274,7 @@ BUSINESS_LOCALPART_HINTS = {
     "works",
 }
 
-PROFILES: Dict[str, Dict[str, object]] = {
+PROFILES: dict[str, dict[str, object]] = {
 
     # Private mailboxes (staggered pacing, domain-wide hourly cap controlled by PROVIDER_LIMIT_DEFAULTS)
     "private_annette": {
@@ -662,7 +662,7 @@ def _process_exists(pid: int) -> bool:
         return False
 
 
-def profile_runtime_lock_status(profile_name: str) -> Dict[str, object]:
+def profile_runtime_lock_status(profile_name: str) -> dict[str, object]:
     lock_path = profile_runtime_lock_path(profile_name)
     if not lock_path.exists():
         return {"locked": False, "path": str(lock_path), "pid": 0}
@@ -743,7 +743,7 @@ def _log_info_marks_sent(info: object) -> bool:
     return "outcome=sent" in text or '"outcome":"sent"' in text or "'outcome': 'sent'" in text
 
 
-def _log_row_is_authoritative_sent(row: Dict[str, str]) -> bool:
+def _log_row_is_authoritative_sent(row: dict[str, str]) -> bool:
     status = str(row.get("Status") or "").strip().upper()
     if status == "SENT":
         return True
@@ -782,9 +782,9 @@ def sender_family_for_runtime(profile: str, provider: str, current_csv: Path | s
     return ""
 
 
-def _profile_log_paths_for_sender_family(family: str) -> List[Path]:
+def _profile_log_paths_for_sender_family(family: str) -> list[Path]:
     family = str(family or "").strip().lower()
-    paths: List[Path] = []
+    paths: list[Path] = []
     for name, cfg in PROFILES.items():
         if get_sender_family(name) != family:
             continue
@@ -804,9 +804,9 @@ def authoritative_send_log_paths(
     profile_name: str = "",
     provider: str = "",
     current_csv: Path | str | None = None,
-) -> List[Path]:
+) -> list[Path]:
     family = sender_family_for_runtime(profile_name, provider, current_csv)
-    paths: List[Path] = []
+    paths: list[Path] = []
     for path in extra_paths:
         if not path:
             continue
@@ -864,8 +864,8 @@ def _norm_authoritative_history_email(raw_email: object) -> str:
 
 def load_authoritative_history_email_sets(
     paths: Sequence[Path],
-) -> Dict[Path, Dict[str, object]]:
-    loaded: Dict[Path, Dict[str, object]] = {}
+) -> dict[Path, dict[str, object]]:
+    loaded: dict[Path, dict[str, object]] = {}
     for raw_path in paths:
         path = Path(raw_path)
         cache_key = path.resolve()
@@ -879,8 +879,8 @@ def load_authoritative_history_email_sets(
                 "row_count": cached[3],
             }
             continue
-        sent: Set[str] = set()
-        invalid: Set[str] = set()
+        sent: set[str] = set()
+        invalid: set[str] = set()
         row_count = 0
         if path.exists():
             with path.open(newline="", encoding="utf-8-sig") as handle:
@@ -1192,7 +1192,7 @@ def release_send_idempotency_reservation(
     return False
 
 
-def campaign_id_for_row(row: Dict[str, str], fallback_campaign_type: str) -> str:
+def campaign_id_for_row(row: dict[str, str], fallback_campaign_type: str) -> str:
     return (
         get_row_value_ci(row, ["campaign_id", "CampaignId", "CampaignID", "dispatch_id", "DispatchId", "preview_id", "PreviewId"])
         or normalize_campaign_type(get_row_value_ci(row, ["campaign_type", "CampaignType", "campaign type"]) or fallback_campaign_type)
@@ -1202,7 +1202,7 @@ def campaign_id_for_row(row: Dict[str, str], fallback_campaign_type: str) -> str
 def claim_queue_row_with_receipt(
     csv_path: Path,
     email_addr: str,
-) -> Optional[Dict[str, object]]:
+) -> dict[str, object] | None:
     target = norm_email(email_addr)
     if not target or not csv_path.exists():
         return None
@@ -1210,8 +1210,8 @@ def claim_queue_row_with_receipt(
         with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or ["Email", "FirstName", "BookTitle"]
-            kept_rows: List[Dict[str, str]] = []
-            claimed_row: Optional[Dict[str, str]] = None
+            kept_rows: list[dict[str, str]] = []
+            claimed_row: dict[str, str] | None = None
             claimed_index = -1
             for row in reader:
                 clean_row = {k: v for k, v in row.items() if k is not None}
@@ -1245,7 +1245,7 @@ def claim_queue_row(csv_path: Path, email_addr: str) -> bool:
 
 def restore_claimed_queue_row(
     csv_path: Path,
-    receipt: Optional[Dict[str, object]],
+    receipt: dict[str, object] | None,
 ) -> bool:
     """Restore one exact claimed row at its prior position without duplicating it."""
     if not receipt or not csv_path.exists():
@@ -1278,7 +1278,7 @@ def restore_claimed_queue_row(
 # ===== SIGNATURES =====
 SIGNATURE_CID = "sigimg"
 
-SIGNATURE_BY_FROM: Dict[str, str] = {
+SIGNATURE_BY_FROM: dict[str, str] = {
     # --- PrivateEmail 5 accounts (each different) ---
     "jordankendrick@barnesnoblemarketing.com":"sig_private_jordan.png",
     "jodihorowitz@barnesnoblemarketing.com":  "sig_private_jodi.png",
@@ -1373,21 +1373,20 @@ Best regards,
 If this is not a fit, no problem — just reply “no” and we will not follow up.
 """
 
-
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
 # Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.
 
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle} and saw an opportunity to make its online presentation "
-    "clearer and more persuasive—so readers can quickly understand what the book is about, "
-    "why it matters, and where to go next."
+    "I came across {BookTitle} and noticed an opportunity to make its online presentation "
+    "more focused—so readers can quickly understand the book, see what makes it worth exploring, "
+    "and know where to go next."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your author profile and saw an opportunity to make your online presentation "
-    "clearer and more persuasive—so readers can quickly understand your work, "
-    "why it matters, and where to go next."
+    "I came across your author profile and noticed an opportunity to make your online presentation "
+    "more focused—so readers can quickly understand what you create, "
+    "see what makes it worth exploring, and know where to go next."
 )
 
 PITCH_JC_SUBJECT = "One idea for {BookTitle}"
@@ -1397,38 +1396,38 @@ PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-Before a reader, reviewer, bookstore, publisher, or media contact takes the next step, they will often look up the book and author first. That first impression can determine whether they continue exploring or move on.
+When a reader, reviewer, bookseller, or media contact looks up a book, that online experience becomes part of the first impression.
 
-Astra Productions helps authors bring that experience together through focused author websites, book landing pages, book trailers, and launch visuals. The goal is not simply to add more content—it is to create a clear online presentation that strengthens trust and makes the next step easier.
+At Astra Productions, we help authors strengthen that moment through focused author websites, book landing pages, cinematic book trailers, and launch visuals built around clarity, credibility, and a clear next step.
 
-If useful, I can send you a brief direction for {{BookTitle}} showing the first three improvements I would prioritize and why.
+If you're open to it, I can send you the three improvements I would prioritize first for {{BookTitle}} and explain why.
 
-No meeting is required. I can send the initial direction by email.
+No meeting is needed—I can send them directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
 astraproductions.co
 
-If you would rather not hear from me again, reply “unsubscribe.”
+P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-Before a reader, reviewer, bookstore, publisher, or media contact takes the next step, they will often look up the author first. That first impression can determine whether they continue exploring or move on.
+When a reader, reviewer, bookseller, or media contact looks an author up, that online experience becomes part of the first impression.
 
-Astra Productions helps authors bring that experience together through focused author websites, book landing pages, book trailers, and launch visuals. The goal is not simply to add more content—it is to create a clear online presentation that strengthens trust and makes the next step easier.
+At Astra Productions, we help authors strengthen that moment through focused author websites, book landing pages, cinematic book trailers, and launch visuals built around clarity, credibility, and a clear next step.
 
-If useful, I can send you a brief direction for your author platform showing the first three improvements I would prioritize and why.
+If you're open to it, I can send you the three improvements I would prioritize first for your author platform and explain why.
 
-No meeting is required. I can send the initial direction by email.
+No meeting is needed—I can send them directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
 astraproductions.co
 
-If you would rather not hear from me again, reply “unsubscribe.”
+P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
 
 PITCH_WARM_SUBJECT = "A focused direction for {BookTitleOrProject}"
@@ -1438,11 +1437,15 @@ PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
 {PersonalizationLine}
 
-Based on what you shared, the clearest next step is {RecommendedServicePhrase}. That directly addresses the need without replacing what already works or adding unnecessary complexity.
+Based on what you shared, the clearest next step is {RecommendedServicePhrase}. It addresses the opportunity directly without replacing what already works or adding unnecessary complexity.
 
-I can turn that recommendation into a concise concept showing the structure I would use, what I would prioritize first, and how the direction would help the intended audience understand the project and take the next step.
+Rather than only describe the direction, I can prepare a no-charge concept preview showing the structure, visual direction, and priorities I would use for {BookTitleOrProject}.
 
-No meeting is required. I can send the initial concept by email.
+The concept is there to let you see the direction before making any decision about full development. There is no obligation to proceed.
+
+If you like what you see, we can then discuss the final scope, timeline, and cost of developing the complete version.
+
+No meeting is required. I can send the concept directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1455,11 +1458,15 @@ PITCH_WARM_BODY_FALLBACK = """Hi {FirstName},
 
 I reviewed the available information about {BookTitleOrProject} and identified one focused opportunity to strengthen how the project is presented.
 
-The clearest fit I see is {RecommendedServicePhrase}. It could address the most visible need without replacing what already works or making the project unnecessarily complicated.
+The clearest fit I see is {RecommendedServicePhrase}. It addresses the most visible need without replacing what already works or making the project unnecessarily complicated.
 
-If useful, I can send a concise concept showing the structure I would recommend, what I would prioritize first, and why that direction would help the intended audience.
+Rather than only describe the recommendation, I can prepare a no-charge concept preview showing the structure, visual direction, and priorities I would use.
 
-No meeting is required. I can send the initial concept by email.
+The concept is there to let you see the direction before making any decision about full development. There is no obligation to proceed.
+
+If you like what you see, we can then discuss the final scope, timeline, and cost of developing the complete version.
+
+No meeting is required. I can send the concept directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1467,7 +1474,6 @@ astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
-
 
 # Kept as a compatibility alias for code that only needs the safe generic body.
 PITCH_WARM_BODY = PITCH_WARM_BODY_FALLBACK
@@ -1610,7 +1616,7 @@ def render_warm_email_copy(
     book_title_or_project: object,
     recommended_service: object,
     personalization_line: object = "",
-) -> Dict[str, object]:
+) -> dict[str, object]:
     safe_first_name = re.sub(r"\s+", " ", str(first_name or "")).strip() or "there"
     book_title = normalize_warm_book_title_or_project(book_title_or_project)
     subject = (
@@ -1722,13 +1728,13 @@ BOOK_TITLE_SOURCE_COLUMNS = (
 )
 
 
-def placeholder_like_tokens(value: object) -> List[str]:
+def placeholder_like_tokens(value: object) -> list[str]:
     return PLACEHOLDER_LIKE_TOKEN_RE.findall(str(value or ""))
 
 
-def normalize_render_field_value(value: object) -> Tuple[str, List[str]]:
+def normalize_render_field_value(value: object) -> tuple[str, list[str]]:
     raw = str(value or "").strip()
-    notes: List[str] = []
+    notes: list[str] = []
     if not raw:
         return "", notes
 
@@ -1860,8 +1866,8 @@ def _book_title_body_without_fallback_opening(body_template: str) -> str:
     return text
 
 
-def _unresolved_placeholders(*values: str) -> Set[str]:
-    placeholders: Set[str] = set()
+def _unresolved_placeholders(*values: str) -> set[str]:
+    placeholders: set[str] = set()
     for value in values:
         placeholders.update(UNRESOLVED_PLACEHOLDER_RE.findall(value or ""))
     return placeholders - ALLOWED_RENDER_PLACEHOLDERS
@@ -1893,7 +1899,7 @@ def book_title_fallback_supported(subject: str, body_template: str, subject_fall
     return True
 
 
-def csv_fieldnames(path: Path) -> List[str]:
+def csv_fieldnames(path: Path) -> list[str]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         return [str(field or "").strip().lstrip("\ufeff") for field in (reader.fieldnames or [])]
@@ -1902,7 +1908,7 @@ def csv_fieldnames(path: Path) -> List[str]:
 def validate_book_title_queue_contract(
     *,
     csv_path: Path,
-    rows: Sequence[Dict[str, str]],
+    rows: Sequence[dict[str, str]],
     subject: str,
     body_template: str,
     profile_name: str,
@@ -1926,8 +1932,8 @@ def validate_book_title_queue_contract(
         )
         return False
 
-    bad_rows: List[str] = []
-    unresolved_rows: List[str] = []
+    bad_rows: list[str] = []
+    unresolved_rows: list[str] = []
     for index, row in enumerate(rows, start=1):
         book_title = resolve_book_title(row, get_row_value_ci(row, ["BookTitle"]))
         if not fallback_supported and not book_title:
@@ -1994,7 +2000,7 @@ def build_sendgrid_list_unsubscribe_header(unsub_email: str) -> str:
     return f"<{mailto_target}>, <{https_target}>"
 
 
-def parse_ts(ts: str) -> Optional[datetime]:
+def parse_ts(ts: str) -> datetime | None:
     ts = (ts or "").strip()
     if not ts:
         return None
@@ -2037,7 +2043,7 @@ def choose_salutation_name(author_name: str, email_addr: str) -> str:
     return first_token
 
 
-def is_external(addr: str, my_domains: Set[str]) -> bool:
+def is_external(addr: str, my_domains: set[str]) -> bool:
     if "@" not in addr:
         return False
     return addr.split("@", 1)[1] not in my_domains
@@ -2051,7 +2057,7 @@ class _CaseInsensitiveRow(dict):
 
     __slots__ = ("_ci_values",)
 
-    def __init__(self, values: Dict[str, str]) -> None:
+    def __init__(self, values: dict[str, str]) -> None:
         super().__init__(values)
         self._refresh_ci_values()
 
@@ -2101,7 +2107,7 @@ class _CaseInsensitiveRow(dict):
         return self
 
 
-def read_rows(path: Path) -> List[Dict[str, str]]:
+def read_rows(path: Path) -> list[dict[str, str]]:
     def clean(v) -> str:
         if v is None:
             return ""
@@ -2109,10 +2115,10 @@ def read_rows(path: Path) -> List[Dict[str, str]]:
             return " ".join(str(x).strip() for x in v if x is not None).strip()
         return str(v).strip()
 
-    rows: List[Dict[str, str]] = []
+    rows: list[dict[str, str]] = []
     with path.open(newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
-            row: Dict[str, str] = {}
+            row: dict[str, str] = {}
             for k, v in r.items():
                 if k is None:
                     continue
@@ -2122,18 +2128,18 @@ def read_rows(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
-def load_emails_from_csv(path: Path) -> Set[str]:
+def load_emails_from_csv(path: Path) -> set[str]:
     if not path.exists():
         return set()
     emails, _diagnostics = load_suppression_email_tokens(path)
     return emails
 
 
-def load_queue_emails_from_csv(path: Path) -> Set[str]:
+def load_queue_emails_from_csv(path: Path) -> set[str]:
     """Read the canonical Email column without applying suppression schema rules."""
     if not path.exists():
         return set()
-    out: Set[str] = set()
+    out: set[str] = set()
     with path.open(newline="", encoding="utf-8-sig") as handle:
         for row in csv.DictReader(handle):
             email = norm_email(row.get("Email") or "")
@@ -2146,7 +2152,7 @@ def local_today_str() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d")
 
 
-def parse_stop_at_local(stop_at_local: str) -> Optional[datetime]:
+def parse_stop_at_local(stop_at_local: str) -> datetime | None:
     raw = (stop_at_local or "").strip()
     if not raw:
         return None
@@ -2173,7 +2179,7 @@ def _safe_int(value: object) -> int:
         return 0
 
 
-def load_sendgrid_counters(path: Path) -> Dict[str, Dict[str, object]]:
+def load_sendgrid_counters(path: Path) -> dict[str, dict[str, object]]:
     if not path.exists():
         return {}
     try:
@@ -2185,7 +2191,7 @@ def load_sendgrid_counters(path: Path) -> Dict[str, Dict[str, object]]:
     return data
 
 
-def _load_sendgrid_counters_unlocked(path: Path) -> Dict[str, Dict[str, object]]:
+def _load_sendgrid_counters_unlocked(path: Path) -> dict[str, dict[str, object]]:
     if not path.exists():
         return {}
     try:
@@ -2197,7 +2203,7 @@ def _load_sendgrid_counters_unlocked(path: Path) -> Dict[str, Dict[str, object]]
     return data
 
 
-def save_sendgrid_counters(path: Path, counters: Dict[str, Dict[str, object]]) -> None:
+def save_sendgrid_counters(path: Path, counters: dict[str, dict[str, object]]) -> None:
     tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
     lock_path = path.with_suffix(".lock")
     payload = json.dumps(counters, indent=2, sort_keys=True, ensure_ascii=True)
@@ -2215,9 +2221,9 @@ def save_sendgrid_counters(path: Path, counters: Dict[str, Dict[str, object]]) -
 
 
 def get_sendgrid_sent_today(
-    counters: Dict[str, Dict[str, object]],
+    counters: dict[str, dict[str, object]],
     key: str,
-) -> Tuple[int, str]:
+) -> tuple[int, str]:
     entry = counters.get(key, {})
     if not isinstance(entry, dict):
         return 0, ""
@@ -2228,7 +2234,7 @@ def get_sendgrid_sent_today(
 
 
 def increment_sendgrid_counter(
-    counters: Dict[str, Dict[str, object]],
+    counters: dict[str, dict[str, object]],
     key: str,
     path: Path,
 ) -> int:
@@ -2245,7 +2251,7 @@ def increment_sendgrid_counter(
     return _safe_int(entry.get("sent"))
 
 
-def get_sendgrid_sent_today_live(path: Path, key: str) -> Tuple[int, str]:
+def get_sendgrid_sent_today_live(path: Path, key: str) -> tuple[int, str]:
     if not key:
         return 0, ""
     lock_path = path.with_suffix(".lock")
@@ -2258,9 +2264,9 @@ def get_sendgrid_sent_today_live(path: Path, key: str) -> Tuple[int, str]:
             fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
-def increment_sendgrid_counters_live(path: Path, keys: List[str]) -> Dict[str, int]:
-    clean_keys: List[str] = []
-    seen: Set[str] = set()
+def increment_sendgrid_counters_live(path: Path, keys: list[str]) -> dict[str, int]:
+    clean_keys: list[str] = []
+    seen: set[str] = set()
     for raw in keys:
         key = (raw or "").strip()
         if not key or key in seen:
@@ -2274,7 +2280,7 @@ def increment_sendgrid_counters_live(path: Path, keys: List[str]) -> Dict[str, i
     tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
     today = local_today_str()
     now_iso = datetime.now().astimezone().isoformat()
-    result: Dict[str, int] = {}
+    result: dict[str, int] = {}
     with lock_path.open("a", encoding="utf-8") as lockf:
         fcntl.flock(lockf, fcntl.LOCK_EX)
         try:
@@ -2301,10 +2307,10 @@ def increment_sendgrid_counters_live(path: Path, keys: List[str]) -> Dict[str, i
     return result
 
 
-def load_log_statuses(log_path: Path) -> Tuple[Set[str], Set[str], Optional[datetime]]:
-    sent: Set[str] = set()
-    failed: Set[str] = set()
-    last_success: Optional[datetime] = None
+def load_log_statuses(log_path: Path) -> tuple[set[str], set[str], datetime | None]:
+    sent: set[str] = set()
+    failed: set[str] = set()
+    last_success: datetime | None = None
     if not log_path.exists():
         return sent, failed, last_success
     with log_path.open(newline="", encoding="utf-8") as f:
@@ -2339,8 +2345,8 @@ def count_sent_today_from_log(log_path: Path) -> int:
     return count
 
 
-def parse_email_list(value: str) -> Set[str]:
-    out: Set[str] = set()
+def parse_email_list(value: str) -> set[str]:
+    out: set[str] = set()
     for raw in (value or "").split(","):
         email_addr = norm_email(raw)
         if email_addr:
@@ -2349,17 +2355,17 @@ def parse_email_list(value: str) -> Set[str]:
 
 
 def prioritize_always_send_rows(
-    rows: List[Dict[str, str]],
-    always_send_set: Set[str],
+    rows: list[dict[str, str]],
+    always_send_set: set[str],
     *,
     allow_missing_rows: bool = True,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     if not always_send_set:
         return list(rows)
 
-    prioritized: List[Dict[str, str]] = []
-    remaining: List[Dict[str, str]] = []
-    emitted: Set[str] = set()
+    prioritized: list[dict[str, str]] = []
+    remaining: list[dict[str, str]] = []
+    emitted: set[str] = set()
 
     for email_addr in sorted(always_send_set):
         for row in rows:
@@ -2382,8 +2388,8 @@ def prioritize_always_send_rows(
     return prioritized + remaining
 
 
-def parse_token_list(value: str) -> Set[str]:
-    out: Set[str] = set()
+def parse_token_list(value: str) -> set[str]:
+    out: set[str] = set()
     for raw in (value or "").split(","):
         token = (raw or "").strip().lower()
         if token:
@@ -2391,7 +2397,7 @@ def parse_token_list(value: str) -> Set[str]:
     return out
 
 
-def parse_name_list(value: str) -> List[str]:
+def parse_name_list(value: str) -> list[str]:
     return [x.strip().lower() for x in (value or "").split(",") if x.strip()]
 
 
@@ -2399,12 +2405,12 @@ def canonical_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
 
 
-def split_canonical_tokens(value: str) -> Set[str]:
+def split_canonical_tokens(value: str) -> set[str]:
     raw = (value or "").strip()
     if not raw:
         return set()
     parts = re.split(r"[;,/|]+", raw)
-    out: Set[str] = set()
+    out: set[str] = set()
     for p in parts:
         tok = canonical_token(p)
         if tok:
@@ -2412,7 +2418,7 @@ def split_canonical_tokens(value: str) -> Set[str]:
     return out
 
 
-def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
+def get_row_value_ci(row: dict[str, str], col_names: list[str]) -> str:
     if not row or not col_names:
         return ""
 
@@ -2433,14 +2439,14 @@ def get_row_value_ci(row: Dict[str, str], col_names: List[str]) -> str:
     return ""
 
 
-def resolve_recipient_email(row: Dict[str, str]) -> str:
+def resolve_recipient_email(row: dict[str, str]) -> str:
     email = norm_email(get_row_value_ci(row, ["Email"]))
     if email:
         return email
     return norm_email(get_row_value_ci(row, ["AuthorEmail", "author_email"]))
 
 
-def get_personalization_name(row: Dict[str, str]) -> str:
+def get_personalization_name(row: dict[str, str]) -> str:
     lower_keys = {(key or "").strip().lower() for key in row}
     if "personalization_allowed" in lower_keys:
         allowed = get_row_value_ci(row, ["personalization_allowed"]).strip().lower()
@@ -2452,13 +2458,13 @@ def get_personalization_name(row: Dict[str, str]) -> str:
     )
 
 
-def resolve_book_title(row: Dict[str, str], explicit_book_title: str = "") -> str:
+def resolve_book_title(row: dict[str, str], explicit_book_title: str = "") -> str:
     author_name = get_row_value_ci(row, ["AuthorName", "author_name", "FullName", "full_name", "author", "name"])
     first_name = get_row_value_ci(row, ["FirstName", "first_name", "first name", "first_name_clean", "firstname"])
     last_name = get_row_value_ci(row, ["LastName", "last_name", "last name", "last_name_clean", "lastname"])
     candidates = [explicit_book_title]
     candidates.extend(get_row_value_ci(row, [column]) for column in BOOK_TITLE_SOURCE_COLUMNS)
-    seen: Set[str] = set()
+    seen: set[str] = set()
     for candidate in candidates:
         normalized_title, _notes = normalize_render_field_value(candidate)
         key = normalized_title.casefold()
@@ -2475,7 +2481,7 @@ def resolve_book_title(row: Dict[str, str], explicit_book_title: str = "") -> st
     return ""
 
 
-def row_merge_fields(row: Dict[str, str], to_email: str, first_name: str, book_title: str) -> Dict[str, str]:
+def row_merge_fields(row: dict[str, str], to_email: str, first_name: str, book_title: str) -> dict[str, str]:
     resolved_book_title = resolve_book_title(row, book_title)
     return {
         "FirstName": (first_name or GENERIC_SALUTATION).strip() or GENERIC_SALUTATION,
@@ -2501,7 +2507,7 @@ def domainpart(email_addr: str) -> str:
     return email_addr.split("@", 1)[1].strip().lower()
 
 
-def is_role_recipient(email_addr: str, role_set: Set[str]) -> bool:
+def is_role_recipient(email_addr: str, role_set: set[str]) -> bool:
     lp = localpart(email_addr)
     if not lp:
         return False
@@ -2510,7 +2516,7 @@ def is_role_recipient(email_addr: str, role_set: Set[str]) -> bool:
 
 def should_block_role_recipient_for_runtime(
     email_addr: str,
-    role_set: Set[str],
+    role_set: set[str],
     *,
     profile_name: str,
     queue_path: Path,
@@ -2529,21 +2535,21 @@ def should_block_role_recipient_for_runtime(
     return is_role_recipient(email_addr, role_set)
 
 
-def load_already_done(sent_log: Path) -> Set[str]:
+def load_already_done(sent_log: Path) -> set[str]:
     if not sent_log.exists():
         return set()
     history = load_authoritative_history_email_sets((sent_log,))[Path(sent_log)]
     return set(history["sent"]) | set(history["invalid"])
 
 
-def load_log_status_emails(sent_log: Path, statuses: Set[str]) -> Set[str]:
+def load_log_status_emails(sent_log: Path, statuses: set[str]) -> set[str]:
     if not sent_log.exists():
         return set()
     wanted = {str(status or "").strip().upper() for status in statuses if str(status or "").strip()}
     if wanted == {"INVALID"}:
         history = load_authoritative_history_email_sets((sent_log,))[Path(sent_log)]
         return set(history["invalid"])
-    out: Set[str] = set()
+    out: set[str] = set()
     with sent_log.open(newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             st = (r.get("Status") or "").strip().upper()
@@ -2555,17 +2561,17 @@ def load_log_status_emails(sent_log: Path, statuses: Set[str]) -> Set[str]:
     return out
 
 
-def load_done_statuses_from_logs(paths: Sequence[Path], statuses: Set[str]) -> Set[str]:
-    out: Set[str] = set()
+def load_done_statuses_from_logs(paths: Sequence[Path], statuses: set[str]) -> set[str]:
+    out: set[str] = set()
     for path in paths:
         out |= load_log_status_emails(path, statuses)
     return out
 
 
-def load_bad_sendgrid_event_emails(path: Path = settings.WEBHOOK_EVENTS_PATH) -> Set[str]:
+def load_bad_sendgrid_event_emails(path: Path = settings.WEBHOOK_EVENTS_PATH) -> set[str]:
     if not path.exists():
         return set()
-    out: Set[str] = set()
+    out: set[str] = set()
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
             raw = line.strip()
@@ -2585,7 +2591,7 @@ def load_bad_sendgrid_event_emails(path: Path = settings.WEBHOOK_EVENTS_PATH) ->
 
 
 def _block_source_signature(path: Path) -> tuple[object, ...]:
-    signatures: List[object] = [str(path)]
+    signatures: list[object] = [str(path)]
     for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
         try:
             stat = candidate.stat()
@@ -2597,10 +2603,10 @@ def _block_source_signature(path: Path) -> tuple[object, ...]:
     return tuple(signatures)
 
 
-def load_ledger_blocked_emails(path: Path) -> Set[str]:
+def load_ledger_blocked_emails(path: Path) -> set[str]:
     if not path.exists():
         return set()
-    blocked: Set[str] = set()
+    blocked: set[str] = set()
     uri = f"file:{path.resolve().as_posix()}?mode=ro"
     with sqlite3.connect(uri, uri=True, timeout=30) as conn:
         table = conn.execute(
@@ -2666,11 +2672,11 @@ class GlobalBlockRefresher:
         self.authoritative_log_paths = tuple(Path(path) for path in authoritative_log_paths)
         self.ledger_path = Path(ledger_path)
         self.include_sendgrid_sources = bool(include_sendgrid_sources)
-        self._signature: Optional[tuple[object, ...]] = None
-        self._sets: Dict[str, Set[str]] = {}
+        self._signature: tuple[object, ...] | None = None
+        self._sets: dict[str, set[str]] = {}
         self.reload_count = 0
 
-    def _source_paths(self) -> List[Path]:
+    def _source_paths(self) -> list[Path]:
         paths = [
             self.unsubscribed_path,
             self.suppressed_path,
@@ -2766,7 +2772,7 @@ def email_logged_sent_for_runtime(
     sent_log: Path,
     email_addr: str,
     *,
-    preview_sent_emails: Optional[Set[str]] = None,
+    preview_sent_emails: set[str] | None = None,
 ) -> bool:
     """Use a stable run-scoped history snapshot only for preview generation."""
     if preview_sent_emails is not None:
@@ -2777,7 +2783,7 @@ def email_logged_sent_for_runtime(
 
 def load_preview_sent_history_snapshot(
     sent_log: Path,
-) -> tuple[Set[str], Set[str], tuple[object, ...]]:
+) -> tuple[set[str], set[str], tuple[object, ...]]:
     """Load preview sent/done history once and prove the source stayed stable."""
     signature = _block_source_signature(sent_log)
     history = load_authoritative_history_email_sets((sent_log,))[sent_log]
@@ -2815,10 +2821,10 @@ def resolve_map_path(base: Path, value: str) -> Path:
     return p
 
 
-def load_account_map(map_path: Path) -> List[Tuple[Path, Path]]:
+def load_account_map(map_path: Path) -> list[tuple[Path, Path]]:
     if not map_path.exists():
         return []
-    out: List[Tuple[Path, Path]] = []
+    out: list[tuple[Path, Path]] = []
     with map_path.open(newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             row = {(k or "").strip().lower(): (v or "").strip() for k, v in r.items() if k}
@@ -2853,14 +2859,14 @@ def _path_matches_dedupe_scope(path: Path, scope: str, kind: str) -> bool:
 
 
 def filter_account_map_entries_for_runtime_dedupe(
-    map_entries: Sequence[Tuple[Path, Path]],
+    map_entries: Sequence[tuple[Path, Path]],
     provider: str,
     current_csv: Path,
-) -> List[Tuple[Path, Path]]:
+) -> list[tuple[Path, Path]]:
     scope = dedupe_scope_for_runtime(provider, current_csv)
     if scope == "global":
         return list(map_entries)
-    out: List[Tuple[Path, Path]] = []
+    out: list[tuple[Path, Path]] = []
     for recipient_path, log_path in map_entries:
         if not _path_matches_dedupe_scope(recipient_path, scope, "recipient"):
             continue
@@ -2870,21 +2876,21 @@ def filter_account_map_entries_for_runtime_dedupe(
     return out
 
 
-def load_done_from_logs(paths: List[Path]) -> Set[str]:
-    out: Set[str] = set()
+def load_done_from_logs(paths: list[Path]) -> set[str]:
+    out: set[str] = set()
     for p in paths:
         out |= load_already_done(p)
     return out
 
 
-def fmt_ts(dt: Optional[datetime]) -> str:
+def fmt_ts(dt: datetime | None) -> str:
     if not dt:
         return "n/a"
     manila = dt + timedelta(hours=8)
     return f"{dt.isoformat()}Z | Manila: {manila.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-def remaining_str(resume_dt: Optional[datetime]) -> str:
+def remaining_str(resume_dt: datetime | None) -> str:
     if not resume_dt:
         return "n/a"
     now = datetime.now(timezone.utc)
@@ -2896,10 +2902,10 @@ def remaining_str(resume_dt: Optional[datetime]) -> str:
     return f"{h}h {m}m"
 
 
-def rolling_24h_stats(log_path: Path, my_domains: Set[str], now: datetime) -> Dict[str, object]:
+def rolling_24h_stats(log_path: Path, my_domains: set[str], now: datetime) -> dict[str, object]:
     cutoff = now - timedelta(hours=24)
-    sent_times: List[datetime] = []
-    ext_last: Dict[str, datetime] = {}
+    sent_times: list[datetime] = []
+    ext_last: dict[str, datetime] = {}
 
     if not log_path.exists():
         return {
@@ -2988,7 +2994,7 @@ def write_message_preview_header(path: Path) -> None:
         writer.writeheader()
 
 
-def append_message_preview_row(path: Path, row: Dict[str, str]) -> None:
+def append_message_preview_row(path: Path, row: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=MESSAGE_PREVIEW_FIELDS, extrasaction="ignore")
@@ -3009,7 +3015,7 @@ def log_worker_event(
     **fields: object,
 ) -> None:
     event_log.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
         "profile": str(profile or "").strip(),
         "event_type": str(event_type or "").strip().upper(),
@@ -3027,7 +3033,7 @@ def log_worker_event(
         os.fsync(handle.fileno())
 
 
-def rewrite_csv_rows(csv_path: Path, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
+def rewrite_csv_rows(csv_path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         "w",
@@ -3047,7 +3053,7 @@ def rewrite_csv_rows(csv_path: Path, fieldnames: List[str], rows: List[Dict[str,
     temp_path.replace(csv_path)
 
 
-def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
+def prune_sent_from_csv(csv_path: Path, sent_emails: set[str]) -> int:
     if not sent_emails or not csv_path.exists():
         return 0
     removed = 0
@@ -3068,7 +3074,7 @@ def prune_sent_from_csv(csv_path: Path, sent_emails: Set[str]) -> int:
     return removed
 
 
-def count_prunable_rows(csv_path: Path, sent_emails: Set[str]) -> int:
+def count_prunable_rows(csv_path: Path, sent_emails: set[str]) -> int:
     if not sent_emails or not csv_path.exists():
         return 0
     removed = 0
@@ -3111,7 +3117,7 @@ def remove_email_from_csv(csv_path: Path, email_addr: str) -> bool:
     return removed > 0
 
 
-def text_to_html(body_text: str, unsub_mailto: str, cid: Optional[str]) -> str:
+def text_to_html(body_text: str, unsub_mailto: str, cid: str | None) -> str:
     """
     HTML version:
     - converts {UnsubMailto} into a clickable link
@@ -3151,11 +3157,11 @@ def render_message_parts(
     subject: str,
     body_template: str,
     unsub_email: str,
-    signature_file: Optional[Path],
-    merge_fields: Optional[Dict[str, str]] = None,
+    signature_file: Path | None,
+    merge_fields: dict[str, str] | None = None,
     subject_fallback: str = "",
     body_fallback: str = "",
-) -> Tuple[str, str, str, Optional[str]]:
+) -> tuple[str, str, str, str | None]:
     unsub_mailto = make_unsub_mailto(unsub_email)
     if re.search(r"{{?\s*Title\s*}}?", subject or "") or re.search(r"{{?\s*Title\s*}}?", body_template or ""):
         raise ValueError("Email template contains blocked unresolved placeholder.")
@@ -3225,11 +3231,11 @@ def build_message(
     subject: str,
     body_template: str,
     unsub_email: str,
-    signature_file: Optional[Path] = None,
-    merge_fields: Optional[Dict[str, str]] = None,
+    signature_file: Path | None = None,
+    merge_fields: dict[str, str] | None = None,
     subject_fallback: str = "",
     body_fallback: str = "",
-) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
+) -> tuple[EmailMessage, str, str, str, str | None]:
     subject_text, body_text, html_body, cid = render_message_parts(
         author,
         book_title,
@@ -3277,13 +3283,13 @@ def build_message_for_runtime(
     subject: str,
     body_template: str,
     unsub_email: str,
-    signature_file: Optional[Path] = None,
-    merge_fields: Optional[Dict[str, str]] = None,
+    signature_file: Path | None = None,
+    merge_fields: dict[str, str] | None = None,
     subject_fallback: str = "",
     body_fallback: str = "",
     *,
     preview_only: bool = False,
-) -> Tuple[Optional[EmailMessage], str, str, str, Optional[str]]:
+) -> tuple[EmailMessage | None, str, str, str, str | None]:
     """Render preview text without constructing send-only MIME payloads."""
     if preview_only:
         subject_text, body_text, _html_body, _cid = render_message_parts(
@@ -3347,8 +3353,8 @@ WARM_CONFIRMATION_PROTECTED_FIELDS = (
 )
 
 
-def normalized_warm_confirmation_payload(row: Dict[str, str]) -> Dict[str, str]:
-    payload: Dict[str, str] = {}
+def normalized_warm_confirmation_payload(row: dict[str, str]) -> dict[str, str]:
+    payload: dict[str, str] = {}
     for field in WARM_CONFIRMATION_PROTECTED_FIELDS:
         value = str(row.get(field) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if field in {"Email", "AuthorEmail"}:
@@ -3357,7 +3363,7 @@ def normalized_warm_confirmation_payload(row: Dict[str, str]) -> Dict[str, str]:
     return payload
 
 
-def warm_confirmation_payload_hash(payload_or_row: Dict[str, str]) -> str:
+def warm_confirmation_payload_hash(payload_or_row: dict[str, str]) -> str:
     payload = normalized_warm_confirmation_payload(payload_or_row)
     encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -3372,9 +3378,9 @@ def _masked_warm_email(value: str) -> str:
 
 
 def validate_warm_confirmed_queue(
-    rows: Sequence[Dict[str, str]],
-    manifest: Dict[str, object],
-) -> Dict[str, object]:
+    rows: Sequence[dict[str, str]],
+    manifest: dict[str, object],
+) -> dict[str, object]:
     if not bool(manifest.get("confirmed")):
         return {"valid": False, "reason": "warm_confirmation_required", "message": "Warm Private JC requires explicit confirmation."}
     approved_rows = manifest.get("approved_rows")
@@ -3385,7 +3391,7 @@ def validate_warm_confirmed_queue(
             "message": "Warm confirmation metadata is missing per-row payload hashes. Re-confirm the reviewed warm preview.",
         }
 
-    seen: Set[str] = set()
+    seen: set[str] = set()
     required_values = {"Email", "AuthorEmail", "FirstName", "EmailSubject", "EmailBody", "campaign_type", "campaign_id"}
     for row in rows:
         payload = normalized_warm_confirmation_payload(row)
@@ -3455,7 +3461,7 @@ def validate_warm_confirmed_queue(
     return {"valid": True, "reason": "", "message": "Warm confirmed queue payload is valid.", "remaining": len(rows)}
 
 
-def load_warm_confirmation_manifest(path: Optional[Path] = None) -> Dict[str, object]:
+def load_warm_confirmation_manifest(path: Path | None = None) -> dict[str, object]:
     manifest_path = Path(path) if path is not None else STATE_DIR / "warm_private_jc_confirmation.json"
     if not manifest_path.exists():
         return {}
@@ -3466,7 +3472,7 @@ def load_warm_confirmation_manifest(path: Optional[Path] = None) -> Dict[str, ob
     return loaded if isinstance(loaded, dict) else {}
 
 
-def validate_warm_queue_contract(csv_path: Path, rows: Sequence[Dict[str, str]]) -> bool:
+def validate_warm_queue_contract(csv_path: Path, rows: Sequence[dict[str, str]]) -> bool:
     fieldnames = set(rows[0].keys()) if rows else set()
     if not rows:
         print(f"ERROR: warm queue is empty: {csv_path}")
@@ -3495,9 +3501,9 @@ def validate_warm_queue_contract(csv_path: Path, rows: Sequence[Dict[str, str]])
 def build_pre_rendered_message(
     from_email: str,
     to_email: str,
-    row: Dict[str, str],
+    row: dict[str, str],
     unsub_email: str,
-) -> Tuple[EmailMessage, str, str, str, Optional[str]]:
+) -> tuple[EmailMessage, str, str, str, str | None]:
     subject_text = str(row.get("EmailSubject") or "").strip()
     body_text = str(row.get("EmailBody") or "").strip()
     if not subject_text or not body_text:
@@ -3521,7 +3527,7 @@ def append_sendgrid_unsubscribe_footer(
     text_content: str,
     html_content: str,
     unsub_email: str,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     label = "Unsubscribe from this list"
     href = SENDGRID_ASM_GROUP_UNSUB_RAW_URL
     if not href:
@@ -3551,29 +3557,29 @@ def send_via_sendgrid(
     body_text: str,
     html_body: str,
     unsub_email: str,
-    signature_file: Optional[Path],
-    cid: Optional[str],
+    signature_file: Path | None,
+    cid: str | None,
     unsubscribe_group_id: int,
-    groups_to_display: List[int],
-    custom_args: Optional[Dict[str, str]] = None,
-) -> Dict[str, str]:
+    groups_to_display: list[int],
+    custom_args: dict[str, str] | None = None,
+) -> dict[str, str]:
     try:
         import importlib
         sg = importlib.import_module("sendgrid")
-        SendGridAPIClient = getattr(sg, "SendGridAPIClient")
+        SendGridAPIClient = sg.SendGridAPIClient
         helpers_mail = importlib.import_module("sendgrid.helpers.mail")
-        Mail = getattr(helpers_mail, "Mail")
-        Content = getattr(helpers_mail, "Content")
-        ReplyTo = getattr(helpers_mail, "ReplyTo")
-        Attachment = getattr(helpers_mail, "Attachment")
-        FileContent = getattr(helpers_mail, "FileContent")
-        FileName = getattr(helpers_mail, "FileName")
-        FileType = getattr(helpers_mail, "FileType")
-        Disposition = getattr(helpers_mail, "Disposition")
-        ContentId = getattr(helpers_mail, "ContentId")
-        Header = getattr(helpers_mail, "Header")
-        Asm = getattr(helpers_mail, "Asm")
-        CustomArg = getattr(helpers_mail, "CustomArg")
+        Mail = helpers_mail.Mail
+        Content = helpers_mail.Content
+        ReplyTo = helpers_mail.ReplyTo
+        Attachment = helpers_mail.Attachment
+        FileContent = helpers_mail.FileContent
+        FileName = helpers_mail.FileName
+        FileType = helpers_mail.FileType
+        Disposition = helpers_mail.Disposition
+        ContentId = helpers_mail.ContentId
+        Header = helpers_mail.Header
+        Asm = helpers_mail.Asm
+        CustomArg = helpers_mail.CustomArg
     except Exception as exc:
         raise RuntimeError(
             "sendgrid library not installed; add 'sendgrid' to requirements and install it"
@@ -3653,7 +3659,7 @@ def smtp_login(host: str, port: int, user: str, pw: str) -> smtplib.SMTP:
     return s
 
 
-def smtp_close(s: Optional[smtplib.SMTP]) -> None:
+def smtp_close(s: smtplib.SMTP | None) -> None:
     if not s:
         return
     try:
@@ -3672,7 +3678,7 @@ def _decode_smtp_err(x) -> str:
     return str(x)
 
 
-def classify_smtp(code: Optional[int], text: str) -> str:
+def classify_smtp(code: int | None, text: str) -> str:
     t = (text or "").lower()
 
     if ("5.4.5" in t) or ("daily user sending limit exceeded" in t) or ("too many unique external" in t) or ("has exceeded the gmail sending limit" in t):
@@ -3689,7 +3695,7 @@ def classify_smtp(code: Optional[int], text: str) -> str:
     return "OTHER"
 
 
-def extract_code_text_from_exception(e: Exception) -> Tuple[Optional[int], str]:
+def extract_code_text_from_exception(e: Exception) -> tuple[int | None, str]:
     code = getattr(e, "smtp_code", None)
     raw = getattr(e, "smtp_error", "")
     text = _decode_smtp_err(raw)
@@ -3701,7 +3707,7 @@ def extract_code_text_from_exception(e: Exception) -> Tuple[Optional[int], str]:
     return code, text
 
 
-def is_temporary_auth_failure(code: Optional[int], text: str) -> bool:
+def is_temporary_auth_failure(code: int | None, text: str) -> bool:
     smtp_text = (text or "").lower()
     if code == 454:
         return True
@@ -3714,7 +3720,7 @@ def is_temporary_auth_failure(code: Optional[int], text: str) -> bool:
     return False
 
 
-def is_sendgrid_forbidden(code: Optional[int], text: str) -> bool:
+def is_sendgrid_forbidden(code: int | None, text: str) -> bool:
     if code == 403:
         return True
     t = (text or "").lower()
@@ -3747,18 +3753,18 @@ def classify_sendgrid_runtime_error(text: str) -> str:
 
 
 # ===== Shared rolling-hour provider guard =====
-def _parse_ts_safe(ts: str) -> Optional[datetime]:
+def _parse_ts_safe(ts: str) -> datetime | None:
     try:
         return datetime.fromisoformat((ts or "").strip().replace("Z", "+00:00"))
     except Exception:
         return None
 
 
-def _domain_log_fieldnames() -> List[str]:
+def _domain_log_fieldnames() -> list[str]:
     return ["TimestampUTC", "Email", "Status", "Info"]
 
 
-def _write_domain_log_rows(handle, rows: List[Dict[str, str]]) -> None:
+def _write_domain_log_rows(handle, rows: list[dict[str, str]]) -> None:
     handle.seek(0)
     writer = csv.DictWriter(handle, fieldnames=_domain_log_fieldnames())
     writer.writeheader()
@@ -3846,13 +3852,13 @@ def _ensure_sendgrid_rate_schema(path: Path) -> None:
 def _legacy_sendgrid_rate_rows(
     domain_log_path: Path,
     now: datetime,
-) -> List[Tuple[str, float, str, str]]:
+) -> list[tuple[str, float, str, str]]:
     """Load only still-live legacy limiter rows during one-time DB bootstrap."""
     if not domain_log_path.exists():
         return []
     cutoff = now - timedelta(hours=1)
     slot_cutoff = now - timedelta(seconds=DOMAIN_SLOT_TTL_SECONDS)
-    rows: List[Tuple[str, float, str, str]] = []
+    rows: list[tuple[str, float, str, str]] = []
     with domain_log_path.open(newline="", encoding="utf-8-sig") as handle:
         for ordinal, row in enumerate(csv.DictReader(handle), start=1):
             status = str(row.get("Status") or "").strip().upper()
@@ -4071,8 +4077,8 @@ def domain_wait_for_slot(
             f.seek(0)
             rows = list(csv.DictReader(f))
 
-            expiry_times: List[datetime] = []
-            pacing_times: List[datetime] = []
+            expiry_times: list[datetime] = []
+            pacing_times: list[datetime] = []
             for r in rows:
                 st = (r.get("Status") or "").strip().upper()
                 if st not in ("ATTEMPT", "SENT", "SLOT"):
@@ -4167,7 +4173,7 @@ def sleep_with_jitter(seconds: int, jitter: int = 10) -> None:
     time.sleep(max(1, int(seconds)) + random.randint(0, max(0, int(jitter))))
 
 
-def humanized_cooldown_sleep_seconds(base_seconds: int, sent_total: int, human_state: Dict[str, int], args) -> int:
+def humanized_cooldown_sleep_seconds(base_seconds: int, sent_total: int, human_state: dict[str, int], args) -> int:
     base_seconds = max(1, int(base_seconds))
     jitter_minus = max(0, int(getattr(args, "human_jitter_minus", 2) or 0))
     jitter_plus = max(0, int(getattr(args, "human_jitter_plus", 2) or 0))
@@ -4207,7 +4213,7 @@ def append_suppressed_email(suppress_csv_path: Path, email_addr: str) -> None:
 
 def controlled_sendgrid_profile_error(
     args: argparse.Namespace,
-    profile_defaults: Dict[str, object],
+    profile_defaults: dict[str, object],
 ) -> str:
     """Return a fail-closed configuration error for the manual test lane."""
     if str(getattr(args, "profile", "") or "").strip() != CONTROLLED_SENDGRID_PROFILE:
@@ -4237,8 +4243,8 @@ def controlled_sendgrid_profile_error(
 
 
 def controlled_sendgrid_queue_error(
-    rows: Sequence[Dict[str, str]],
-    recipient_allowlist: Set[str],
+    rows: Sequence[dict[str, str]],
+    recipient_allowlist: set[str],
 ) -> str:
     """Require one queue row and the exact controlled recipient."""
     if len(rows) != 1:
@@ -4251,7 +4257,7 @@ def controlled_sendgrid_queue_error(
     return ""
 
 
-def main():
+def main() -> int | None:
     profile_parser = argparse.ArgumentParser(add_help=False)
     profile_parser.add_argument("--profile", choices=sorted(PROFILES.keys()), help="Load a preset configuration.")
     profile_parser.add_argument("--list_profiles", action="store_true", help="List available profiles.")
@@ -4465,7 +4471,7 @@ def main():
                 args.cooldown_seconds = resolved_private_spacing_seconds
 
     if args.resync_sendgrid:
-        candidates: Dict[str, Dict[str, object]] = {}
+        candidates: dict[str, dict[str, object]] = {}
         if args.profile:
             cfg = PROFILES.get(args.profile)
             if not cfg:
@@ -4486,7 +4492,7 @@ def main():
         today = datetime.now().astimezone().strftime("%Y-%m-%d")
         updated = 0
         global_sent_today = 0
-        global_last_success: Optional[datetime] = None
+        global_last_success: datetime | None = None
         for name, cfg in candidates.items():
             log_path = _resolve_log_path(cfg.get("log") or "")
             sent_today = count_sent_today_from_log(log_path)
@@ -4515,7 +4521,7 @@ def main():
             return
 
     if args.status or args.status_sendgrid:
-        candidates: Dict[str, Dict[str, object]] = {}
+        candidates: dict[str, dict[str, object]] = {}
         if args.profile:
             cfg = PROFILES.get(args.profile)
             if not cfg:
@@ -4595,23 +4601,17 @@ def main():
             print(f"PROFILE: {name}")
             print(f"  provider={provider} csv={csv_path.name} log={log_path.name}")
             print(
-                "  total_recipients={total} sent_success_total={sent} failed_total={failed} pending_total={pending}"
-                .format(total=total_recipients, sent=sent_total, failed=failed_total, pending=pending_total)
+                f"  total_recipients={total_recipients} sent_success_total={sent_total} failed_total={failed_total} pending_total={pending_total}"
             )
             print(
-                "  sent_success_today={sent_today} daily_cap={daily_cap} remaining_today={remaining_today}"
-                .format(sent_today=sent_today, daily_cap=daily_cap, remaining_today=remaining_today)
+                f"  sent_success_today={sent_today} daily_cap={daily_cap} remaining_today={remaining_today}"
             )
             print(f"  last_success_timestamp={last_success_str}")
         if args.status_sendgrid and not args.profile and total_sendgrid_accounts:
             cap_display = str(SENDGRID_DAILY_CAP) if cap_enabled else "off"
             remaining_display = str(global_sendgrid_remaining) if cap_enabled else "off"
             print(
-                "TOTAL: sent_today={sent} remaining_today={remaining} cap={cap}".format(
-                    sent=global_sendgrid_sent_today,
-                    remaining=remaining_display,
-                    cap=cap_display,
-                )
+                f"TOTAL: sent_today={global_sendgrid_sent_today} remaining_today={remaining_display} cap={cap_display}"
             )
         return
 
@@ -4638,9 +4638,9 @@ def main():
     controlled_config_error = controlled_sendgrid_profile_error(args, profile_defaults)
     if controlled_config_error:
         print(f"REFUSED: {controlled_config_error}")
-        return
+        return 1 if args.preflight else None
 
-    if args.provider == "sendgrid" and not no_send_mode and not sendgrid_api_key:
+    if args.provider == "sendgrid" and not inspection_only and not sendgrid_api_key:
         print("ERROR: SENDGRID_API_KEY is required for --provider sendgrid.")
         return
 
@@ -4713,7 +4713,7 @@ def main():
         errors: int = 0,
         last_recipient: str = "",
         action: str = "",
-        pending_count: Optional[int] = None,
+        pending_count: int | None = None,
         terminal: bool = False,
         force: bool = False,
     ) -> None:
@@ -4767,7 +4767,7 @@ def main():
         print("ERROR missing:", csv_path)
         return
 
-    my_domains: Set[str] = {d.strip().lower() for d in (args.my_domains or "").split(",") if d.strip()}
+    my_domains: set[str] = {d.strip().lower() for d in (args.my_domains or "").split(",") if d.strip()}
     if not my_domains:
         my_domains = {DEFAULT_DOMAIN}
 
@@ -4783,9 +4783,9 @@ def main():
         if controlled_queue_error:
             emit_worker_event("ERROR", "controlled_test_queue_refused")
             print(f"REFUSED: {controlled_queue_error}")
-            return
+            return 1 if args.preflight else None
     pre_rendered_message = bool(pitch.get("pre_rendered_message"))
-    warm_confirmation_manifest: Dict[str, object] = {}
+    warm_confirmation_manifest: dict[str, object] = {}
     if pre_rendered_message:
         if str(args.profile or "").strip() == "private_jc_warm":
             warm_confirmation_manifest = load_warm_confirmation_manifest()
@@ -4800,10 +4800,10 @@ def main():
                     field=str(warm_integrity.get("field") or ""),
                 )
                 print(f"ERROR: {reason}: {message}")
-                return
+                return 1 if args.preflight else None
         if not validate_warm_queue_contract(csv_path, rows):
             emit_worker_event("ERROR", "invalid_warm_queue", csv_path=str(csv_path))
-            return
+            return 1 if args.preflight else None
     elif not validate_book_title_queue_contract(
         csv_path=csv_path,
         rows=rows,
@@ -4816,8 +4816,8 @@ def main():
     ):
         emit_worker_event("ERROR", "invalid_booktitle_queue", csv_path=str(csv_path))
         return
-    preview_sent_emails: Optional[Set[str]] = None
-    preview_sent_history_signature: Optional[tuple[object, ...]] = None
+    preview_sent_emails: set[str] | None = None
+    preview_sent_history_signature: tuple[object, ...] | None = None
     if args.preview_messages:
         (
             preview_sent_emails,
@@ -4829,8 +4829,8 @@ def main():
     unsubbed = load_emails_from_csv(unsub_csv_path)
     suppressed = load_emails_from_csv(suppress_csv_path)
     always_send_set = parse_email_list(getattr(args, "always_send", ""))
-    sendgrid_suppressed_active: Set[str] = set()
-    sendgrid_bad_event_emails: Set[str] = set()
+    sendgrid_suppressed_active: set[str] = set()
+    sendgrid_bad_event_emails: set[str] = set()
     global_bad_outcome_log_paths = authoritative_send_log_paths()
     sendgrid_suppressed_perm = 0
     sendgrid_suppressed_temp_active = 0
@@ -4849,7 +4849,7 @@ def main():
     risk_cols = parse_name_list(getattr(args, "risk_col", "risk"))
     valid_status_values = {canonical_token(x) for x in parse_token_list(getattr(args, "valid_status_values", ""))}
     blocked_risk_values = {canonical_token(x) for x in parse_token_list(getattr(args, "blocked_risk_values", ""))}
-    row_keys: Set[str] = set()
+    row_keys: set[str] = set()
     for row in rows:
         for k in row.keys():
             row_keys.add((k or "").strip().lower())
@@ -4866,8 +4866,8 @@ def main():
         )
         return
 
-    global_done: Set[str] = set()
-    other_recipients: Set[str] = set()
+    global_done: set[str] = set()
+    other_recipients: set[str] = set()
     dedupe_scope = dedupe_scope_for_runtime(args.provider, csv_path)
     if args.global_dedupe:
         map_entries = load_account_map(_resolve_app_path(args.account_map))
@@ -4920,12 +4920,12 @@ def main():
                 rows = read_rows(csv_path)
 
     def build_pending_snapshot(
-        current_rows: Optional[List[Dict[str, str]]] = None,
+        current_rows: list[dict[str, str]] | None = None,
         *,
         emit_suppressed_logs: bool,
         allow_missing_always_send_rows: bool = True,
         exclude_logged_always_send: bool = False,
-    ) -> tuple[List[Dict[str, str]], Dict[str, int], int, int]:
+    ) -> tuple[list[dict[str, str]], dict[str, int], int, int]:
         candidate_rows = list(current_rows) if current_rows is not None else read_rows(csv_path)
         current_already_done = (
             set(already_done)
@@ -4934,15 +4934,15 @@ def main():
         )
         current_unsubbed = load_emails_from_csv(unsub_csv_path)
         current_suppressed = load_emails_from_csv(suppress_csv_path)
-        current_sendgrid_suppressed_active: Set[str] = set(sendgrid_suppressed_active)
-        current_sendgrid_bad_event_emails: Set[str] = set(sendgrid_bad_event_emails)
+        current_sendgrid_suppressed_active: set[str] = set(sendgrid_suppressed_active)
+        current_sendgrid_bad_event_emails: set[str] = set(sendgrid_bad_event_emails)
         if args.provider in {"private", "sendgrid"}:
             current_sendgrid_suppressed_active, _ = load_active_suppressed_emails(
                 sendgrid_suppression_csv_path
             )
 
-        snapshot_pending: List[Dict[str, str]] = []
-        snapshot_seen_in_input: Set[str] = set()
+        snapshot_pending: list[dict[str, str]] = []
+        snapshot_seen_in_input: set[str] = set()
         snapshot_stats = {
             "skipped_dupes": 0,
             "skipped_global_logs": 0,
@@ -5193,9 +5193,9 @@ def main():
             )
 
     gmail_messages_24h = 0
-    gmail_unique_ext: Set[str] = set()
-    gmail_resume_messages: Optional[datetime] = None
-    gmail_resume_unique: Optional[datetime] = None
+    gmail_unique_ext: set[str] = set()
+    gmail_resume_messages: datetime | None = None
+    gmail_resume_unique: datetime | None = None
     if args.provider == "gmail" and (args.max_messages_24h or args.max_unique_external_24h):
         now = datetime.now(timezone.utc)
         stats = rolling_24h_stats(log_path, my_domains, now)
@@ -5275,9 +5275,9 @@ def main():
             f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
             f"{uuid.uuid4().hex[:10]}"
         )
-    sendgrid_custom_args: Dict[str, str] = {}
+    sendgrid_custom_args: dict[str, str] = {}
 
-    sendgrid_counters: Dict[str, Dict[str, object]] = {}
+    sendgrid_counters: dict[str, dict[str, object]] = {}
     sendgrid_counter_key = ""
     sendgrid_sent_today = 0
     sendgrid_account_sent_today = 0
@@ -5346,9 +5346,9 @@ def main():
     sig_name = sig_name.strip()
     sig_path = _resolve_app_path(sig_name) if (sig_name and "{SIGIMG}" in body_template) else None
 
-    smtp: Optional[smtplib.SMTP] = None
+    smtp: smtplib.SMTP | None = None
     sent_this_run = 0
-    sent_this_run_emails: Set[str] = set()
+    sent_this_run_emails: set[str] = set()
     invalid_count = 0
     error_count = 0
     total_sent_attempted = 0
@@ -5357,19 +5357,19 @@ def main():
     # Observability: record most-recent OTHER-class sendgrid error per profile
     # and append simple CSV rows to this file for offline inspection.
     OBSERVABILITY_LOG_PATH = os.path.join(STATE_DIR, "sendgrid_other_observability.csv")
-    recent_other_error: Dict[str, Dict[str, object]] = {}
+    recent_other_error: dict[str, dict[str, object]] = {}
     max_consecutive_errors = max(0, int(getattr(args, "max_consecutive_errors", 0) or 0))
     max_throttle_errors = max(0, int(getattr(args, "max_throttle_errors", 0) or 0))
     max_invalid_rate_1h = float(getattr(args, "max_invalid_rate_1h", 0) or 0.0)
     invalid_rate_min_events = max(1, int(getattr(args, "invalid_rate_min_events", 20) or 20))
-    quality_events_1h: Deque[Tuple[datetime, bool]] = deque()
+    quality_events_1h: deque[tuple[datetime, bool]] = deque()
     repeat_mode = args.repeat
     cooldown_seconds = max(0, int(args.cooldown_seconds))
     batch_size = max(0, int(args.batch_size))
     human_mode_active = bool(getattr(args, "human_mode", False)) and args.provider == "private" and repeat_mode
-    human_state: Dict[str, int] = {}
+    human_state: dict[str, int] = {}
     provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
-    last_success_sent_at_utc: Optional[datetime] = None
+    last_success_sent_at_utc: datetime | None = None
     submission_attempts_this_run = 0
 
     def audit_sleep(seconds: float, action: str = "SLEEP") -> None:
@@ -5637,8 +5637,8 @@ def main():
         subject_text: str,
         body_text: str,
         html_body: str,
-        cid: Optional[str],
-    ) -> Dict[str, str]:
+        cid: str | None,
+    ) -> dict[str, str]:
         """
         PrivateEmail: connect per message (reduces DISCONNECTED loops)
         Gmail: keep connection open
@@ -5674,7 +5674,7 @@ def main():
                 sendgrid_groups_to_display,
                 sendgrid_custom_args,
             )
-        result: Dict[str, str] = {}
+        result: dict[str, str] = {}
         if args.provider == "private":
             smtp_close(smtp)
             smtp = None
@@ -5690,7 +5690,7 @@ def main():
         base = max(180, int(args.interval) * 4)
         return base + random.randint(0, 45)
 
-    def note_error(is_throttle: bool = False) -> Optional[str]:
+    def note_error(is_throttle: bool = False) -> str | None:
         nonlocal consecutive_errors, consecutive_throttle_errors
         consecutive_errors += 1
         if is_throttle:
@@ -5704,7 +5704,7 @@ def main():
             return "circuit_errors"
         return None
 
-    def note_quality_event(is_invalid: bool) -> Optional[str]:
+    def note_quality_event(is_invalid: bool) -> str | None:
         if max_invalid_rate_1h <= 0:
             return None
         now = datetime.now(timezone.utc)
@@ -5820,7 +5820,7 @@ def main():
                 row_campaign_type = normalize_campaign_type(get_row_value_ci(r, ["campaign_type", "CampaignType", "campaign type"]) or args.campaign_type)
                 row_campaign_id = campaign_id_for_row(r, row_campaign_type)
                 idempotency_reserved = False
-                queue_claim_receipt: Optional[Dict[str, object]] = None
+                queue_claim_receipt: dict[str, object] | None = None
                 submission_attempted = False
                 accepted_send_bookkeeping_failed = False
                 last_recipient_for_audit = to_email
@@ -7161,7 +7161,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main() or 0)
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)

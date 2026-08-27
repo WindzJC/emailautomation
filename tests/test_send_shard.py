@@ -318,6 +318,72 @@ class SendShardTests(unittest.TestCase):
             ),
         )
 
+    def test_controlled_sendgrid_empty_queue_preflight_returns_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (
+                base,
+                shards,
+                logs,
+                state,
+                _csv_path,
+                unsub,
+                suppress,
+                sg_suppress,
+                counters,
+                _profile,
+            ) = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue_path = shards / "recipients_sendgrid_controlled_test.csv"
+            queue_path.write_text("Email,FirstName,BookTitle\n", encoding="utf-8")
+            log_path = logs / "sendgrid_controlled_test_log.csv"
+            log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            profile = {
+                **send_shard.PROFILES[send_shard.CONTROLLED_SENDGRID_PROFILE],
+                "csv": queue_path.name,
+                "log": log_path.name,
+            }
+            stdout = io.StringIO()
+
+            with patch.object(settings, "APP_ROOT", base), patch.object(
+                settings, "SHARDS_DIR", shards
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                settings, "STATE_DIR", state
+            ), patch.object(send_shard, "SHARDS_DIR", shards), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(send_shard, "STATE_DIR", state), patch.object(
+                send_shard, "ROOT", base
+            ), patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub), patch.object(
+                send_shard, "DEFAULT_SUPPRESS_CSV", suppress
+            ), patch.object(
+                send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress
+            ), patch.object(
+                send_shard, "SENDGRID_COUNTERS_PATH", counters
+            ), patch.dict(
+                send_shard.PROFILES,
+                {send_shard.CONTROLLED_SENDGRID_PROFILE: profile},
+                clear=False,
+            ), patch.dict(
+                send_shard.os.environ,
+                {"SENDGRID_API_KEY": ""},
+                clear=False,
+            ), patch.object(
+                sys,
+                "argv",
+                [
+                    "send_shard.py",
+                    "--profile",
+                    send_shard.CONTROLLED_SENDGRID_PROFILE,
+                    "--preflight",
+                ],
+            ), patch.object(send_shard, "send_via_sendgrid") as send_mock, redirect_stdout(stdout):
+                result = send_shard.main()
+
+        self.assertEqual(1, result)
+        send_mock.assert_not_called()
+        self.assertIn(
+            "REFUSED: controlled test queue must contain exactly one recipient row",
+            stdout.getvalue(),
+        )
+
     def test_private_jc_pacing_remains_unchanged(self) -> None:
         profile = send_shard.PROFILES["private_jc"]
         self.assertEqual(60, profile["interval"])
@@ -3453,10 +3519,61 @@ class SendShardTests(unittest.TestCase):
             ), patch.object(send_shard, "smtp_login") as smtp_login, patch.object(
                 sys, "argv", ["send_shard.py", "--profile", "private_jc_warm", "--preflight"]
             ), redirect_stdout(stdout):
-                send_shard.main()
+                result = send_shard.main()
 
         smtp_login.assert_not_called()
+        self.assertEqual(1, result)
         self.assertIn("warm_queue_payload_mismatch", stdout.getvalue())
+
+    def test_warm_sender_empty_queue_preflight_returns_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "shards"
+            logs = root / "logs"
+            state = root / "state"
+            shards.mkdir()
+            logs.mkdir()
+            state.mkdir()
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            queue_path.write_text("Email,EmailSubject,EmailBody\n", encoding="utf-8")
+            (logs / "private_jc_warm_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            unsub = state / "unsubscribed.csv"
+            suppress = state / "suppressed.csv"
+            sg_suppress = state / "sendgrid_suppressions.csv"
+            unsub.write_text("Email\n", encoding="utf-8")
+            suppress.write_text("Email\n", encoding="utf-8")
+            sg_suppress.write_text("Email,Status\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch.object(settings, "APP_ROOT", root), patch.object(
+                settings, "SHARDS_DIR", shards
+            ), patch.object(settings, "LOGS_DIR", logs), patch.object(
+                settings, "STATE_DIR", state
+            ), patch.object(send_shard, "SHARDS_DIR", shards), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(send_shard, "STATE_DIR", state), patch.object(
+                send_shard, "ROOT", root
+            ), patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub), patch.object(
+                send_shard, "DEFAULT_SUPPRESS_CSV", suppress
+            ), patch.object(
+                send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress
+            ), patch.object(
+                send_shard, "load_warm_confirmation_manifest", return_value={"confirmed": True}
+            ), patch.object(
+                send_shard, "validate_warm_confirmed_queue", return_value={"valid": True}
+            ), patch.object(send_shard, "smtp_login") as smtp_login, patch.object(
+                sys,
+                "argv",
+                ["send_shard.py", "--profile", "private_jc_warm", "--preflight"],
+            ), redirect_stdout(stdout):
+                result = send_shard.main()
+
+        smtp_login.assert_not_called()
+        self.assertEqual(1, result)
+        self.assertIn("ERROR: warm queue is empty", stdout.getvalue())
 
     def test_confirmed_warm_queue_allows_public_role_contact_paths_only_for_warm_profile(self) -> None:
         warm_queue = Path("recipients_private_jc_warm.csv")
