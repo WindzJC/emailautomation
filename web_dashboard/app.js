@@ -1320,10 +1320,11 @@ function leadOpsProgressCopy(phase) {
 
 function leadOpsProgressAsCheckStatus(progress = {}) {
   const phase = String(progress.phase || progress.status || "upload_received").toLowerCase();
-  const label = leadOpsProgressCopy(phase);
+  const progressLabel = leadOpsProgressCopy(phase);
   const rowCounts = progress.row_counts && typeof progress.row_counts === "object" ? progress.row_counts : {};
   const progressRows = Number(progress.processed_rows || 0);
   const completedCheckPhase = ["ready_for_preview", "previewing", "preview_complete"].includes(phase);
+  const label = completedCheckPhase ? "Complete" : progressLabel;
   const cleanedRows = Number(rowCounts.cleaned_rows ?? progress.cleaned_rows ?? (completedCheckPhase ? progressRows : 0));
   const rejectedRows = Number(rowCounts.rejected_rows ?? progress.rejected_rows ?? 0);
   const outputExists = Object.prototype.hasOwnProperty.call(progress, "output_exists")
@@ -1339,16 +1340,16 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   const guidance = failed
     ? "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
       : phase === "ready_for_preview"
-      ? "Success: review counts, then Preview Dispatch."
+      ? "Lead check complete. Review counts, then run Dispatch Preview."
       : phase === "preview_complete"
-        ? "Preview complete: review safety before Confirm."
+        ? "Lead check complete. Dispatch Preview is ready; review safety before Confirm."
         : phase === "confirm_complete"
           ? "Confirm complete."
         : "Processing: wait.";
   return {
     state,
     label,
-    message: String(progress.current_message || label),
+    message: completedCheckPhase ? "Lead check complete." : String(progress.current_message || label),
     guidance,
     preview_ready: previewReady,
     preview_state: previewReady ? "ready" : "not_ready",
@@ -1381,7 +1382,7 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
     input_exists: progress.input_exists,
     job_record_exists: progress.job_record_exists,
     phase,
-    current_message: progress.current_message || label,
+    current_message: completedCheckPhase ? "Lead check complete." : progress.current_message || label,
     error_summary: progress.error_summary || "",
     confirm_ready: false,
     tone: failed ? "bad" : processing ? "active" : previewReady ? "good" : "wait",
@@ -1853,7 +1854,6 @@ function importantLeadDispatchPayload(includePreviewId = false) {
     dispatch_source_mode: selectedImportantDispatchSourceMode(campaignType),
     dispatch_cap: els.leadsImportantDispatchCap?.value || "all",
     campaign_type: campaignType,
-    recontact_recency_override: Boolean(els.leadsRecontactRecencyOverride?.checked),
   };
   if (includePreviewId) {
     payload.preview_id = lastImportantDispatchPreview?.preview_id || "";
@@ -2787,10 +2787,8 @@ function latestRecontactPreviewContext(preview = lastImportantDispatchPreview) {
 }
 
 function recontactRecencyOverrideRequired(preview = lastImportantDispatchPreview) {
-  if (!preview || selectedImportantDispatchCampaignType() !== "recontact_cold") return false;
-  if (!dispatchPreviewMatchesCurrentSelection()) return false;
-  if (selectedSaferRecontactPoolIsActive() && Number(lastSaferRecontactSummary?.safer_found_in_active_history || 0) === 0) return false;
-  return recontactRecencySummary(preview).highRisk && !Boolean(els.leadsRecontactRecencyOverride?.checked);
+  void preview;
+  return false;
 }
 
 function saferRecontactSummaryContext() {
@@ -2855,7 +2853,25 @@ function dispatchPreviewRouteSummary(preview = null, dispatchSource = {}) {
   const sg3 = Number(preview?.rows_to_add_sendgrid_3 ?? shardCounts.sendgrid_3 ?? 0);
   const sg4 = Number(preview?.rows_to_add_sendgrid_4 ?? shardCounts.sendgrid_4 ?? 0);
   const sg5 = Number(preview?.rows_to_add_sendgrid_5 ?? shardCounts.sendgrid_5 ?? 0);
-  const sendgridTotal = Number(preview?.rows_to_add_sendgrid ?? preview?.sendgrid_planned_count ?? (sg1 + sg2 + sg3 + sg4 + sg5) ?? 0);
+  const configuredProfileCounts = preview?.sendgrid_profile_planned_counts && typeof preview.sendgrid_profile_planned_counts === "object"
+    ? preview.sendgrid_profile_planned_counts
+    : {};
+  const configuredProfileOrder = Array.isArray(preview?.sendgrid_profile_order)
+    ? preview.sendgrid_profile_order
+    : Object.keys(configuredProfileCounts);
+  const profileLabels = preview?.sendgrid_profile_labels && typeof preview.sendgrid_profile_labels === "object"
+    ? preview.sendgrid_profile_labels
+    : {};
+  const sendgridProfiles = configuredProfileOrder
+    .filter((profile) => Object.prototype.hasOwnProperty.call(configuredProfileCounts, profile))
+    .map((profile) => ({
+      profile,
+      label: String(profileLabels[profile] || profile).replace(/^sendgrid_/, "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+      count: Number(configuredProfileCounts[profile] || 0),
+    }));
+  const legacyTotal = sg1 + sg2 + sg3 + sg4 + sg5;
+  const profileTotal = sendgridProfiles.reduce((sum, item) => sum + item.count, 0);
+  const sendgridTotal = Number(preview?.rows_to_add_sendgrid ?? preview?.sendgrid_planned_count ?? (sendgridProfiles.length ? profileTotal : legacyTotal) ?? 0);
   const privateJc = Number(preview?.rows_to_add_private_jc ?? preview?.private_jc_planned_count ?? 0);
   const selectedRows = Number(preview?.dispatch_selected_row_count ?? preview?.selected_rows ?? dispatchSource.dispatch_source_row_count ?? 0);
   const uniquePlanned = Number(preview?.total_planned_unique_count ?? preview?.total_rows_would_write ?? privateJc + sendgridTotal ?? 0);
@@ -2875,8 +2891,12 @@ function dispatchPreviewRouteSummary(preview = null, dispatchSource = {}) {
   const duplicatePlanned = Number(preview?.duplicate_planned_email_count ?? 0);
   const sentLogOverlap = Number(preview?.planned_authoritative_sent_overlap_count ?? preview?.planned_sent_log_overlap_count ?? 0);
   const sendgridZeroReason = String(preview?.sendgrid_zero_reason || "").trim();
-  const shardsSlash = `${sg1} / ${sg2} / ${sg3} / ${sg4} / ${sg5}`;
-  const shardsLabel = `SG1 ${sg1} · SG2 ${sg2} · SG3 ${sg3} · SG4 ${sg4} · SG5 ${sg5}`;
+  const shardsSlash = sendgridProfiles.length
+    ? sendgridProfiles.map((item) => `${item.label} ${item.count}`).join(" / ")
+    : `${sg1} / ${sg2} / ${sg3} / ${sg4} / ${sg5}`;
+  const shardsLabel = sendgridProfiles.length
+    ? sendgridProfiles.map((item) => `${item.label} ${item.count}`).join(" · ")
+    : `SG1 ${sg1} · SG2 ${sg2} · SG3 ${sg3} · SG4 ${sg4} · SG5 ${sg5}`;
   const sourceRows = Number(preview?.dispatch_source_row_count ?? dispatchSource.dispatch_source_row_count ?? selectedRows ?? 0);
   const historyRemoved = skippedAlreadyContacted + skippedAlreadySent;
   return {
@@ -2886,6 +2906,7 @@ function dispatchPreviewRouteSummary(preview = null, dispatchSource = {}) {
     sg3,
     sg4,
     sg5,
+    sendgridProfiles,
     sendgridTotal,
     uniquePlanned,
     selectedRows,
@@ -2912,15 +2933,14 @@ function dispatchPreviewRouteSummary(preview = null, dispatchSource = {}) {
 }
 
 function selectedQueueLabel(preview = lastImportantDispatchPreview, dispatchSource = {}) {
-  if (isCurrentSaferRecontactSource(dispatchSource, preview)) return "Safer Recontact";
-  if (String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold") return "Full Recontact";
+  void dispatchSource;
+  if (String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold") return "Recontact Existing Leads";
   return "Fresh Cold";
 }
 
 function selectedQueueConfirmLabel(preview = lastImportantDispatchPreview, dispatchSource = {}) {
   const label = selectedQueueLabel(preview, dispatchSource);
-  if (label === "Safer Recontact") return "Confirm Safer Recontact Queue";
-  if (label === "Full Recontact") return "Confirm Full Recontact Queue";
+  if (label === "Recontact Existing Leads") return "Confirm Recontact Queue";
   return "Confirm Fresh Cold Queue";
 }
 
@@ -2970,7 +2990,12 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
   const sourceBlockReason = dispatchPreviewBlockReason(dispatchSource);
   const liveQueuesNotEmpty = liveRecipientQueueTotal() > 0;
-  const recencyOverrideRequired = recontactRecencyOverrideRequired(preview);
+  const priorSuccessIsInformational = String(preview?.prior_success_policy || "") === "allow_informational"
+    || String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold";
+  const sentHistoryPolicyViolation = summary.sentLogOverlap > 0 && !priorSuccessIsInformational;
+  const historyPolicyAmbiguous = Boolean(preview)
+    && !priorSuccessIsInformational
+    && (Number(preview.history_policy_version || 0) !== 2 || String(preview.prior_success_policy || "") !== "block_global");
   const malformedPreview = Boolean(preview) && (
     !String(preview.campaign_type || "").trim()
     || !String(preview.dispatch_source_mode || "").trim()
@@ -2984,8 +3009,9 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
     && !sendersActive
     && !liveQueuesNotEmpty
     && summary.duplicatePlanned === 0
-    && summary.sentLogOverlap === 0
+    && !sentHistoryPolicyViolation
     && !missingRequiredDispatchFields
+    && !historyPolicyAmbiguous
   );
   const queueSafetyBlockedByPreview = Boolean(preview) && (
     (hasQueueSafety && queueSafety.safe !== true)
@@ -3013,7 +3039,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
       buttonTitle: "The stored preview does not match the current source, cap, or campaign.",
     };
   }
-  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || summary.sentLogOverlap > 0 || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || missingRequiredDispatchFields || queueSafetyBlockedByPreview || recencyOverrideRequired) {
+  if (activeDispatch || sendersActive || activeCheck || sourceBlocked || liveQueuesNotEmpty || summary.duplicatePlanned > 0 || sentHistoryPolicyViolation || summary.skippedMathMismatch || summary.hasMissingSendgridZeroReason || malformedPreview || missingRequiredDispatchFields || historyPolicyAmbiguous || queueSafetyBlockedByPreview) {
     const reason = activeDispatch
       ? "Dispatch job is already running."
       : sendersActive
@@ -3024,7 +3050,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
             ? "Recipient queues are not empty."
             : summary.duplicatePlanned > 0
               ? `Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`
-              : summary.sentLogOverlap > 0
+              : sentHistoryPolicyViolation
                 ? `Planned recipients overlap authoritative sent/contact logs: ${summary.sentLogOverlap.toLocaleString()}.`
                 : summary.skippedMathMismatch
                   ? `Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons ${summary.skippedReasonTotal.toLocaleString()}.`
@@ -3034,11 +3060,11 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
                       ? "Preview is missing campaign or source metadata."
                       : missingRequiredDispatchFields
                         ? "Preview has planned rows missing required dispatch fields."
+                        : historyPolicyAmbiguous
+                          ? "Fresh Cold preview does not establish the current global prior-success policy."
                         : queueSafetyBlockedByPreview
                           ? (hasQueueSafety ? "Preview queue safety is unsafe." : "Preview queue safety is unknown.")
-                          : recencyOverrideRequired
-                            ? "Full recontact has high recent-contact overlap and requires explicit override."
-                            : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
+                          : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
     return {
       state: "blocked",
       tone: "bad",
@@ -3052,10 +3078,8 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const queueLabel = selectedQueueLabel(preview, dispatchSource);
   const title = queueLabel === "Fresh Cold"
     ? "Ready to confirm Fresh Cold queue"
-    : queueLabel === "Safer Recontact"
-      ? "Ready to confirm Safer Recontact queue"
-      : "Ready to confirm Full Recontact queue";
-  const message = `${summary.uniquePlanned.toLocaleString()} unique leads will be queued: ${summary.privateJc.toLocaleString()} Private JC and ${summary.sendgridTotal.toLocaleString()} SendGrid. SendGrid shards: ${summary.shardsSlash}. Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`;
+    : "Ready to confirm Recontact queue";
+  const message = `${summary.uniquePlanned.toLocaleString()} unique leads will be queued: ${summary.privateJc.toLocaleString()} Private JC and ${summary.sendgridTotal.toLocaleString()} SendGrid. SendGrid profiles: ${summary.shardsSlash}. Duplicate planned emails: ${summary.duplicatePlanned.toLocaleString()}.`;
   return {
     state: "ready",
     tone: "good",
@@ -3077,7 +3101,6 @@ function renderDispatchModeCards(preview = null) {
   if (!els.leadsDispatchModeCards) return;
   const selectedCampaign = selectedImportantDispatchCampaignType();
   const recontactPreview = latestRecontactPreviewContext(preview || lastImportantDispatchPreview);
-  const activeSaferPreview = isCurrentSaferRecontactSource(null, preview || lastImportantDispatchPreview);
   const freshSource = dispatchSourceOptionForMode("triaged_keep");
   const recontactSource = dispatchSourceOptionForMode("cleaned");
   const freshCount = Number(freshSource.dispatch_eligible_row_count || freshSource.dispatch_source_row_count || 0);
@@ -3086,12 +3109,8 @@ function renderDispatchModeCards(preview = null) {
   const routeSummary = dispatchPreviewRouteSummary(validPreview ? preview : null, freshSource);
   const coldPlanned = validColdPreview ? routeSummary.uniquePlanned : 0;
   const coldSafety = dispatchConfirmSafetyState(freshSource, validColdPreview ? preview : null);
-  const fullRecency = recontactPreview && !activeSaferPreview ? recontactRecencySummary(recontactPreview) : saferRecontactSummaryContext();
-  const recontactCount = Number(fullRecency.plannedUnique || lastSaferRecontactSummary?.planned_unique || recontactSource.dispatch_eligible_row_count || recontactSource.dispatch_source_row_count || 0);
-  const recency = fullRecency;
-  const recentHistoryLabel = recency.plannedUnique
-    ? `${recency.found.toLocaleString()} / ${recency.plannedUnique.toLocaleString()} (${percentLabel(recency.foundRatio)}) active history · ${recency.seenThisMonth.toLocaleString()} / ${recency.plannedUnique.toLocaleString()} (${percentLabel(recency.seenThisMonthRatio)}) seen this month`
-    : "Run preview to calculate recent-history overlap";
+  const recency = recontactPreview ? recontactRecencySummary(recontactPreview) : recontactRecencySummary(null);
+  const recontactCount = Number(recency.plannedUnique || recontactSource.dispatch_eligible_row_count || recontactSource.dispatch_source_row_count || 0);
   const freshMetric = validColdPreview
     ? `${coldPlanned.toLocaleString()} cold-safe lead${coldPlanned === 1 ? "" : "s"} after history filtering`
     : `${freshCount.toLocaleString()} source row${freshCount === 1 ? "" : "s"}`;
@@ -3100,32 +3119,12 @@ function renderDispatchModeCards(preview = null) {
     : validColdPreview
       ? `${routeSummary.privateJc.toLocaleString()} Private JC / ${routeSummary.sendgridTotal.toLocaleString()} SendGrid. ${coldSafety.ready ? "Ready" : "Review"}`
       : "Preview required for actual sendable count.";
-  const recontactAdvice = recency.highRisk
-    ? `Not recommended — ${percentLabel(recency.foundRatio)} already in active history.`
-    : "Use only when recontacting prior SendGrid/local history is intentional.";
-  const recontactRiskLabel = recency.highRisk ? "RED risk. " : "";
-  const saferCount = Number(lastSaferRecontactSummary?.safer_rows_written ?? recency.notFound ?? 0);
-  const saferPlanned = Number(lastSaferRecontactSummary?.planned_unique ?? recency.plannedUnique ?? 0);
-  const saferPercent = saferPlanned > 0 ? percentLabel(saferCount / saferPlanned) : percentLabel(recency.notFoundRatio);
-  const saferActive = activeSaferPreview || selectedSaferRecontactPoolIsActive();
-  const saferCreated = Boolean(lastSaferRecontactSummary?.output_path);
-  const saferCreationCount = Number(saferCount || recency.notFound || 0);
-  const saferCreationLabel = saferCreationCount
-    ? `Create ${saferCreationCount.toLocaleString()} Safer Recontact Leads`
-    : "Create Safer Recontact Leads";
-  const saferButtonLabel = saferRecontactPoolLoading
-    ? "Creating..."
-    : saferActive
-      ? "Safer Pool Selected"
-      : saferCreated
-        ? "Use Safer Pool"
-        : saferCreationLabel;
-  const saferMetric = saferCreated
-    ? `${saferCount.toLocaleString()} / ${saferPlanned.toLocaleString()} (${escapeHtml(saferPercent)}) safer leads created`
-    : `${saferCount.toLocaleString()} / ${Math.max(saferPlanned, recency.plannedUnique).toLocaleString()} (${escapeHtml(saferPercent)}) safer candidates`;
-  const saferFeedback = lastSaferRecontactFeedback?.message
-    ? `<small class="dispatch-mode-feedback dispatch-mode-feedback-${escapeHtml(lastSaferRecontactFeedback.state || "warn")}">${escapeHtml(lastSaferRecontactFeedback.message)}</small>`
-    : "";
+  const recontactMetrics = recency.plannedUnique
+    ? `Previously contacted: ${recency.found.toLocaleString()} · Seen this month: ${recency.seenThisMonth.toLocaleString()} · Not found in active history: ${recency.notFound.toLocaleString()}`
+    : "Run preview to calculate informational contact-history metrics.";
+  const eligibleAfterSafety = recontactPreview
+    ? Number(recontactPreview.total_planned_unique_count || recontactPreview.total_rows_would_write || 0)
+    : 0;
   setNodeHtml(
     els.leadsDispatchModeCards,
     `
@@ -3137,28 +3136,14 @@ function renderDispatchModeCards(preview = null) {
         <small>${escapeHtml(freshAdvice)}</small>
         ${validColdPreview ? `<em>${escapeHtml(coldSafety.ready ? "Ready" : "Review")}</em>` : ""}
       </button>
-      <details class="dispatch-secondary-modes" ${selectedCampaign === "recontact_cold" || saferActive ? "open" : ""}>
-        <summary>Recontact options</summary>
-        <div class="dispatch-secondary-mode-grid">
-          <button class="dispatch-mode-card ${selectedCampaign === "recontact_cold" && !activeSaferPreview ? "is-selected" : ""} ${recency.highRisk ? "is-warn" : ""}" type="button" data-dispatch-mode-card="recontact">
-            <span class="label">Recontact Campaign</span>
-            <strong>Full Recontact Pool / Checked Output</strong>
-            <span>May include prior contacts/sends.</span>
-            <b>${recontactCount.toLocaleString()} total planned</b>
-            <small>${escapeHtml(recentHistoryLabel)}. ${escapeHtml(recontactRiskLabel)}${escapeHtml(recontactAdvice)}</small>
-          </button>
-          <button class="dispatch-mode-card dispatch-mode-card-action ${saferActive ? "is-selected" : lastSaferRecontactSummary?.output_path ? "is-ready" : ""}" type="button" data-dispatch-mode-card="safer-recontact" ${saferActive ? "disabled" : ""}>
-            <span class="label">Safer Recontact Campaign</span>
-            ${saferActive ? `<span class="mini-pill">Selected</span>` : ""}
-            <strong>Safer Recontact Pool</strong>
-            <span>Only planned recontact leads not found in active history.</span>
-            <b>${saferMetric}</b>
-            <small>${saferActive ? "Selected source: Safer recontact CSV — not found in active history." : lastSaferRecontactSummary?.output_path ? `Created separately: ${lastSaferRecontactSummary.output_path}` : "Recommended over full recontact when recent-contact risk is high."}</small>
-            ${saferFeedback}
-            <em>${escapeHtml(saferButtonLabel)}</em>
-          </button>
-        </div>
-      </details>
+      <button class="dispatch-mode-card ${selectedCampaign === "recontact_cold" ? "is-selected" : ""}" type="button" data-dispatch-mode-card="recontact">
+        <span class="label">Recontact Existing Leads</span>
+        <strong>Checked Recontact Pool</strong>
+        <span>Prior successful contact is allowed; mandatory safety blocks still apply.</span>
+        <b>${recontactCount.toLocaleString()} checked row${recontactCount === 1 ? "" : "s"}</b>
+        <small>${escapeHtml(recontactMetrics)}</small>
+        <em>Eligible after mandatory safety: ${eligibleAfterSafety.toLocaleString()}</em>
+      </button>
     `,
   );
 }
@@ -3167,12 +3152,12 @@ function dispatchStatusBannerModel(dispatchSource = {}, preview = null) {
   const routeSummary = dispatchPreviewRouteSummary(preview, dispatchSource);
   const duplicateCount = Number(preview?.duplicate_planned_email_count || 0);
   const sourceMismatch = Boolean(lastImportantDispatchPreview?.preview_id && !preview);
-  const saferPreview = isCurrentSaferRecontactSource(dispatchSource, preview);
+  const recontactPreview = String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold";
   const malformedPreview = Boolean(preview) && (
     !String(preview.campaign_type || "").trim()
     || !String(preview.dispatch_source_mode || "").trim()
     || duplicateCount > 0
-    || routeSummary.sentLogOverlap > 0
+    || (routeSummary.sentLogOverlap > 0 && !recontactPreview)
     || routeSummary.skippedMathMismatch
   );
   const activeSenders = activeSenderProfiles().length > 0;
@@ -3190,20 +3175,12 @@ function dispatchStatusBannerModel(dispatchSource = {}, preview = null) {
             : String(dispatchSource.dispatch_block_reason || "Selected source is blocked."),
     };
   }
-  const recency = recontactRecencySummary(preview);
-  if (preview && selectedImportantDispatchCampaignType() === "recontact_cold" && recency.highRisk && !saferPreview) {
-    return {
-      tone: "bad",
-      title: "Do not confirm",
-      message: `Do not confirm full recontact — ${percentLabel(recency.foundRatio)} were already in active history and ${percentLabel(recency.seenThisMonthRatio)} were seen this month. Use the ${recency.notFound.toLocaleString()} safer leads or import a new fresh pool.`,
-    };
-  }
   if (preview && liveRecipientQueueTotal() === 0) {
     return {
       tone: "good",
       title: "Preview calculated",
-      message: saferPreview
-        ? "Safer recontact CSV — not found in active history. Confirm is available when the selected preview is current."
+      message: recontactPreview
+        ? "Prior-contact overlap is informational for Recontact. Mandatory safety checks still control confirmation."
         : routeSummary.historyRemoved
           ? `History filter excluded ${routeSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${routeSummary.uniquePlanned.toLocaleString()} cold-safe leads remain.`
           : "Queues are empty. Confirm is available when the selected preview is current.",
@@ -4369,21 +4346,6 @@ function renderImportantDispatch(result) {
     || (stalePreviewMismatch
       ? "The stored preview does not match the selected source or cap. Click Preview Dispatch to calculate queue assignments."
       : "Locked until Check/Triage completes.");
-  const previewPrivateJc = Number(dispatchPreview?.rows_to_add_private_jc || 0);
-  const previewSg1 = Number(dispatchPreview?.rows_to_add_sendgrid_1 || 0);
-  const previewSg2 = Number(dispatchPreview?.rows_to_add_sendgrid_2 || 0);
-  const previewSg3 = Number(dispatchPreview?.rows_to_add_sendgrid_3 || 0);
-  const previewSg4 = Number(dispatchPreview?.rows_to_add_sendgrid_4 || 0);
-  const previewSg5 = Number(dispatchPreview?.rows_to_add_sendgrid_5 || 0);
-  const previewSendgrid = previewSg1 + previewSg2 + previewSg3 + previewSg4 + previewSg5;
-  const sendgridShardBreakdown = `SG1 ${previewSg1} · SG2 ${previewSg2} · SG3 ${previewSg3} · SG4 ${previewSg4} · SG5 ${previewSg5}`;
-  const sendgridZeroReason = String(dispatchPreview?.sendgrid_zero_reason || "").trim();
-  const previewUniquePlanned = Number(dispatchPreview?.total_planned_unique_count || dispatchPreview?.total_rows_would_write || 0);
-  const previewSkipped = Number(dispatchPreview?.skipped_both || 0)
-    || Number(dispatchPreview?.skipped_already_sent || 0)
-    + Number(dispatchPreview?.skipped_already_queued || 0)
-    + Number(dispatchPreview?.skipped_suppressed || 0)
-    + Number(dispatchPreview?.skipped_invalid_malformed || 0);
   const previewRouteSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
   const confirmSafety = dispatchConfirmSafetyState(dispatchSource, dispatchPreview);
   const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) === 0;
@@ -4403,10 +4365,6 @@ function renderImportantDispatch(result) {
   renderRecommendedNextAction(dispatchSource, dispatchPreview);
   if (els.leadsDispatchSection) {
     els.leadsDispatchSection.classList.toggle("leads-dispatch-section-deferred", currentJcQueuePending);
-  }
-  if (els.leadsRecontactOverrideWrap) {
-    const showOverride = Boolean(dispatchPreview && selectedImportantDispatchCampaignType() === "recontact_cold" && recontactRecencySummary(dispatchPreview).highRisk);
-    els.leadsRecontactOverrideWrap.hidden = !showOverride;
   }
   if (els.leadsDispatchCurrentQueueNote) {
     els.leadsDispatchCurrentQueueNote.hidden = !currentJcQueuePending || Boolean(dispatchPreview);
@@ -4477,7 +4435,7 @@ function renderImportantDispatch(result) {
               <details class="dispatch-preview-details">
                 <summary>Preview details</summary>
                 ${renderOperatorMetricStrip([
-                  { label: "SendGrid shards", value: previewRouteSummary.shardsSlash },
+                  { label: "SendGrid profiles", value: previewRouteSummary.shardsSlash },
                   { label: "Unique", value: previewRouteSummary.uniquePlanned },
                   { label: "Duplicates", value: previewRouteSummary.duplicatePlanned, tone: previewRouteSummary.duplicatePlanned ? "bad" : "good" },
                   { label: "Already contacted", value: previewRouteSummary.skippedAlreadyContacted, tone: previewRouteSummary.skippedAlreadyContacted ? "warn" : "" },
@@ -5442,7 +5400,7 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     `
       <div class="workflow-tracker-head">
         <p class="eyebrow">Workflow Tracker</p>
-        <span>${escapeHtml(isCurrentSaferRecontactSource(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null) ? "Safer Recontact" : selectedCampaign === "cold" ? "Fresh Cold" : "Recontact")}</span>
+        <span>${escapeHtml(selectedCampaign === "cold" ? "Fresh Cold" : "Recontact Existing Leads")}</span>
       </div>
       <ol class="workflow-tracker-row" aria-label="Lead dispatch workflow">
         ${tasks.map((task, index) => `
@@ -6450,13 +6408,6 @@ async function confirmImportantLeadDispatch() {
     lastImportantDispatchConfirmFeedback = { state: "blocked", message: "Run Preview Dispatch first for the current source and cap." };
     renderImportantDispatch(lastImportantDispatch);
     showMessage("Run Preview Dispatch first for the current source and cap.", "error");
-    return;
-  }
-  if (recontactRecencyOverrideRequired(lastImportantDispatchPreview)) {
-    const message = "Recontact preview has high recent-contact overlap. Confirm requires explicit override.";
-    lastImportantDispatchConfirmFeedback = { state: "blocked", message };
-    renderImportantDispatch(lastImportantDispatch);
-    showMessage(message, "error");
     return;
   }
   if (els.leadsImportantDispatchConfirmBtn) {
@@ -10035,8 +9986,6 @@ if (els.leadsCurrentRunPanel) {
     if (action === "fast_triage") void runImportantLeadVerify(VERIFY_MODE_FAST_TRIAGE);
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
-    if (action === "create_safer_recontact") void createSaferRecontactPool();
-    if (action === "use_safer_recontact") useSaferRecontactPoolAsSelectedSource();
     if (action === "select_fresh_cold") {
       if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "cold";
       if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
@@ -10055,8 +10004,6 @@ if (els.leadsRecommendedNextAction) {
     if (action === "upload_check") void runImportantLeadUploadCheck();
     if (action === "preview_dispatch") void previewImportantLeadDispatch();
     if (action === "confirm_dispatch") void confirmImportantLeadDispatch();
-    if (action === "create_safer_recontact") void createSaferRecontactPool();
-    if (action === "use_safer_recontact") useSaferRecontactPoolAsSelectedSource();
     if (action === "select_fresh_cold") {
       if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "cold";
       if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "triaged_keep";
@@ -10081,14 +10028,6 @@ if (els.leadsDispatchModeCards) {
     const card = event.target.closest("[data-dispatch-mode-card]");
     if (!card) return;
     const mode = String(card.dataset.dispatchModeCard || "");
-    if (mode === "safer-recontact") {
-      if (lastSaferRecontactSummary?.output_path) {
-        useSaferRecontactPoolAsSelectedSource();
-      } else {
-        void createSaferRecontactPool();
-      }
-      return;
-    }
     if (mode === "recontact") {
       if (els.leadsImportantDispatchCampaignType) els.leadsImportantDispatchCampaignType.value = "recontact_cold";
       if (els.leadsImportantDispatchSourceMode) els.leadsImportantDispatchSourceMode.value = "cleaned";
@@ -10101,9 +10040,6 @@ if (els.leadsDispatchModeCards) {
     hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
     renderImportantDispatch(lastImportantDispatch);
   });
-}
-if (els.leadsRecontactRecencyOverride) {
-  els.leadsRecontactRecencyOverride.addEventListener("change", () => renderImportantDispatch(lastImportantDispatch));
 }
 if (els.leadsImportantInputText) {
   els.leadsImportantInputText.addEventListener("input", () => updateImportantLeadPasteGuardrails());

@@ -28,6 +28,7 @@ from important_leads_verify import important_leads_triage_path_state, important_
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
+    PRODUCTION_SENDGRID_PROFILES,
     ROLE_LOCALPART_BLOCKLIST,
     is_recontact_cold_campaign,
     is_role_recipient,
@@ -111,6 +112,10 @@ GLOBAL_BAD_CONTACT_HISTORY_STATUSES = {
     "unsubscribe",
     "unsubscribed",
 }
+
+DISPATCH_HISTORY_POLICY_VERSION = 2
+FRESH_COLD_PRIOR_SUCCESS_POLICY = "block_global"
+RECONTACT_PRIOR_SUCCESS_POLICY = "allow_informational"
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EMAIL_IN_TEXT_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -2538,6 +2543,8 @@ def _archive_assigned_dispatch_preview(
         f"sendgrid_{index}": int(preview.get(f"rows_to_add_sendgrid_{index}") or preview.get(f"assigned_sg{index}") or 0)
         for index in range(1, 6)
     }
+    queue_keys = _dispatch_queue_keys(preview)
+    sendgrid_queue_keys = [key for key in queue_keys if key.startswith("sendgrid_")]
     payload = {
         "archived_at_utc": iso_utc(),
         "preview_id": str(preview.get("preview_id") or ""),
@@ -2557,6 +2564,9 @@ def _archive_assigned_dispatch_preview(
         "rows_to_add_sendgrid_4": sendgrid_shard_planned_counts["sendgrid_4"],
         "rows_to_add_sendgrid_5": sendgrid_shard_planned_counts["sendgrid_5"],
         "sendgrid_shard_planned_counts": sendgrid_shard_planned_counts,
+        "sendgrid_profile_planned_counts": dict(preview.get("sendgrid_profile_planned_counts") or {}),
+        "sendgrid_profile_order": list(preview.get("sendgrid_profile_order") or []),
+        "sendgrid_profile_labels": dict(preview.get("sendgrid_profile_labels") or {}),
         "sendgrid_zero_reason": str(preview.get("sendgrid_zero_reason") or ""),
         "recontact_recency": dict(preview.get("recontact_recency") or {}),
         "recontact_planned_unique": int(preview.get("recontact_planned_unique") or 0),
@@ -2568,12 +2578,12 @@ def _archive_assigned_dispatch_preview(
         "private_jc_planned_rows": list(queue_rows.get("private_jc") or []),
         "sendgrid_planned_rows": [
             row
-            for key in [f"sendgrid_{index}" for index in range(1, 6)]
+            for key in sendgrid_queue_keys
             for row in list(queue_rows.get(key) or [])
         ],
         "per_shard_planned_rows": {
             key: list(queue_rows.get(key) or [])
-            for key in ["private_jc", *[f"sendgrid_{index}" for index in range(1, 6)]]
+            for key in queue_keys
         },
         "skipped_rows": int(
             preview.get("skipped_rows")
@@ -2688,6 +2698,17 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
         raise RuntimeError("Dispatch preview has an invalid campaign type. Re-run Preview Dispatch.")
     if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) != str(preview.get("dispatch_source_mode") or "").strip().lower():
         raise RuntimeError("Dispatch preview has an invalid dispatch source mode. Re-run Preview Dispatch.")
+    campaign_type = normalize_campaign_type(preview.get("campaign_type"))
+    if campaign_type == CAMPAIGN_TYPE_COLD:
+        if int(preview.get("history_policy_version") or 0) != DISPATCH_HISTORY_POLICY_VERSION:
+            raise RuntimeError(
+                "Fresh Cold dispatch preview does not establish the current global prior-success policy. "
+                "Re-run Preview Dispatch."
+            )
+        if str(preview.get("prior_success_policy") or "") != FRESH_COLD_PRIOR_SUCCESS_POLICY:
+            raise RuntimeError(
+                "Fresh Cold dispatch preview has an ambiguous prior-success policy. Re-run Preview Dispatch."
+            )
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue")
     if not isinstance(plan_rows_by_queue, dict):
@@ -2772,8 +2793,12 @@ def _dispatch_alias_fields(payload: Dict[str, object]) -> Dict[str, object]:
         "rows_to_add_private_jc": int(payload.get("rows_to_add_private_jc") or payload.get("added_astra") or 0),
         "rows_to_add_sendgrid_shards": _dispatch_sendgrid_shard_counts(payload, "rows_to_add"),
         "rows_written_sendgrid_shards": {
-            key: int(rows_written_per_queue_map.get(key) or 0)
-            for key in [f"sendgrid_{index}" for index in range(1, 6)]
+            f"sendgrid_{index}": int(
+                rows_written_per_queue_map.get(f"sendgrid_{index}")
+                or payload.get(f"assigned_sg{index}")
+                or 0
+            )
+            for index in range(1, 6)
         },
         "rows_written_private_jc": int(rows_written_per_queue_map.get("private_jc") or 0),
         "total_rows_that_would_be_written": int(payload.get("total_rows_would_write") or 0),
@@ -2820,6 +2845,33 @@ def _append_dispatch_run_history(
     write_json_atomic(history_path, history[: max(1, int(limit or 1))])
 
 
+def _registered_sendgrid_profiles() -> List[str]:
+    return [
+        name
+        for name, cfg in PROFILES.items()
+        if str(cfg.get("provider") or "") == "sendgrid"
+    ]
+
+
+def _enabled_sendgrid_dispatch_profiles() -> List[str]:
+    return [
+        name
+        for name in PRODUCTION_SENDGRID_PROFILES
+        if name in PROFILES
+        and str(PROFILES[name].get("provider") or "") == "sendgrid"
+        and not bool(PROFILES[name].get("controlled_test"))
+    ]
+
+
+def _sendgrid_profile_label(profile_name: str) -> str:
+    return str(profile_name or "").removeprefix("sendgrid_").replace("_", " ").title()
+
+
+def _legacy_sendgrid_queue_key(path: Path) -> str:
+    match = re.fullmatch(r"recipients_sendgrid_([1-5])\.csv", path.name)
+    return f"sendgrid_{match.group(1)}" if match else ""
+
+
 def _dispatch_queue_key(path: Path, jc_path: Path, sendgrid_paths: Sequence[Path]) -> str:
     if path == jc_path:
         return "private_jc"
@@ -2832,13 +2884,65 @@ def _dispatch_queue_key(path: Path, jc_path: Path, sendgrid_paths: Sequence[Path
 DISPATCH_QUEUE_KEYS = ("private_jc", "sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5")
 
 
+def _dispatch_queue_keys(payload: Dict[str, object]) -> List[str]:
+    queue_paths = payload.get("queue_paths")
+    plan_rows = payload.get("plan_rows_by_queue")
+    known = queue_paths if isinstance(queue_paths, dict) else plan_rows if isinstance(plan_rows, dict) else {}
+    requested = payload.get("queue_key_order")
+    if isinstance(requested, list):
+        ordered = [str(key) for key in requested if str(key) in known]
+        if ordered and ordered[0] == "private_jc":
+            return ordered
+    legacy = [key for key in DISPATCH_QUEUE_KEYS if key in known]
+    if legacy and legacy[0] == "private_jc":
+        return legacy
+    sendgrid_keys = sorted(
+        (str(key) for key in known if str(key).startswith("sendgrid_")),
+        key=str,
+    )
+    return ["private_jc", *sendgrid_keys] if "private_jc" in known else sendgrid_keys
+
+
+def _confirmation_queue_lock_paths(
+    preview: Dict[str, object],
+    destination_queue_paths: Sequence[Path],
+) -> List[Path]:
+    safety_queue_paths: List[Path] = []
+    if int(preview.get("history_policy_version") or 0) == DISPATCH_HISTORY_POLICY_VERSION:
+        raw_safety_queue_paths = preview.get("queue_safety_paths")
+        if not isinstance(raw_safety_queue_paths, list) or not raw_safety_queue_paths:
+            raise RuntimeError(
+                "Dispatch preview is missing queue safety paths. Re-run Preview Dispatch."
+            )
+        if any(not str(path or "").strip() for path in raw_safety_queue_paths):
+            raise RuntimeError(
+                "Dispatch preview has invalid queue safety paths. Re-run Preview Dispatch."
+            )
+        safety_queue_paths = [Path(str(path)) for path in raw_safety_queue_paths]
+        dependency_fingerprints = preview.get("dependency_fingerprints")
+        if not isinstance(dependency_fingerprints, dict):
+            raise RuntimeError(
+                "Dispatch preview is missing dependency state. Re-run Preview Dispatch."
+            )
+        fingerprinted_paths = {
+            Path(str(entry.get("path") or "")).resolve()
+            for entry in dependency_fingerprints.values()
+            if isinstance(entry, dict) and str(entry.get("path") or "").strip()
+        }
+        if any(path.resolve() not in fingerprinted_paths for path in safety_queue_paths):
+            raise RuntimeError(
+                "Dispatch preview queue safety paths are not fully fingerprinted. Re-run Preview Dispatch."
+            )
+
+    return list(dict.fromkeys([*destination_queue_paths, *safety_queue_paths]))
+
+
 def _planned_queue_row_summary(plan_rows_by_queue: Dict[str, object]) -> Dict[str, int]:
     private_count = 0
     sendgrid_count = 0
     total_rows = 0
     email_counts: Counter[str] = Counter()
-    for key in DISPATCH_QUEUE_KEYS:
-        rows = plan_rows_by_queue.get(key) if isinstance(plan_rows_by_queue, dict) else []
+    for key, rows in (plan_rows_by_queue.items() if isinstance(plan_rows_by_queue, dict) else []):
         if not isinstance(rows, list):
             rows = []
         row_count = len(rows)
@@ -2906,12 +3010,8 @@ def _record_dispatch_history_from_preview(
     try:
         rows_created = 0
         rows_created_per_queue = {
-            "private_jc": 0,
-            "sendgrid_1": 0,
-            "sendgrid_2": 0,
-            "sendgrid_3": 0,
-            "sendgrid_4": 0,
-            "sendgrid_5": 0,
+            str(queue_key): 0
+            for queue_key in plan_dispatch_events_by_queue
         }
         with conn:
             for queue_key, raw_events in plan_dispatch_events_by_queue.items():
@@ -2996,6 +3096,7 @@ def _build_dispatch_plan(
         suppressed_path=suppressed_path,
         unsubscribed_path=unsubscribed_path,
     )
+    configured_sendgrid_routing = sendgrid_queue_paths is None
     default_jc_path: Path | None = None
     default_sendgrid_paths: List[Path] | None = None
     default_jc_log_path: Path | None = None
@@ -3011,25 +3112,49 @@ def _build_dispatch_plan(
     if jc_path is None:
         raise ValueError("Dispatch requires a Private JC queue file.")
     sendgrid_paths = list(sendgrid_queue_paths or default_sendgrid_paths or [])
-    if len(sendgrid_paths) != 5:
-        raise ValueError("Dispatch requires exactly 5 SendGrid queue files.")
+    if not sendgrid_paths:
+        raise ValueError("Dispatch requires at least one enabled production SendGrid profile.")
+    if configured_sendgrid_routing:
+        sendgrid_profile_order = _enabled_sendgrid_dispatch_profiles()
+        if len(sendgrid_profile_order) != len(sendgrid_paths):
+            raise ValueError("Enabled SendGrid profile configuration does not match its queue files.")
+        sendgrid_queue_keys = list(sendgrid_profile_order)
+    else:
+        sendgrid_profile_order = []
+        sendgrid_queue_keys = [f"sendgrid_{index}" for index in range(1, len(sendgrid_paths) + 1)]
     jc_log = jc_log_path or default_jc_log_path
     if jc_log is None:
         raise ValueError("Dispatch requires a Private JC log file.")
     sg_logs = list(sendgrid_log_paths or default_sendgrid_log_paths or [])
-    if len(sg_logs) < len(sendgrid_paths):
-        raise ValueError("Dispatch requires at least one SendGrid log file per SendGrid queue.")
+    if not sg_logs:
+        raise ValueError("Dispatch requires authoritative SendGrid history logs.")
     queue_paths = [jc_path, *sendgrid_paths]
+    if configured_sendgrid_routing:
+        safety_queue_paths = [
+            jc_path,
+            settings.shard_path(str(PROFILES["private_jc_warm"]["csv"])),
+            *[
+                settings.shard_path(str(PROFILES[name]["csv"]))
+                for name in _registered_sendgrid_profiles()
+            ],
+        ]
+    else:
+        safety_queue_paths = [
+            jc_path,
+            jc_path.with_name("recipients_private_jc_warm.csv"),
+            *sendgrid_paths,
+        ]
+    safety_queue_paths = list(dict.fromkeys(safety_queue_paths))
     log_paths = [jc_log, *sg_logs]
     ledger_conn = connect_lead_ledger(_lead_ledger_db_path(lead_ledger_db_path))
 
     try:
         source_mode = _normalize_dispatch_source_mode(dispatch_source_mode)
         normalized_campaign_type = normalize_campaign_type(campaign_type)
-        # Successful delivery is historical evidence, not permanent
-        # suppression. Queue and campaign idempotency still prevent duplicate
-        # submission inside the current dispatch.
-        allow_previously_sent = True
+        # Recontact treats successful delivery as informational history. Fresh
+        # Cold blocks it globally before routing. Queue and campaign
+        # idempotency remain fail-closed for both modes.
+        allow_previously_sent = is_recontact_cold_campaign(normalized_campaign_type)
         source_state = _dispatch_source_snapshot(
             source_mode=source_mode,
             cleaned_path=master_path,
@@ -3053,7 +3178,7 @@ def _build_dispatch_plan(
 
         queue_headers_by_path: Dict[Path, List[str]] = {}
         queue_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
-        for path in queue_paths:
+        for path in safety_queue_paths:
             headers, rows = _read_queue_rows(path)
             queue_headers_by_path[path] = headers
             queue_rows_by_path[path] = rows
@@ -3070,19 +3195,7 @@ def _build_dispatch_plan(
         jc_sent = _sent_email_set(authoritative_jc_logs)
         sendgrid_sent = _sent_email_set(authoritative_sg_logs)
         bad_event_emails = load_bad_sendgrid_event_emails(sendgrid_events_path) | load_done_statuses_from_logs(authoritative_log_paths, {"INVALID"})
-        jc_queue_block_emails = _existing_queue_email_set({jc_path: queue_rows_by_path[jc_path]})
-        sendgrid_queue_block_emails = _existing_queue_email_set(
-            {path: queue_rows_by_path[path] for path in sendgrid_paths}
-        )
-        warm_queue_path = (
-            WARM_PRIVATE_JC_QUEUE_PATH
-            if jc_queue_path is None
-            else jc_path.with_name("recipients_private_jc_warm.csv")
-        )
-        _warm_headers, warm_queue_rows = _read_queue_rows(warm_queue_path)
-        warm_queue_block_emails = _existing_queue_email_set({warm_queue_path: warm_queue_rows})
-        # Warm Private JC is part of the Astra lane, so it blocks only Astra.
-        jc_queue_block_emails |= warm_queue_block_emails
+        global_queue_block_emails = _existing_queue_email_set(queue_rows_by_path)
         source_email_by_lead_id: Dict[str, str] = {}
         source_emails: set[str] = set()
         for row in source_rows:
@@ -3143,13 +3256,10 @@ def _build_dispatch_plan(
         exclusion_reason_counts: Counter[str] = Counter()
         already_contacted_evidence: List[Dict[str, str]] = []
         plan_dispatch_events_by_queue: Dict[str, List[Dict[str, str]]] = {
-            "private_jc": [],
-            "sendgrid_1": [],
-            "sendgrid_2": [],
-            "sendgrid_3": [],
-            "sendgrid_4": [],
-            "sendgrid_5": [],
+            key: [] for key in ["private_jc", *sendgrid_queue_keys]
         }
+        successful_contact_lead_ids = astra_lane_contacted_lead_ids | sendgrid_contacted_lead_ids
+        successful_send_emails = jc_sent | sendgrid_sent
 
         for row in source_rows:
             if normalized_cap != DISPATCH_CAP_ALL and (added_astra + added_sendgrid) >= selected_limit:
@@ -3176,19 +3286,34 @@ def _build_dispatch_plan(
                 exclusion_reason_counts["bad_sendgrid_event"] += 1
                 continue
 
+            if email in global_queue_block_emails:
+                skipped_astra_already_queued += 1
+                skipped_sendgrid_already_queued += 1
+                exclusion_reason_counts["already_queued"] += 1
+                continue
+
             if lead_id in global_bad_contact_lead_ids:
                 bad_event_skipped += 1
                 exclusion_reason_counts["bad_contact_history"] += 1
                 if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
                     already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 continue
-            if lead_id in (astra_lane_contacted_lead_ids | sendgrid_contacted_lead_ids) and allow_previously_sent:
+            if not allow_previously_sent and email in successful_send_emails:
+                skipped_astra_already_sent += 1
+                skipped_sendgrid_already_sent += 1
+                already_contacted_skipped += 1
+                exclusion_reason_counts["already_sent"] += 1
+                if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
+                    already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
+                continue
+            if not allow_previously_sent and lead_id in successful_contact_lead_ids:
+                already_contacted_skipped += 1
+                exclusion_reason_counts["already_contacted"] += 1
+                if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
+                    already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
+                continue
+            if lead_id in successful_contact_lead_ids and allow_previously_sent:
                 already_contacted_allowed += 1
-
-            # Do not globally suppress cross-lane sent history here.
-            # Route-specific checks below decide whether Private JC or SendGrid
-            # can still accept the row. Example: if SendGrid already sent it,
-            # Astra may still accept it if Astra has not sent/queued it.
             normalized = {header: _strip_cell(row.get(header, "")) for header in source_headers}
             normalized["Email"] = email
             normalized["campaign_type"] = normalized_campaign_type
@@ -3212,19 +3337,10 @@ def _build_dispatch_plan(
 
             def add_to_astra() -> bool:
                 nonlocal added_astra, other_family_sent_history_allowed
-                if email in jc_sent and not allow_previously_sent:
-                    route_failure_reasons.append("astra_already_sent")
-                    return False
-                if lead_id in astra_lane_contacted_lead_ids and not allow_previously_sent:
-                    route_failure_reasons.append("astra_already_contacted")
-                    return False
-                if email in jc_queue_block_emails:
-                    route_failure_reasons.append("astra_already_queued")
-                    return False
                 if email in sendgrid_sent and email not in jc_sent:
                     other_family_sent_history_allowed += 1
                 added_astra_rows.append(normalized)
-                jc_queue_block_emails.add(email)
+                global_queue_block_emails.add(email)
                 added_astra += 1
                 plan_dispatch_events_by_queue["private_jc"].append(
                     {
@@ -3242,31 +3358,20 @@ def _build_dispatch_plan(
 
             def add_to_sendgrid() -> bool:
                 nonlocal added_sendgrid, sg_assign_cursor, route_sendgrid_already_sent, route_sendgrid_already_queued, other_family_sent_history_allowed
-                if email in sendgrid_sent and not allow_previously_sent:
-                    route_sendgrid_already_sent += 1
-                    route_failure_reasons.append("sendgrid_already_sent")
-                    return False
-                if lead_id in sendgrid_contacted_lead_ids and not allow_previously_sent:
-                    route_failure_reasons.append("sendgrid_already_contacted")
-                    return False
-                if email in sendgrid_queue_block_emails:
-                    route_sendgrid_already_queued += 1
-                    route_failure_reasons.append("sendgrid_already_queued")
-                    return False
                 if email in jc_sent and email not in sendgrid_sent:
                     other_family_sent_history_allowed += 1
                 bucket_index = sg_assign_cursor % len(sendgrid_paths)
                 sg_assign_cursor += 1
                 added_sendgrid_rows_by_index[bucket_index].append(normalized)
-                sendgrid_queue_block_emails.add(email)
+                global_queue_block_emails.add(email)
                 added_sendgrid += 1
-                queue_key = f"sendgrid_{bucket_index + 1}"
+                queue_key = sendgrid_queue_keys[bucket_index]
                 plan_dispatch_events_by_queue[queue_key].append(
                     {
                         "lead_id": lead_id,
                         "email": email,
                         "queue_target": queue_key,
-                        "profile": queue_key,
+                        "profile": sendgrid_profile_order[bucket_index] if sendgrid_profile_order else queue_key,
                         "full_name": _strip_cell(normalized.get("FullName", "")),
                         "first_name": _trimmed_first_name(normalized.get("FirstName", "") or normalized.get("FullName", "")),
                         "source_row_hash": source_row_hash(normalized),
@@ -3316,7 +3421,10 @@ def _build_dispatch_plan(
 
         total_dispatch_rows = selected_rows_scanned
 
-        queue_headers = _queue_output_headers(queue_headers_by_path.values(), source_headers)
+        queue_headers = _queue_output_headers(
+            (queue_headers_by_path[path] for path in queue_paths),
+            source_headers,
+        )
         if "BookTitle" in master_headers and "BookTitle" not in queue_headers:
             queue_headers.append("BookTitle")
         if normalized_campaign_type != CAMPAIGN_TYPE_COLD and "campaign_type" not in queue_headers:
@@ -3327,38 +3435,35 @@ def _build_dispatch_plan(
         for path, rows in zip(sendgrid_paths, added_sendgrid_rows_by_index):
             plan_rows_by_path[path] = [_master_row_to_queue_row(row, queue_headers) for row in rows]
 
+        plan_rows_by_queue = {"private_jc": plan_rows_by_path[jc_path]}
+        plan_rows_by_queue.update(
+            {
+                key: plan_rows_by_path[path]
+                for key, path in zip(sendgrid_queue_keys, sendgrid_paths)
+            }
+        )
         rows_written_per_queue = {
-            _dispatch_queue_key(path, jc_path, sendgrid_paths): len(rows)
-            for path, rows in plan_rows_by_path.items()
-        }
-        plan_rows_by_queue = {
-            "private_jc": plan_rows_by_path[jc_path],
-            "sendgrid_1": plan_rows_by_path[sendgrid_paths[0]],
-            "sendgrid_2": plan_rows_by_path[sendgrid_paths[1]],
-            "sendgrid_3": plan_rows_by_path[sendgrid_paths[2]],
-            "sendgrid_4": plan_rows_by_path[sendgrid_paths[3]],
-            "sendgrid_5": plan_rows_by_path[sendgrid_paths[4]],
+            key: len(rows)
+            for key, rows in plan_rows_by_queue.items()
         }
         planned_summary = _planned_queue_row_summary(plan_rows_by_queue)
-        planned_private_sent_overlap = {
-            norm_email(row.get("Email", ""))
-            for row in (plan_rows_by_queue.get("private_jc") or [])
-            if isinstance(row, dict) and norm_email(row.get("Email", "")) in jc_sent
-        }
-        planned_sendgrid_sent_overlap: set[str] = set()
-        for queue_key in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"):
-            planned_sendgrid_sent_overlap |= {
+        planned_authoritative_sent_overlap: set[str] = set()
+        for queue_rows in plan_rows_by_queue.values():
+            planned_authoritative_sent_overlap |= {
                 norm_email(row.get("Email", ""))
-                for row in (plan_rows_by_queue.get(queue_key) or [])
-                if isinstance(row, dict) and norm_email(row.get("Email", "")) in sendgrid_sent
+                for row in queue_rows
+                if isinstance(row, dict) and norm_email(row.get("Email", "")) in (jc_sent | sendgrid_sent)
             }
-        planned_authoritative_sent_overlap_count = len(
-            planned_private_sent_overlap | planned_sendgrid_sent_overlap
-        )
-        sendgrid_shard_planned_counts = {
-            f"sendgrid_{index}": len(plan_rows_by_path[path])
-            for index, path in enumerate(sendgrid_paths, start=1)
+        planned_authoritative_sent_overlap_count = len(planned_authoritative_sent_overlap)
+        sendgrid_profile_planned_counts = {
+            key: len(plan_rows_by_path[path])
+            for key, path in zip(sendgrid_queue_keys, sendgrid_paths)
         }
+        legacy_sendgrid_planned_counts = {f"sendgrid_{index}": 0 for index in range(1, 6)}
+        for key, path in zip(sendgrid_queue_keys, sendgrid_paths):
+            legacy_key = _legacy_sendgrid_queue_key(path)
+            if legacy_key:
+                legacy_sendgrid_planned_counts[legacy_key] = int(sendgrid_profile_planned_counts.get(key) or 0)
         sendgrid_zero_reason = ""
         if added_sendgrid == 0 and int(planned_summary["total_planned_queue_rows"]):
             if route_sendgrid_already_sent:
@@ -3387,7 +3492,7 @@ def _build_dispatch_plan(
         }
         dependency_fingerprints = _collect_dispatch_input_fingerprints(
             source_path=source_path,
-            queue_paths=queue_paths,
+            queue_paths=safety_queue_paths,
             log_paths=log_paths,
             sendgrid_suppressions_path=sendgrid_suppressions_path,
             suppressed_path=suppressed_path,
@@ -3397,6 +3502,12 @@ def _build_dispatch_plan(
 
         plan = {
             "campaign_type": normalized_campaign_type,
+            "history_policy_version": DISPATCH_HISTORY_POLICY_VERSION,
+            "prior_success_policy": (
+                RECONTACT_PRIOR_SUCCESS_POLICY
+                if allow_previously_sent
+                else FRESH_COLD_PRIOR_SUCCESS_POLICY
+            ),
             "allow_previously_sent": allow_previously_sent,
             "allow_previously_contacted": allow_previously_sent,
             "dispatch_source_mode": source_mode,
@@ -3423,13 +3534,19 @@ def _build_dispatch_plan(
             "rejected_label": _display_path_label(rejected_path),
             "source_headers": source_headers,
             "queue_headers": queue_headers,
+            "queue_key_order": ["private_jc", *sendgrid_queue_keys],
             "queue_paths": {
                 "private_jc": str(jc_path),
-                "sendgrid_1": str(sendgrid_paths[0]),
-                "sendgrid_2": str(sendgrid_paths[1]),
-                "sendgrid_3": str(sendgrid_paths[2]),
-                "sendgrid_4": str(sendgrid_paths[3]),
-                "sendgrid_5": str(sendgrid_paths[4]),
+                **{
+                    key: str(path)
+                    for key, path in zip(sendgrid_queue_keys, sendgrid_paths)
+                },
+            },
+            "queue_safety_paths": [str(path) for path in safety_queue_paths],
+            "sendgrid_profile_order": list(sendgrid_profile_order),
+            "sendgrid_profile_labels": {
+                profile_name: _sendgrid_profile_label(profile_name)
+                for profile_name in sendgrid_profile_order
             },
             "sendgrid_log_paths": [str(path) for path in sg_logs],
             "authoritative_send_log_paths": [str(path) for path in authoritative_log_paths],
@@ -3440,11 +3557,14 @@ def _build_dispatch_plan(
             "planned_sent_log_overlap_count": planned_authoritative_sent_overlap_count,
             "queue_existing_counts": {
                 "private_jc": len(queue_rows_by_path[jc_path]),
-                "sendgrid_1": len(queue_rows_by_path[sendgrid_paths[0]]),
-                "sendgrid_2": len(queue_rows_by_path[sendgrid_paths[1]]),
-                "sendgrid_3": len(queue_rows_by_path[sendgrid_paths[2]]),
-                "sendgrid_4": len(queue_rows_by_path[sendgrid_paths[3]]),
-                "sendgrid_5": len(queue_rows_by_path[sendgrid_paths[4]]),
+                **{
+                    key: len(queue_rows_by_path[path])
+                    for key, path in zip(sendgrid_queue_keys, sendgrid_paths)
+                },
+            },
+            "queue_safety_existing_counts": {
+                _canonical_workspace_label(path): len(queue_rows_by_path[path])
+                for path in safety_queue_paths
             },
             "skipped_invalid_malformed": invalid_malformed_skipped,
             "invalid_malformed_skipped": invalid_malformed_skipped,
@@ -3472,18 +3592,19 @@ def _build_dispatch_plan(
             "added_astra": added_astra,
             "rows_to_add_sendgrid": added_sendgrid,
             "added_sendgrid": added_sendgrid,
-            "rows_to_add_sendgrid_1": len(plan_rows_by_path[sendgrid_paths[0]]),
-            "rows_to_add_sendgrid_2": len(plan_rows_by_path[sendgrid_paths[1]]),
-            "rows_to_add_sendgrid_3": len(plan_rows_by_path[sendgrid_paths[2]]),
-            "rows_to_add_sendgrid_4": len(plan_rows_by_path[sendgrid_paths[3]]),
-            "rows_to_add_sendgrid_5": len(plan_rows_by_path[sendgrid_paths[4]]),
-            "sendgrid_shard_planned_counts": sendgrid_shard_planned_counts,
+            "rows_to_add_sendgrid_1": legacy_sendgrid_planned_counts["sendgrid_1"],
+            "rows_to_add_sendgrid_2": legacy_sendgrid_planned_counts["sendgrid_2"],
+            "rows_to_add_sendgrid_3": legacy_sendgrid_planned_counts["sendgrid_3"],
+            "rows_to_add_sendgrid_4": legacy_sendgrid_planned_counts["sendgrid_4"],
+            "rows_to_add_sendgrid_5": legacy_sendgrid_planned_counts["sendgrid_5"],
+            "sendgrid_shard_planned_counts": legacy_sendgrid_planned_counts,
+            "sendgrid_profile_planned_counts": sendgrid_profile_planned_counts,
             "sendgrid_zero_reason": sendgrid_zero_reason,
-            "assigned_sg1": len(plan_rows_by_path[sendgrid_paths[0]]),
-            "assigned_sg2": len(plan_rows_by_path[sendgrid_paths[1]]),
-            "assigned_sg3": len(plan_rows_by_path[sendgrid_paths[2]]),
-            "assigned_sg4": len(plan_rows_by_path[sendgrid_paths[3]]),
-            "assigned_sg5": len(plan_rows_by_path[sendgrid_paths[4]]),
+            "assigned_sg1": legacy_sendgrid_planned_counts["sendgrid_1"],
+            "assigned_sg2": legacy_sendgrid_planned_counts["sendgrid_2"],
+            "assigned_sg3": legacy_sendgrid_planned_counts["sendgrid_3"],
+            "assigned_sg4": legacy_sendgrid_planned_counts["sendgrid_4"],
+            "assigned_sg5": legacy_sendgrid_planned_counts["sendgrid_5"],
             "skipped_both": skipped_both,
             "outcome_counts": dict(outcome_counts),
             "exclusion_reason_counts": dict(exclusion_reason_counts),
@@ -3645,7 +3766,7 @@ def _confirm_plan_rows_by_queue(
 ) -> tuple[Dict[str, List[Dict[str, str]]], Dict[str, int]]:
     filtered: Dict[str, List[Dict[str, str]]] = {}
     removed: Dict[str, int] = {}
-    for key in ["private_jc", "sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"]:
+    for key in plan_rows_by_queue:
         rows: List[Dict[str, str]] = []
         removed_count = 0
         for row in (plan_rows_by_queue.get(key) or []):
@@ -3653,7 +3774,7 @@ def _confirm_plan_rows_by_queue(
                 continue
             normalized = {str(header): _strip_cell(row.get(str(header), "")) for header in queue_headers}
             email = norm_email(normalized.get("Email", ""))
-            if key.startswith("sendgrid_") and email and email in sendgrid_sent_emails and not allow_sendgrid_already_sent:
+            if email and email in sendgrid_sent_emails and not allow_sendgrid_already_sent:
                 removed_count += 1
                 continue
             rows.append(normalized)
@@ -3757,13 +3878,14 @@ def _confirm_dispatch_preview_impl(
     queue_paths_map = preview.get("queue_paths") or {}
     if not isinstance(queue_paths_map, dict):
         raise RuntimeError("Dispatch preview is missing queue paths. Re-run Preview Dispatch.")
-    queue_keys = ["private_jc", "sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5"]
+    queue_keys = _dispatch_queue_keys(preview)
     queue_paths = [Path(str(queue_paths_map.get(key) or "")) for key in queue_keys]
     queue_headers = [str(value or "").strip() for value in (preview.get("queue_headers") or []) if str(value or "").strip()]
-    if len(queue_paths) != 6 or not all(str(path).strip() for path in queue_paths):
+    if len(queue_paths) < 2 or not all(str(path).strip() for path in queue_paths):
         raise RuntimeError("Dispatch preview is missing queue files. Re-run Preview Dispatch.")
     if not queue_headers:
         raise RuntimeError("Dispatch preview is missing queue headers. Re-run Preview Dispatch.")
+    queue_lock_paths = _confirmation_queue_lock_paths(preview, queue_paths)
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue") or {}
     if not isinstance(plan_rows_by_queue, dict):
@@ -3782,19 +3904,21 @@ def _confirm_dispatch_preview_impl(
         raise RuntimeError("Dispatch preview has no stored assigned rows or explicit zero-add reasons. Re-run Preview Dispatch before confirming again.")
 
     sendgrid_log_paths = _confirm_sendgrid_log_paths(preview)
-    sendgrid_sent_emails = _sent_email_set(sendgrid_log_paths)
+    raw_authoritative_log_paths = preview.get("authoritative_send_log_paths")
+    authoritative_log_paths = (
+        [Path(str(path)) for path in raw_authoritative_log_paths if str(path or "").strip()]
+        if isinstance(raw_authoritative_log_paths, list)
+        else sendgrid_log_paths
+    )
+    authoritative_sent_emails = _sent_email_set(authoritative_log_paths)
     campaign_type = normalize_campaign_type(preview.get("campaign_type") or CAMPAIGN_TYPE_COLD)
     is_recontact_campaign = is_recontact_cold_campaign(campaign_type)
-    allow_previously_sent = True
+    allow_previously_sent = is_recontact_campaign
     recontact_recency = preview.get("recontact_recency") if isinstance(preview.get("recontact_recency"), dict) else {}
-    if is_recontact_campaign and bool(recontact_recency.get("high_risk")) and not allow_high_risk_recontact:
-        raise RuntimeError(
-            "Recontact preview has high recent-contact overlap. Confirm requires explicit override."
-        )
     effective_plan_rows_by_queue, confirm_filtered_sendgrid_already_sent = _confirm_plan_rows_by_queue(
         plan_rows_by_queue=plan_rows_by_queue,
         queue_headers=queue_headers,
-        sendgrid_sent_emails=sendgrid_sent_emails,
+        sendgrid_sent_emails=authoritative_sent_emails,
         allow_sendgrid_already_sent=allow_previously_sent,
     )
     effective_rows_written_per_queue = {
@@ -3811,7 +3935,7 @@ def _confirm_dispatch_preview_impl(
                 if not isinstance(event, dict):
                     continue
                 email = norm_email(event.get("email", ""))
-                if key.startswith("sendgrid_") and email and email in sendgrid_sent_emails and not allow_previously_sent:
+                if email and email in authoritative_sent_emails and not allow_previously_sent:
                     continue
                 events.append(dict(event))
             effective_dispatch_events_by_queue[key] = events
@@ -3851,18 +3975,17 @@ def _confirm_dispatch_preview_impl(
     backup_dir = backup_root / f"dispatch_{timestamp_slug()}"
     if backup_dir.exists():
         backup_dir = backup_root / f"{backup_dir.name}_{uuid.uuid4().hex[:8]}"
-    staged_queue_paths: List[Path] = []
-    for key, path in zip(queue_keys, queue_paths):
-        staged_path = _stage_csv_payload(path, queue_headers, effective_plan_rows_by_queue.get(key) or [])
-        staged_queue_paths.append(staged_path)
-        _temporary_paths.append(staged_path)
-
-    _lock_stack.enter_context(lock_files(queue_paths))
+    _lock_stack.enter_context(lock_files(queue_lock_paths))
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
         raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
     existing_rows_by_path = assert_dispatch_destination_queues_empty(queue_paths)
+    staged_queue_paths: List[Path] = []
+    for key, path in zip(queue_keys, queue_paths):
+        staged_path = _stage_csv_payload(path, queue_headers, effective_plan_rows_by_queue.get(key) or [])
+        staged_queue_paths.append(staged_path)
+        _temporary_paths.append(staged_path)
     for path in queue_paths:
         _snapshot_file(path, _snapshots)
     _rollback_dirs.append(backup_dir)
@@ -3880,7 +4003,7 @@ def _confirm_dispatch_preview_impl(
         if _fault_injector:
             _fault_injector(f"queue_replacement_{position}")
     if _fault_injector:
-        _fault_injector("after_sixth_replacement")
+        _fault_injector("after_sixth_replacement" if len(queue_paths) == 6 else "after_all_replacements")
 
     ledger_path_text = str(effective_preview.get("lead_ledger_db_path") or "").strip()
     ledger_path = _lead_ledger_db_path(Path(ledger_path_text) if ledger_path_text else None)
@@ -3900,19 +4023,23 @@ def _confirm_dispatch_preview_impl(
         _fault_injector("ledger_recording")
 
     final_queue_counts = {
-        "jc": len(final_rows_by_path[queue_paths[0]]),
-        "sg1": len(final_rows_by_path[queue_paths[1]]),
-        "sg2": len(final_rows_by_path[queue_paths[2]]),
-        "sg3": len(final_rows_by_path[queue_paths[3]]),
-        "sg4": len(final_rows_by_path[queue_paths[4]]),
-        "sg5": len(final_rows_by_path[queue_paths[5]]),
+        key: len(final_rows_by_path[path])
+        for key, path in zip(queue_keys, queue_paths)
     }
+    legacy_rows_written = {f"sendgrid_{index}": 0 for index in range(1, 6)}
+    for key, path in zip(queue_keys, queue_paths):
+        if key == "private_jc":
+            continue
+        legacy_key = _legacy_sendgrid_queue_key(path)
+        if legacy_key:
+            legacy_rows_written[legacy_key] = int(effective_rows_written_per_queue.get(key) or 0)
 
     completed_at_utc = iso_utc()
     added_astra_count = int(effective_rows_written_per_queue.get("private_jc") or 0)
     added_sendgrid_count = sum(
-        int(effective_rows_written_per_queue.get(f"sendgrid_{index}") or 0)
-        for index in range(1, 6)
+        int(value or 0)
+        for key, value in effective_rows_written_per_queue.items()
+        if key.startswith("sendgrid_")
     )
     exclusion_reason_counts = dict(preview.get("exclusion_reason_counts") or {})
     if confirm_filtered_sendgrid_already_sent_count:
@@ -3931,7 +4058,7 @@ def _confirm_dispatch_preview_impl(
         "allow_previously_sent": allow_previously_sent,
         "allow_previously_contacted": allow_previously_sent,
         "recontact_recency": dict(recontact_recency),
-        "recontact_recency_override": bool(allow_high_risk_recontact),
+        "recontact_recency_override": False,
         "recontact_planned_unique": int(recontact_recency.get("planned_unique") or preview.get("recontact_planned_unique") or 0),
         "recontact_found_in_active_history": int(recontact_recency.get("found_in_active_history") or preview.get("recontact_found_in_active_history") or 0),
         "recontact_seen_this_month": int(recontact_recency.get("seen_this_month") or preview.get("recontact_seen_this_month") or 0),
@@ -3979,11 +4106,18 @@ def _confirm_dispatch_preview_impl(
         "rows_missing_author_name": int(preview.get("rows_missing_author_name") or 0),
         "previously_sent_allowed_count": int(preview.get("previously_sent_allowed_count") or 0),
         "already_contacted_allowed_count": int(preview.get("already_contacted_allowed_count") or 0),
-        "assigned_sg1": int(effective_rows_written_per_queue.get("sendgrid_1") or 0),
-        "assigned_sg2": int(effective_rows_written_per_queue.get("sendgrid_2") or 0),
-        "assigned_sg3": int(effective_rows_written_per_queue.get("sendgrid_3") or 0),
-        "assigned_sg4": int(effective_rows_written_per_queue.get("sendgrid_4") or 0),
-        "assigned_sg5": int(effective_rows_written_per_queue.get("sendgrid_5") or 0),
+        "assigned_sg1": legacy_rows_written["sendgrid_1"],
+        "assigned_sg2": legacy_rows_written["sendgrid_2"],
+        "assigned_sg3": legacy_rows_written["sendgrid_3"],
+        "assigned_sg4": legacy_rows_written["sendgrid_4"],
+        "assigned_sg5": legacy_rows_written["sendgrid_5"],
+        "sendgrid_profile_order": list(preview.get("sendgrid_profile_order") or []),
+        "sendgrid_profile_labels": dict(preview.get("sendgrid_profile_labels") or {}),
+        "sendgrid_profile_planned_counts": {
+            key: int(effective_rows_written_per_queue.get(key) or 0)
+            for key in queue_keys
+            if key.startswith("sendgrid_")
+        },
         "skipped_both": int(preview.get("skipped_both") or 0),
         "rows_written_per_queue": dict(effective_rows_written_per_queue),
         "queue_paths": dict(preview.get("queue_paths") or {}),
@@ -4354,13 +4488,11 @@ def check_master_leads(
 
 def _dispatch_profile_paths() -> tuple[Path, List[Path], Path, List[Path]]:
     jc_path = settings.shard_path(str(PROFILES["private_jc"]["csv"]))
-    sendgrid_profiles = [
-        name for name, cfg in PROFILES.items()
-        if str(cfg.get("provider") or "") == "sendgrid"
-    ]
-    shard_paths = [settings.shard_path(str(PROFILES[name]["csv"])) for name in sendgrid_profiles]
+    enabled_sendgrid_profiles = _enabled_sendgrid_dispatch_profiles()
+    registered_sendgrid_profiles = _registered_sendgrid_profiles()
+    shard_paths = [settings.shard_path(str(PROFILES[name]["csv"])) for name in enabled_sendgrid_profiles]
     jc_log_path = settings.log_path(str(PROFILES["private_jc"]["log"]))
-    sendgrid_log_paths = [settings.log_path(str(PROFILES[name]["log"])) for name in sendgrid_profiles]
+    sendgrid_log_paths = [settings.log_path(str(PROFILES[name]["log"])) for name in registered_sendgrid_profiles]
     sendgrid_domain_logs = [
         settings.log_path(str(cfg.get("domain_log")))
         for name, cfg in PROFILES.items()
@@ -4601,9 +4733,16 @@ def important_leads_status() -> Dict[str, object]:
     jc_path, sendgrid_paths, _, _ = _dispatch_profile_paths()
     jc_headers, jc_rows = _read_queue_rows(jc_path)
     sendgrid_status = []
-    for index, path in enumerate(sendgrid_paths, start=1):
+    for profile_name, path in zip(_enabled_sendgrid_dispatch_profiles(), sendgrid_paths):
         _, rows = _read_queue_rows(path)
-        sendgrid_status.append({"name": f"SG{index}", "path": str(path), "count": len(rows)})
+        sendgrid_status.append(
+            {
+                "name": _sendgrid_profile_label(profile_name),
+                "profile": profile_name,
+                "path": str(path),
+                "count": len(rows),
+            }
+        )
 
     cleaned_source_path = _workspace_path_from_label(path_state["output_path"], MASTER_OUTPUT_PATH)
     verified_source_path = _workspace_path_from_label(

@@ -7203,29 +7203,23 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         requested_cap = str(getattr(payload, "dispatch_cap", preview.get("dispatch_cap") or DISPATCH_CAP_ALL) if payload else preview.get("dispatch_cap") or DISPATCH_CAP_ALL).strip().lower()
         if requested_cap and requested_cap != str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL):
             raise RuntimeError("Dispatch preview does not match the selected cap. Re-run Preview Dispatch.")
-        recontact_recency = preview.get("recontact_recency") if isinstance(preview.get("recontact_recency"), dict) else {}
-        recontact_override = bool(getattr(payload, "recontact_recency_override", False) if payload else False)
-        if is_recontact_cold_campaign(preview_campaign_type) and bool(recontact_recency.get("high_risk")) and not recontact_override:
-            raise RuntimeError("Recontact preview has high recent-contact overlap. Confirm requires explicit override.")
-
         queue_paths_map = preview.get("queue_paths") or {}
-        queue_keys = (
-            "private_jc",
-            "sendgrid_1",
-            "sendgrid_2",
-            "sendgrid_3",
-            "sendgrid_4",
-            "sendgrid_5",
-        )
         if not isinstance(queue_paths_map, dict):
             raise RuntimeError(
                 "Dispatch preview is missing queue paths. Re-run Preview Dispatch."
             )
-        queue_paths = [
-            Path(str(queue_paths_map.get(key) or ""))
-            for key in queue_keys
-        ]
-        if len(queue_paths) != 6 or not all(
+        raw_queue_key_order = preview.get("queue_key_order")
+        queue_keys = (
+            [str(key) for key in raw_queue_key_order if str(key) in queue_paths_map]
+            if isinstance(raw_queue_key_order, list)
+            else [
+                key
+                for key in ("private_jc", "sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5")
+                if key in queue_paths_map
+            ]
+        )
+        queue_paths = [Path(str(queue_paths_map.get(key) or "")) for key in queue_keys]
+        if len(queue_paths) < 2 or not all(
             str(path).strip() for path in queue_paths
         ):
             raise RuntimeError(
@@ -7258,7 +7252,7 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
             eligible_rows=int(preview.get("dispatch_eligible_row_count") or 0),
             selected_rows=int(preview.get("dispatch_selected_row_count") or 0),
             total_rows_would_write=int(preview.get("total_rows_would_write") or 0),
-            recontact_recency_override=recontact_override,
+            recontact_recency_override=False,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)

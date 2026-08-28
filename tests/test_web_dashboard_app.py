@@ -235,11 +235,12 @@ class WebDashboardAppTests(unittest.TestCase):
             "Retry Confirm Dispatch",
             "Confirm Dispatch failed. Retry Confirm Dispatch.",
             "Confirm Dispatch is running.",
-            "rows_to_add_sendgrid_5",
+            "sendgrid_profile_planned_counts",
+            "sendgrid_profile_labels",
+            "sendgrid_profile_order",
             "sendgrid_zero_reason",
             "SendGrid",
-            "SendGrid shards",
-            "shardsSlash",
+            "SendGrid profiles",
             "total_planned_unique_count",
             "Unique",
             "Duplicates",
@@ -258,45 +259,32 @@ class WebDashboardAppTests(unittest.TestCase):
             "Ready to confirm Fresh Cold queue",
             "Confirm locked — review preview",
             "Confirm locked — rerun preview",
-            "recontact_recency_override",
-            "recontactRecencyOverrideRequired",
             "importantDispatchConfirmButtonLabel",
-            "SAFER_RECONTACT_SOURCE_FILENAME",
-            "sourcePathMatchesSaferRecontact",
-            "isSaferRecontactSource",
-            "isCurrentSaferRecontactSource",
             "dispatchSourceDisplayName",
             "dispatchSourceDetailLabel",
-            "Safer recontact CSV — not found in active history",
-            "Safer Pool Selected",
-            "RED risk.",
             "dispatch_source_kind",
-            "Not recommended: most leads were contacted recently.",
             "Fresh Cold Campaign",
-            "Recontact Campaign",
-            "Safer Recontact Campaign",
-            "Create safer recontact leads failed:",
-            "safer recontact leads created.",
-            "safer candidates",
-            "safer leads created",
-            "Not recommended — ${percentLabel(recency.foundRatio)} already in active history.",
-            "Use Safer Pool",
-            "useSaferRecontactPoolAsSelectedSource",
-            "if (lastSaferRecontactSummary?.output_path)",
-            "void createSaferRecontactPool();",
-            "/api/leads/dispatch-important/safer-recontact-pool",
+            "Recontact Existing Leads",
+            "Checked Recontact Pool",
+            "Previously contacted",
+            "Seen this month",
+            "Eligible after mandatory safety",
+            "history_policy_version",
+            "prior_success_policy",
             "source row",
             "Preview required for actual sendable count.",
             "cold-safe lead",
-            "percentLabel(recency.foundRatio)",
-            "percentLabel(recency.seenThisMonthRatio)",
-            "Do not confirm full recontact —",
-            "Confirm Full Recontact Queue",
+            "Confirm Recontact Queue",
             "Confirm Fresh Cold Queue",
-            "Confirm Safer Recontact Queue",
             "Confirm locked — review preview",
         ]:
             self.assertIn(expected, source)
+        for removed_active_workflow in [
+            'data-dispatch-mode-card="safer_recontact"',
+            'data-dispatch-mode-card="full_recontact"',
+            "recontact_recency_override:",
+        ]:
+            self.assertNotIn(removed_active_workflow, source)
         self.assertIn("previewStatus = currentPreviewReady", source)
         self.assertLess(source.index("previewStatus = currentPreviewReady"), source.index("importantLeadDispatchPreviewLoading", source.index("previewStatus = currentPreviewReady")))
         self.assertNotIn("sendable</b>", source)
@@ -306,13 +294,12 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-dispatch-mode-cards",
             "leads-dispatch-campaign-type",
             "<option value=\"cold\">Fresh Cold — excludes prior contacts</option>",
-            "<option value=\"recontact_cold\">Recontact — allows prior contacts</option>",
+            "<option value=\"recontact_cold\">Recontact Existing Leads — allows prior successful contact</option>",
             "<option value=\"triaged_keep\">Fresh Cold Keep</option>",
-            "<option value=\"cleaned\">Recontact Pool / Checked Output</option>",
-            "leads-recontact-recency-override",
-            "I understand this full recontact campaign includes recently contacted leads.",
+            "<option value=\"cleaned\">Checked Recontact Pool</option>",
         ]:
             self.assertIn(expected, html)
+        self.assertNotIn("leads-recontact-recency-override", html)
 
         styles = STYLES_CSS.read_text(encoding="utf-8")
         for expected in [
@@ -401,6 +388,17 @@ class WebDashboardAppTests(unittest.TestCase):
             ".lead-ops-progress-warning",
         ]:
             self.assertIn(expected, styles)
+
+    def test_lead_check_dispatch_preview_and_queue_statuses_are_distinct(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('const label = completedCheckPhase ? "Complete" : progressLabel;', source)
+        self.assertIn('message: completedCheckPhase ? "Lead check complete."', source)
+        self.assertIn('previewStatus = currentPreviewReady', source)
+        self.assertIn('lastImportantDispatchPreviewState = "not_generated"', source)
+        self.assertIn('lastImportantDispatchPreviewState = "ready"', source)
+        self.assertIn('currentDispatchConfirmed', source)
+        self.assertIn('Confirm Recontact Queue', source)
+        self.assertNotIn('message: completedCheckPhase ? "Preview complete."', source)
 
     def test_lead_ops_campaign_intake_polish_and_locked_states_are_rendered(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1006,9 +1004,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Locked until Check/Triage completes.",
             "safer_recontact_source_summary",
             "lastSaferRecontactSummary = lastLeadsStatus.safer_recontact_source_summary",
-            "active history ·",
-            "safer candidates",
-            "use_safer_recontact",
+            "Previously contacted:",
             "Source:",
             "selectedDispatchSourceLabel",
             "leads-dispatch-section-deferred",
@@ -1051,7 +1047,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "sentLogOverlap",
             "Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons",
             "History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()}",
-            "Use Safer Pool",
             "workflow-banner-inline",
             "Current step",
             "leads-control-check-result",

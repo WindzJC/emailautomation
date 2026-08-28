@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import json
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -70,6 +73,71 @@ def planned_row(email: str, first_name: str = "Fresh") -> dict[str, str]:
         "AuthorEmail": email,
         "AuthorName": f"{first_name} Author",
         "BookTitle": f"{first_name} Book",
+    }
+
+
+def build_dynamic_dispatch_fixture(
+    tmp: Path,
+    *,
+    preview_name: str,
+    lead_count: int = 8,
+) -> dict[str, object]:
+    master_path = tmp / "leads.csv"
+    triaged_keep_path = tmp / "leads_triaged_keep.csv"
+    rows = [
+        {
+            "FullName": f"Lead {index}",
+            "FirstName": f"Lead{index}",
+            "Email": f"lead-{index}@example.com",
+            "Status": "KEEP",
+        }
+        for index in range(1, lead_count + 1)
+    ]
+    write_csv(
+        master_path,
+        ["FullName", "FirstName", "Email"],
+        [
+            {key: row[key] for key in ("FullName", "FirstName", "Email")}
+            for row in rows
+        ],
+    )
+    write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+    for cfg in send_shard.PROFILES.values():
+        csv_name = str(cfg.get("csv") or "").strip()
+        log_name = str(cfg.get("log") or "").strip()
+        if csv_name:
+            write_csv(tmp / Path(csv_name).name, ["Email", "FirstName"], [])
+        if log_name:
+            write_csv(tmp / Path(log_name).name, ["Email", "Status"], [])
+    write_csv(tmp / "sendgrid_domain_log.csv", ["Email", "Status"], [])
+    write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+    write_csv(tmp / "suppressed.csv", ["Email"], [])
+    write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+
+    def managed_path(value: object) -> Path:
+        return tmp / Path(str(value)).name
+
+    preview_dir = tmp / preview_name
+    with (
+        patch.object(important_leads_workflow.settings, "shard_path", side_effect=managed_path),
+        patch.object(important_leads_workflow.settings, "log_path", side_effect=managed_path),
+    ):
+        preview = preview_dispatch_master_leads(
+            master_path=master_path,
+            triaged_keep_path=triaged_keep_path,
+            rejected_path=tmp / "leads_rejected.csv",
+            dispatch_source_mode="triaged_keep",
+            sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+            suppressed_path=tmp / "suppressed.csv",
+            unsubscribed_path=tmp / "unsubscribed.csv",
+            lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            preview_dir=preview_dir,
+        )
+    return {
+        "preview": preview,
+        "preview_dir": preview_dir,
+        "master_path": master_path,
+        "triaged_keep_path": triaged_keep_path,
     }
 
 
@@ -1329,7 +1397,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["undeliverable_removed"], 1)
             self.assertEqual(report["reason_counts"]["UNDELIVERABLE_DOMAIN"], 1)
 
-    def test_dispatch_master_leads_uses_channel_specific_dedupe(self) -> None:
+    def test_fresh_cold_globally_blocks_prior_success_and_active_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -1423,27 +1491,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 for row in planned[f"sendgrid_{index}"]
             ]
 
-            self.assertEqual(
-                {
-                    "fresh-both@example.com",
-                    "sg-sent@example.com",
-                    "queued-sg@example.com",
-                },
-                jc_emails,
-            )
+            self.assertEqual({"fresh-both@example.com"}, jc_emails)
 
             self.assertEqual(
                 len(all_sg_emails),
                 len(set(all_sg_emails)),
             )
-            self.assertEqual(
-                {
-                    "astra-sent@example.com",
-                    "queued-astra@example.com",
-                    "both-sent@example.com",
-                },
-                set(all_sg_emails),
-            )
+            self.assertEqual(set(), set(all_sg_emails))
 
             self.assertTrue(
                 jc_emails.isdisjoint(all_sg_emails)
@@ -1456,6 +1510,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 "suppressed@example.com",
                 jc_emails | set(all_sg_emails),
             )
+            self.assertEqual(3, report["exclusion_reason_counts"]["already_sent"])
+            self.assertEqual(3, report["exclusion_reason_counts"]["already_queued"])
 
     def test_dispatch_master_leads_default_uses_triaged_keep_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1859,23 +1915,23 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(5, preview["source_row_count"])
             self.assertEqual(5, preview["total_source_rows"])
             self.assertEqual(5, preview["eligible_rows"])
-            self.assertEqual(0, preview["skipped_already_sent"])
-            self.assertEqual(0, preview["skipped_already_queued"])
+            self.assertEqual(1, preview["skipped_already_sent"])
+            self.assertEqual(1, preview["skipped_already_queued"])
             self.assertEqual(1, preview["skipped_suppressed"])
             self.assertEqual(1, preview["skipped_invalid_malformed"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(
-                {"sendgrid_1": 1, "sendgrid_2": 1, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
+                {"sendgrid_1": 0, "sendgrid_2": 0, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
                 preview["rows_to_add_sendgrid_shards"],
             )
             self.assertEqual("cold", preview["campaign_type"])
             self.assertEqual("triaged_keep", preview["dispatch_source_mode"])
             self.assertIs(True, preview["dispatch_source_exists"])
             self.assertEqual(1, preview["private_jc_planned_count"])
-            self.assertEqual(2, preview["sendgrid_planned_count"])
-            self.assertEqual(3, preview["total_planned_unique_count"])
+            self.assertEqual(0, preview["sendgrid_planned_count"])
+            self.assertEqual(1, preview["total_planned_unique_count"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
-            self.assertEqual(3, preview["total_rows_that_would_be_written"])
+            self.assertEqual(1, preview["total_rows_that_would_be_written"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             preview_path = preview_dir / f"{preview['preview_id']}.json"
             self.assertTrue(preview_path.exists())
@@ -2014,7 +2070,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             for path in sg_queues:
                 self.assertEqual([], read_csv_rows(path))
 
-    def test_fresh_cold_sendgrid_zero_requires_visible_reason(self) -> None:
+    def test_active_sendgrid_queue_membership_blocks_all_fresh_cold_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -2058,10 +2114,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(len(rows), preview["rows_to_add_private_jc"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
-            self.assertIn("SendGrid received 0 rows", preview["sendgrid_zero_reason"])
-            self.assertIn("already queued", preview["sendgrid_zero_reason"])
+            self.assertEqual(len(rows), preview["exclusion_reason_counts"]["already_queued"])
 
     def test_confirm_dispatch_preview_writes_exact_previewed_rows_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2203,7 +2258,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    def test_future_fresh_cold_campaign_allows_successful_sendgrid_history(self) -> None:
+    def test_fresh_cold_campaign_blocks_successful_sendgrid_history_globally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -2284,21 +2339,18 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 lead_ledger_db_path=ledger_db_path,
                 preview_dir=preview_dir,
             )
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
-            self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(0, preview["skipped_already_sent"])
-            self.assertEqual(0, preview["skipped_rows"])
-            self.assertEqual({}, preview["exclusion_reason_counts"])
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["skipped_already_sent"])
+            self.assertEqual(2, preview["skipped_rows"])
+            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             sendgrid_emails = [
                 row["Email"]
                 for queue_name in ("sendgrid_1", "sendgrid_2", "sendgrid_3", "sendgrid_4", "sendgrid_5")
                 for row in preview["plan_rows_by_queue"][queue_name]
             ]
-            self.assertEqual(
-                ["beta@example.com"],
-                sorted(sendgrid_emails),
-            )
+            self.assertEqual([], sendgrid_emails)
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
             try:
                 alpha_id = lead_ledger.deterministic_lead_id("alpha@example.com")
@@ -2462,7 +2514,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 for row in rows_by_queue:
                     self.assertEqual("recontact_cold", row["campaign_type"])
 
-    def test_recontact_preview_counts_recent_history_and_requires_override(self) -> None:
+    def test_recontact_preview_counts_history_without_confirmation_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -2537,12 +2589,16 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("red", preview["recontact_recency"]["risk_level"])
             self.assertEqual("Not recommended: most leads were contacted recently.", preview["recontact_recency_warning"])
 
-            with self.assertRaisesRegex(RuntimeError, "explicit override"):
-                confirm_dispatch_preview(
-                    preview["preview_id"],
-                    require_stopped=False,
-                    preview_dir=preview_dir,
-                )
+            confirmed = confirm_dispatch_preview(
+                preview["preview_id"],
+                require_stopped=False,
+                backup_root=tmp / "backups",
+                report_dir=tmp / "reports",
+                persist_state=False,
+                preview_dir=preview_dir,
+            )
+            self.assertEqual("recontact_cold", confirmed["campaign_type"])
+            self.assertEqual(3, confirmed["total_rows_would_write"])
 
     def test_safer_recontact_pool_writes_separate_csv_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3222,7 +3278,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(150, all_rows["selected_rows"])
             self.assertEqual(150, all_rows["total_rows_that_would_be_written"])
 
-    def test_preview_dispatch_cap_reroutes_sendgrid_history_to_astra(self) -> None:
+    def test_fresh_cold_cap_excludes_history_before_routing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
 
@@ -3234,17 +3290,17 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual("100", capped["dispatch_cap"])
-            self.assertEqual(100, capped["selected_rows"])
-            self.assertEqual(0, capped["skipped_already_contacted"])
-            self.assertEqual(50, capped["rows_to_add_private_jc"])
-            self.assertEqual(50, capped["rows_to_add_sendgrid"])
-            self.assertEqual(10, capped["assigned_sg1"])
-            self.assertEqual(10, capped["assigned_sg2"])
-            self.assertEqual(10, capped["assigned_sg3"])
-            self.assertEqual(10, capped["assigned_sg4"])
-            self.assertEqual(10, capped["assigned_sg5"])
+            self.assertEqual(150, capped["selected_rows"])
+            self.assertEqual(90, capped["skipped_already_contacted"])
+            self.assertEqual(30, capped["rows_to_add_private_jc"])
+            self.assertEqual(30, capped["rows_to_add_sendgrid"])
+            self.assertEqual(6, capped["assigned_sg1"])
+            self.assertEqual(6, capped["assigned_sg2"])
+            self.assertEqual(6, capped["assigned_sg3"])
+            self.assertEqual(6, capped["assigned_sg4"])
+            self.assertEqual(6, capped["assigned_sg5"])
 
-    def test_preview_dispatch_cap_stops_after_lane_fallback_fills_cap(self) -> None:
+    def test_fresh_cold_cap_scans_past_blocked_history_to_fill_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
 
@@ -3256,8 +3312,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual("100", capped["dispatch_cap"])
-            self.assertEqual(100, capped["selected_rows"])
-            self.assertEqual(0, capped["skipped_already_contacted"])
+            self.assertEqual(190, capped["selected_rows"])
+            self.assertEqual(90, capped["skipped_already_contacted"])
             self.assertEqual(50, capped["rows_to_add_sendgrid"])
             self.assertEqual(50, capped["rows_to_add_private_jc"])
             self.assertEqual(10, capped["assigned_sg1"])
@@ -3358,7 +3414,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(str(verified_path), strict_preview["source_file_path"])
             self.assertNotEqual(triaged_preview["preview_id"], strict_preview["preview_id"])
 
-    def test_preview_dispatch_master_leads_routes_astra_contact_to_sendgrid(self) -> None:
+    def test_fresh_cold_blocks_astra_contact_instead_of_cross_lane_reroute(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3415,16 +3471,16 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=tmp / "previews",
             )
 
-            self.assertEqual(0, preview["skipped_already_contacted"])
+            self.assertEqual(1, preview["skipped_already_contacted"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
-            self.assertNotIn("already_contacted", preview["exclusion_reason_counts"])
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["exclusion_reason_counts"]["already_contacted"])
 
     def test_preview_dispatch_scopes_ledger_contact_history_by_lane(self) -> None:
         scenarios = [
-            ("private_jc", "private_jc", "delivered", 1, 0, 0, {}),
-            ("private_jc_warm", "private_jc_warm", "delivered", 1, 0, 0, {}),
-            ("sendgrid_jordan", "sendgrid_2", "delivered", 1, 0, 0, {}),
+            ("private_jc", "private_jc", "delivered", 0, 0, 1, {"already_contacted": 1}),
+            ("private_jc_warm", "private_jc_warm", "delivered", 0, 0, 1, {"already_contacted": 1}),
+            ("sendgrid_jordan", "sendgrid_2", "delivered", 0, 0, 1, {"already_contacted": 1}),
             ("private_jc", "private_jc", "complaint", 0, 0, 0, {"bad_contact_history": 1}),
         ]
         for profile, queue_target, status, expected_jc, expected_sg, expected_contacted, expected_reasons in scenarios:
@@ -3480,7 +3536,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 self.assertEqual(expected_contacted, preview["skipped_already_contacted"])
                 self.assertEqual(expected_reasons, preview["exclusion_reason_counts"])
 
-    def test_preview_dispatch_allows_future_campaign_after_both_lanes_contacted(self) -> None:
+    def test_recontact_allows_prior_success_from_both_lanes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3526,6 +3582,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 suppressed_path=tmp / "suppressed.csv",
                 unsubscribed_path=tmp / "unsubscribed.csv",
                 lead_ledger_db_path=ledger_db_path,
+                campaign_type="recontact_cold",
                 preview_dir=tmp / "previews",
             )
 
@@ -3533,7 +3590,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(0, preview["skipped_already_contacted"])
             self.assertEqual({}, preview["exclusion_reason_counts"])
 
-    def test_warm_private_queue_blocks_astra_but_allows_sendgrid(self) -> None:
+    def test_warm_private_queue_blocks_all_fresh_cold_routes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3567,8 +3624,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(0, preview["rows_to_add_private_jc"])
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
-            self.assertEqual(0, preview["skipped_already_queued"])
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["skipped_already_queued"])
 
     def test_preview_dispatch_ignores_queued_staged_history_for_fresh_cold(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3643,7 +3700,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(0, preview["history_source_category_counts"]["already_contacted_from_contact_history"])
             self.assertEqual(0, preview["history_source_category_counts"]["already_sent_from_actual_send_log"])
 
-    def test_fresh_cold_preview_allows_authoritative_sendgrid_domain_sent_history(self) -> None:
+    def test_fresh_cold_preview_blocks_authoritative_sendgrid_sent_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3719,20 +3776,18 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             self.assertEqual(
                 {
-                    "profile-sent@example.com",
-                    "domain-sent@example.com",
                     "fresh-one@example.com",
                     "fresh-two@example.com",
                 },
                 planned_emails,
             )
-            self.assertEqual({"domain-sent@example.com"}, sendgrid_planned_emails & authoritative_sent)
-            self.assertEqual(0, preview["skipped_already_sent"])
-            self.assertEqual(0, preview["skipped_rows"])
-            self.assertEqual({}, preview["exclusion_reason_counts"])
+            self.assertEqual(set(), sendgrid_planned_emails & authoritative_sent)
+            self.assertEqual(2, preview["skipped_already_sent"])
+            self.assertEqual(2, preview["skipped_rows"])
+            self.assertEqual({"already_sent": 2}, preview["exclusion_reason_counts"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             self.assertEqual(
-                0,
+                2,
                 preview["history_audit_counts"]["already_sent_from_actual_send_log"],
             )
             self.assertIn(str(domain_log), preview["sendgrid_log_paths"])
@@ -3742,6 +3797,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
     def test_fresh_cold_preview_contract_allows_large_already_sent_exclusion_when_overlap_zero(self) -> None:
         preview = {
             "campaign_type": "cold",
+            "history_policy_version": 2,
+            "prior_success_policy": "block_global",
             "dispatch_source_mode": "triaged_keep",
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
             "preview_id": "preview_safe",
@@ -3765,9 +3822,262 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
         _validate_dispatch_preview_contract(preview)
 
-    def test_future_campaign_preview_contract_allows_sent_log_overlap(self) -> None:
+    def test_default_sendgrid_routing_uses_only_enabled_profiles_deterministically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            rows = [
+                {
+                    "FullName": f"Lead {index}",
+                    "FirstName": f"Lead{index}",
+                    "Email": f"lead-{index}@example.com",
+                    "Status": "KEEP",
+                }
+                for index in range(1, 7)
+            ]
+            write_csv(master_path, ["FullName", "FirstName", "Email"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            for cfg in send_shard.PROFILES.values():
+                csv_name = str(cfg.get("csv") or "").strip()
+                log_name = str(cfg.get("log") or "").strip()
+                if csv_name:
+                    write_csv(tmp / Path(csv_name).name, ["Email", "FirstName"], [])
+                if log_name:
+                    write_csv(tmp / Path(log_name).name, ["Email", "Status"], [])
+            write_csv(tmp / "sendgrid_domain_log.csv", ["Email", "Status"], [])
+            write_csv(tmp / "sendgrid_suppressions.csv", ["email", "state", "type"], [])
+            write_csv(tmp / "suppressed.csv", ["Email"], [])
+            write_csv(tmp / "unsubscribed.csv", ["Email"], [])
+
+            def managed_path(value: object) -> Path:
+                return tmp / Path(str(value)).name
+
+            def build(preview_name: str) -> dict[str, object]:
+                with (
+                    patch.object(important_leads_workflow.settings, "shard_path", side_effect=managed_path),
+                    patch.object(important_leads_workflow.settings, "log_path", side_effect=managed_path),
+                ):
+                    return preview_dispatch_master_leads(
+                        master_path=master_path,
+                        triaged_keep_path=triaged_keep_path,
+                        rejected_path=tmp / "leads_rejected.csv",
+                        dispatch_source_mode="triaged_keep",
+                        sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                        suppressed_path=tmp / "suppressed.csv",
+                        unsubscribed_path=tmp / "unsubscribed.csv",
+                        lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                        preview_dir=tmp / preview_name,
+                    )
+
+            first = build("previews-one")
+            second = build("previews-two")
+            expected_profiles = ["sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"]
+            self.assertEqual(expected_profiles, first["sendgrid_profile_order"])
+            self.assertEqual(["private_jc", *expected_profiles], first["queue_key_order"])
+            self.assertNotIn("sendgrid_annette", first["plan_rows_by_queue"])
+            self.assertNotIn("sendgrid_fiorela", first["plan_rows_by_queue"])
+            self.assertNotIn("sendgrid_controlled_test", first["plan_rows_by_queue"])
+            self.assertEqual(
+                {profile: 1 for profile in expected_profiles},
+                first["sendgrid_profile_planned_counts"],
+            )
+            first_routes = {
+                key: [row["Email"] for row in planned_rows]
+                for key, planned_rows in first["plan_rows_by_queue"].items()
+            }
+            second_routes = {
+                key: [row["Email"] for row in planned_rows]
+                for key, planned_rows in second["plan_rows_by_queue"].items()
+            }
+            self.assertEqual(first_routes, second_routes)
+            safety_names = {Path(path).name for path in first["queue_safety_paths"]}
+            self.assertIn("recipients_sendgrid_1.csv", safety_names)
+            self.assertIn("recipients_sendgrid_5.csv", safety_names)
+            self.assertIn("recipients_sendgrid_controlled_test.csv", safety_names)
+
+            write_csv(
+                tmp / "recipients_sendgrid_1.csv",
+                ["Email", "FirstName"],
+                [{"Email": "legacy-active@example.com", "FirstName": "Legacy"}],
+            )
+            with self.assertRaisesRegex(RuntimeError, "Changed inputs"):
+                important_leads_workflow.validate_dispatch_preview(
+                    first["preview_id"],
+                    preview_dir=tmp / "previews-one",
+                )
+
+    def test_current_policy_confirmation_locks_complete_safety_set_and_writes_only_destinations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fixture = build_dynamic_dispatch_fixture(tmp, preview_name="previews")
+            preview = fixture["preview"]
+            preview_dir = fixture["preview_dir"]
+            queue_paths_map = preview["queue_paths"]
+            destination_paths = [Path(queue_paths_map[key]) for key in preview["queue_key_order"]]
+            safety_paths = [Path(path) for path in preview["queue_safety_paths"]]
+            expected_lock_paths = list(dict.fromkeys([*destination_paths, *safety_paths]))
+            safety_only_paths = [path for path in safety_paths if path not in destination_paths]
+            safety_only_before = {path: path.read_bytes() for path in safety_only_paths}
+            captured_lock_sets: list[list[Path]] = []
+            real_lock_files = important_leads_workflow.lock_files
+
+            @contextmanager
+            def capture_lock_files(paths: object):
+                captured = list(paths)
+                captured_lock_sets.append(captured)
+                with real_lock_files(captured):
+                    yield
+
+            with patch.object(important_leads_workflow, "lock_files", side_effect=capture_lock_files):
+                report = confirm_dispatch_preview(
+                    preview["preview_id"],
+                    require_stopped=False,
+                    backup_root=tmp / "backups",
+                    report_dir=tmp / "reports",
+                    persist_state=False,
+                    preview_dir=preview_dir,
+                )
+
+            self.assertEqual([expected_lock_paths], captured_lock_sets)
+            self.assertEqual(len(expected_lock_paths), len({path.resolve() for path in expected_lock_paths}))
+            self.assertEqual(
+                {
+                    "recipients_private_jc.csv",
+                    "recipients_private_jc_warm.csv",
+                    "recipients_sendgrid_1.csv",
+                    "recipients_sendgrid_2.csv",
+                    "recipients_sendgrid_3.csv",
+                    "recipients_sendgrid_4.csv",
+                    "recipients_sendgrid_5.csv",
+                    "recipients_sendgrid_controlled_test.csv",
+                },
+                {path.name for path in expected_lock_paths},
+            )
+            self.assertEqual(
+                {"private_jc", "sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"},
+                set(report["rows_written_per_queue"]),
+            )
+            for key, path in zip(preview["queue_key_order"], destination_paths):
+                self.assertEqual(preview["plan_rows_by_queue"][key], read_csv_rows(path))
+            for path, original in safety_only_before.items():
+                self.assertEqual(original, path.read_bytes(), f"safety-only queue was modified: {path.name}")
+            self.assertNotIn("sendgrid_annette", report["rows_written_per_queue"])
+            self.assertNotIn("sendgrid_fiorela", report["rows_written_per_queue"])
+            self.assertNotIn("sendgrid_controlled_test", report["rows_written_per_queue"])
+            self.assertNotIn("private_jc_warm", report["rows_written_per_queue"])
+            self.assertEqual(
+                report["added_sendgrid"],
+                sum(report["rows_written_sendgrid_shards"].values()),
+            )
+
+    def test_current_policy_confirmation_waits_for_disabled_queue_and_fails_closed_on_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fixture = build_dynamic_dispatch_fixture(tmp, preview_name="previews")
+            preview = fixture["preview"]
+            preview_dir = fixture["preview_dir"]
+            queue_paths_map = preview["queue_paths"]
+            destination_paths = [Path(queue_paths_map[key]) for key in preview["queue_key_order"]]
+            destination_before = {path: path.read_bytes() for path in destination_paths}
+            disabled_queue = tmp / Path(str(send_shard.PROFILES["sendgrid_annette"]["csv"])).name
+            self.assertIn(str(disabled_queue), preview["queue_safety_paths"])
+            self.assertNotIn(disabled_queue, destination_paths)
+
+            writer_has_lock = threading.Event()
+            allow_writer_change = threading.Event()
+            confirmation_lock_attempted = threading.Event()
+            writer_errors: list[BaseException] = []
+            confirmation_errors: list[BaseException] = []
+            real_lock_files = important_leads_workflow.lock_files
+
+            def mutate_disabled_queue() -> None:
+                try:
+                    with real_lock_files([disabled_queue]):
+                        writer_has_lock.set()
+                        if not allow_writer_change.wait(timeout=5):
+                            raise RuntimeError("timed out waiting to mutate disabled queue")
+                        write_csv(
+                            disabled_queue,
+                            ["Email", "FirstName"],
+                            [{"Email": "lead-1@example.com", "FirstName": "Lead1"}],
+                        )
+                except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+                    writer_errors.append(exc)
+
+            @contextmanager
+            def observe_confirmation_lock(paths: object):
+                captured = list(paths)
+                confirmation_lock_attempted.set()
+                with real_lock_files(captured):
+                    yield
+
+            def run_confirmation() -> None:
+                try:
+                    confirm_dispatch_preview(
+                        preview["preview_id"],
+                        require_stopped=False,
+                        backup_root=tmp / "backups",
+                        report_dir=tmp / "reports",
+                        persist_state=False,
+                        preview_dir=preview_dir,
+                    )
+                except BaseException as exc:
+                    confirmation_errors.append(exc)
+
+            writer = threading.Thread(target=mutate_disabled_queue)
+            writer.start()
+            self.assertTrue(writer_has_lock.wait(timeout=5))
+            with patch.object(important_leads_workflow, "lock_files", side_effect=observe_confirmation_lock):
+                confirmation = threading.Thread(target=run_confirmation)
+                confirmation.start()
+                self.assertTrue(confirmation_lock_attempted.wait(timeout=5))
+                time.sleep(0.05)
+                self.assertTrue(confirmation.is_alive(), "confirmation did not wait for the disabled queue lock")
+                allow_writer_change.set()
+                writer.join(timeout=5)
+                confirmation.join(timeout=5)
+
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(confirmation.is_alive())
+            self.assertEqual([], writer_errors)
+            self.assertEqual(1, len(confirmation_errors))
+            self.assertIsInstance(confirmation_errors[0], RuntimeError)
+            self.assertIn("Changed inputs", str(confirmation_errors[0]))
+            self.assertEqual(
+                [{"Email": "lead-1@example.com", "FirstName": "Lead1"}],
+                read_csv_rows(disabled_queue),
+            )
+            for path, original in destination_before.items():
+                self.assertEqual(original, path.read_bytes(), f"destination changed after stale preview: {path.name}")
+            self.assertEqual(
+                "previewed",
+                load_dispatch_preview(preview["preview_id"], preview_dir=preview_dir)["status"],
+            )
+            self.assertFalse(list((tmp / "reports" / "dispatch_confirmed").glob("*.json")))
+
+    def test_ambiguous_legacy_fresh_cold_preview_fails_closed(self) -> None:
         preview = {
             "campaign_type": "cold",
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
+            "preview_id": "legacy_ambiguous",
+            "private_jc_planned_count": 1,
+            "sendgrid_planned_count": 0,
+            "total_planned_unique_count": 1,
+            "total_rows_would_write": 1,
+            "duplicate_planned_email_count": 0,
+            "skipped_rows": 0,
+            "exclusion_reason_counts": {},
+            "planned_authoritative_sent_overlap_count": 0,
+            "plan_rows_by_queue": {"private_jc": [planned_row("fresh@example.com")]},
+        }
+        with self.assertRaisesRegex(RuntimeError, "current global prior-success policy"):
+            _validate_dispatch_preview_contract(preview)
+
+    def test_recontact_preview_contract_allows_sent_log_overlap(self) -> None:
+        preview = {
+            "campaign_type": "recontact_cold",
             "dispatch_source_mode": "triaged_keep",
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
             "preview_id": "preview_overlap",
@@ -3794,6 +4104,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
     def test_fresh_cold_preview_contract_blocks_skipped_math_mismatch(self) -> None:
         preview = {
             "campaign_type": "cold",
+            "history_policy_version": 2,
+            "prior_success_policy": "block_global",
             "dispatch_source_mode": "triaged_keep",
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
             "preview_id": "preview_bad_math",

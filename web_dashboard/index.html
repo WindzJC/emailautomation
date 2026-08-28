@@ -619,7 +619,7 @@
                         <select id="leads-dispatch-source-mode">
                           <option value="triaged_keep">Fresh Cold Keep</option>
                           <option value="strict_verified">Strict Public Proof</option>
-                          <option value="cleaned">Recontact Pool / Checked Output</option>
+                          <option value="cleaned">Checked Recontact Pool</option>
                         </select>
                         <details class="campaign-control-details">
                           <summary>Source details</summary>
@@ -635,7 +635,7 @@
                         <span class="label">Campaign Type</span>
                         <select id="leads-dispatch-campaign-type">
                           <option value="cold">Fresh Cold — excludes prior contacts</option>
-                          <option value="recontact_cold">Recontact — allows prior contacts</option>
+                          <option value="recontact_cold">Recontact Existing Leads — allows prior successful contact</option>
                         </select>
                         <details class="campaign-control-details">
                           <summary>Campaign details</summary>
@@ -668,10 +668,6 @@
                         <span class="muted">Confirm writes queues only after the selected preview is current and safety checks pass.</span>
                       </div>
                       <div class="leads-action-slot leads-confirm-action-slot">
-                        <label id="leads-recontact-override-wrap" class="recontact-override" hidden>
-                          <input id="leads-recontact-recency-override" type="checkbox" />
-                          I understand this full recontact campaign includes recently contacted leads.
-                        </label>
                         <button id="leads-important-dispatch-confirm-btn" class="btn btn-primary" type="button" disabled>Confirm Dispatch</button>
                       </div>
                     </div>
