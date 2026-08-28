@@ -2917,6 +2917,231 @@ def test_inactive_profiles_without_previews_do_not_block(tmp_path):
     assert [item["profile"] for item in safety["profiles"]] == ["private_jc"]
 
 
+SOURCE_ONLY_EMPTY_RUNTIME_PROFILES = (
+    "private_jc",
+    "private_jc_warm",
+    "sendgrid_alison",
+    "sendgrid_jodi",
+    "sendgrid_jordan",
+    "sendgrid_annette",
+    "sendgrid_fiorela",
+    "sendgrid_controlled_test",
+)
+
+
+def _write_source_only_empty_runtime_queues(repo: Path) -> dict[str, Path]:
+    profiles = runtime_handoff._profile_runtime_layout()
+    queue_dir = repo / "data/shards"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+    for profile in SOURCE_ONLY_EMPTY_RUNTIME_PROFILES:
+        queue_name = str(profiles[profile]["csv"])
+        path = queue_dir / queue_name
+        header = "AuthorEmail,AuthorName\n" if profile == "private_jc_warm" else "Email,FirstName\n"
+        path.write_text(header, encoding="utf-8")
+        paths[profile] = path
+    return paths
+
+
+def test_source_only_empty_runtime_accepts_all_eight_queues_without_writes(tmp_path):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    before = {profile: path.read_bytes() for profile, path in paths.items()}
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is True
+    assert result["failed_predicates"] == []
+    assert len(result["queues"]) == 8
+    assert all(report["row_count"] == 0 for report in result["queues"])
+    assert all(report["fingerprint"] == "" for report in result["queues"])
+    assert result["global_safety"]["safe"] is True
+    assert result["global_safety"]["active_intended_profiles"] == []
+    assert result["global_safety"]["profiles"] == []
+    assert before == {profile: path.read_bytes() for profile, path in paths.items()}
+
+
+@pytest.mark.parametrize(
+    "profile",
+    (
+        "private_jc",
+        "sendgrid_alison",
+        "sendgrid_annette",
+        "sendgrid_controlled_test",
+    ),
+)
+def test_source_only_empty_runtime_rejects_any_mapped_nonempty_queue(tmp_path, profile):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    paths[profile].write_text("Email,FirstName\nrecipient@example.test,Test\n", encoding="utf-8")
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert f"queue_is_empty:{profile}" in result["failed_predicates"]
+    assert result["global_safety"] is None
+
+
+def test_source_only_empty_runtime_rejects_unknown_populated_recipient_queue(tmp_path):
+    _write_source_only_empty_runtime_queues(tmp_path)
+    (tmp_path / "data/shards/recipients_unknown.csv").write_text(
+        "Email\nunknown@example.test\n",
+        encoding="utf-8",
+    )
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "global_queue_safety:safe" in result["failed_predicates"]
+    assert "global_queue_safety:unsafe_reasons" in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_rejects_missing_queue(tmp_path):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    paths["sendgrid_jordan"].unlink()
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "queue_exists:sendgrid_jordan" in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_rejects_symlink_queue(tmp_path):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    queue = paths["sendgrid_jodi"]
+    target = queue.with_name("safe-header.csv")
+    target.write_text("Email\n", encoding="utf-8")
+    queue.unlink()
+    queue.symlink_to(target)
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "queue_is_not_symlink:sendgrid_jodi" in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_rejects_nonregular_queue(tmp_path):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    queue = paths["sendgrid_fiorela"]
+    queue.unlink()
+    queue.mkdir()
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "queue_is_regular_file:sendgrid_fiorela" in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_rejects_missing_recipient_header(tmp_path):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    paths["private_jc_warm"].write_text("Name\n", encoding="utf-8")
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "queue_schema_is_valid:private_jc_warm" in result["failed_predicates"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_predicate"),
+    (
+        (
+            "duplicate@example.test,One\nduplicate@example.test,Two\n",
+            "queue_has_no_duplicates:private_jc",
+        ),
+        ("not-an-email,Invalid\n", "queue_has_no_invalid_rows:private_jc"),
+    ),
+)
+def test_source_only_empty_runtime_rejects_duplicate_or_invalid_rows(
+    tmp_path,
+    rows,
+    expected_predicate,
+):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    paths["private_jc"].write_text("Email,FirstName\n" + rows, encoding="utf-8")
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert expected_predicate in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_rejects_unsafe_global_result(tmp_path, monkeypatch):
+    _write_source_only_empty_runtime_queues(tmp_path)
+    unsafe = {
+        "safe": False,
+        "unsafe_reasons": ["synthetic unsafe state"],
+        "active_intended_profiles": [],
+        "profiles": [],
+        "queue_unique_emails": 0,
+        "duplicate_queue_rows": 0,
+        "invalid_queue_rows": 0,
+        "queue_suppression_overlap": 0,
+        "queue_idempotency_overlap": 0,
+        "preview_failed_rows": 0,
+    }
+    monkeypatch.setattr(runtime_handoff, "recompute_queue_safety", lambda _repo: unsafe)
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert result["global_safety"] is unsafe
+    assert "global_queue_safety:safe" in result["failed_predicates"]
+    assert "global_queue_safety:unsafe_reasons" in result["failed_predicates"]
+
+
+def test_source_only_empty_runtime_never_checks_previews_or_sender_execution(
+    tmp_path,
+    monkeypatch,
+):
+    paths = _write_source_only_empty_runtime_queues(tmp_path)
+    paths["private_jc"].write_text(
+        "Email,FirstName\nrecipient@example.test,Test\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runtime_handoff,
+        "_preview_safety",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("source-only empty-runtime must not inspect previews")
+        ),
+    )
+
+    result = runtime_handoff.source_only_empty_runtime_safety(
+        tmp_path,
+        SOURCE_ONLY_EMPTY_RUNTIME_PROFILES,
+    )
+
+    assert result["safe"] is False
+    assert "queue_is_empty:private_jc" in result["failed_predicates"]
+    assert result["global_safety"] is None
+
+
 def test_active_profile_stale_preview_is_precise_and_failed_initialize_is_read_only(
     tmp_path, monkeypatch
 ):

@@ -3483,6 +3483,164 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
     }
 
 
+def source_only_empty_runtime_safety(
+    runtime_root: Path,
+    profiles: Iterable[str],
+) -> dict[str, Any]:
+    """Verify that selected configured queues form a safe, empty runtime.
+
+    This is a read-only source-deployment predicate, not sender readiness.
+    Populated queues must continue through the normal preview-aligned verifier.
+    """
+    runtime_root = runtime_root.resolve()
+    configured = _profile_runtime_layout()
+    requested_profiles = tuple(profiles)
+    failed_predicates: list[str] = []
+    failure_details: list[str] = []
+    queue_reports: list[dict[str, Any]] = []
+    queue_dir = runtime_root / "data/shards"
+
+    if not requested_profiles or len(set(requested_profiles)) != len(requested_profiles):
+        failed_predicates.append("profile_inventory_is_nonempty_and_unique")
+        failure_details.append("profile inventory must be nonempty and contain no duplicates")
+
+    for profile in requested_profiles:
+        config = configured.get(profile)
+        if not isinstance(config, dict):
+            failed_predicates.append(f"configured_profile_exists:{profile}")
+            failure_details.append(f"profile={profile} reason=profile is not configured")
+            continue
+
+        queue_name = str(config.get("csv") or "").strip()
+        if (
+            not queue_name
+            or Path(queue_name).name != queue_name
+            or not queue_name.startswith("recipients_")
+            or not queue_name.endswith(".csv")
+        ):
+            failed_predicates.append(f"safe_queue_basename:{profile}")
+            failure_details.append(f"profile={profile} reason=unsafe configured queue basename")
+            continue
+
+        queue_path = queue_dir / queue_name
+        try:
+            queue_stat = queue_path.lstat()
+        except FileNotFoundError:
+            failed_predicates.append(f"queue_exists:{profile}")
+            failure_details.append(f"profile={profile} queue={queue_name} reason=queue is missing")
+            continue
+        except OSError as exc:
+            failed_predicates.append(f"queue_metadata_readable:{profile}")
+            failure_details.append(
+                f"profile={profile} queue={queue_name} reason=queue metadata is unreadable: "
+                f"{type(exc).__name__}"
+            )
+            continue
+
+        if stat.S_ISLNK(queue_stat.st_mode):
+            failed_predicates.append(f"queue_is_not_symlink:{profile}")
+            failure_details.append(f"profile={profile} queue={queue_name} reason=queue is a symlink")
+            continue
+        if not stat.S_ISREG(queue_stat.st_mode):
+            failed_predicates.append(f"queue_is_regular_file:{profile}")
+            failure_details.append(
+                f"profile={profile} queue={queue_name} reason=queue is not a regular file"
+            )
+            continue
+
+        try:
+            queue_state = _read_queue_state(queue_path, profile)
+        except (HandoffError, OSError, UnicodeError, csv.Error) as exc:
+            failed_predicates.append(f"queue_schema_is_valid:{profile}")
+            failure_details.append(
+                f"profile={profile} queue={queue_name} reason=queue schema is invalid: {exc}"
+            )
+            continue
+
+        report = {
+            "profile": profile,
+            "queue": queue_name,
+            "row_count": int(queue_state["row_count"]),
+            "duplicate_count": int(queue_state["duplicate_count"]),
+            "invalid_count": int(queue_state["invalid_count"]),
+            "fingerprint": str(queue_state["fingerprint"]),
+        }
+        queue_reports.append(report)
+        for metric, expected, predicate in (
+            ("row_count", 0, "queue_is_empty"),
+            ("duplicate_count", 0, "queue_has_no_duplicates"),
+            ("invalid_count", 0, "queue_has_no_invalid_rows"),
+            ("fingerprint", "", "queue_has_empty_fingerprint"),
+        ):
+            if report[metric] != expected:
+                failed_predicates.append(f"{predicate}:{profile}")
+                failure_details.append(
+                    f"profile={profile} queue={queue_name} reason={predicate} "
+                    f"actual={report[metric]!r}"
+                )
+
+    # Do not let the general inventory follow a structurally unsafe recipient
+    # queue. Unknown regular queues are deliberately left to the canonical
+    # global safety computation, which rejects them when populated.
+    for queue_path in sorted(queue_dir.glob("recipients_*.csv")):
+        try:
+            queue_stat = queue_path.lstat()
+        except OSError as exc:
+            failed_predicates.append("recipient_queue_inventory_readable")
+            failure_details.append(
+                f"queue={queue_path.name} reason=queue metadata is unreadable: "
+                f"{type(exc).__name__}"
+            )
+            continue
+        if stat.S_ISLNK(queue_stat.st_mode) or not stat.S_ISREG(queue_stat.st_mode):
+            failed_predicates.append("recipient_queue_inventory_is_regular")
+            failure_details.append(
+                f"queue={queue_path.name} reason=recipient queue is not a regular non-symlink file"
+            )
+
+    global_safety: dict[str, Any] | None = None
+    if not failed_predicates:
+        try:
+            global_safety = recompute_queue_safety(runtime_root)
+        except (HandoffError, OSError, UnicodeError, csv.Error) as exc:
+            failed_predicates.append("global_queue_safety_computed")
+            failure_details.append(
+                f"reason=global queue safety could not be computed: {exc}"
+            )
+
+    if global_safety is not None:
+        expected_global = {
+            "safe": True,
+            "unsafe_reasons": [],
+            "active_intended_profiles": [],
+            "profiles": [],
+            "queue_unique_emails": 0,
+            "duplicate_queue_rows": 0,
+            "invalid_queue_rows": 0,
+            "queue_suppression_overlap": 0,
+            "queue_idempotency_overlap": 0,
+            "preview_failed_rows": 0,
+        }
+        for metric, expected in expected_global.items():
+            if global_safety.get(metric) != expected:
+                failed_predicates.append(f"global_queue_safety:{metric}")
+                failure_details.append(
+                    f"reason=global queue safety metric mismatch metric={metric} "
+                    f"actual={global_safety.get(metric)!r} expected={expected!r}"
+                )
+
+    failed_predicates = list(dict.fromkeys(failed_predicates))
+    return {
+        "safe": not failed_predicates,
+        "mode": "source_only_empty_runtime",
+        "requested_profiles": list(requested_profiles),
+        "queues": queue_reports,
+        "global_safety": global_safety,
+        "failed_predicates": failed_predicates,
+        "failure_details": failure_details,
+    }
+
+
 def preflight_queue_safety(
     runtime_root: Path,
     *,

@@ -330,6 +330,29 @@ Preflight bypasses send authority and cannot submit a message. Passing
 as the sender instance's `ExecCondition`; in that mode the selected credential
 must also exist in the selected protected profile environment.
 
+The normal command above is populated sender-readiness verification: it requires
+recipient rows, exact queue/validated-preview alignment, and the profile's
+non-sending preflight. When a source-only deployment is performed while every
+operational and controlled sender queue is intentionally empty, use the separate
+empty-runtime mode:
+
+```bash
+deploy/cloud/verify.sh \
+  --profile private_jc \
+  --require-authority \
+  --source-only-empty-runtime
+```
+
+This mode requires active authority and the selected profile's protected
+credential, validates that all eight operational/controlled queue mappings are
+regular non-symlink CSV files with valid headers and zero rows, and requires the
+global queue-safety report to describe an explicitly safe all-empty runtime. It
+also rejects any unknown populated recipient queue. It does not inspect preview
+artifacts or run profile-specific sender preflight, so passing it is not sender
+readiness. If any recipient row exists, use normal profile verification with its
+strict preview checks. Never fabricate or temporarily insert a production
+recipient solely to satisfy deployment verification.
+
 ## Backups
 
 Restic provides encrypted, content-addressed, checksummed backups. The backup

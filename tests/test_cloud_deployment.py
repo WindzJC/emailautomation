@@ -435,6 +435,70 @@ def test_profile_verifier_requires_explicit_profile_and_is_preflight_only() -> N
     assert "--profile private_jc" not in verify
 
 
+def test_source_only_empty_runtime_verifier_is_explicit_and_separate() -> None:
+    verify_path = CLOUD / "verify.sh"
+    verify = verify_path.read_text(encoding="utf-8")
+
+    assert "--source-only-empty-runtime" in verify
+    assert "--source-only-empty-runtime requires --require-authority" in verify
+    assert "source_only_empty_runtime_safety" in verify
+    assert "Cloud source-only empty-runtime verification passed." in verify
+    assert 'if [[ "${SOURCE_ONLY_EMPTY_RUNTIME}" -eq 1 ]]' in verify
+    source_only_completion = verify.rsplit(
+        'if [[ "${SOURCE_ONLY_EMPTY_RUNTIME}" -eq 1 ]]',
+        maxsplit=1,
+    )[1]
+    source_branch, normal_branch = source_only_completion.split("\nelse\n", maxsplit=1)
+    assert "send_shard.py" not in source_branch
+    assert "--preflight" not in source_branch
+    assert "send_shard.py" in normal_branch
+    assert "--preflight" in normal_branch
+
+
+def test_source_only_empty_runtime_requires_authority_before_environment_checks() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            str(CLOUD / "verify.sh"),
+            "--profile",
+            "private_jc",
+            "--source-only-empty-runtime",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={},
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert (
+        result.stderr.strip()
+        == "REFUSED: --source-only-empty-runtime requires --require-authority."
+    )
+
+
+def test_normal_verifier_keeps_populated_sender_readiness_contract() -> None:
+    verify = (CLOUD / "verify.sh").read_text(encoding="utf-8")
+
+    assert "else:\n    if not queue.is_file():" in verify
+    assert "selected profile queue has no data rows" in verify
+    assert "runtime_handoff._preview_safety" in verify
+    assert 'else\n  ASTRA_MACHINE_ID=cloud "${PYTHON_BIN}" send_shard.py' in verify
+    assert "--preflight" in verify
+
+
+def test_sender_exec_condition_does_not_enable_source_only_empty_runtime() -> None:
+    unit = (CLOUD / "astra-sender@.service").read_text(encoding="utf-8")
+    exec_condition = next(
+        line for line in unit.splitlines() if line.startswith("ExecCondition=")
+    )
+
+    assert "verify.sh --profile %i --require-authority" in exec_condition
+    assert "--source-only-empty-runtime" not in exec_condition
+
+
 def test_profile_environments_do_not_cross_credentials() -> None:
     unit = (CLOUD / "astra-sender@.service").read_text(encoding="utf-8")
     common = (CLOUD / "env.example").read_text(encoding="utf-8")
