@@ -391,7 +391,8 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_lead_check_dispatch_preview_and_queue_statuses_are_distinct(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        self.assertIn('const label = completedCheckPhase ? "Complete" : progressLabel;', source)
+        self.assertIn('const label = previewReady ? "Complete" : failed ? "Failed" : progressLabel;', source)
+        self.assertIn('const failed = ["failed", "stale"].includes(phase) || (completedCheckPhase && !previewReady);', source)
         self.assertIn('message: completedCheckPhase ? "Lead check complete."', source)
         self.assertIn('previewStatus = currentPreviewReady', source)
         self.assertIn('lastImportantDispatchPreviewState = "not_generated"', source)
@@ -399,6 +400,32 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn('currentDispatchConfirmed', source)
         self.assertIn('Confirm Recontact Queue', source)
         self.assertNotIn('message: completedCheckPhase ? "Preview complete."', source)
+
+    def test_recontact_readiness_is_scoped_to_checked_source_not_fresh_check(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        readiness_start = source.index("function selectedDispatchSourceReadiness")
+        readiness_end = source.index("function dispatchActionBlockReason", readiness_start)
+        readiness = source[readiness_start:readiness_end]
+
+        self.assertIn('normalizedCampaign === "recontact_cold" ? "cleaned"', readiness)
+        self.assertIn('if (normalizedCampaign === "cold")', readiness)
+        self.assertIn("leadCheckBlocksPreview(currentLeadCheckStatus(status))", readiness)
+        self.assertIn("dispatchSource.dispatch_source_exists !== true", readiness)
+        self.assertIn("base.row_count <= 0", readiness)
+        self.assertIn("base.eligible_row_count <= 0", readiness)
+        self.assertNotIn('normalizedCampaign === "recontact_cold"\n    && leadCheckBlocksPreview', readiness)
+
+        payload_start = source.index("function importantLeadDispatchPayload")
+        payload_end = source.index("async function previewImportantLeadDispatch", payload_start)
+        payload = source[payload_start:payload_end]
+        self.assertIn('output_path: campaignType === "recontact_cold"', payload)
+        self.assertIn("? selectedSourcePath", payload)
+
+        cards_start = source.index("function renderDispatchModeCards")
+        cards_end = source.index("function renderImportantDispatch", cards_start)
+        cards = source[cards_start:cards_end]
+        self.assertIn('String(preview.campaign_type || "") === "recontact_cold"', cards)
+        self.assertIn('"Preview required"', cards)
 
     def test_lead_ops_campaign_intake_polish_and_locked_states_are_rendered(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -982,7 +1009,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "No current check is ready for the selected upload type.",
             "checkReadyForCounts ? Number(latestCheck.input_rows || pipeline.input_rows || 0) : 0",
             "checkReadyForCounts ? Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0) : 0",
-            "Preview blocked: Upload & Check is required for the selected upload type",
             "lastImportantLeadCheck = selectedLeadCheckReport(lastLeadsStatus)",
             "lastImportantVerify = selectedLeadTriageReport(lastLeadsStatus)",
             "currentRunWorkflowState",
@@ -1016,7 +1042,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "Selected source has",
             "broader than the confirmed safe source",
             "Preview blocked: current staged keep is empty",
-            "Preview blocked: Fast Triage has not completed",
             "Preview blocked: source file missing",
             "renderLeadsOperatorStatusStrip",
             "renderLeadsWorkflowStatusBanner",

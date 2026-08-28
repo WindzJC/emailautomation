@@ -1324,7 +1324,6 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   const rowCounts = progress.row_counts && typeof progress.row_counts === "object" ? progress.row_counts : {};
   const progressRows = Number(progress.processed_rows || 0);
   const completedCheckPhase = ["ready_for_preview", "previewing", "preview_complete"].includes(phase);
-  const label = completedCheckPhase ? "Complete" : progressLabel;
   const cleanedRows = Number(rowCounts.cleaned_rows ?? progress.cleaned_rows ?? (completedCheckPhase ? progressRows : 0));
   const rejectedRows = Number(rowCounts.rejected_rows ?? progress.rejected_rows ?? 0);
   const outputExists = Object.prototype.hasOwnProperty.call(progress, "output_exists")
@@ -1333,10 +1332,11 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   const rejectedExists = Object.prototype.hasOwnProperty.call(progress, "rejected_exists")
     ? Boolean(progress.rejected_exists)
     : Boolean(progress.rejected_path);
-  const failed = ["failed", "stale"].includes(phase);
+  const previewReady = completedCheckPhase && cleanedRows > 0 && outputExists && rejectedExists;
+  const failed = ["failed", "stale"].includes(phase) || (completedCheckPhase && !previewReady);
   const processing = ["upload_received", "checking", "triaging", "previewing", "confirming"].includes(phase);
-  const previewReady = ["ready_for_preview", "preview_complete"].includes(phase) && cleanedRows > 0 && outputExists && rejectedExists;
-  const state = failed ? phase : previewReady ? "success" : processing ? "processing" : "not_ready";
+  const label = previewReady ? "Complete" : failed ? "Failed" : progressLabel;
+  const state = failed ? (["failed", "stale"].includes(phase) ? phase : "failed") : previewReady ? "success" : processing ? "processing" : "not_ready";
   const guidance = failed
     ? "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
       : phase === "ready_for_preview"
@@ -1393,6 +1393,20 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
 function currentLeadCheckStatus(status = lastLeadsStatus) {
   const uploadType = selectedLeadUploadType();
   const progress = currentLeadOpsProgress(status, uploadType);
+  const check = status?.lead_check_status;
+  const authoritativeState = String(check?.state || "").toLowerCase();
+  const activeJob = status?.active_important_check_jobs?.[uploadType]
+    || (uploadType === "cold" ? status?.active_important_check_job : null)
+    || null;
+  if (
+    uploadType === "cold"
+    && check
+    && typeof check === "object"
+    && authoritativeState
+    && !isActiveImportantLeadCheckJob(activeJob)
+  ) {
+    return progress?.job_id ? { ...check, lead_ops_progress: progress } : check;
+  }
   if (progress?.job_id) {
     const progressPhase = String(progress.phase || progress.status || "").toLowerCase();
     if (["confirming", "confirm_complete"].includes(progressPhase) && status?.lead_check_status) {
@@ -1408,7 +1422,6 @@ function currentLeadCheckStatus(status = lastLeadsStatus) {
       return progressStatus;
     }
   }
-  const check = status?.lead_check_status;
   if (uploadType === "cold" && check && typeof check === "object") {
     const selectedReport = selectedLeadCheckReport(status, uploadType);
     const warmReport = status?.latest_warm_check;
@@ -1563,7 +1576,14 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   const check = currentLeadCheckStatus(status);
   const state = String(check.state || "not_started");
   const tone = leadCheckStatusTone(check);
-  const label = check.label || "Not started";
+  const workflowState = leadCheckWorkflowStatus(check);
+  const label = workflowState === "completed"
+    ? "Complete"
+    : workflowState === "running"
+      ? "Running"
+      : workflowState === "failed"
+        ? "Failed"
+        : "Not started";
   const message = check.message || "No upload/check output is ready yet.";
   const guidance = check.guidance || "Not ready for preview: upload a lead CSV and run Upload & Check.";
   const uploadTime = check.upload_received_at_utc || check.upload_received_at ? formatGeneratedAt(check.upload_received_at_utc || check.upload_received_at) : "Not recorded";
@@ -1584,7 +1604,7 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   const hasProgressPercent = Object.prototype.hasOwnProperty.call(progress || {}, "percent") && Number.isFinite(progressValue);
   const safeProgressPercent = hasProgressPercent ? Math.min(100, Math.max(0, progressValue)) : 0;
   const progressPhase = String(progress?.phase || check.phase || state || "").toLowerCase();
-  const progressPhaseLabel = leadOpsProgressCopy(progressPhase);
+  const progressPhaseLabel = workflowState === "failed" ? "Failed" : leadOpsProgressCopy(progressPhase);
   const processedRows = Number(check.processed_rows ?? progress?.processed_rows);
   const totalRows = Number(check.total_rows ?? progress?.total_rows);
   const progressRowsCopy = Number.isFinite(processedRows) && Number.isFinite(totalRows) && totalRows > 0
@@ -1679,45 +1699,102 @@ function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   );
 }
 
-function dispatchActionBlockReason() {
-  const safety = leadsRunSafety();
-  const checkBlock = leadCheckBlocksPreview();
-  if (checkBlock) return checkBlock;
-  if (safety.checkRunning) {
-    return `Check Leads is running for job ${safety.checkJobId}. Wait until leads.csv, triage, and preview are fresh.`;
+function globalDispatchActionBlockReason(status = lastLeadsStatus, snapshot = lastSnapshot) {
+  const activeDispatch = status?.active_important_dispatch_job || lastImportantDispatchJob || null;
+  if (isActiveImportantLeadCheckJob(activeDispatch)) {
+    return `Dispatch operation ${activeDispatch.job_id || "unknown"} is already running.`;
   }
-  if (safety.activeSenders.length) {
-    return `Active senders are running: ${safety.activeSenders.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`;
+  const activeSenders = activeSenderProfiles(snapshot);
+  if (activeSenders.length) {
+    return `Active senders are running: ${activeSenders.map((profile) => `${formatProfileName(profile.name)} (${profile.runtime_state})`).join(", ")}.`;
   }
   return "";
 }
 
-function dispatchPreviewActionBlockReason() {
-  return dispatchActionBlockReason();
-}
-
-function dispatchPreviewBlockReason(dispatchSource = {}) {
-  const actionBlock = dispatchPreviewActionBlockReason();
-  if (actionBlock) return actionBlock;
-  if (dispatchSource.dispatch_block_reason) return String(dispatchSource.dispatch_block_reason);
-  if (!dispatchSource.dispatch_source_path) return "No triage keep source is selected or the source is missing.";
+function selectedDispatchSourceReadiness(
+  campaignType = selectedImportantDispatchCampaignType(),
+  dispatchSource = dispatchSourceForSelectedMode().source || {},
+  status = lastLeadsStatus,
+) {
+  const normalizedCampaign = campaignType === "recontact_cold" ? "recontact_cold" : "cold";
+  const expectedMode = normalizedCampaign === "recontact_cold" ? "cleaned" : selectedImportantDispatchSourceMode(normalizedCampaign);
   const sourceMode = String(dispatchSource.dispatch_source_mode || "").toLowerCase();
   const sourceName = String(dispatchSource.dispatch_source_name || "").toLowerCase();
   const triageSourceSelected = sourceMode === "triaged_keep" || sourceName.includes("triage");
-  if (dispatchSource.dispatch_source_exists === false) {
-    return triageSourceSelected
-      ? "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes."
-      : "Selected dispatch source is missing. Retry after the source is generated.";
+  const base = {
+    ready: false,
+    state: "not_ready",
+    block_reason: "",
+    campaign_type: normalizedCampaign,
+    source_mode: sourceMode,
+    expected_source_mode: expectedMode,
+    source_path: String(dispatchSource.dispatch_source_path || ""),
+    source_exists: dispatchSource.dispatch_source_exists === true,
+    row_count: Number(dispatchSource.dispatch_source_row_count || 0),
+    eligible_row_count: Number(dispatchSource.dispatch_eligible_row_count || 0),
+  };
+  const blocked = (state, reason) => ({ ...base, state, block_reason: reason });
+  if (sourceMode !== expectedMode) {
+    return blocked(
+      "source_mismatch",
+      normalizedCampaign === "recontact_cold"
+        ? "Checked Recontact source metadata is unavailable or inconsistent. Refresh status before previewing."
+        : "Selected Fresh source metadata is unavailable or inconsistent. Refresh status before previewing.",
+    );
   }
-  if (Number(dispatchSource.dispatch_source_row_count || 0) <= 0) {
-    return triageSourceSelected
-      ? "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically."
-      : "Dispatch source is empty. Retry after the source has accepted rows.";
+  if (normalizedCampaign === "cold") {
+    const checkBlock = leadCheckBlocksPreview(currentLeadCheckStatus(status));
+    if (checkBlock) return blocked("fresh_check_not_ready", checkBlock);
   }
-  if (Number(dispatchSource.dispatch_eligible_row_count || 0) <= 0) {
-    return "No eligible rows are available for preview. Rows may already be contacted, already sent, suppressed, invalid, or excluded.";
+  if (dispatchSource.dispatch_block_reason) {
+    return blocked("source_blocked", String(dispatchSource.dispatch_block_reason));
   }
-  return "";
+  if (!base.source_path) {
+    return blocked(
+      "source_missing",
+      normalizedCampaign === "recontact_cold"
+        ? "No checked Recontact source is selected or the source is missing."
+        : "No Fresh dispatch source is selected or the source is missing.",
+    );
+  }
+  if (dispatchSource.dispatch_source_exists !== true) {
+    return blocked(
+      "source_missing",
+      triageSourceSelected
+        ? "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes."
+        : normalizedCampaign === "recontact_cold"
+          ? "Checked Recontact source is missing. Restore or regenerate the checked source before previewing."
+          : "Selected dispatch source is missing. Retry after the source is generated.",
+    );
+  }
+  if (base.row_count <= 0) {
+    return blocked(
+      "source_empty",
+      triageSourceSelected
+        ? "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically."
+        : normalizedCampaign === "recontact_cold"
+          ? "Checked Recontact source is empty. Preview Dispatch requires candidate rows."
+          : "Dispatch source is empty. Retry after the source has accepted rows.",
+    );
+  }
+  if (base.eligible_row_count <= 0) {
+    return blocked("source_ineligible", "No eligible source rows are available for preview.");
+  }
+  return { ...base, ready: true, state: "ready" };
+}
+
+function dispatchActionBlockReason(dispatchSource = dispatchSourceForSelectedMode().source || {}) {
+  const globalBlock = globalDispatchActionBlockReason();
+  if (globalBlock) return globalBlock;
+  return selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), dispatchSource).block_reason;
+}
+
+function dispatchPreviewActionBlockReason(dispatchSource = dispatchSourceForSelectedMode().source || {}) {
+  return dispatchActionBlockReason(dispatchSource);
+}
+
+function dispatchPreviewBlockReason(dispatchSource = {}) {
+  return dispatchPreviewActionBlockReason(dispatchSource);
 }
 
 function currentShardPlanKey() {
@@ -1756,6 +1833,13 @@ function syncImportantDispatchCampaignSource() {
   sourceSelect.disabled = false;
   sourceSelect.title = "";
   if (sourceSelect.value === "cleaned") sourceSelect.value = "triaged_keep";
+}
+
+function renderSelectedDispatchWorkflowState() {
+  renderImportantDispatch(lastImportantDispatch);
+  renderLeadsCurrentRunPanel(lastLeadsStatus);
+  renderLeadsWorkflowTaskList(lastLeadsStatus);
+  renderLeadsWorkflowStatusBanner(lastLeadsStatus);
 }
 
 function currentDispatchPlanKey() {
@@ -1847,9 +1931,13 @@ function importantLeadPathsPayload() {
 
 function importantLeadDispatchPayload(includePreviewId = false) {
   const campaignType = selectedImportantDispatchCampaignType();
+  const selectedSource = dispatchSourceForSelectedMode().source || {};
+  const selectedSourcePath = String(selectedSource.dispatch_source_path || "").trim();
   const payload = {
     input_path: els.leadsImportantInputPath?.value?.trim() || "",
-    output_path: els.leadsImportantOutputPath?.value?.trim() || "",
+    output_path: campaignType === "recontact_cold"
+      ? selectedSourcePath
+      : (els.leadsImportantOutputPath?.value?.trim() || ""),
     rejected_path: els.leadsImportantRejectedPath?.value?.trim() || "",
     dispatch_source_mode: selectedImportantDispatchSourceMode(campaignType),
     dispatch_cap: els.leadsImportantDispatchCap?.value || "all",
@@ -3100,7 +3188,12 @@ function dispatchSourceOptionForMode(mode) {
 function renderDispatchModeCards(preview = null) {
   if (!els.leadsDispatchModeCards) return;
   const selectedCampaign = selectedImportantDispatchCampaignType();
-  const recontactPreview = latestRecontactPreviewContext(preview || lastImportantDispatchPreview);
+  const recontactPreview = selectedCampaign === "recontact_cold"
+    && preview
+    && dispatchPreviewMatchesCurrentSelection()
+    && String(preview.campaign_type || "") === "recontact_cold"
+    ? preview
+    : null;
   const freshSource = dispatchSourceOptionForMode("triaged_keep");
   const recontactSource = dispatchSourceOptionForMode("cleaned");
   const freshCount = Number(freshSource.dispatch_eligible_row_count || freshSource.dispatch_source_row_count || 0);
@@ -3123,8 +3216,8 @@ function renderDispatchModeCards(preview = null) {
     ? `Previously contacted: ${recency.found.toLocaleString()} · Seen this month: ${recency.seenThisMonth.toLocaleString()} · Not found in active history: ${recency.notFound.toLocaleString()}`
     : "Run preview to calculate informational contact-history metrics.";
   const eligibleAfterSafety = recontactPreview
-    ? Number(recontactPreview.total_planned_unique_count || recontactPreview.total_rows_would_write || 0)
-    : 0;
+    ? Number(recontactPreview.total_planned_unique_count || recontactPreview.total_rows_would_write || 0).toLocaleString()
+    : "Preview required";
   setNodeHtml(
     els.leadsDispatchModeCards,
     `
@@ -3142,7 +3235,7 @@ function renderDispatchModeCards(preview = null) {
         <span>Prior successful contact is allowed; mandatory safety blocks still apply.</span>
         <b>${recontactCount.toLocaleString()} checked row${recontactCount === 1 ? "" : "s"}</b>
         <small>${escapeHtml(recontactMetrics)}</small>
-        <em>Eligible after mandatory safety: ${eligibleAfterSafety.toLocaleString()}</em>
+        <em>Eligible after mandatory safety: ${escapeHtml(eligibleAfterSafety)}</em>
       </button>
     `,
   );
@@ -4821,7 +4914,9 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
   const latestDispatch = status?.latest_dispatch || lastImportantDispatch || {};
   const checkStatus = leadCheck.state ? leadCheckWorkflowStatus(leadCheck) : workflowStepStatus(activeCheck, latestCheck);
   const triageStatus = checkStatus === "completed" ? workflowStepStatus(activeVerify, latestTriage) : "pending";
-  const currentPreviewReady = checkStatus === "completed" && triageStatus === "completed" && dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
+  const selectedSource = dispatchSourceForSelectedMode().source || {};
+  const sourceReadiness = selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), selectedSource, status);
+  const currentPreviewReady = sourceReadiness.ready && dispatchPreviewMatchesCurrentSelection() && Boolean(lastImportantDispatchPreview?.preview_id);
   const previewStatus = currentPreviewReady
       ? "ready"
       : importantLeadDispatchPreviewLoading
@@ -4846,16 +4941,13 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
     previewStatus,
     confirmStatus,
     currentPreviewReady,
+    sourceReadiness,
   };
 }
 
 function currentRunPreviewBlockMessage(dispatchSource = {}, state = currentRunWorkflowState()) {
-  if (state.checkStatus === "running") return "Preview blocked: Check Leads is still running";
-  if (state.checkStatus === "failed") return "Preview blocked: current check is not ready";
-  if (state.checkStatus !== "completed") return "Preview blocked: Upload & Check is required for the selected upload type";
-  if (state.triageStatus === "running") return "Preview blocked: Fast Triage has not completed";
-  if (state.triageStatus !== "completed") return "Preview blocked: Fast Triage has not completed";
-  const rawReason = String(dispatchSource.dispatch_block_reason || dispatchPreviewBlockReason(dispatchSource) || "").trim();
+  const readiness = selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), dispatchSource, lastLeadsStatus);
+  const rawReason = String(readiness.block_reason || dispatchPreviewBlockReason(dispatchSource) || "").trim();
   if (!rawReason) return "";
   const normalized = rawReason.toLowerCase();
   if (normalized.includes("current staged fast triage keep is empty") || normalized.includes("has no keep rows")) {
@@ -4872,10 +4964,11 @@ function currentRunPreviewBlockMessage(dispatchSource = {}, state = currentRunWo
 
 function currentRunNextAction(state, dispatchSource = {}) {
   const previewBlock = currentRunPreviewBlockMessage(dispatchSource, state);
-  if (state.checkStatus === "running") return { label: "Check Leads running", action: "", disabled: true };
-  if (state.checkStatus !== "completed") return { label: "Upload & Check", action: "upload_check", disabled: false };
-  if (state.triageStatus === "running") return { label: "Fast Triage running", action: "", disabled: true };
-  if (state.triageStatus !== "completed") return { label: "Fast Triage", action: "fast_triage", disabled: false };
+  const recontactSelected = selectedImportantDispatchCampaignType() === "recontact_cold";
+  if (!recontactSelected && state.checkStatus === "running") return { label: "Check Leads running", action: "", disabled: true };
+  if (!recontactSelected && state.checkStatus !== "completed") return { label: "Upload & Check", action: "upload_check", disabled: false };
+  if (!recontactSelected && state.triageStatus === "running") return { label: "Fast Triage running", action: "", disabled: true };
+  if (!recontactSelected && state.triageStatus !== "completed") return { label: "Fast Triage", action: "fast_triage", disabled: false };
   if (state.previewStatus === "ready") {
     const confirmBlocked = dispatchActionBlockReason();
     return {
@@ -5202,8 +5295,12 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     return;
   }
   const state = currentRunWorkflowState(status);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  const selectedDispatchSource = dispatchSourceForSelectedMode().source || {};
+  const sourceReadiness = selectedDispatchSourceReadiness(selectedCampaign, selectedDispatchSource, status);
+  const recontactSelected = selectedCampaign === "recontact_cold";
   const checkReadyForCounts = state.checkStatus === "completed";
-  const dispatchSource = checkReadyForCounts ? (dispatchSourceForSelectedMode().source || {}) : {};
+  const dispatchSource = recontactSelected || checkReadyForCounts ? selectedDispatchSource : {};
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
   const pipeline = status?.pipeline || {};
@@ -5214,7 +5311,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   const cleanedRows = checkReadyForCounts ? Number(latestCheck.cleaned_rows || latestCheck.output_rows || pipeline.cleaned_rows || 0) : 0;
   const rejectedRows = checkReadyForCounts ? Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || pipeline.rejected_rows || 0) : 0;
   const sourceRows = Number(dispatchSource.dispatch_eligible_row_count || dispatchSource.dispatch_source_row_count || 0);
-  const checkedEligibleRows = checkReadyForCounts ? Number(
+  const checkedEligibleRows = recontactSelected ? sourceRows : checkReadyForCounts ? Number(
     pipeline.dispatch_eligible_rows
     || latestCheck.dispatch_eligible_rows
     || latestCheck.eligible_rows
@@ -5243,8 +5340,10 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
         : `<span>${lastCheckCopy}</span>`,
     );
   }
-  const processingReady = state.checkStatus === "completed" && state.triageStatus === "completed";
-  const currentBlocker = state.checkStatus === "failed"
+  const processingReady = recontactSelected ? sourceReadiness.ready : state.checkStatus === "completed" && state.triageStatus === "completed";
+  const currentBlocker = recontactSelected
+    ? sourceReadiness.block_reason
+    : state.checkStatus === "failed"
     ? "Check Leads failed."
     : state.triageStatus === "failed"
       ? "Fast Triage failed."
@@ -5261,8 +5360,10 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
         <div class="current-run-head">
           <div>
             <p class="eyebrow">Source Summary</p>
-            <h3>${processingReady ? "Source ready for preview" : "Source not ready"}</h3>
-            <p class="current-run-subtitle">${checkReadyForCounts ? "Counts below describe the current checked and triaged source only." : "Source rows 0 · Not ready for preview until Upload & Check completes."}</p>
+            <h3>${processingReady ? (recontactSelected ? "Checked Recontact source ready for preview" : "Source ready for preview") : "Source not ready"}</h3>
+            <p class="current-run-subtitle">${recontactSelected
+              ? `${sourceRows.toLocaleString()} checked Recontact source row${sourceRows === 1 ? "" : "s"}. Mandatory safety eligibility is calculated by Preview Dispatch.`
+              : checkReadyForCounts ? "Counts below describe the current checked and triaged source only." : "Source rows 0 · Not ready for preview until Upload & Check completes."}</p>
           </div>
           <span class="mini-pill">${processingReady ? "Ready" : "Waiting"}</span>
         </div>
@@ -5282,7 +5383,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             </div>
           </details>
         ` : ""}
-        ${checkReadyForCounts ? "" : `<div class="operator-empty-state operator-empty-state-inline source-summary-empty"><strong>Source rows 0</strong><span>Upload and check the selected source before previewing dispatch.</span></div>`}
+        ${recontactSelected || checkReadyForCounts ? "" : `<div class="operator-empty-state operator-empty-state-inline source-summary-empty"><strong>Source rows 0</strong><span>Upload and check the selected source before previewing dispatch.</span></div>`}
         ${authIssue ? `<div class="current-run-auth-warning">${escapeHtml(authIssue)}</div>` : ""}
         ${currentBlocker ? `<div class="current-run-summary-line current-run-blocker"><span>${escapeHtml(currentBlocker)}</span></div>` : ""}
       </article>
@@ -5350,12 +5451,14 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const sourceReadiness = selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), dispatchSource, status);
   const checkRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows || 0);
   const checkRejected = Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || 0);
   const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_source_row_count || 0);
   const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
   const quarantineRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
   const selectedCampaign = selectedImportantDispatchCampaignType();
+  const recontactSelected = selectedCampaign === "recontact_cold";
   const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
   const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
   const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
@@ -5366,9 +5469,11 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
   const tasks = [
     {
       step: "Source",
-      status: hasUpload ? "Complete" : "Waiting",
-      detail: hasUpload ? "A source is staged for the selected upload type." : "Choose a CSV/XLSX source.",
-      tone: hasUpload ? "good" : "neutral",
+      status: sourceReadiness.ready ? "Complete" : hasUpload ? "Review" : "Waiting",
+      detail: sourceReadiness.ready
+        ? `${selectedSource} is structurally ready for Preview Dispatch.`
+        : sourceReadiness.block_reason || (hasUpload ? "A source is staged but is not ready." : "Choose a CSV/XLSX source."),
+      tone: sourceReadiness.ready ? "good" : "neutral",
     },
     {
       step: "Check",
@@ -5379,7 +5484,9 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     {
       step: "Triage",
       status: state.triageStatus === "completed" ? "Complete" : triageLocked ? "Locked" : state.triageStatus === "running" ? "Running" : "Waiting",
-      detail: keepRows ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine` : triageLocked ? "Locked until check completes." : "Run Fast Triage after Check.",
+      detail: keepRows
+        ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine`
+        : recontactSelected ? "Fresh Cold triage state does not gate the checked Recontact source." : triageLocked ? "Locked until check completes." : "Run Fast Triage after Check.",
       tone: state.triageStatus === "completed" ? "good" : state.triageStatus === "running" ? "warn" : "neutral",
     },
     {
@@ -5464,19 +5571,28 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
   const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
   const dispatchSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  const sourceReadiness = selectedDispatchSourceReadiness(selectedCampaign, dispatchSource, status);
+  const recontactSelected = selectedCampaign === "recontact_cold";
   const confirmedQueue = confirmedDispatchQueueState(status);
   const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
     ? "New staged run not ready — previous dispatch is queued."
     : "";
-  const headline = dispatchSummary.sentLogOverlap > 0
+  const headline = dispatchSummary.sentLogOverlap > 0 && !recontactSelected
     ? `BLOCKED — Planned recipients overlap authoritative sent/contact logs: ${dispatchSummary.sentLogOverlap.toLocaleString()}.`
     : dispatchSummary.skippedMathMismatch
       ? `BLOCKED — Skipped rows ${dispatchSummary.skippedRows.toLocaleString()} do not match skipped reasons ${dispatchSummary.skippedReasonTotal.toLocaleString()}.`
-      : dispatchSummary.historyRemoved && state.previewStatus === "completed"
+      : dispatchSummary.historyRemoved && state.previewStatus === "ready" && !recontactSelected
         ? `SAFE — History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${dispatchSummary.uniquePlanned.toLocaleString()} cold-safe leads remain.`
-        : state.triageStatus === "completed" && state.previewStatus !== "completed"
-      ? "READY — Preview Dispatch required before Confirm."
-      : workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus);
+        : recontactSelected && state.previewStatus === "ready"
+          ? "READY — Recontact Preview calculated. Review mandatory safety before Confirm."
+          : recontactSelected && sourceReadiness.ready
+            ? "READY — Checked Recontact source is ready for Preview Dispatch."
+            : recontactSelected
+              ? `BLOCKED — ${sourceReadiness.block_reason || "Checked Recontact source is not ready."}`
+              : state.triageStatus === "completed" && state.previewStatus !== "ready"
+                ? "READY — Preview Dispatch required before Confirm."
+                : workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus);
   setNodeHtml(
     els.leadsWorkflowStatusBanner,
     `
@@ -10038,7 +10154,7 @@ if (els.leadsDispatchModeCards) {
     }
     syncImportantDispatchCampaignSource();
     hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
-    renderImportantDispatch(lastImportantDispatch);
+    renderSelectedDispatchWorkflowState();
   });
 }
 if (els.leadsImportantInputText) {
@@ -10064,7 +10180,7 @@ if (els.leadsImportantDispatchCampaignType) {
   els.leadsImportantDispatchCampaignType.addEventListener("change", () => {
     syncImportantDispatchCampaignSource();
     hydrateImportantDispatchPreviewFromStatus(lastLeadsStatus);
-    renderImportantDispatch(lastImportantDispatch);
+    renderSelectedDispatchWorkflowState();
   });
 }
 if (els.leadsUploadBtn) els.leadsUploadBtn.addEventListener("click", () => uploadLeadsFile());
