@@ -8841,7 +8841,7 @@ class DashboardStabilizationTests(unittest.TestCase):
         expected = {
             "ok": True,
             "profile": "sendgrid_alison",
-            "recipient": "astraprouctionsbyjc@gmail.com",
+            "recipient": "astraproductionsbyjc@gmail.com",
             "auto_started": False,
         }
         with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(

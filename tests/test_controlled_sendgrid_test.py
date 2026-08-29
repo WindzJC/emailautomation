@@ -74,7 +74,7 @@ def test_each_approved_identity_uses_exact_profile_credential_and_envelope(tmp_p
 
     result = _execute(tmp_path, profile, provider)
     label, from_email, key = APPROVED[profile]
-    assert controlled.CONTROLLED_TEST_RECIPIENT == "astraprouctionsbyjc@gmail.com"
+    assert controlled.CONTROLLED_TEST_RECIPIENT == "astraproductionsbyjc@gmail.com"
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0] == key
@@ -102,7 +102,7 @@ def test_unapproved_identity_is_refused_before_provider(tmp_path: Path, profile:
 
 def test_client_cannot_supply_recipient_or_from_values() -> None:
     public = controlled.controlled_test_public_config()
-    assert public["recipient"] == "astraprouctionsbyjc@gmail.com"
+    assert public["recipient"] == "astraproductionsbyjc@gmail.com"
     assert set(controlled.CONTROLLED_TEST_IDENTITIES) == set(APPROVED)
     assert all(set(row) == {"profile", "label", "from_email", "reply_to"} for row in public["profiles"])
 

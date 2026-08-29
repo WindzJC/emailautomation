@@ -73,7 +73,7 @@ describe("Controlled Send Test", () => {
   it("renders only approved identities and updates the server-locked From preview", async () => {
     const { root } = await boot(() => Promise.resolve(response({ ok: true })));
     const select = document.getElementById("controlled-send-test-profile");
-    expect(document.getElementById("controlled-send-test-recipient")).toHaveTextContent("astraprouctionsbyjc@gmail.com");
+    expect(document.getElementById("controlled-send-test-recipient")).toHaveTextContent("astraproductionsbyjc@gmail.com");
     expect([...select.options].map((option) => [option.value, option.dataset.fromEmail])).toEqual([
       ["sendgrid_alison", "alisonaguiar@bnmarketing.info"],
       ["sendgrid_jodi", "jodihorowitz@bnmarketing.info"],
@@ -109,7 +109,7 @@ describe("Controlled Send Test", () => {
         result: {
           sender: "Alison",
           from_email: "alisonaguiar@bnmarketing.info",
-          recipient: "astraprouctionsbyjc@gmail.com",
+          recipient: "astraproductionsbyjc@gmail.com",
           provider_message_id: "provider-1",
           submitted_at_utc: "2026-08-29T00:00:00Z",
         },

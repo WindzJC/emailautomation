@@ -12,6 +12,7 @@ INDEX_HTML = Path(__file__).resolve().parents[1] / "web_dashboard" / "index.html
 STYLES_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "styles.css"
 TAILWIND_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "tailwind.css"
 LIVE_DASHBOARD_PY = Path(__file__).resolve().parents[1] / "live_dashboard.py"
+CONTROLLED_SENDGRID_TEST_PY = Path(__file__).resolve().parents[1] / "controlled_sendgrid_test.py"
 REACT_MAIN = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "main.jsx"
 
 
@@ -20,10 +21,14 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")
         backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+        controlled_backend = CONTROLLED_SENDGRID_TEST_PY.read_text(encoding="utf-8")
         react_source = REACT_MAIN.read_text(encoding="utf-8")
 
         self.assertIn("Controlled Send Test", html)
-        self.assertIn("astraprouctionsbyjc@gmail.com", html)
+        self.assertIn("astraproductionsbyjc@gmail.com", html)
+        old_recipient_typo = "astraprouctionsbyjc" + "@gmail.com"
+        for active_source in (source, html, controlled_backend):
+            self.assertNotIn(old_recipient_typo, active_source)
         self.assertIn("Does not use production recipient queues", html)
         selector = re.search(r'<select id="controlled-send-test-profile">(.*?)</select>', html, re.DOTALL)
         self.assertIsNotNone(selector)

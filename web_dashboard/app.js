@@ -9657,7 +9657,7 @@ async function runControlledSendTest() {
   const fromEmail = option?.dataset?.fromEmail || "";
   if (!window.confirm(
     `CONTROLLED SEND TEST\n\nSend exactly one validation email from ${senderLabel} (${fromEmail}) `
-    + "to astraprouctionsbyjc@gmail.com?\n\nNo production recipient queue will be used.",
+    + "to astraproductionsbyjc@gmail.com?\n\nNo production recipient queue will be used.",
   )) {
     renderControlledSendTestStatus({ message: "Controlled Send Test cancelled. No request was submitted." }, false);
     return;
