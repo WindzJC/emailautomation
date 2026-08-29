@@ -220,31 +220,49 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual("12:00", profile["stop_at_local"])
 
     def test_bnmarketing_sendgrid_identities_and_signatures_are_exact(self) -> None:
-        expected = {
+        expected_identities = {
+            "sendgrid_alison": "alisonaguiar@bnmarketing.info",
+            "sendgrid_jodi": "jodihorowitz@bnmarketing.info",
+            "sendgrid_jordan": "jordankendrick@bnmarketing.info",
+            "sendgrid_annette": "annettedanek-akey@bnmarketing.info",
+            "sendgrid_fiorela": "fiorelladelima@bnmarketing.info",
+        }
+        expected_signatures = {
             "sendgrid_alison": (
-                "alisonaguiar@bnmarketing.us",
+                "alisonaguiar@bnmarketing.info",
                 "sig_sendgrid_alison_bnmarketing.png",
             ),
             "sendgrid_jodi": (
-                "jodihorowitz@bnmarketing.us",
+                "jodihorowitz@bnmarketing.info",
                 "sig_sendgrid_jodi_bnmarketing.png",
             ),
             "sendgrid_jordan": (
-                "jordankendrick@bnmarketing.us",
+                "jordankendrick@bnmarketing.info",
                 "sig_sendgrid_jordan_bnmarketing.png",
             ),
         }
 
-        for profile_name, (from_email, signature_name) in expected.items():
+        for profile_name, from_email in expected_identities.items():
             profile = send_shard.PROFILES[profile_name]
             self.assertEqual(from_email, profile["from_email"])
-            self.assertEqual("bnmarketing.us,astraproductionsbyjc.com", profile["my_domains"])
+            self.assertEqual("bnmarketing.info,astraproductionsbyjc.com", profile["my_domains"])
+
+        for profile_name, (from_email, signature_name) in expected_signatures.items():
+            profile = send_shard.PROFILES[profile_name]
+            self.assertEqual(from_email, profile["from_email"])
             self.assertEqual(signature_name, send_shard.SIGNATURE_BY_FROM[from_email])
             self.assertTrue((Path(send_shard.__file__).resolve().parent / signature_name).is_file())
 
-        self.assertNotIn("alisonaguair@bnmarketing.us", send_shard.SIGNATURE_BY_FROM)
+        self.assertFalse(
+            any(
+                str(profile.get("from_email") or "").endswith("@bnmarketing.us")
+                for profile in send_shard.PROFILES.values()
+                if profile.get("provider") == "sendgrid" and profile.get("send_enabled", True)
+            )
+        )
+        self.assertNotIn("alisonaguair@bnmarketing.info", send_shard.SIGNATURE_BY_FROM)
         self.assertNotEqual(
-            "alisonaguair@bnmarketing.us",
+            "alisonaguair@bnmarketing.info",
             send_shard.PROFILES["sendgrid_alison"]["from_email"],
         )
         self.assertFalse(
@@ -265,7 +283,6 @@ class SendShardTests(unittest.TestCase):
             send_shard.CONTROLLED_SENDGRID_PROFILE,
         ):
             self.assertFalse(send_shard.profile_send_available(profile_name))
-            self.assertIn("bnmarketing.us", send_shard.profile_send_unavailable_reason(profile_name))
             output = io.StringIO()
             with patch.object(sys, "argv", ["send_shard.py", "--profile", profile_name, "--preflight"]):
                 with redirect_stdout(output):
@@ -322,6 +339,136 @@ class SendShardTests(unittest.TestCase):
                 send_shard.CONTROLLED_SENDGRID_PROFILE
             ).name,
         )
+
+    def test_sendgrid_reply_to_follows_migrated_profile_identity(self) -> None:
+        for profile_name in (
+            "sendgrid_alison",
+            "sendgrid_jodi",
+            "sendgrid_jordan",
+            "sendgrid_annette",
+            "sendgrid_fiorela",
+        ):
+            from_email = str(send_shard.PROFILES[profile_name]["from_email"])
+            message, *_ = send_shard.build_message(
+                from_email=from_email,
+                to_email="reader@example.test",
+                author="Reader",
+                book_title="Example Book",
+                subject="Example subject",
+                body_template="Hi {FirstName},\n\nExample body.",
+                unsub_email="unsubscribe@astraproductionsbyjc.com",
+            )
+            self.assertEqual(from_email, str(message["From"]))
+            self.assertEqual(from_email, str(message["Reply-To"]))
+
+    def test_sendgrid_provider_payload_uses_migrated_identity_for_reply_to(self) -> None:
+        captured: dict[str, object] = {}
+
+        class Value:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+        class Mail:
+            def __init__(self, *, from_email, to_emails, subject):
+                self.from_email = from_email
+                self.to_emails = to_emails
+                self.subject = subject
+                self.reply_to = None
+
+            def add_content(self, _content):
+                return None
+
+            def add_header(self, _header):
+                return None
+
+            def add_custom_arg(self, _custom_arg):
+                return None
+
+            def add_attachment(self, _attachment):
+                return None
+
+        class SendGridAPIClient:
+            def __init__(self, _api_key):
+                pass
+
+            def send(self, mail):
+                captured["mail"] = mail
+                return type(
+                    "Response",
+                    (),
+                    {"status_code": 202, "headers": {}, "body": b""},
+                )()
+
+        helpers = type(
+            "Helpers",
+            (),
+            {
+                "Mail": Mail,
+                "Content": Value,
+                "ReplyTo": Value,
+                "Attachment": Value,
+                "FileContent": Value,
+                "FileName": Value,
+                "FileType": Value,
+                "Disposition": Value,
+                "ContentId": Value,
+                "Header": Value,
+                "Asm": Value,
+                "CustomArg": Value,
+            },
+        )
+        sendgrid = type("SendGrid", (), {"SendGridAPIClient": SendGridAPIClient})
+
+        def fake_import(name: str):
+            return sendgrid if name == "sendgrid" else helpers
+
+        from_email = str(send_shard.PROFILES["sendgrid_jordan"]["from_email"])
+        with patch("importlib.import_module", side_effect=fake_import):
+            send_shard.send_via_sendgrid(
+                "synthetic-key",
+                from_email,
+                "reader@example.test",
+                from_email,
+                "Example subject",
+                "Example body",
+                "<p>Example body</p>",
+                "unsubscribe@astraproductionsbyjc.com",
+                None,
+                None,
+                0,
+                [],
+            )
+
+        mail = captured["mail"]
+        self.assertEqual(from_email, mail.from_email)
+        self.assertEqual((from_email,), mail.reply_to.args)
+
+    def test_sendgrid_migration_preserves_routing_and_queue_mappings(self) -> None:
+        self.assertEqual(
+            ("sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"),
+            send_shard.PRODUCTION_SENDGRID_PROFILES,
+        )
+        self.assertEqual(
+            {
+                "sendgrid_alison": "recipients_sendgrid_4.csv",
+                "sendgrid_jodi": "recipients_sendgrid_3.csv",
+                "sendgrid_jordan": "recipients_sendgrid_2.csv",
+                "sendgrid_annette": "recipients_sendgrid_1.csv",
+                "sendgrid_fiorela": "recipients_sendgrid_5.csv",
+            },
+            {
+                profile_name: str(send_shard.PROFILES[profile_name]["csv"])
+                for profile_name in (
+                    "sendgrid_alison",
+                    "sendgrid_jodi",
+                    "sendgrid_jordan",
+                    "sendgrid_annette",
+                    "sendgrid_fiorela",
+                )
+            },
+        )
+        self.assertNotIn(send_shard.CONTROLLED_SENDGRID_PROFILE, send_shard.PRODUCTION_SENDGRID_PROFILES)
         self.assertEqual(
             [
                 "sendgrid_annette",
@@ -814,8 +961,8 @@ class SendShardTests(unittest.TestCase):
                     campaign_id="campaign-a",
                     provider="sendgrid",
                     email="author@example.test",
-                    profile="sendgrid_annette",
-                    queue_file="recipients_sendgrid_1.csv",
+                    profile="sendgrid_alison",
+                    queue_file="recipients_sendgrid_4.csv",
                     db_path=db_path,
                 )[0]
             )
@@ -824,8 +971,8 @@ class SendShardTests(unittest.TestCase):
                     campaign_id="campaign-a",
                     provider="sendgrid",
                     email="AUTHOR@example.test",
-                    profile="sendgrid_annette",
-                    queue_file="recipients_sendgrid_1.csv",
+                    profile="sendgrid_jordan",
+                    queue_file="recipients_sendgrid_2.csv",
                     db_path=db_path,
                 )[0]
             )

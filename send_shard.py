@@ -443,8 +443,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_1.csv",
         "log": "sendgrid_annette_log.csv",
         "pitch": "pitch1",
-        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "annettedanek-akey@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -460,17 +460,17 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
-        # TODO: configure Annette bnmarketing.us From identity and signature before enabling this SendGrid profile.
+        # TODO: configure Annette's dedicated SendGrid signature before enabling this profile.
         "send_enabled": False,
-        "send_disabled_reason": "Annette bnmarketing.us From identity and signature are not configured.",
+        "send_disabled_reason": "Annette bnmarketing.info signature is not configured.",
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
         "csv": "recipients_sendgrid_2.csv",
         "log": "sendgrid_jordan_log.csv",
         "pitch": "pitch2",
-        "from_email": "jordankendrick@bnmarketing.us",
-        "my_domains": "bnmarketing.us,astraproductionsbyjc.com",
+        "from_email": "jordankendrick@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -492,8 +492,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_3.csv",
         "log": "sendgrid_jodi_log.csv",
         "pitch": "pitch3",
-        "from_email": "jodihorowitz@bnmarketing.us",
-        "my_domains": "bnmarketing.us,astraproductionsbyjc.com",
+        "from_email": "jodihorowitz@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -515,8 +515,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_4.csv",
         "log": "sendgrid_alison_log.csv",
         "pitch": "pitch4",
-        "from_email": "alisonaguiar@bnmarketing.us",
-        "my_domains": "bnmarketing.us,astraproductionsbyjc.com",
+        "from_email": "alisonaguiar@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -538,8 +538,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_5.csv",
         "log": "sendgrid_fiorela_log.csv",
         "pitch": "pitch5",
-        "from_email": "fiorelladelima@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "fiorelladelima@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 0,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -555,9 +555,9 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
-        # TODO: configure Fiorela bnmarketing.us From identity and signature before enabling this SendGrid profile.
+        # TODO: configure Fiorela's dedicated SendGrid signature before enabling this profile.
         "send_enabled": False,
-        "send_disabled_reason": "Fiorela bnmarketing.us From identity and signature are not configured.",
+        "send_disabled_reason": "Fiorela bnmarketing.info signature is not configured.",
     },
     "sendgrid_controlled_test": {
         "provider": "sendgrid",
@@ -1306,14 +1306,14 @@ def restore_claimed_queue_row(
 SIGNATURE_CID = "sigimg"
 
 SIGNATURE_BY_FROM: dict[str, str] = {
-    # --- SendGrid bnmarketing.us identities ---
-    "jordankendrick@bnmarketing.us": "sig_sendgrid_jordan_bnmarketing.png",
-    "jodihorowitz@bnmarketing.us": "sig_sendgrid_jodi_bnmarketing.png",
-    "alisonaguiar@bnmarketing.us": "sig_sendgrid_alison_bnmarketing.png",
+    # --- SendGrid bnmarketing.info identities ---
+    "jordankendrick@bnmarketing.info": "sig_sendgrid_jordan_bnmarketing.png",
+    "jodihorowitz@bnmarketing.info": "sig_sendgrid_jodi_bnmarketing.png",
+    "alisonaguiar@bnmarketing.info": "sig_sendgrid_alison_bnmarketing.png",
 
-    # TODO: Add Annette's verified bnmarketing.us From address and
+    # TODO: Add Annette's bnmarketing.info signature mapping and
     #       dedicated SendGrid signature here when that account is ready.
-    # TODO: Add Fiorella's verified bnmarketing.us From address and
+    # TODO: Add Fiorella's bnmarketing.info signature mapping and
     #       dedicated SendGrid signature here when that account is ready.
 
     # --- Astra / JC identities ---

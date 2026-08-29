@@ -1455,13 +1455,37 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     {"Email": "both-sent@example.com", "Status": "SENT"},
                 ],
             )
-            write_csv(logs[1], ["Email", "Status"], [{"Email": "sg-sent@example.com", "Status": "SENT"}])
-            write_csv(logs[2], ["Email", "Status"], [{"Email": "both-sent@example.com", "Status": "SENT"}])
+            write_csv(
+                logs[1],
+                ["Email", "Status", "SenderFrom"],
+                [
+                    {
+                        "Email": "sg-sent@example.com",
+                        "Status": "SENT",
+                        "SenderFrom": "alisonaguiar@bnmarketing.us",
+                    }
+                ],
+            )
+            write_csv(
+                logs[2],
+                ["Email", "Status", "SenderFrom"],
+                [
+                    {
+                        "Email": "both-sent@example.com",
+                        "Status": "SENT",
+                        "SenderFrom": "jordankendrick@bnmarketing.us",
+                    }
+                ],
+            )
             for path in logs[3:]:
                 write_csv(path, ["Email", "Status"], [])
             write_csv(suppressed_path, ["Email"], [{"Email": "suppressed@example.com"}])
             write_csv(unsubscribed_path, ["Email"], [])
             write_csv(sendgrid_suppressions_path, ["email", "state", "type"], [])
+            queue_bytes_before = {
+                path: path.read_bytes()
+                for path in (jc_queue, *sg_queues)
+            }
 
             report = preview_dispatch_master_leads(
                 master_path=master_path,
@@ -1512,6 +1536,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(3, report["exclusion_reason_counts"]["already_sent"])
             self.assertEqual(3, report["exclusion_reason_counts"]["already_queued"])
+            self.assertEqual(
+                queue_bytes_before,
+                {path: path.read_bytes() for path in (jc_queue, *sg_queues)},
+            )
 
     def test_dispatch_master_leads_default_uses_triaged_keep_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2406,10 +2434,18 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             write_csv(logs[0], ["Email", "Status"], [])
             write_csv(
                 logs[1],
-                ["Email", "Status"],
+                ["Email", "Status", "SenderFrom"],
                 [
-                    {"Email": "sent@example.com", "Status": "SENT"},
-                    {"Email": "invalid-event@example.com", "Status": "INVALID"},
+                    {
+                        "Email": "sent@example.com",
+                        "Status": "SENT",
+                        "SenderFrom": "jodihorowitz@bnmarketing.us",
+                    },
+                    {
+                        "Email": "invalid-event@example.com",
+                        "Status": "INVALID",
+                        "SenderFrom": "jodihorowitz@bnmarketing.us",
+                    },
                 ],
             )
             for path in logs[2:]:
