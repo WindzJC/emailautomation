@@ -16,6 +16,38 @@ REACT_MAIN = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "ma
 
 
 class WebDashboardAppTests(unittest.TestCase):
+    def test_controlled_sendgrid_card_has_fixed_recipient_and_only_approved_senders(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        html = INDEX_HTML.read_text(encoding="utf-8")
+        backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+        react_source = REACT_MAIN.read_text(encoding="utf-8")
+
+        self.assertIn("Controlled Send Test", html)
+        self.assertIn("astraprouctionsbyjc@gmail.com", html)
+        self.assertIn("Does not use production recipient queues", html)
+        selector = re.search(r'<select id="controlled-send-test-profile">(.*?)</select>', html, re.DOTALL)
+        self.assertIsNotNone(selector)
+        options = re.findall(r'<option value="([^"]+)" data-from-email="([^"]+)">([^<]+)</option>', selector.group(1))
+        self.assertEqual(
+            [
+                ("sendgrid_alison", "alisonaguiar@bnmarketing.info", "Alison"),
+                ("sendgrid_jodi", "jodihorowitz@bnmarketing.info", "Jodi"),
+                ("sendgrid_jordan", "jordankendrick@bnmarketing.info", "Jordan"),
+            ],
+            options,
+        )
+        self.assertNotIn("sendgrid_annette", selector.group(1))
+        self.assertNotIn("sendgrid_fiorela", selector.group(1))
+        self.assertNotIn("sendgrid_controlled_test", selector.group(1))
+        self.assertIn('fetch("/api/sendgrid/controlled-test"', source)
+        self.assertIn('body: JSON.stringify({ sender_profile: profile })', source)
+        self.assertIn("controlledSendTestPending", source)
+        self.assertIn('els.controlledSendTestBtn.textContent = "Sending..."', source)
+        self.assertIn("No production recipient queue will be used", source)
+        self.assertIn('@app.post("/api/sendgrid/controlled-test")', backend)
+        self.assertIn("model_config = ConfigDict(extra=\"forbid\")", backend)
+        self.assertIn("controlledTest: outer(senders, \".controlled-send-test-card\")", react_source)
+
     def test_lead_ops_routes_are_separate_and_upload_type_is_not_user_selectable(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")

@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css?v=react-components-20260702" />
-    <link rel="stylesheet" href="/static/build/dashboard.css?v=responsive-layout-20260812m" />
+    <link rel="stylesheet" href="/static/build/dashboard.css?v=controlled-sendgrid-test-20260829a" />
     <style>
       .app-shell {
         grid-template-columns: 1fr;
@@ -508,6 +508,34 @@
             </section>
           </details>
 
+            <section class="panel panel-shell controlled-send-test-card" aria-labelledby="controlled-send-test-title">
+              <div class="controlled-send-test-copy">
+                <p class="eyebrow">Manual validation</p>
+                <h2 id="controlled-send-test-title">Controlled Send Test</h2>
+                <p>Sends exactly one validation email to the fixed Astra test inbox. Does not use production recipient queues.</p>
+              </div>
+              <div class="controlled-send-test-grid">
+                <div class="controlled-send-test-fixed">
+                  <span>Recipient</span>
+                  <strong id="controlled-send-test-recipient">astraprouctionsbyjc@gmail.com</strong>
+                </div>
+                <label class="controlled-send-test-field">
+                  <span>Sender</span>
+                  <select id="controlled-send-test-profile">
+                    <option value="sendgrid_alison" data-from-email="alisonaguiar@bnmarketing.info">Alison</option>
+                    <option value="sendgrid_jodi" data-from-email="jodihorowitz@bnmarketing.info">Jodi</option>
+                    <option value="sendgrid_jordan" data-from-email="jordankendrick@bnmarketing.info">Jordan</option>
+                  </select>
+                </label>
+                <div class="controlled-send-test-fixed">
+                  <span>Resolved From / Reply-To</span>
+                  <strong id="controlled-send-test-from">alisonaguiar@bnmarketing.info</strong>
+                </div>
+                <button id="controlled-send-test-btn" class="btn btn-primary" type="button">Send 1 Controlled Test</button>
+              </div>
+              <div id="controlled-send-test-status" class="controlled-send-test-status" aria-live="polite"></div>
+            </section>
+
             <section class="workspace-primary">
               <details id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">
                 <summary class="panel-summary">
@@ -743,6 +771,6 @@
     </template>
     <div id="dashboard-root"></div>
     <noscript>This dashboard requires JavaScript.</noscript>
-    <script type="module" src="/static/build/dashboard.js?v=lead-workflow-routes-20260728c"></script>
+    <script type="module" src="/static/build/dashboard.js?v=controlled-sendgrid-test-20260829a"></script>
   </body>
 </html>

@@ -44,7 +44,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from openpyxl import load_workbook
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -57,6 +57,11 @@ except Exception:  # pragma: no cover - dependency fallback
 import runtime_control
 import runtime_audit
 import settings
+from controlled_sendgrid_test import (
+    ControlledSendGridTestRefused,
+    controlled_test_public_config,
+    execute_controlled_sendgrid_test,
+)
 from runtime_authority import AuthorityError, assert_send_authorized
 from dashboard_security import (
     DashboardSecurityStatus,
@@ -373,6 +378,11 @@ class QuarantineReviewActionPayload(BaseModel):
 class DashboardAuthPayload(BaseModel):
     username: str = ""
     password: str = ""
+
+
+class ControlledSendGridTestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sender_profile: str
 
 
 def _profile_runtime_active(profile_name: str) -> bool:
@@ -5966,6 +5976,59 @@ def _run_start_ready_job(job_id: str) -> None:
         with _START_READY_JOB_LOCK:
             if _START_READY_ACTIVE_JOB_ID == job_id:
                 _START_READY_ACTIVE_JOB_ID = ""
+
+
+def _controlled_sendgrid_test_conflicts() -> list[str]:
+    reasons: list[str] = []
+    active_senders = sorted(_active_sender_names())
+    if active_senders:
+        reasons.append(f"active sender(s): {', '.join(active_senders)}")
+    active_previews = sorted(_active_preview_names())
+    if active_previews:
+        reasons.append(f"active preview operation(s): {', '.join(active_previews)}")
+    runtime_job = _preview_sync_runtime_job()
+    if runtime_job:
+        reasons.append("an active lead-check or dispatch job")
+    with _START_READY_JOB_LOCK:
+        start_ready_job = _START_READY_JOBS.get(_START_READY_ACTIVE_JOB_ID)
+        if isinstance(start_ready_job, dict) and str(start_ready_job.get("status") or "") in {"PLANNING", "RUNNING"}:
+            reasons.append("Start Ready Senders is active")
+    return reasons
+
+
+@app.get("/api/sendgrid/controlled-test")
+def controlled_sendgrid_test_config_endpoint() -> JSONResponse:
+    return JSONResponse({"ok": True, **controlled_test_public_config()})
+
+
+@app.post("/api/sendgrid/controlled-test")
+async def controlled_sendgrid_test_endpoint(payload: ControlledSendGridTestPayload) -> JSONResponse:
+    live_action_block = _manual_live_action_block_response(str(payload.sender_profile or ""))
+    if live_action_block is not None:
+        return live_action_block
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            _SENDER_START_EXECUTOR,
+            partial(
+                execute_controlled_sendgrid_test,
+                str(payload.sender_profile or ""),
+                conflict_check=_controlled_sendgrid_test_conflicts,
+            ),
+        )
+    except ControlledSendGridTestRefused as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": exc.code,
+                "message": str(exc),
+                "sender_profile": str(payload.sender_profile or ""),
+                "auto_started": False,
+            },
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, "message": "Controlled SendGrid test accepted by the provider.", "result": result})
 
 
 @app.get("/api/start-ready")

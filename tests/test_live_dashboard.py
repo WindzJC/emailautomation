@@ -8837,6 +8837,78 @@ class DashboardStabilizationTests(unittest.TestCase):
 
         self.assertEqual(set(), accounted)
 
+    def test_controlled_sendgrid_endpoint_passes_only_profile_to_isolated_service(self) -> None:
+        expected = {
+            "ok": True,
+            "profile": "sendgrid_alison",
+            "recipient": "astraprouctionsbyjc@gmail.com",
+            "auto_started": False,
+        }
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
+            live_dashboard,
+            "_controlled_sendgrid_test_conflicts",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "execute_controlled_sendgrid_test",
+            return_value=expected,
+        ) as execute:
+            response = asyncio.run(
+                live_dashboard.controlled_sendgrid_test_endpoint(
+                    live_dashboard.ControlledSendGridTestPayload(sender_profile="sendgrid_alison")
+                )
+            )
+        body = json.loads(response.body)
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual(expected, body["result"])
+        self.assertEqual("sendgrid_alison", execute.call_args.args[0])
+        self.assertNotIn("recipient", execute.call_args.kwargs)
+        self.assertNotIn("from_email", execute.call_args.kwargs)
+
+    def test_controlled_sendgrid_endpoint_returns_structured_fail_closed_refusal(self) -> None:
+        refusal = live_dashboard.ControlledSendGridTestRefused("runtime_conflict", "Synthetic sender conflict.")
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
+            live_dashboard,
+            "execute_controlled_sendgrid_test",
+            side_effect=refusal,
+        ):
+            response = asyncio.run(
+                live_dashboard.controlled_sendgrid_test_endpoint(
+                    live_dashboard.ControlledSendGridTestPayload(sender_profile="sendgrid_jodi")
+                )
+            )
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("runtime_conflict", body["error"])
+        self.assertFalse(body["auto_started"])
+
+    def test_controlled_sendgrid_conflicts_include_senders_previews_jobs_and_start_ready(self) -> None:
+        with patch.object(live_dashboard, "_active_sender_names", return_value={"private_jc"}), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value={"sendgrid_jodi"},
+        ), patch.object(
+            live_dashboard,
+            "_preview_sync_runtime_job",
+            return_value={"job_id": "dispatch-1"},
+        ):
+            with live_dashboard._START_READY_JOB_LOCK:
+                old_id = live_dashboard._START_READY_ACTIVE_JOB_ID
+                live_dashboard._START_READY_ACTIVE_JOB_ID = "start-ready-test"
+                live_dashboard._START_READY_JOBS["start-ready-test"] = {"status": "RUNNING"}
+            try:
+                reasons = live_dashboard._controlled_sendgrid_test_conflicts()
+            finally:
+                with live_dashboard._START_READY_JOB_LOCK:
+                    live_dashboard._START_READY_JOBS.pop("start-ready-test", None)
+                    live_dashboard._START_READY_ACTIVE_JOB_ID = old_id
+        self.assertEqual(4, len(reasons))
+        self.assertTrue(any("private_jc" in reason for reason in reasons))
+        self.assertTrue(any("sendgrid_jodi" in reason for reason in reasons))
+        self.assertTrue(any("dispatch" in reason for reason in reasons))
+        self.assertTrue(any("Start Ready" in reason for reason in reasons))
+
 
 if __name__ == "__main__":
     unittest.main()

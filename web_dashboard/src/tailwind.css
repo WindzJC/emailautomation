@@ -422,10 +422,45 @@
 .start-ready-item.status-starting .start-ready-item-state { color: #edc574; }
 .start-ready-item.status-refused .start-ready-item-state { color: #ef8c91; }
 
+.controlled-send-test-card {
+  display: grid;
+  grid-template-columns: minmax(220px, .8fr) minmax(0, 2fr);
+  gap: 18px;
+  padding: 18px 20px;
+}
+.controlled-send-test-copy h2 { margin: 3px 0 6px; font-size: 18px; }
+.controlled-send-test-copy > p:last-child { margin: 0; color: #94a3b8; font-size: 13px; line-height: 1.45; }
+.controlled-send-test-grid {
+  display: grid;
+  grid-template-columns: minmax(205px, 1fr) minmax(135px, .6fr) minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  min-width: 0;
+}
+.controlled-send-test-fixed,
+.controlled-send-test-field { display: grid; gap: 5px; min-width: 0; }
+.controlled-send-test-fixed span,
+.controlled-send-test-field > span { color: #8999ad; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.controlled-send-test-fixed strong { overflow-wrap: anywhere; font-size: 13px; }
+.controlled-send-test-field select { min-width: 0; width: 100%; }
+.controlled-send-test-status {
+  grid-column: 2;
+  min-height: 18px;
+  color: #94a3b8;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.controlled-send-test-status.status-success { color: #6fdda7; }
+.controlled-send-test-status.status-error { color: #ef8c91; }
+.controlled-send-test-status.status-pending { color: #edc574; }
+
 @media (max-width: 720px) {
   .start-ready-head { align-items: flex-start; flex-direction: column; gap: 3px; }
   .start-ready-head span { text-align: left; }
   .start-ready-list { grid-template-columns: 1fr; }
+  .controlled-send-test-card { grid-template-columns: 1fr; padding: 16px; }
+  .controlled-send-test-grid { grid-template-columns: 1fr; }
+  .controlled-send-test-status { grid-column: 1; }
 }
 
 .react-command-bar select,

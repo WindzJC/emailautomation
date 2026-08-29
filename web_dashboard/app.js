@@ -41,6 +41,10 @@ const els = {
   wallboardBtn: document.getElementById("wallboard-btn"),
   startReadyBtn: document.getElementById("start-ready-btn"),
   startReadyStatus: document.getElementById("start-ready-status"),
+  controlledSendTestProfile: document.getElementById("controlled-send-test-profile"),
+  controlledSendTestFrom: document.getElementById("controlled-send-test-from"),
+  controlledSendTestBtn: document.getElementById("controlled-send-test-btn"),
+  controlledSendTestStatus: document.getElementById("controlled-send-test-status"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
   leadsImportantInputPath: document.getElementById("leads-important-input-path"),
@@ -149,6 +153,8 @@ const els = {
   environmentNote: document.getElementById("dashboard-environment-note"),
   messageBar: document.getElementById("message-bar"),
 };
+
+let controlledSendTestPending = false;
 
 let snapshotPollTimer = null;
 let snapshotPollGeneration = 0;
@@ -9616,6 +9622,75 @@ async function handleSenderStatusClick(event) {
   }
 }
 
+function syncControlledSendTestIdentity() {
+  if (!els.controlledSendTestProfile || !els.controlledSendTestFrom) return;
+  const option = els.controlledSendTestProfile.selectedOptions?.[0];
+  els.controlledSendTestFrom.textContent = option?.dataset?.fromEmail || "Unavailable";
+}
+
+function renderControlledSendTestStatus(data, ok) {
+  if (!els.controlledSendTestStatus) return;
+  const result = data?.result || {};
+  const messageId = String(result.provider_message_id || "").trim();
+  const timestamp = String(result.submitted_at_utc || "").trim();
+  const sender = String(result.sender || "").trim();
+  const fromEmail = String(result.from_email || "").trim();
+  const recipient = String(result.recipient || "").trim();
+  els.controlledSendTestStatus.className = `controlled-send-test-status status-${ok ? "success" : "error"}`;
+  if (!ok) {
+    els.controlledSendTestStatus.textContent = data?.message || "Controlled SendGrid test failed safely.";
+    return;
+  }
+  els.controlledSendTestStatus.textContent = [
+    `${sender} accepted`,
+    `${fromEmail} → ${recipient}`,
+    messageId ? `Provider message ID: ${messageId}` : "Provider accepted without a message ID",
+    timestamp,
+  ].filter(Boolean).join(" · ");
+}
+
+async function runControlledSendTest() {
+  if (controlledSendTestPending || !els.controlledSendTestProfile || !els.controlledSendTestBtn) return;
+  const profile = String(els.controlledSendTestProfile.value || "").trim();
+  const option = els.controlledSendTestProfile.selectedOptions?.[0];
+  const senderLabel = option?.textContent?.trim() || profile;
+  const fromEmail = option?.dataset?.fromEmail || "";
+  if (!window.confirm(
+    `CONTROLLED SEND TEST\n\nSend exactly one validation email from ${senderLabel} (${fromEmail}) `
+    + "to astraprouctionsbyjc@gmail.com?\n\nNo production recipient queue will be used.",
+  )) {
+    renderControlledSendTestStatus({ message: "Controlled Send Test cancelled. No request was submitted." }, false);
+    return;
+  }
+  controlledSendTestPending = true;
+  els.controlledSendTestBtn.disabled = true;
+  els.controlledSendTestProfile.disabled = true;
+  els.controlledSendTestBtn.textContent = "Sending...";
+  if (els.controlledSendTestStatus) {
+    els.controlledSendTestStatus.className = "controlled-send-test-status status-pending";
+    els.controlledSendTestStatus.textContent = "Submitting one controlled provider validation...";
+  }
+  try {
+    const response = await fetch("/api/sendgrid/controlled-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sender_profile: profile }),
+    });
+    const data = await response.json().catch(() => ({}));
+    const ok = response.ok && data.ok !== false;
+    renderControlledSendTestStatus(data, ok);
+    showMessage(data.message || (ok ? "Controlled SendGrid test accepted." : "Controlled SendGrid test failed safely."), ok ? "success" : "error");
+  } catch (err) {
+    renderControlledSendTestStatus({ message: `Controlled SendGrid test failed: ${err}` }, false);
+    showMessage(`Controlled SendGrid test failed: ${err}`, "error");
+  } finally {
+    controlledSendTestPending = false;
+    els.controlledSendTestBtn.disabled = false;
+    els.controlledSendTestProfile.disabled = false;
+    els.controlledSendTestBtn.textContent = "Send 1 Controlled Test";
+  }
+}
+
 async function postAction(path, options = {}) {
   const { profileName = "", action = "", body = null } = options;
   const manualSenderStart = path.startsWith("/api/start/");
@@ -10068,6 +10143,11 @@ async function bootstrapDashboard() {
 
 if (els.refreshBtn) els.refreshBtn.addEventListener("click", () => fetchSnapshot());
 if (els.startReadyBtn) els.startReadyBtn.addEventListener("click", () => startReadySenders());
+if (els.controlledSendTestProfile) {
+  els.controlledSendTestProfile.addEventListener("change", syncControlledSendTestIdentity);
+  syncControlledSendTestIdentity();
+}
+if (els.controlledSendTestBtn) els.controlledSendTestBtn.addEventListener("click", () => runControlledSendTest());
 if (els.sendCapSaveBtn) els.sendCapSaveBtn.addEventListener("click", () => saveSendCap());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));

@@ -131,6 +131,8 @@ export function SendersDashboard({ view }) {
         controls={view.commandBar}
       />
 
+      {view.controlledTest ? <LegacyNode html={view.controlledTest} /> : null}
+
       <section className="react-supporting-panels">
         <LegacyNode html={view.profileDetail} />
         <LegacyNode html={view.history} />
@@ -298,6 +300,7 @@ function readDashboardTemplate() {
       metrics: outer(senders, ".queue-health-section"),
       progress: outer(senders, ".ops-progress-strip"),
       progressDetails: outer(senders, "#ops-progress-details"),
+      controlledTest: outer(senders, ".controlled-send-test-card"),
       profileDetail: outer(senders, ".workspace-primary"),
       history: outer(senders, ".campaign-history-panel"),
     },
