@@ -16,6 +16,7 @@ APPROVED = {
     "sendgrid_jodi": ("Jodi", "jodihorowitz@bnmarketing.info", "SG.jodi.secret"),
     "sendgrid_jordan": ("Jordan", "jordankendrick@bnmarketing.info", "SG.jordan.secret"),
 }
+PREVIOUS_TEST_VERSION = "sendgrid-identity-validation-v1"
 
 
 def _profiles() -> dict[str, dict[str, object]]:
@@ -107,6 +108,84 @@ def test_client_cannot_supply_recipient_or_from_values() -> None:
     assert all(set(row) == {"profile", "label", "from_email", "reply_to"} for row in public["profiles"])
 
 
+def test_corrected_recipient_version_preserves_historical_alison_and_allows_one_new_attempt(tmp_path: Path) -> None:
+    assert controlled.CONTROLLED_TEST_VERSION == "sendgrid-identity-validation-corrected-recipient-v2"
+    assert controlled.CONTROLLED_TEST_VERSION != PREVIOUS_TEST_VERSION
+
+    state = tmp_path / "controlled.sqlite3"
+    with controlled._open_state(state) as connection:
+        connection.execute(
+            """
+            INSERT INTO controlled_sendgrid_tests (
+                test_version, profile, recipient, from_email, reply_to,
+                payload_fingerprint, status, reserved_at_utc, updated_at_utc,
+                provider_status, provider_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                PREVIOUS_TEST_VERSION,
+                "sendgrid_alison",
+                "astraprouctionsbyjc@gmail.com",
+                "alisonaguiar@bnmarketing.info",
+                "alisonaguiar@bnmarketing.info",
+                "historical-v1-fingerprint",
+                "accepted",
+                "2026-08-29T00:00:00Z",
+                "2026-08-29T00:00:00Z",
+                "202",
+                "o-iUyYNQQmiEtqEVpStyhg",
+            ),
+        )
+
+    calls: list[tuple[object, ...]] = []
+    env_dir = _env_dir(tmp_path)
+
+    def execute_alison() -> dict[str, object]:
+        return controlled.execute_controlled_sendgrid_test(
+            "sendgrid_alison",
+            profile_env_dir=env_dir,
+            state_path=state,
+            profiles=_profiles(),
+            authority_check=lambda: {"status": "active", "authorized_machine": "cloud"},
+            conflict_check=lambda: [],
+            block_classification=lambda: "",
+            provider_send=lambda *args, **kwargs: calls.append(args) or {"status_code": "202", "message_id": "corrected-v2"},
+        )
+
+    result = execute_alison()
+    assert result["recipient"] == "astraproductionsbyjc@gmail.com"
+    assert len(calls) == 1
+
+    with sqlite3.connect(state) as connection:
+        rows = connection.execute(
+            """
+            SELECT test_version, recipient, status, provider_message_id
+            FROM controlled_sendgrid_tests
+            WHERE profile = 'sendgrid_alison'
+            ORDER BY reserved_at_utc
+            """
+        ).fetchall()
+    assert rows == [
+        (
+            PREVIOUS_TEST_VERSION,
+            "astraprouctionsbyjc@gmail.com",
+            "accepted",
+            "o-iUyYNQQmiEtqEVpStyhg",
+        ),
+        (
+            controlled.CONTROLLED_TEST_VERSION,
+            "astraproductionsbyjc@gmail.com",
+            "accepted",
+            "corrected-v2",
+        ),
+    ]
+
+    with pytest.raises(controlled.ControlledSendGridTestRefused) as refusal:
+        execute_alison()
+    assert refusal.value.code == "controlled_test_already_attempted"
+    assert len(calls) == 1
+
+
 def test_same_sender_is_reserved_once_and_never_resubmitted(tmp_path: Path) -> None:
     calls: list[object] = []
 
@@ -147,8 +226,12 @@ def test_three_sender_tests_have_independent_idempotency_keys(tmp_path: Path) ->
         )
     assert calls == list(APPROVED)
     with sqlite3.connect(state) as connection:
-        rows = connection.execute("SELECT profile, status FROM controlled_sendgrid_tests ORDER BY profile").fetchall()
-    assert rows == sorted((profile, "accepted") for profile in APPROVED)
+        rows = connection.execute(
+            "SELECT test_version, profile, status FROM controlled_sendgrid_tests ORDER BY profile"
+        ).fetchall()
+    assert rows == sorted(
+        (controlled.CONTROLLED_TEST_VERSION, profile, "accepted") for profile in APPROVED
+    )
 
 
 @pytest.mark.parametrize("classification", ["unsubscribed", "global_suppression", "sendgrid_suppression", "bad_outcome", "ledger_blocked"])

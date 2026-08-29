@@ -8838,6 +8838,12 @@ class DashboardStabilizationTests(unittest.TestCase):
         self.assertEqual(set(), accounted)
 
     def test_controlled_sendgrid_endpoint_passes_only_profile_to_isolated_service(self) -> None:
+        with self.assertRaises(ValueError):
+            live_dashboard.ControlledSendGridTestPayload(
+                sender_profile="sendgrid_alison",
+                test_version="client-selected-version",
+            )
+
         expected = {
             "ok": True,
             "profile": "sendgrid_alison",
