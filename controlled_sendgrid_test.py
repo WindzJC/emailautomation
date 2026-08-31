@@ -27,8 +27,8 @@ from send_shard import (
 from sendgrid_launch_auth import resolve_sendgrid_api_key
 
 
-CONTROLLED_TEST_RECIPIENT = "astraproductionsbyjc@gmail.com"
-CONTROLLED_TEST_VERSION = "sendgrid-identity-validation-corrected-recipient-v3"
+CONTROLLED_TEST_RECIPIENT = "astraproductionsbyjc+sendgridv4@gmail.com"
+CONTROLLED_TEST_VERSION = "sendgrid-identity-validation-corrected-recipient-v4"
 CONTROLLED_TEST_IDENTITIES = {
     "sendgrid_alison": "alisonaguiar@bnmarketing.info",
     "sendgrid_jodi": "jodihorowitz@bnmarketing.info",

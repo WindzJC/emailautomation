@@ -77,7 +77,7 @@ def test_each_approved_identity_uses_exact_profile_credential_and_envelope(tmp_p
 
     result = _execute(tmp_path, profile, provider)
     label, from_email, key = APPROVED[profile]
-    assert controlled.CONTROLLED_TEST_RECIPIENT == "astraproductionsbyjc@gmail.com"
+    assert controlled.CONTROLLED_TEST_RECIPIENT == "astraproductionsbyjc+sendgridv4@gmail.com"
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0] == key
@@ -247,13 +247,13 @@ def test_unapproved_identity_is_refused_before_provider(tmp_path: Path, profile:
 
 def test_client_cannot_supply_recipient_or_from_values() -> None:
     public = controlled.controlled_test_public_config()
-    assert public["recipient"] == "astraproductionsbyjc@gmail.com"
+    assert public["recipient"] == "astraproductionsbyjc+sendgridv4@gmail.com"
     assert set(controlled.CONTROLLED_TEST_IDENTITIES) == set(APPROVED)
     assert all(set(row) == {"profile", "label", "from_email", "reply_to"} for row in public["profiles"])
 
 
 def test_corrected_recipient_version_preserves_historical_alison_and_allows_one_new_attempt(tmp_path: Path) -> None:
-    assert controlled.CONTROLLED_TEST_VERSION == "sendgrid-identity-validation-corrected-recipient-v3"
+    assert controlled.CONTROLLED_TEST_VERSION == "sendgrid-identity-validation-corrected-recipient-v4"
     assert controlled.CONTROLLED_TEST_VERSION != PREVIOUS_TEST_VERSION
 
     state = tmp_path / "controlled.sqlite3"
@@ -297,7 +297,7 @@ def test_corrected_recipient_version_preserves_historical_alison_and_allows_one_
         )
 
     result = execute_alison()
-    assert result["recipient"] == "astraproductionsbyjc@gmail.com"
+    assert result["recipient"] == "astraproductionsbyjc+sendgridv4@gmail.com"
     assert len(calls) == 1
 
     with sqlite3.connect(state) as connection:
@@ -318,7 +318,7 @@ def test_corrected_recipient_version_preserves_historical_alison_and_allows_one_
         ),
         (
             controlled.CONTROLLED_TEST_VERSION,
-            "astraproductionsbyjc@gmail.com",
+            "astraproductionsbyjc+sendgridv4@gmail.com",
             "accepted",
             "corrected-v2",
         ),
