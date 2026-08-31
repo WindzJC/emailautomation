@@ -189,8 +189,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 if bool(send_shard.PROFILES[name].get("send_enabled", True))
             ]
             self.assertEqual(expected_profiles, preview["sendgrid_profile_order"])
-            self.assertNotIn("sendgrid_annette", preview["sendgrid_profile_order"])
-            self.assertNotIn("sendgrid_fiorela", preview["sendgrid_profile_order"])
+            self.assertIn("sendgrid_annette", preview["sendgrid_profile_order"])
+            self.assertIn("sendgrid_fiorela", preview["sendgrid_profile_order"])
             self.assertEqual(0, preview["rows_to_add_private_jc"])
             self.assertEqual(8, preview["rows_to_add_sendgrid"])
             self.assertTrue(preview["full_recontact_sendgrid_only"])
@@ -4351,15 +4351,33 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             first = build("previews-one")
             second = build("previews-two")
-            expected_profiles = ["sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"]
+            expected_profiles = [
+                "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
+                "sendgrid_jodi",
+                "sendgrid_jordan",
+            ]
             self.assertEqual(expected_profiles, first["sendgrid_profile_order"])
             self.assertEqual(["private_jc", *expected_profiles], first["queue_key_order"])
-            self.assertNotIn("sendgrid_annette", first["plan_rows_by_queue"])
-            self.assertNotIn("sendgrid_fiorela", first["plan_rows_by_queue"])
+            self.assertEqual(
+                {"private_jc", *expected_profiles},
+                set(first["plan_rows_by_queue"]),
+            )
             self.assertNotIn("sendgrid_controlled_test", first["plan_rows_by_queue"])
             self.assertEqual(
-                {profile: 1 for profile in expected_profiles},
+                {
+                    "sendgrid_alison": 1,
+                    "sendgrid_annette": 1,
+                    "sendgrid_fiorela": 1,
+                    "sendgrid_jodi": 0,
+                    "sendgrid_jordan": 0,
+                },
                 first["sendgrid_profile_planned_counts"],
+            )
+            self.assertEqual(
+                3,
+                sum(first["sendgrid_profile_planned_counts"].values()),
             )
             first_routes = {
                 key: [row["Email"] for row in planned_rows]
@@ -4434,15 +4452,22 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 {path.name for path in expected_lock_paths},
             )
             self.assertEqual(
-                {"private_jc", "sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"},
+                {
+                    "private_jc",
+                    "sendgrid_alison",
+                    "sendgrid_annette",
+                    "sendgrid_fiorela",
+                    "sendgrid_jodi",
+                    "sendgrid_jordan",
+                },
                 set(report["rows_written_per_queue"]),
             )
             for key, path in zip(preview["queue_key_order"], destination_paths):
                 self.assertEqual(preview["plan_rows_by_queue"][key], read_csv_rows(path))
             for path, original in safety_only_before.items():
                 self.assertEqual(original, path.read_bytes(), f"safety-only queue was modified: {path.name}")
-            self.assertNotIn("sendgrid_annette", report["rows_written_per_queue"])
-            self.assertNotIn("sendgrid_fiorela", report["rows_written_per_queue"])
+            self.assertIn("sendgrid_annette", report["rows_written_per_queue"])
+            self.assertIn("sendgrid_fiorela", report["rows_written_per_queue"])
             self.assertNotIn("sendgrid_controlled_test", report["rows_written_per_queue"])
             self.assertNotIn("private_jc_warm", report["rows_written_per_queue"])
             self.assertEqual(
@@ -4459,7 +4484,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             queue_paths_map = preview["queue_paths"]
             destination_paths = [Path(queue_paths_map[key]) for key in preview["queue_key_order"]]
             destination_before = {path: path.read_bytes() for path in destination_paths}
-            disabled_queue = tmp / Path(str(send_shard.PROFILES["sendgrid_annette"]["csv"])).name
+            disabled_queue = tmp / Path(
+                str(
+                    send_shard.PROFILES[
+                        send_shard.CONTROLLED_SENDGRID_PROFILE
+                    ]["csv"]
+                )
+            ).name
             self.assertIn(str(disabled_queue), preview["queue_safety_paths"])
             self.assertNotIn(disabled_queue, destination_paths)
 

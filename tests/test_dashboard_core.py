@@ -58,11 +58,37 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("PROFILE_NOT_CONFIGURED", health["reason_code"])
 
     def test_tmux_start_refuses_unconfigured_sendgrid_profiles_without_side_effects(self) -> None:
-        with patch.object(dashboard_core, "active_or_locked_sender_profiles") as active_profiles:
-            for profile_name in ("sendgrid_annette", "sendgrid_fiorela"):
-                ok, message = dashboard_core.start_sendgrid_profile(profile_name, 0)
-                self.assertFalse(ok)
-                self.assertIn("not configured for sending", message)
+        profile_name = "sendgrid_unconfigured_test"
+        profile = {
+            **dashboard_core.PROFILES["sendgrid_annette"],
+            "provider": "sendgrid",
+            "send_enabled": False,
+            "send_disabled_reason": "Synthetic SendGrid profile is not configured for sending.",
+        }
+
+        with (
+            patch.dict(
+                dashboard_core.PROFILES,
+                {profile_name: profile},
+                clear=False,
+            ),
+            patch.object(
+                dashboard_core,
+                "SENDGRID_PROFILES",
+                [*dashboard_core.SENDGRID_PROFILES, profile_name],
+            ),
+            patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+            ) as active_profiles,
+        ):
+            ok, message = dashboard_core.start_sendgrid_profile(
+                profile_name,
+                0,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("not configured for sending", message)
         active_profiles.assert_not_called()
 
     def test_cloud_service_flag_disables_repository_dotenv_loading(self) -> None:

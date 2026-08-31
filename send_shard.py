@@ -463,9 +463,6 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
-        # TODO: configure Annette's dedicated SendGrid signature before enabling this profile.
-        "send_enabled": False,
-        "send_disabled_reason": "Annette bnmarketing.info signature is not configured.",
     },
     "sendgrid_jordan": {
         "provider": "sendgrid",
@@ -558,9 +555,6 @@ PROFILES: dict[str, dict[str, object]] = {
         "prune_sent": True,
         "unsubscribe_group_id": 363425,
         "groups_to_display": [363425],
-        # TODO: configure Fiorela's dedicated SendGrid signature before enabling this profile.
-        "send_enabled": False,
-        "send_disabled_reason": "Fiorela bnmarketing.info signature is not configured.",
     },
     "sendgrid_controlled_test": {
         "provider": "sendgrid",

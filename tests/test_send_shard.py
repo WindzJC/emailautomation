@@ -197,6 +197,8 @@ class SendShardTests(unittest.TestCase):
         self.assertEqual(
             {
                 "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
                 "sendgrid_jodi",
                 "sendgrid_jordan",
             },
@@ -263,8 +265,10 @@ class SendShardTests(unittest.TestCase):
         signature_names = [signature_name for _from_email, signature_name in expected_signatures.values()]
         self.assertEqual(len(signature_names), len(set(signature_names)))
         self.assertNotIn("LOGO ASTRA bg.png", signature_names)
-        self.assertFalse(send_shard.PROFILES["sendgrid_annette"]["send_enabled"])
-        self.assertFalse(send_shard.PROFILES["sendgrid_fiorela"]["send_enabled"])
+        for profile_name in ("sendgrid_annette", "sendgrid_fiorela"):
+            self.assertTrue(send_shard.profile_send_available(profile_name))
+            self.assertEqual("", send_shard.profile_send_unavailable_reason(profile_name))
+            self.assertTrue(bool(send_shard.PROFILES[profile_name].get("send_enabled", True)))
 
         self.assertFalse(
             any(
@@ -289,10 +293,8 @@ class SendShardTests(unittest.TestCase):
             )
         )
 
-    def test_unconfigured_sendgrid_profiles_fail_closed_before_runtime_work(self) -> None:
+    def test_unconfigured_controlled_sendgrid_profile_fails_closed_before_runtime_work(self) -> None:
         for profile_name in (
-            "sendgrid_annette",
-            "sendgrid_fiorela",
             send_shard.CONTROLLED_SENDGRID_PROFILE,
         ):
             self.assertFalse(send_shard.profile_send_available(profile_name))
@@ -459,7 +461,13 @@ class SendShardTests(unittest.TestCase):
 
     def test_sendgrid_migration_preserves_routing_and_queue_mappings(self) -> None:
         self.assertEqual(
-            ("sendgrid_alison", "sendgrid_jodi", "sendgrid_jordan"),
+            (
+                "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
+                "sendgrid_jodi",
+                "sendgrid_jordan",
+            ),
             send_shard.PRODUCTION_SENDGRID_PROFILES,
         )
         self.assertEqual(
