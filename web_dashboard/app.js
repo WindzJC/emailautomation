@@ -3058,6 +3058,7 @@ function sendgridOutcomeHealthSummaryHtml(snapshot = lastSnapshot) {
 }
 
 const REQUIRED_DISPATCH_FIELDS = ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"];
+const FULL_RECONTACT_REQUIRED_DISPATCH_FIELDS = ["Email", "AuthorName"];
 const SENDGRID_OUTCOME_STALE_WARNING = "SendGrid outcome feed is stale. Emails may have been accepted by SendGrid, but delivery/bounce/spam outcomes are not currently being received.";
 
 function previewPlannedRows(preview = null) {
@@ -3068,10 +3069,14 @@ function previewPlannedRows(preview = null) {
 }
 
 function previewMissingRequiredDispatchFields(preview = null) {
+  const requiredFields = preview?.full_recontact_sendgrid_only
+    ? FULL_RECONTACT_REQUIRED_DISPATCH_FIELDS
+    : REQUIRED_DISPATCH_FIELDS;
+
   return previewPlannedRows(preview).some((row) => (
     !row
     || typeof row !== "object"
-    || REQUIRED_DISPATCH_FIELDS.some((field) => !String(row[field] || "").trim())
+    || requiredFields.some((field) => !String(row[field] || "").trim())
   ));
 }
 
