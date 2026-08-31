@@ -1528,22 +1528,18 @@ astraproductions.co
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
 
-PITCH_WARM_SUBJECT = "A focused direction for {BookTitleOrProject}"
-PITCH_WARM_SUBJECT_FALLBACK = "A focused direction for your author platform"
+PITCH_WARM_SUBJECT = "About {BookTitleOrProject}"
+PITCH_WARM_SUBJECT_FALLBACK = "About your author project"
 
 PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
 {PersonalizationLine}
 
-Based on what you shared, the clearest next step is {RecommendedServicePhrase}. It addresses the opportunity directly without replacing what already works or adding unnecessary complexity.
+Based on what you described, the most direct way I’d approach it is {RecommendedServicePhrase}—focused specifically on that issue rather than turning it into a larger project than necessary.
 
-Rather than only describe the direction, I can prepare a no-charge concept preview showing the structure, visual direction, and priorities I would use for {BookTitleOrProject}.
+If useful, I can put together {PreviewOffer} for {BookTitleOrProject} so you can see how I’d approach it before deciding whether you want to take it any further.
 
-The concept is there to let you see the direction before making any decision about full development. There is no obligation to proceed.
-
-If you like what you see, we can then discuss the final scope, timeline, and cost of developing the complete version.
-
-No meeting is required. I can send the concept directly by email.
+There’s no obligation, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1552,38 +1548,17 @@ astraproductions.co
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
 
-PITCH_WARM_BODY_FALLBACK = """Hi {FirstName},
-
-I reviewed the available information about {BookTitleOrProject} and identified one focused opportunity to strengthen how the project is presented.
-
-The clearest fit I see is {RecommendedServicePhrase}. It addresses the most visible need without replacing what already works or making the project unnecessarily complicated.
-
-Rather than only describe the recommendation, I can prepare a no-charge concept preview showing the structure, visual direction, and priorities I would use.
-
-The concept is there to let you see the direction before making any decision about full development. There is no obligation to proceed.
-
-If you like what you see, we can then discuss the final scope, timeline, and cost of developing the complete version.
-
-No meeting is required. I can send the concept directly by email.
-
-Windelle JC
-Founder & CEO, Astra Productions
-astraproductions.co
-
-P.S. If you would rather not hear from me again, reply “unsubscribe.”
-"""
-
-# Kept as a compatibility alias for code that only needs the safe generic body.
-PITCH_WARM_BODY = PITCH_WARM_BODY_FALLBACK
+PITCH_WARM_BODY_FALLBACK = None
+PITCH_WARM_BODY = None
 
 WARM_RECOMMENDED_SERVICE_PHRASES = {
     "website": "a custom author website",
     "custom author website": "a custom author website",
     "cinematic book trailer": "a cinematic book trailer",
-    "book launch visuals": "book launch visuals",
+    "book launch visuals": "a focused set of book launch visuals",
     "author platform presentation": "a stronger author-platform presentation",
     "book landing page": "a book landing page",
-    "launch visuals + landing page + trailer clips": "launch visuals, a landing page, and trailer clips",
+    "launch visuals + landing page + trailer clips": "a combination of launch visuals, a landing page, and trailer clips",
     "book trailer + launch visuals + landing page": "a book trailer, launch visuals, and a landing page",
     "book landing page + trailer + launch visuals": "a book landing page, a trailer, and launch visuals",
     "launch page + trailer + visuals": "a launch page, a trailer, and supporting visuals",
@@ -1593,18 +1568,71 @@ WARM_RECOMMENDED_SERVICE_PHRASES = {
     "series landing page + launch visuals + trailer clips": "a series landing page, launch visuals, and trailer clips",
     "author website refresh + book landing pages + newsletter cta": "an author-website refresh, book landing pages, and a newsletter call to action",
     "book trailer + special-edition visuals + landing page": "a book trailer, special-edition visuals, and a landing page",
-    "launch visuals + landing page funnel + trailer": "launch visuals, a landing-page funnel, and a trailer",
-    "launch visuals + book landing page + trailer": "launch visuals, a book landing page, and a trailer",
+    "launch visuals + landing page funnel + trailer": "a combination of launch visuals, a landing-page funnel, and a trailer",
+    "launch visuals + book landing page + trailer": "a combination of launch visuals, a book landing page, and a trailer",
     "trailer refresh + launch page + social clips": "a trailer refresh, a launch page, and social clips",
     "launch page + book trailer + visuals": "a launch page, a book trailer, and supporting visuals",
-    "kickstarter launch visuals + trailer/social clips": "Kickstarter launch visuals and trailer/social clips",
+    "kickstarter launch visuals + trailer/social clips": "a set of Kickstarter launch visuals and trailer/social clips",
     "book landing page + newsletter funnel + visuals": "a book landing page, a newsletter funnel, and supporting visuals",
-    "launch visuals + book landing page + trailer clips": "launch visuals, a book landing page, and trailer clips",
+    "launch visuals + book landing page + trailer clips": "a combination of launch visuals, a book landing page, and trailer clips",
     "newsletter/signup landing page": "a newsletter signup landing page",
     "book campaign page upgrade": "a book-campaign page upgrade",
     "book landing page and launch visuals": "a book landing page and launch visuals",
+    "protected author contact form": "a protected author contact form",
+    "author website and protected contact form": "a focused author website with a protected contact form",
+    "launch or preorder page": "a focused launch or preorder page",
+    "reader-magnet landing page": "a reader-magnet landing page",
+    "book landing page and newsletter integration": "a book landing page with newsletter integration",
+    "book trailer and launch visuals": "a cinematic book trailer with matching launch visuals",
 }
-WARM_RECOMMENDED_SERVICE_FALLBACK = "a focused launch presentation"
+WARM_PREVIEW_OFFERS = {
+    "website": "a concise homepage and site-structure concept",
+    "custom author website": "a concise homepage and site-structure concept",
+    "cinematic book trailer": "a short trailer concept covering the opening hook, pacing, visual direction, and ending CTA",
+    "book launch visuals": "a launch-visual direction showing the key creative approach and campaign assets",
+    "author platform presentation": "a focused platform concept showing how I’d organize the author, books, and reader journey",
+    "book landing page": "a one-page concept showing the page structure, messaging hierarchy, and reader path",
+    "launch visuals + landing page + trailer clips": "a combined concept covering the launch visuals, landing-page structure, and trailer-clip direction",
+    "book trailer + launch visuals + landing page": "a combined concept covering the trailer, matching launch visuals, and landing-page structure",
+    "book landing page + trailer + launch visuals": "a combined concept covering the landing page, trailer direction, and matching launch visuals",
+    "launch page + trailer + visuals": "a launch concept covering the page structure, trailer direction, and supporting visuals",
+    "book launch page + newsletter cta + trailer": "a launch concept covering the page, newsletter call to action, and trailer direction",
+    "author site upgrade + book landing pages": "a site concept covering the author-site improvements and dedicated book-page structure",
+    "direct-store landing page + launch visuals + trailer": "a direct-store concept covering the landing-page flow, launch visuals, and trailer direction",
+    "series landing page + launch visuals + trailer clips": "a series-page concept covering the reader path, launch visuals, and trailer clips",
+    "author website refresh + book landing pages + newsletter cta": "a site concept covering the author refresh, book-page structure, and newsletter path",
+    "book trailer + special-edition visuals + landing page": "a campaign concept covering the trailer, special-edition visuals, and landing page",
+    "launch visuals + landing page funnel + trailer": "a campaign concept covering the launch visuals, landing-page funnel, and trailer direction",
+    "launch visuals + book landing page + trailer": "a campaign concept covering the launch visuals, book-page structure, and trailer direction",
+    "trailer refresh + launch page + social clips": "a creative concept covering the trailer refresh, launch page, and social clips",
+    "launch page + book trailer + visuals": "a launch concept covering the page structure, book trailer, and supporting visuals",
+    "kickstarter launch visuals + trailer/social clips": "a Kickstarter creative concept covering the launch visuals and trailer/social clips",
+    "book landing page + newsletter funnel + visuals": "a campaign concept covering the book page, newsletter funnel, and supporting visuals",
+    "launch visuals + book landing page + trailer clips": "a campaign concept covering the launch visuals, book-page structure, and trailer clips",
+    "newsletter/signup landing page": "a signup-page concept showing the message, structure, and reader conversion path",
+    "book campaign page upgrade": "a focused campaign-page concept showing the structure and improvements I’d prioritize",
+    "book landing page and launch visuals": "a campaign concept covering the book-page structure and matching launch visuals",
+    "protected author contact form": "a short implementation outline showing the protected professional contact flow I\u2019d use",
+    "author website and protected contact form": "a concise site concept showing the core page structure and protected contact flow",
+    "launch or preorder page": "a launch-page concept showing the key sections, calls to action, and reader path",
+    "reader-magnet landing page": "a reader-magnet concept showing the offer, signup path, and connection back to the book",
+    "book landing page and newsletter integration": "a one-page concept showing the book presentation and newsletter signup flow together",
+    "book trailer and launch visuals": "a creative direction covering the trailer concept and matching launch visuals",
+}
+WARM_GENERIC_PERSONALIZATION_PHRASES = (
+    "online presentation",
+    "online presence",
+    "stronger presentation",
+    "project deserves stronger presentation",
+    "opportunity to improve",
+    "noticed an opportunity",
+    "reviewed your website",
+    "reviewed your profile",
+    "could benefit from",
+    "looking to hire",
+    "looking for a developer",
+    "seeking a developer",
+)
 WARM_INTERNAL_PERSONALIZATION_LABEL_RE = re.compile(
     r"\b(?:need[\W_]*signal|outreach[\W_]*angle|explicit[\W_]*need|"
     r"verified[\W_]*presentation[\W_]*gap|lead[\W_]*score|scraper[\W_]*notes?|"
@@ -1698,14 +1726,39 @@ def normalize_warm_book_title_or_project(value: object) -> str:
     return text
 
 
-def format_warm_recommended_service_phrase(value: object) -> str:
+def format_warm_recommended_service_phrase(value: object) -> str | None:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if not text:
-        return WARM_RECOMMENDED_SERVICE_FALLBACK
-    return WARM_RECOMMENDED_SERVICE_PHRASES.get(
-        text.casefold(),
-        WARM_RECOMMENDED_SERVICE_FALLBACK,
-    )
+    return WARM_RECOMMENDED_SERVICE_PHRASES.get(text.casefold()) if text else None
+
+
+def warm_preview_offer(value: object) -> str | None:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return WARM_PREVIEW_OFFERS.get(text.casefold()) if text else None
+
+
+def warm_email_copy_rejection_reason(
+    *,
+    book_title_or_project: object,
+    recommended_service: object,
+    personalization_line: object,
+) -> str:
+    raw_personalization = str(personalization_line or "")
+    normalized_personalization = normalize_warm_personalization_line(raw_personalization)
+    if not raw_personalization.strip() or not normalized_personalization:
+        return "missing_personalization"
+    folded_personalization = normalized_personalization.casefold()
+    if any(phrase in folded_personalization for phrase in WARM_GENERIC_PERSONALIZATION_PHRASES):
+        return "generic_personalization"
+    raw_service = re.sub(r"\s+", " ", str(recommended_service or "")).strip()
+    if not raw_service:
+        return "missing_recommended_service"
+    if format_warm_recommended_service_phrase(raw_service) is None:
+        return "unmapped_recommended_service"
+    if not warm_preview_offer(raw_service):
+        return "missing_preview_offer"
+    if not normalize_warm_book_title_or_project(book_title_or_project):
+        return "missing_project"
+    return ""
 
 
 def render_warm_email_copy(
@@ -1715,27 +1768,35 @@ def render_warm_email_copy(
     recommended_service: object,
     personalization_line: object = "",
 ) -> dict[str, object]:
+    rejection_reason = warm_email_copy_rejection_reason(
+        book_title_or_project=book_title_or_project,
+        recommended_service=recommended_service,
+        personalization_line=personalization_line,
+    )
+    if rejection_reason:
+        raise ValueError(rejection_reason)
     safe_first_name = re.sub(r"\s+", " ", str(first_name or "")).strip() or "there"
     book_title = normalize_warm_book_title_or_project(book_title_or_project)
-    subject = (
-        PITCH_WARM_SUBJECT.format(BookTitleOrProject=book_title)
-        if book_title
-        else PITCH_WARM_SUBJECT_FALLBACK
-    )
+    subject = PITCH_WARM_SUBJECT.format(BookTitleOrProject=book_title)
     safe_personalization = normalize_warm_personalization_line(personalization_line)
+    recommended_service_phrase = format_warm_recommended_service_phrase(recommended_service)
+    preview_offer = warm_preview_offer(recommended_service)
+    assert recommended_service_phrase is not None
+    assert preview_offer is not None
     merge_values = {
         "FirstName": safe_first_name,
-        "BookTitleOrProject": book_title or "your author platform",
-        "RecommendedServicePhrase": format_warm_recommended_service_phrase(recommended_service),
+        "BookTitleOrProject": book_title,
+        "RecommendedServicePhrase": recommended_service_phrase,
+        "PreviewOffer": preview_offer,
         "PersonalizationLine": safe_personalization,
     }
-    body_template = PITCH_WARM_BODY_PERSONALIZED if safe_personalization else PITCH_WARM_BODY_FALLBACK
     return {
         "subject": subject,
-        "body": body_template.format(**merge_values),
-        "template": "personalized" if safe_personalization else "fallback",
+        "body": PITCH_WARM_BODY_PERSONALIZED.format(**merge_values),
+        "template": "personalized",
         "personalization_line": safe_personalization,
         "recommended_service_phrase": merge_values["RecommendedServicePhrase"],
+        "preview_offer": preview_offer,
     }
 
 
@@ -1785,7 +1846,7 @@ PITCHES = {
     "pitch_warm": {
         "subject": PITCH_WARM_SUBJECT,
         "subject_fallback": PITCH_WARM_SUBJECT_FALLBACK,
-        "body": PITCH_WARM_BODY_FALLBACK,
+        "body": PITCH_WARM_BODY_PERSONALIZED,
         "body_personalized": PITCH_WARM_BODY_PERSONALIZED,
         "pre_rendered_message": True,
     },
@@ -3427,6 +3488,7 @@ WARM_QUEUE_REQUIRED_HEADERS = {
     "NeedSignal",
     "RecommendedService",
     "OutreachAngle",
+    "PersonalizationLine",
     "SourceURL",
     "ContactPath",
     "ResearchStatus",
@@ -3443,6 +3505,7 @@ WARM_CONFIRMATION_PROTECTED_FIELDS = (
     "NeedSignal",
     "RecommendedService",
     "OutreachAngle",
+    "PersonalizationLine",
     "SourceURL",
     "ContactPath",
     "ResearchStatus",
@@ -3509,6 +3572,33 @@ def validate_warm_confirmed_queue(
                     "valid": False,
                     "reason": "warm_queue_missing_required_field",
                     "message": f"Warm queue row is missing required field {field}.",
+                    "email": _masked_warm_email(email),
+                    "field": field,
+                }
+        try:
+            expected_copy = render_warm_email_copy(
+                first_name=payload["FirstName"],
+                book_title_or_project=payload["BookTitleOrProject"],
+                recommended_service=payload["RecommendedService"],
+                personalization_line=payload["PersonalizationLine"],
+            )
+        except ValueError as exc:
+            return {
+                "valid": False,
+                "reason": str(exc),
+                "message": "Warm queue row does not satisfy the personalized-copy safety gate.",
+                "email": _masked_warm_email(email),
+            }
+        for field, expected in (
+            ("EmailSubject", expected_copy["subject"]),
+            ("EmailBody", expected_copy["body"]),
+        ):
+            normalized_expected = str(expected).replace("\r\n", "\n").replace("\r", "\n").strip()
+            if payload[field] != normalized_expected:
+                return {
+                    "valid": False,
+                    "reason": "warm_queue_copy_mismatch",
+                    "message": f"Warm queue row does not match canonical field {field}.",
                     "email": _masked_warm_email(email),
                     "field": field,
                 }

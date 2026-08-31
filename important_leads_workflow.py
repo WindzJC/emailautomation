@@ -42,6 +42,7 @@ from send_shard import (
     normalize_warm_personalization_line,
     normalized_warm_confirmation_payload,
     render_warm_email_copy,
+    warm_email_copy_rejection_reason,
     validate_warm_confirmed_queue,
     warm_confirmation_payload_hash,
 )
@@ -218,6 +219,7 @@ WARM_EMAIL_PREVIEW_HEADERS = (
     "NeedSignal",
     "RecommendedService",
     "OutreachAngle",
+    "PersonalizationLine",
     "SourceURL",
     "ContactPath",
     "ResearchStatus",
@@ -231,6 +233,21 @@ WARM_PRIVATE_JC_QUEUE_HEADERS = (
 )
 WARM_PRIVATE_JC_QUEUE_PATH = settings.SHARDS_DIR / "recipients_private_jc_warm.csv"
 WARM_PRIVATE_JC_CONFIRMATION_PATH = settings.STATE_DIR / "warm_private_jc_confirmation.json"
+
+WARM_NEED_SIGNAL_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:explicit[\W_]*need|verified[\W_]*presentation[\W_]*gap|"
+    r"need[\W_]*signal|research[\W_]*signal)\s*(?:[:\-\u2013\u2014]+\s*)+)+",
+    flags=re.IGNORECASE,
+)
+WARM_AMBIGUOUS_NEED_SIGNALS = {
+    "n/a",
+    "na",
+    "none",
+    "not specified",
+    "synthetic need",
+    "tbd",
+    "unknown",
+}
 
 COMMON_DOMAIN_FIXES = {
     "gamil.com": "gmail.com",
@@ -1041,6 +1058,160 @@ def _blocked_email_set(
     }
 
 
+def build_warm_personalization_line(need_signal: object) -> str:
+    """Build conservative recipient-facing copy from an attributable research signal."""
+    signal = _strip_cell(need_signal).strip(" \t\r\n\"'\u201c\u201d")
+
+    # Strip the exact Warm research classification wrappers first.
+    #
+    # Examples:
+    # Explicit Need — Direct Service Need: ...
+    # Explicit Need — Provider Search: ...
+    #
+    # Do this before the older generic prefix normalization so category
+    # labels can never leak into recipient-facing copy.
+    signal = re.sub(
+        r"^\s*Explicit\s+Need\s*"
+        r"(?:(?:[-\u2013\u2014]|:)\s*)?"
+        r"(?:(?:Direct\s+Service\s+Need|Provider\s+Search)\s*:\s*)?",
+        "",
+        signal,
+        flags=re.IGNORECASE,
+    )
+
+    # Preserve compatibility with existing known research-prefix handling.
+    signal = WARM_NEED_SIGNAL_PREFIX_RE.sub("", signal)
+
+    # Also accept a category prefix without the outer "Explicit Need" label.
+    signal = re.sub(
+        r"^(?:Direct\s+Service\s+Need|Provider\s+Search)\s*:\s*",
+        "",
+        signal,
+        flags=re.IGNORECASE,
+    ).strip(" \t\r\n\"'\u201c\u201d")
+
+    if not signal or signal.casefold() in WARM_AMBIGUOUS_NEED_SIGNALS:
+        return ""
+
+    if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\u2019.-]*", signal)) < 4:
+        return ""
+
+    attributed = re.match(
+        r"^(?:the\s+)?author\s+"
+        r"(?:said|shared|noted|wrote|mentioned)\s+"
+        r"(?:that\s+)?(.+)$",
+        signal,
+        flags=re.IGNORECASE,
+    )
+
+    clause = attributed.group(1).strip() if attributed else signal
+
+    transformations = (
+        # Explicit provider-search forms.
+        (
+            r"^(?:the\s+)?author\s+is\s+looking\s+for\s+",
+            "I saw your note about looking for ",
+        ),
+        (
+            r"^(?:they\s+are|i\s+am|i['\u2019]m)\s+looking\s+for\s+",
+            "I saw your note about looking for ",
+        ),
+        (
+            r"^looking\s+for\s+",
+            "I saw your note about looking for ",
+        ),
+
+        # Direct inability / service-need forms.
+        (
+            r"^(?:they|i)\s+cannot\s+",
+            "I saw your note about being unable to ",
+        ),
+        (
+            r"^(?:they|i)\s+need\s+help\s+",
+            "I saw your note about needing help ",
+        ),
+        (
+            r"^(?:they|i)\s+need\s+",
+            "I saw your note about needing ",
+        ),
+        (
+            r"^(?:the\s+)?author\s+cannot\s+",
+            "I saw your note about being unable to ",
+        ),
+        (
+            r"^(?:the\s+)?author\s+needs\s+help\s+",
+            "I saw your note about needing help ",
+        ),
+        (
+            r"^(?:the\s+)?author\s+needs\s+",
+            "I saw your note about needing ",
+        ),
+        (
+            r"^cannot\s+",
+            "I saw your note about being unable to ",
+        ),
+        (
+            r"^needs?\s+help\s+",
+            "I saw your note about needing help ",
+        ),
+        (
+            r"^needs?\s+",
+            "I saw your note about needing ",
+        ),
+
+        # Possessive factual forms.
+        (
+            r"^(?:their|my)\s+",
+            "I saw your note that your ",
+        ),
+        (
+            r"^your\s+",
+            "I saw your note about your ",
+        ),
+    )
+
+    personalization = ""
+
+    for pattern, prefix in transformations:
+        if re.match(pattern, clause, flags=re.IGNORECASE):
+            personalization = (
+                prefix
+                + re.sub(
+                    pattern,
+                    "",
+                    clause,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+            )
+            break
+
+    if not personalization:
+        if re.match(r"^they\s+", clause, flags=re.IGNORECASE):
+            clause = re.sub(
+                r"^they\s+",
+                "you ",
+                clause,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+        personalization = (
+            "I saw your note that "
+            + clause[:1].lower()
+            + clause[1:]
+        )
+
+    # Convert third-person author possessives to recipient-facing possessives.
+    personalization = re.sub(
+        r"\btheir\b",
+        "your",
+        personalization,
+        flags=re.IGNORECASE,
+    )
+
+    return normalize_warm_personalization_line(personalization)
+
 def _warm_research_rows(path: Path) -> tuple[List[Dict[str, str]], int]:
     text = _normalize_csv_text(path.read_text(encoding="utf-8-sig", errors="replace"))
     if not text.strip():
@@ -1184,14 +1355,26 @@ def check_warm_research_leads(
                 elif email in already_contacted:
                     code, reason = "ALREADY_CONTACTED", "Email appears in authoritative Private JC, SendGrid, or contact history."
                 else:
-                    personalization_line = normalize_warm_personalization_line(
-                        row.get("PersonalizationLine", "")
-                    )
+                    personalization_line = _strip_cell(row.get("PersonalizationLine", ""))
                     if not personalization_line:
-                        code = "PERSONALIZATION_REVIEW_REQUIRED"
-                        reason = "Manual review required: missing or invalid PersonalizationLine."
+                        personalization_line = build_warm_personalization_line(row.get("NeedSignal", ""))
+                        if not personalization_line:
+                            code = "unable_to_build_personalization"
+                            reason = "Warm copy safety gate could not build safe personalization from NeedSignal."
+                    row["PersonalizationLine"] = personalization_line
+                if not code:
+                    copy_rejection = warm_email_copy_rejection_reason(
+                        book_title_or_project=row.get("BookTitleOrProject", ""),
+                        recommended_service=row.get("RecommendedService", ""),
+                        personalization_line=personalization_line,
+                    )
+                    if copy_rejection:
+                        code = copy_rejection
+                        reason = f"Warm copy safety gate rejected this row: {copy_rejection}."
                     else:
-                        row["PersonalizationLine"] = personalization_line
+                        row["PersonalizationLine"] = normalize_warm_personalization_line(
+                            row.get("PersonalizationLine", "")
+                        )
         elif not code and contact_method == "contact_form":
             contact_key = _strip_cell(row.get("ContactPath", "")).lower().rstrip("/")
             if contact_key in seen_contact_paths:
@@ -1296,6 +1479,7 @@ def generate_warm_email_preview(
             "NeedSignal": _strip_cell(row.get("NeedSignal", "")),
             "RecommendedService": _strip_cell(row.get("RecommendedService", "")),
             "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")),
+            "PersonalizationLine": str(rendered_copy["personalization_line"]),
             "SourceURL": _strip_cell(row.get("SourceURL", "")),
             "ContactPath": _strip_cell(row.get("ContactPath", "")),
             "ResearchStatus": _strip_cell(row.get("ResearchStatus", "")) or "New",
@@ -1487,6 +1671,22 @@ def confirm_warm_private_jc_preview(
             continue
         if re.search(r"{[A-Za-z][A-Za-z0-9_]*}", _strip_cell(row.get("EmailSubject", "")) + _strip_cell(row.get("EmailBody", ""))):
             violations["unresolved_preview_placeholder"] += 1
+            continue
+        try:
+            rendered_copy = render_warm_email_copy(
+                first_name=_trimmed_first_name(row.get("AuthorName", "")) or "there",
+                book_title_or_project=row.get("BookTitleOrProject", ""),
+                recommended_service=row.get("RecommendedService", ""),
+                personalization_line=row.get("PersonalizationLine", ""),
+            )
+        except ValueError as exc:
+            violations[str(exc)] += 1
+            continue
+        if (
+            _strip_cell(row.get("EmailSubject", "")) != str(rendered_copy["subject"]).strip()
+            or _strip_cell(row.get("EmailBody", "")) != str(rendered_copy["body"]).strip()
+        ):
+            violations["preview_copy_mismatch"] += 1
             continue
         if email in blocked:
             violations["suppressed_or_bad_outcome"] += 1
