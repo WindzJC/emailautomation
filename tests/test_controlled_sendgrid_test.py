@@ -253,7 +253,7 @@ def test_client_cannot_supply_recipient_or_from_values() -> None:
 
 
 def test_corrected_recipient_version_preserves_historical_alison_and_allows_one_new_attempt(tmp_path: Path) -> None:
-    assert controlled.CONTROLLED_TEST_VERSION == "sendgrid-identity-validation-corrected-recipient-v2"
+    assert controlled.CONTROLLED_TEST_VERSION == "sendgrid-identity-validation-corrected-recipient-v3"
     assert controlled.CONTROLLED_TEST_VERSION != PREVIOUS_TEST_VERSION
 
     state = tmp_path / "controlled.sqlite3"
