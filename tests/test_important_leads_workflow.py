@@ -81,6 +81,7 @@ def build_dynamic_dispatch_fixture(
     *,
     preview_name: str,
     lead_count: int = 8,
+    campaign_type: str = "cold",
 ) -> dict[str, object]:
     master_path = tmp / "leads.csv"
     triaged_keep_path = tmp / "leads_triaged_keep.csv"
@@ -131,6 +132,7 @@ def build_dynamic_dispatch_fixture(
             suppressed_path=tmp / "suppressed.csv",
             unsubscribed_path=tmp / "unsubscribed.csv",
             lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+            campaign_type=campaign_type,
             preview_dir=preview_dir,
         )
     return {
@@ -142,6 +144,120 @@ def build_dynamic_dispatch_fixture(
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def test_full_recontact_uses_only_currently_enabled_sendgrid_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = build_dynamic_dispatch_fixture(
+                Path(tmpdir),
+                preview_name="recontact_preview",
+                campaign_type="recontact_cold",
+            )
+            preview = fixture["preview"]
+            expected_profiles = [
+                name
+                for name in send_shard.PRODUCTION_SENDGRID_PROFILES
+                if bool(send_shard.PROFILES[name].get("send_enabled", True))
+            ]
+            self.assertEqual(expected_profiles, preview["sendgrid_profile_order"])
+            self.assertNotIn("sendgrid_annette", preview["sendgrid_profile_order"])
+            self.assertNotIn("sendgrid_fiorela", preview["sendgrid_profile_order"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(8, preview["rows_to_add_sendgrid"])
+            self.assertTrue(preview["full_recontact_sendgrid_only"])
+
+    def test_full_recontact_fails_when_no_sendgrid_lane_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            write_csv(master_path, ["Email", "FirstName"], [{"Email": "one@example.com", "FirstName": "One"}])
+            write_csv(triaged_keep_path, ["Email", "FirstName", "Status"], [{"Email": "one@example.com", "FirstName": "One", "Status": "KEEP"}])
+            jc_queue = tmp / "recipients_private_jc.csv"
+            jc_log = tmp / "private_jc_log.csv"
+            sg_log = tmp / "sendgrid_log.csv"
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            write_csv(jc_log, ["Email", "Status"], [])
+            write_csv(sg_log, ["Email", "Status"], [])
+
+            with patch.object(
+                important_leads_workflow,
+                "_dispatch_profile_paths",
+                return_value=(jc_queue, [], jc_log, [sg_log]),
+            ):
+                with self.assertRaisesRegex(ValueError, "at least one enabled production SendGrid profile"):
+                    preview_dispatch_master_leads(
+                        master_path=master_path,
+                        triaged_keep_path=triaged_keep_path,
+                        rejected_path=tmp / "leads_rejected.csv",
+                        dispatch_source_mode="triaged_keep",
+                        campaign_type="recontact_cold",
+                        preview_dir=tmp / "previews",
+                    )
+
+    def test_safer_recontact_keeps_balanced_private_and_sendgrid_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            safer_path = tmp / "leads_safer_recontact_not_seen_active_history.csv"
+            rows = [
+                {"Email": "one@example.com", "FirstName": "One", "AuthorEmail": "one@example.com", "AuthorName": "One", "BookTitle": "One Book", "Status": "KEEP"},
+                {"Email": "two@example.com", "FirstName": "Two", "AuthorEmail": "two@example.com", "AuthorName": "Two", "BookTitle": "Two Book", "Status": "KEEP"},
+            ]
+            write_csv(master_path, ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"], [{key: row[key] for key in ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle"]} for row in rows])
+            write_csv(safer_path, ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "Status"], rows)
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv", *[tmp / f"sendgrid_{index}_log.csv" for index in range(1, 6)]]
+            for path in [jc_queue, *sg_queues]:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=safer_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                campaign_type="recontact_cold",
+                preview_dir=tmp / "previews",
+            )
+            self.assertEqual("safer_recontact", preview["dispatch_source_kind"])
+            self.assertFalse(preview["full_recontact_sendgrid_only"])
+            self.assertEqual(1, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertNotIn("campaign_id", preview)
+            self.assertNotIn("campaign_id", preview["queue_headers"])
+            self.assertNotIn("dispatch_source_kind", preview["queue_headers"])
+            for planned_rows in preview["plan_rows_by_queue"].values():
+                for row in planned_rows:
+                    self.assertNotIn("dispatch_source_kind", row)
+                    self.assertNotIn("campaign_id", row)
+
+            confirmed = confirm_dispatch_preview(
+                preview["preview_id"],
+                require_stopped=False,
+                backup_root=tmp / "backups",
+                report_dir=tmp / "reports",
+                persist_state=False,
+                preview_dir=tmp / "previews",
+            )
+            self.assertEqual("", confirmed["campaign_id"])
+            final_rows = [row for path in [jc_queue, *sg_queues] for row in read_csv_rows(path)]
+            self.assertEqual(2, len(final_rows))
+            self.assertTrue(all("campaign_id" not in row for row in final_rows))
+            self.assertTrue(all("dispatch_source_kind" not in row for row in final_rows))
+            self.assertEqual(
+                {"recontact_cold"},
+                {send_shard.campaign_id_for_row(row, "recontact_cold") for row in final_rows},
+            )
+
     def test_warm_research_check_splits_email_contact_form_and_rejected_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -2533,10 +2649,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(2, preview["invalid_malformed_skipped"])
             self.assertEqual(1, preview["exclusion_reason_counts"]["missing_required_dispatch_field"])
             self.assertEqual(9, preview["bad_suppressed_removed_count"])
-            self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
             self.assertEqual(2, preview["total_rows_would_write"])
             self.assertIn("campaign_type", preview["queue_headers"])
+            self.assertIn("campaign_id", preview["queue_headers"])
+            self.assertEqual(preview["preview_id"], preview["campaign_id"])
+            self.assertEqual([], preview["plan_rows_by_queue"]["private_jc"])
             planned_emails = [
                 row["Email"]
                 for rows_by_queue in preview["plan_rows_by_queue"].values()
@@ -2549,6 +2668,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             for rows_by_queue in preview["plan_rows_by_queue"].values():
                 for row in rows_by_queue:
                     self.assertEqual("recontact_cold", row["campaign_type"])
+                    self.assertEqual(preview["campaign_id"], row["campaign_id"])
 
     def test_recontact_preview_counts_history_without_confirmation_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2634,7 +2754,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=preview_dir,
             )
             self.assertEqual("recontact_cold", confirmed["campaign_type"])
+            self.assertEqual(preview["campaign_id"], confirmed["campaign_id"])
             self.assertEqual(3, confirmed["total_rows_would_write"])
+            self.assertEqual(0, confirmed["rows_written_private_jc"])
+            final_rows = [row for path in sg_queues for row in read_csv_rows(path)]
+            self.assertEqual(3, len(final_rows))
+            self.assertEqual({preview["campaign_id"]}, {row["campaign_id"] for row in final_rows})
 
     def test_safer_recontact_pool_writes_separate_csv_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2791,8 +2916,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 campaign_type="recontact_cold",
                 preview_dir=preview_dir,
             )
-            self.assertEqual(1, preview["rows_to_add_sendgrid"])
-            self.assertEqual(1, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
 
             report = confirm_dispatch_preview(
                 preview["preview_id"],
@@ -2806,16 +2931,20 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("completed", report["status"])
             self.assertEqual("recontact_cold", report["campaign_type"])
             self.assertEqual(0, report["confirm_filtered_sendgrid_already_sent"])
-            self.assertEqual(1, sum(report["rows_written_sendgrid_shards"].values()))
-            self.assertEqual(1, report["rows_written_private_jc"])
+            self.assertEqual(2, sum(report["rows_written_sendgrid_shards"].values()))
+            self.assertEqual(0, report["rows_written_private_jc"])
             self.assertEqual(2, report["total_rows_would_write"])
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
-                self.assertEqual(["alpha@example.com"], [row["Email"] for row in csv.DictReader(handle)])
+                self.assertEqual([], [row["Email"] for row in csv.DictReader(handle)])
             sendgrid_emails: list[str] = []
+            sendgrid_campaign_ids: set[str] = set()
             for path in sg_queues:
                 with path.open(newline="", encoding="utf-8-sig") as handle:
-                    sendgrid_emails.extend(row["Email"] for row in csv.DictReader(handle))
-            self.assertEqual(["beta@example.com"], sendgrid_emails)
+                    rows_from_queue = list(csv.DictReader(handle))
+                    sendgrid_emails.extend(row["Email"] for row in rows_from_queue)
+                    sendgrid_campaign_ids.update(row["campaign_id"] for row in rows_from_queue)
+            self.assertEqual(["alpha@example.com", "beta@example.com"], sendgrid_emails)
+            self.assertEqual({preview["campaign_id"]}, sendgrid_campaign_ids)
 
     def test_confirm_dispatch_preview_failure_preserves_staged_files_and_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4112,13 +4241,18 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             _validate_dispatch_preview_contract(preview)
 
     def test_recontact_preview_contract_allows_sent_log_overlap(self) -> None:
+        campaign_id = "dispatch_preview_20260831_120000_deadbeef"
         preview = {
             "campaign_type": "recontact_cold",
             "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_kind": "triaged_keep",
+            "full_recontact_sendgrid_only": True,
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
-            "preview_id": "preview_overlap",
-            "private_jc_planned_count": 1,
-            "sendgrid_planned_count": 1,
+            "preview_id": campaign_id,
+            "campaign_id": campaign_id,
+            "queue_headers": ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "campaign_type", "dispatch_source_kind", "campaign_id"],
+            "private_jc_planned_count": 0,
+            "sendgrid_planned_count": 2,
             "total_planned_unique_count": 2,
             "total_rows_would_write": 2,
             "duplicate_planned_email_count": 0,
@@ -4126,8 +4260,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "exclusion_reason_counts": {},
             "planned_authoritative_sent_overlap_count": 1,
             "plan_rows_by_queue": {
-                "private_jc": [planned_row("overlap-private@example.com", "OverlapPrivate")],
-                "sendgrid_1": [planned_row("overlap-sg@example.com", "OverlapSg")],
+                "private_jc": [],
+                "sendgrid_1": [
+                    {**planned_row("overlap-private@example.com", "OverlapPrivate"), "campaign_type": "recontact_cold", "dispatch_source_kind": "full_recontact", "campaign_id": campaign_id},
+                    {**planned_row("overlap-sg@example.com", "OverlapSg"), "campaign_type": "recontact_cold", "dispatch_source_kind": "full_recontact", "campaign_id": campaign_id},
+                ],
                 "sendgrid_2": [],
                 "sendgrid_3": [],
                 "sendgrid_4": [],
@@ -4136,6 +4273,52 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
         }
 
         _validate_dispatch_preview_contract(preview)
+
+    def test_recontact_preview_contract_rejects_missing_or_mixed_campaign_ids(self) -> None:
+        campaign_id = "dispatch_preview_20260831_120000_deadbeef"
+        base_preview = {
+            "campaign_type": "recontact_cold",
+            "dispatch_source_mode": "triaged_keep",
+            "dispatch_source_kind": "triaged_keep",
+            "full_recontact_sendgrid_only": True,
+            "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
+            "preview_id": campaign_id,
+            "campaign_id": campaign_id,
+            "queue_headers": ["Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle", "campaign_type", "dispatch_source_kind", "campaign_id"],
+            "private_jc_planned_count": 0,
+            "sendgrid_planned_count": 1,
+            "total_planned_unique_count": 1,
+            "total_rows_would_write": 1,
+            "duplicate_planned_email_count": 0,
+            "skipped_rows": 0,
+            "exclusion_reason_counts": {},
+            "plan_rows_by_queue": {
+                "private_jc": [],
+                "sendgrid_1": [{**planned_row("one@example.com"), "campaign_type": "recontact_cold", "dispatch_source_kind": "full_recontact", "campaign_id": campaign_id}],
+            },
+        }
+
+        missing = json.loads(json.dumps(base_preview))
+        missing["plan_rows_by_queue"]["sendgrid_1"][0].pop("campaign_id")
+        with self.assertRaisesRegex(RuntimeError, "missing campaign ID"):
+            _validate_dispatch_preview_contract(missing)
+
+        malformed = json.loads(json.dumps(base_preview))
+        malformed["preview_id"] = "recontact_cold"
+        malformed["campaign_id"] = "recontact_cold"
+        malformed["plan_rows_by_queue"]["sendgrid_1"][0]["campaign_id"] = "recontact_cold"
+        with self.assertRaisesRegex(RuntimeError, "malformed campaign ID"):
+            _validate_dispatch_preview_contract(malformed)
+
+        mixed = json.loads(json.dumps(base_preview))
+        mixed["plan_rows_by_queue"]["sendgrid_1"][0]["campaign_id"] = "dispatch_preview_20260831_120001_feedface"
+        with self.assertRaisesRegex(RuntimeError, "mixed or mismatched campaign ID"):
+            _validate_dispatch_preview_contract(mixed)
+
+        corrupted_kind = json.loads(json.dumps(base_preview))
+        corrupted_kind["dispatch_source_kind"] = "safer_recontact"
+        with self.assertRaisesRegex(RuntimeError, "source classification does not match"):
+            _validate_dispatch_preview_contract(corrupted_kind)
 
     def test_fresh_cold_preview_contract_blocks_skipped_math_mismatch(self) -> None:
         preview = {

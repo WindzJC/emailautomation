@@ -31,7 +31,6 @@ from send_shard import (
     PITCH_JC_BODY,
     _parse_ts_safe,
     _resolve_shard_path,
-    append_sendgrid_unsubscribe_footer,
     build_sendgrid_astra_custom_args,
     build_sendgrid_list_unsubscribe_header,
     build_message,
@@ -232,6 +231,14 @@ class SendShardTests(unittest.TestCase):
                 "alisonaguiar@bnmarketing.info",
                 "sig_sendgrid_alison_bnmarketing.png",
             ),
+            "sendgrid_annette": (
+                "annettedanek-akey@bnmarketing.info",
+                "sig_sendgrid_annette_bnmarketing.png",
+            ),
+            "sendgrid_fiorela": (
+                "fiorelladelima@bnmarketing.info",
+                "sig_sendgrid_fiorela_bnmarketing.png",
+            ),
             "sendgrid_jodi": (
                 "jodihorowitz@bnmarketing.info",
                 "sig_sendgrid_jodi_bnmarketing.png",
@@ -252,6 +259,12 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(from_email, profile["from_email"])
             self.assertEqual(signature_name, send_shard.SIGNATURE_BY_FROM[from_email])
             self.assertTrue((Path(send_shard.__file__).resolve().parent / signature_name).is_file())
+
+        signature_names = [signature_name for _from_email, signature_name in expected_signatures.values()]
+        self.assertEqual(len(signature_names), len(set(signature_names)))
+        self.assertNotIn("LOGO ASTRA bg.png", signature_names)
+        self.assertFalse(send_shard.PROFILES["sendgrid_annette"]["send_enabled"])
+        self.assertFalse(send_shard.PROFILES["sendgrid_fiorela"]["send_enabled"])
 
         self.assertFalse(
             any(
@@ -986,6 +999,115 @@ class SendShardTests(unittest.TestCase):
                     db_path=db_path,
                 )[0]
             )
+
+    def test_recontact_campaign_id_requires_explicit_single_server_generation(self) -> None:
+        campaign_id = "dispatch_preview_20260831_120000_deadbeef"
+        row = {
+            "Email": "author@example.test",
+            "campaign_type": "recontact_cold",
+            "dispatch_source_kind": "full_recontact",
+            "campaign_id": campaign_id,
+        }
+        self.assertEqual(campaign_id, send_shard.campaign_id_for_row(row, "recontact_cold"))
+        self.assertEqual(
+            campaign_id,
+            send_shard.validate_recontact_queue_campaign_identity([row], "recontact_cold"),
+        )
+        with self.assertRaisesRegex(ValueError, "missing its explicit campaign ID"):
+            send_shard.campaign_id_for_row(
+                {"Email": "author@example.test", "campaign_type": "recontact_cold", "dispatch_source_kind": "full_recontact"},
+                "recontact_cold",
+            )
+        with self.assertRaisesRegex(ValueError, "mixed campaign IDs"):
+            send_shard.validate_recontact_queue_campaign_identity(
+                [
+                    row,
+                    {
+                        **row,
+                        "Email": "other@example.test",
+                        "campaign_id": "dispatch_preview_20260831_120001_feedface",
+                    },
+                ],
+                "recontact_cold",
+            )
+
+        safer_row = {
+            "Email": "safer@example.test",
+            "campaign_type": "recontact_cold",
+            "dispatch_source_kind": "safer_recontact",
+        }
+        self.assertEqual(
+            "recontact_cold",
+            send_shard.campaign_id_for_row(safer_row, "recontact_cold"),
+        )
+        self.assertEqual(
+            "",
+            send_shard.validate_recontact_queue_campaign_identity([safer_row], "recontact_cold"),
+        )
+        self.assertEqual(
+            "recontact_cold",
+            send_shard.campaign_id_for_row(
+                {"Email": "legacy-safer@example.test", "campaign_type": "recontact_cold"},
+                "recontact_cold",
+            ),
+        )
+
+    def test_five_sendgrid_profiles_racing_same_campaign_have_one_reservation_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "send_idempotency.sqlite3"
+            profiles = [
+                "sendgrid_alison",
+                "sendgrid_annette",
+                "sendgrid_fiorela",
+                "sendgrid_jodi",
+                "sendgrid_jordan",
+            ]
+            barrier = threading.Barrier(len(profiles))
+            results: list[tuple[str, bool, str]] = []
+            result_lock = threading.Lock()
+
+            def reserve(profile: str) -> None:
+                barrier.wait(timeout=2)
+                reserved, reason = send_shard.reserve_send_idempotency(
+                    campaign_id="dispatch_preview_20260831_120000_deadbeef",
+                    provider="sendgrid",
+                    email="shared@example.test",
+                    profile=profile,
+                    queue_file=f"{profile}.csv",
+                    db_path=db_path,
+                )
+                with result_lock:
+                    results.append((profile, reserved, reason))
+
+            threads = [threading.Thread(target=reserve, args=(profile,)) for profile in profiles]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(1, sum(1 for _profile, reserved, _reason in results if reserved))
+            self.assertEqual(4, sum(1 for _profile, reserved, _reason in results if not reserved))
+            self.assertEqual(
+                {"duplicate_reservation"},
+                {reason for _profile, reserved, reason in results if not reserved},
+            )
+
+            future_reserved, future_reason = send_shard.reserve_send_idempotency(
+                campaign_id="dispatch_preview_20260831_130000_cafebabe",
+                provider="sendgrid",
+                email="shared@example.test",
+                profile="sendgrid_alison",
+                queue_file="sendgrid_alison.csv",
+                db_path=db_path,
+            )
+            self.assertTrue(future_reserved)
+            self.assertEqual("reserved", future_reason)
+            with send_shard._send_idempotency_connection(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT campaign_id, status FROM send_reservations ORDER BY campaign_id"
+                ).fetchall()
+            self.assertEqual(2, len(rows))
 
     def test_send_idempotency_busy_retry_succeeds_after_writer_releases_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3650,18 +3772,111 @@ class SendShardTests(unittest.TestCase):
                 )
             )
 
-    def test_sendgrid_unsubscribe_footer_uses_mailto_list_link(self) -> None:
-        text_content, html_content = append_sendgrid_unsubscribe_footer(
-            "Hello there",
-            "<html><body>Hello there</body></html>",
-            "unsubscribe@barnesnoblemarketing.com",
-        )
+    def test_real_sendgrid_payload_preserves_reply_footer_signature_and_mailto_header(self) -> None:
+        captured: dict[str, object] = {}
 
-        self.assertIn("Unsubscribe from this list", text_content)
-        self.assertIn("<%asm_group_unsubscribe_raw_url%>", text_content)
-        self.assertIn("Unsubscribe from this list", html_content)
-        self.assertIn("<%asm_group_unsubscribe_raw_url%>", html_content)
-        self.assertNotIn("asm_group_unsubscribe_url", html_content)
+        class Value:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+        class Mail:
+            def __init__(self, *, from_email, to_emails, subject):
+                self.contents: list[Value] = []
+                self.headers: list[Value] = []
+
+            def add_content(self, content):
+                self.contents.append(content)
+
+            def add_header(self, header):
+                self.headers.append(header)
+
+            def add_custom_arg(self, _custom_arg):
+                return None
+
+            def add_attachment(self, _attachment):
+                captured["attachment"] = _attachment
+
+        class SendGridAPIClient:
+            def __init__(self, _api_key):
+                pass
+
+            def send(self, mail):
+                captured["mail"] = mail
+                return type("Response", (), {"status_code": 202, "headers": {}, "body": b""})()
+
+        helpers = type(
+            "Helpers",
+            (),
+            {
+                "Mail": Mail,
+                "Content": Value,
+                "ReplyTo": Value,
+                "Attachment": Value,
+                "FileContent": Value,
+                "FileName": Value,
+                "FileType": Value,
+                "Disposition": Value,
+                "ContentId": Value,
+                "Header": Value,
+                "Asm": Value,
+                "CustomArg": Value,
+            },
+        )
+        sendgrid = type("SendGrid", (), {"SendGridAPIClient": SendGridAPIClient})
+
+        def fake_import(name: str):
+            return sendgrid if name == "sendgrid" else helpers
+
+        signature_file = Path(send_shard.__file__).resolve().parent / "sig_sendgrid_alison_bnmarketing.png"
+        subject_text, body_text, html_body, cid = send_shard.render_message_parts(
+            "Example Author",
+            "Example Book",
+            send_shard.SENDGRID_BOOK_TITLE_SUBJECT,
+            send_shard.PITCH_1_5_BODY,
+            "unsubscribe@barnesnoblemarketing.com",
+            signature_file,
+            merge_fields={"FirstName": "Reader", "AuthorName": "Example Author", "BookTitle": "Example Book"},
+        )
+        with patch("importlib.import_module", side_effect=fake_import):
+            send_shard.send_via_sendgrid(
+                "synthetic-key",
+                "sender@bnmarketing.info",
+                "reader@example.test",
+                "sender@bnmarketing.info",
+                subject_text,
+                body_text,
+                html_body,
+                "unsubscribe@barnesnoblemarketing.com",
+                signature_file,
+                cid,
+                363425,
+                [363425],
+            )
+
+        mail = captured["mail"]
+        contents = {content.args[0]: content.args[1] for content in mail.contents}
+        self.assertNotIn("Unsubscribe from this list", contents["text/plain"])
+        self.assertNotIn("<%asm_group_unsubscribe_raw_url%>", contents["text/plain"])
+        self.assertNotIn("Unsubscribe from this list", contents["text/html"])
+        self.assertNotIn("<%asm_group_unsubscribe_raw_url%>", contents["text/html"])
+        self.assertEqual(1, contents["text/plain"].count(send_shard.REPLY_UNSUBSCRIBE_FOOTER))
+        self.assertEqual(1, contents["text/html"].count(send_shard.REPLY_UNSUBSCRIBE_FOOTER))
+        self.assertIn("attachment", captured)
+        self.assertEqual(cid, send_shard.SIGNATURE_CID)
+        attachment = captured["attachment"]
+        self.assertEqual(signature_file.name, attachment.args[1].args[0])
+        self.assertEqual(cid, attachment.args[4].args[0])
+
+        without_reply_footer = contents["text/plain"].replace(send_shard.REPLY_UNSUBSCRIBE_FOOTER, "")
+        with self.assertRaises(AssertionError):
+            self.assertEqual(1, without_reply_footer.count(send_shard.REPLY_UNSUBSCRIBE_FOOTER))
+
+        headers = {header.args[0]: header.args[1] for header in mail.headers}
+        self.assertIn(
+            "<mailto:unsubscribe@barnesnoblemarketing.com?subject=unsubscribe&body=unsubscribe>",
+            headers["List-Unsubscribe"],
+        )
 
     def test_sendgrid_list_unsubscribe_header_includes_mailto_and_https(self) -> None:
         header = build_sendgrid_list_unsubscribe_header("unsubscribe@barnesnoblemarketing.com")

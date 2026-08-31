@@ -148,6 +148,9 @@ def _short_sha256(*parts: object, length: int = 24) -> str:
 CAMPAIGN_TYPE_COLD = "cold"
 CAMPAIGN_TYPE_RECONTACT_COLD = "recontact_cold"
 CAMPAIGN_TYPE_WARM_PRIVATE_JC = "warm_private_jc"
+RECONTACT_CAMPAIGN_ID_RE = re.compile(r"dispatch_preview_\d{8}_\d{6}_[0-9a-f]{8}")
+RECONTACT_SOURCE_KIND_FULL = "full_recontact"
+RECONTACT_SOURCE_KIND_SAFER = "safer_recontact"
 BAD_SENDGRID_EVENT_STATUSES = {
     "blocked",
     "bounce",
@@ -1220,10 +1223,69 @@ def release_send_idempotency_reservation(
 
 
 def campaign_id_for_row(row: dict[str, str], fallback_campaign_type: str) -> str:
-    return (
-        get_row_value_ci(row, ["campaign_id", "CampaignId", "CampaignID", "dispatch_id", "DispatchId", "preview_id", "PreviewId"])
-        or normalize_campaign_type(get_row_value_ci(row, ["campaign_type", "CampaignType", "campaign type"]) or fallback_campaign_type)
+    explicit_campaign_id = get_row_value_ci(row, ["campaign_id", "CampaignId", "CampaignID"])
+    row_campaign_type = normalize_campaign_type(
+        get_row_value_ci(row, ["campaign_type", "CampaignType", "campaign type"])
+        or fallback_campaign_type
     )
+    if is_recontact_cold_campaign(row_campaign_type):
+        source_kind = get_row_value_ci(
+            row,
+            ["dispatch_source_kind", "DispatchSourceKind", "dispatch source kind"],
+        ).strip().lower()
+        if source_kind == RECONTACT_SOURCE_KIND_FULL:
+            if not explicit_campaign_id:
+                raise ValueError("Full Recontact queue row is missing its explicit campaign ID.")
+            if not RECONTACT_CAMPAIGN_ID_RE.fullmatch(explicit_campaign_id):
+                raise ValueError("Full Recontact queue row has a malformed campaign ID.")
+            return explicit_campaign_id
+        if source_kind not in {"", RECONTACT_SOURCE_KIND_SAFER}:
+            raise ValueError("Recontact queue row has an invalid dispatch source kind.")
+        # Safer Recontact and legacy recontact queues retain the pre-existing
+        # static campaign fallback. An explicit legacy ID, if present, is also
+        # preserved exactly as before.
+        return explicit_campaign_id or row_campaign_type
+    return (
+        explicit_campaign_id
+        or get_row_value_ci(row, ["dispatch_id", "DispatchId", "preview_id", "PreviewId"])
+        or row_campaign_type
+    )
+
+
+def validate_recontact_queue_campaign_identity(
+    rows: Sequence[dict[str, str]],
+    fallback_campaign_type: str,
+) -> str:
+    campaign_ids: set[str] = set()
+    source_kinds: set[str] = set()
+    for row in rows:
+        row_campaign_type = normalize_campaign_type(
+            get_row_value_ci(row, ["campaign_type", "CampaignType", "campaign type"])
+            or fallback_campaign_type
+        )
+        if not is_recontact_cold_campaign(row_campaign_type):
+            continue
+        source_kind = get_row_value_ci(
+            row,
+            ["dispatch_source_kind", "DispatchSourceKind", "dispatch source kind"],
+        ).strip().lower()
+        source_kind_field_present = any(
+            str(key or "").strip().lower().replace("_", " ") == "dispatch source kind"
+            for key in row
+        )
+        if source_kind_field_present and not source_kind:
+            raise ValueError("Recontact queue row is missing its dispatch source kind.")
+        if source_kind not in {"", RECONTACT_SOURCE_KIND_FULL, RECONTACT_SOURCE_KIND_SAFER}:
+            raise ValueError("Recontact queue row has an invalid dispatch source kind.")
+        if source_kind:
+            source_kinds.add(source_kind)
+        if source_kind == RECONTACT_SOURCE_KIND_FULL:
+            campaign_ids.add(campaign_id_for_row(row, row_campaign_type))
+    if len(source_kinds) > 1:
+        raise ValueError("Recontact queue contains mixed dispatch source kinds.")
+    if len(campaign_ids) > 1:
+        raise ValueError("Full Recontact queue contains mixed campaign IDs.")
+    return next(iter(campaign_ids), "")
 
 
 def claim_queue_row_with_receipt(
@@ -1310,11 +1372,8 @@ SIGNATURE_BY_FROM: dict[str, str] = {
     "jordankendrick@bnmarketing.info": "sig_sendgrid_jordan_bnmarketing.png",
     "jodihorowitz@bnmarketing.info": "sig_sendgrid_jodi_bnmarketing.png",
     "alisonaguiar@bnmarketing.info": "sig_sendgrid_alison_bnmarketing.png",
-
-    # TODO: Add Annette's bnmarketing.info signature mapping and
-    #       dedicated SendGrid signature here when that account is ready.
-    # TODO: Add Fiorella's bnmarketing.info signature mapping and
-    #       dedicated SendGrid signature here when that account is ready.
+    "annettedanek-akey@bnmarketing.info": "sig_sendgrid_annette_bnmarketing.png",
+    "fiorelladelima@bnmarketing.info": "sig_sendgrid_fiorela_bnmarketing.png",
 
     # --- Astra / JC identities ---
     "jc@astraproductions.co": "LOGO ASTRA bg.png",
@@ -1341,6 +1400,8 @@ BOOK_TITLE_GENERIC_OPENING = (
 )
 
 BOOK_TITLE_MISSING_FALLBACK_OPENING = BOOK_TITLE_GENERIC_OPENING
+
+REPLY_UNSUBSCRIBE_FOOTER = 'P.S. If you would rather not hear from me again, reply “unsubscribe.”'
 
 PITCH_1_5_BODY = f"""Hi {{FirstName}},
 
@@ -1372,6 +1433,8 @@ Best regards,
 {{SIGIMG}}
 
 If this is not a fit, no problem — just reply “no” and we will not follow up.
+
+{REPLY_UNSUBSCRIBE_FOOTER}
 """
 
 PITCH_1_5_GENERIC_BODY = f"""Hi {{FirstName}},
@@ -1404,6 +1467,8 @@ Best regards,
 {{SIGIMG}}
 
 If this is not a fit, no problem — just reply “no” and we will not follow up.
+
+{REPLY_UNSUBSCRIBE_FOOTER}
 """
 
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
@@ -3556,31 +3621,6 @@ def build_pre_rendered_message(
     return msg, subject_text, body_text, html_body, None
 
 
-def append_sendgrid_unsubscribe_footer(
-    text_content: str,
-    html_content: str,
-    unsub_email: str,
-) -> tuple[str, str]:
-    label = "Unsubscribe from this list"
-    href = SENDGRID_ASM_GROUP_UNSUB_RAW_URL
-    if not href:
-        return text_content, html_content
-
-    if label.lower() not in text_content.lower():
-        text_content = (text_content.rstrip() + f"\n\nP.S. {label}: {href}").strip()
-
-    if label.lower() not in html_content.lower():
-        footer_html = f'<br><br><a href="{href}">{html.escape(label)}</a>'
-        if "</body>" in html_content:
-            html_content = html_content.replace("</body>", f"{footer_html}</body>", 1)
-        elif "</html>" in html_content:
-            html_content = html_content.replace("</html>", f"{footer_html}</html>", 1)
-        else:
-            html_content = f"{html_content}{footer_html}"
-
-    return text_content, html_content
-
-
 def send_via_sendgrid(
     api_key: str,
     from_email: str,
@@ -3622,7 +3662,6 @@ def send_via_sendgrid(
 
     text_content = body_text.replace("{SIGIMG}", "").strip()
     html_content = html_body
-    text_content, html_content = append_sendgrid_unsubscribe_footer(text_content, html_content, unsub_email)
 
     mail = Mail(from_email=from_email, to_emails=to_email, subject=subject_text)
     mail.add_content(Content("text/plain", text_content))
@@ -4814,6 +4853,12 @@ def main() -> int | None:
         my_domains = {DEFAULT_DOMAIN}
 
     rows = read_rows(csv_path)
+    try:
+        validate_recontact_queue_campaign_identity(rows, args.campaign_type)
+    except ValueError as exc:
+        emit_worker_event("ERROR", "invalid_recontact_campaign_identity", csv_path=str(csv_path))
+        print(f"REFUSED: {exc}")
+        return 1 if args.preflight else None
     recipient_allowlist = parse_email_list(
         str(getattr(args, "recipient_allowlist", "") or "")
     )

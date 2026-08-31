@@ -29,6 +29,9 @@ from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
     PRODUCTION_SENDGRID_PROFILES,
+    RECONTACT_CAMPAIGN_ID_RE,
+    RECONTACT_SOURCE_KIND_FULL,
+    RECONTACT_SOURCE_KIND_SAFER,
     ROLE_LOCALPART_BLOCKLIST,
     is_recontact_cold_campaign,
     is_role_recipient,
@@ -2684,6 +2687,89 @@ def _missing_required_dispatch_fields(row: Dict[str, object]) -> List[str]:
     ]
 
 
+def _validate_recontact_source_classification(preview: Dict[str, object]) -> bool:
+    source_path = Path(str(preview.get("dispatch_source_path") or ""))
+    safer_recontact = is_safer_recontact_source_path(source_path)
+    expected_source_kind = (
+        RECONTACT_SOURCE_KIND_SAFER
+        if safer_recontact
+        else _normalize_dispatch_source_mode(preview.get("dispatch_source_mode"))
+    )
+    actual_source_kind = str(preview.get("dispatch_source_kind") or "").strip()
+    if actual_source_kind != expected_source_kind:
+        raise RuntimeError(
+            "Recontact preview source classification does not match its server-classified source path. "
+            "Re-run Preview Dispatch."
+        )
+    expected_sendgrid_only = not safer_recontact
+    if bool(preview.get("full_recontact_sendgrid_only")) != expected_sendgrid_only:
+        raise RuntimeError("Recontact preview routing classification is inconsistent. Re-run Preview Dispatch.")
+    return safer_recontact
+
+
+def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
+    if not is_recontact_cold_campaign(preview.get("campaign_type")):
+        return
+
+    safer_recontact = _validate_recontact_source_classification(preview)
+    campaign_id = str(preview.get("campaign_id") or "").strip()
+    preview_id = str(preview.get("preview_id") or "").strip()
+    queue_headers = [str(value or "").strip() for value in (preview.get("queue_headers") or [])]
+    plan_rows_by_queue = preview.get("plan_rows_by_queue")
+    if not isinstance(plan_rows_by_queue, dict):
+        raise RuntimeError("Recontact preview is missing planned queue rows. Re-run Preview Dispatch.")
+
+    if safer_recontact:
+        if campaign_id or "campaign_id" in queue_headers:
+            raise RuntimeError("Safer Recontact preview must retain its existing campaign identity semantics.")
+        for queue_name, planned_rows in plan_rows_by_queue.items():
+            if not isinstance(planned_rows, list):
+                raise RuntimeError(f"Safer Recontact preview has invalid planned rows for {queue_name}. Re-run Preview Dispatch.")
+            for index, row in enumerate(planned_rows, start=1):
+                if not isinstance(row, dict):
+                    raise RuntimeError(f"Safer Recontact preview has invalid planned row {index} in {queue_name}. Re-run Preview Dispatch.")
+                if str(row.get("campaign_id") or "").strip() or str(row.get("dispatch_source_kind") or "").strip() == RECONTACT_SOURCE_KIND_FULL:
+                    raise RuntimeError("Safer Recontact preview contains Full Recontact campaign metadata.")
+        return
+
+    if "dispatch_source_kind" not in queue_headers:
+        raise RuntimeError("Full Recontact preview is missing the dispatch source kind queue field. Re-run Preview Dispatch.")
+    for queue_name, planned_rows in plan_rows_by_queue.items():
+        if not isinstance(planned_rows, list):
+            raise RuntimeError(f"Full Recontact preview has invalid planned rows for {queue_name}. Re-run Preview Dispatch.")
+        for index, row in enumerate(planned_rows, start=1):
+            if not isinstance(row, dict):
+                raise RuntimeError(f"Full Recontact preview has invalid planned row {index} in {queue_name}. Re-run Preview Dispatch.")
+            if str(row.get("dispatch_source_kind") or "").strip() != RECONTACT_SOURCE_KIND_FULL:
+                raise RuntimeError(
+                    f"Full Recontact preview planned row {index} in {queue_name} has a missing or mismatched dispatch source kind. "
+                    "Re-run Preview Dispatch."
+                )
+
+    if not campaign_id:
+        raise RuntimeError("Full Recontact preview is missing its campaign ID. Re-run Preview Dispatch.")
+    if not RECONTACT_CAMPAIGN_ID_RE.fullmatch(campaign_id):
+        raise RuntimeError("Full Recontact preview has a malformed campaign ID. Re-run Preview Dispatch.")
+    if campaign_id != preview_id:
+        raise RuntimeError("Full Recontact preview campaign ID does not match its server preview ID. Re-run Preview Dispatch.")
+
+    if "campaign_id" not in queue_headers:
+        raise RuntimeError("Full Recontact preview is missing the campaign ID queue field. Re-run Preview Dispatch.")
+
+    private_rows = plan_rows_by_queue.get("private_jc") or []
+    if private_rows:
+        raise RuntimeError("Full Recontact preview must route recipients only to enabled SendGrid profiles.")
+    for queue_name, planned_rows in plan_rows_by_queue.items():
+        for index, row in enumerate(planned_rows, start=1):
+            row_campaign_id = str(row.get("campaign_id") or "").strip()
+            if row_campaign_id != campaign_id:
+                reason = "missing" if not row_campaign_id else "mixed or mismatched"
+                raise RuntimeError(
+                    f"Full Recontact preview planned row {index} in {queue_name} has a {reason} campaign ID. "
+                    "Re-run Preview Dispatch."
+                )
+
+
 def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
     required_text_fields = {
         "campaign_type": "campaign type",
@@ -2699,6 +2785,7 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
     if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) != str(preview.get("dispatch_source_mode") or "").strip().lower():
         raise RuntimeError("Dispatch preview has an invalid dispatch source mode. Re-run Preview Dispatch.")
     campaign_type = normalize_campaign_type(preview.get("campaign_type"))
+    _validate_recontact_campaign_identity(preview)
     if campaign_type == CAMPAIGN_TYPE_COLD:
         if int(preview.get("history_policy_version") or 0) != DISPATCH_HISTORY_POLICY_VERSION:
             raise RuntimeError(
@@ -3173,6 +3260,10 @@ def _build_dispatch_plan(
         if not source_rows:
             raise ValueError(f"{source_state['dispatch_source_name']} dispatch source has no eligible rows: {source_path}")
         safer_recontact_source = is_safer_recontact_source_path(source_path)
+        full_recontact_sendgrid_only = (
+            is_recontact_cold_campaign(normalized_campaign_type)
+            and not safer_recontact_source
+        )
         dispatch_source_name = "Safer Recontact Pool" if safer_recontact_source else str(source_state["dispatch_source_name"])
         dispatch_source_detail = "Safer recontact CSV — not found in active history" if safer_recontact_source else dispatch_source_name
 
@@ -3317,6 +3408,8 @@ def _build_dispatch_plan(
             normalized = {header: _strip_cell(row.get(header, "")) for header in source_headers}
             normalized["Email"] = email
             normalized["campaign_type"] = normalized_campaign_type
+            if full_recontact_sendgrid_only:
+                normalized["dispatch_source_kind"] = RECONTACT_SOURCE_KIND_FULL
             missing_required = _missing_required_dispatch_fields(normalized)
             if missing_required:
                 invalid_malformed_skipped += 1
@@ -3330,9 +3423,9 @@ def _build_dispatch_plan(
             if email in (jc_sent | sendgrid_sent) and allow_previously_sent:
                 previously_sent_allowed += 1
 
-            # Preserve the existing balanced allocation across both delivery
-            # lanes. Historical success is evidence only and does not choose or
-            # block the lane for this distinct campaign.
+            # Full Recontact is the SendGrid resend lane. Fresh Cold and the
+            # separately generated Safer Recontact pool retain their existing
+            # balanced routing behavior.
             prefer_sendgrid = added_astra > added_sendgrid
 
             def add_to_astra() -> bool:
@@ -3380,7 +3473,9 @@ def _build_dispatch_plan(
                 )
                 return True
 
-            if prefer_sendgrid:
+            if full_recontact_sendgrid_only:
+                added_to_sendgrid = add_to_sendgrid()
+            elif prefer_sendgrid:
                 added_to_sendgrid = add_to_sendgrid()
                 if not added_to_sendgrid:
                     added_to_astra = add_to_astra()
@@ -3429,6 +3524,8 @@ def _build_dispatch_plan(
             queue_headers.append("BookTitle")
         if normalized_campaign_type != CAMPAIGN_TYPE_COLD and "campaign_type" not in queue_headers:
             queue_headers.append("campaign_type")
+        if full_recontact_sendgrid_only and "dispatch_source_kind" not in queue_headers:
+            queue_headers.append("dispatch_source_kind")
 
         plan_rows_by_path: Dict[Path, List[Dict[str, str]]] = {path: [] for path in queue_paths}
         plan_rows_by_path[jc_path] = [_master_row_to_queue_row(row, queue_headers) for row in added_astra_rows]
@@ -3512,6 +3609,7 @@ def _build_dispatch_plan(
             "allow_previously_contacted": allow_previously_sent,
             "dispatch_source_mode": source_mode,
             "dispatch_source_kind": "safer_recontact" if safer_recontact_source else source_mode,
+            "full_recontact_sendgrid_only": full_recontact_sendgrid_only,
             "dispatch_source_name": dispatch_source_name,
             "dispatch_source_detail": dispatch_source_detail,
             "dispatch_source_path": str(source_path),
@@ -3678,6 +3776,45 @@ def preview_dispatch_master_leads(
         campaign_type=campaign_type,
     )
     preview_id = f"dispatch_preview_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    if (
+        is_recontact_cold_campaign(plan.get("campaign_type"))
+        and not _validate_recontact_source_classification(plan)
+    ):
+        campaign_id = preview_id
+        queue_headers = [str(value or "").strip() for value in (plan.get("queue_headers") or []) if str(value or "").strip()]
+        if "campaign_id" not in queue_headers:
+            queue_headers.append("campaign_id")
+        plan["queue_headers"] = queue_headers
+        plan["campaign_id"] = campaign_id
+        plan_rows_by_queue = plan.get("plan_rows_by_queue")
+        if not isinstance(plan_rows_by_queue, dict):
+            raise RuntimeError("Full Recontact plan is missing queue rows.")
+        for planned_rows in plan_rows_by_queue.values():
+            if not isinstance(planned_rows, list):
+                raise RuntimeError("Full Recontact plan has invalid queue rows.")
+            for row in planned_rows:
+                if not isinstance(row, dict):
+                    raise RuntimeError("Full Recontact plan has an invalid queue row.")
+                row["campaign_id"] = campaign_id
+        plan_dispatch_events_by_queue = plan.get("plan_dispatch_events_by_queue")
+        if isinstance(plan_dispatch_events_by_queue, dict):
+            for events in plan_dispatch_events_by_queue.values():
+                if not isinstance(events, list):
+                    continue
+                for event in events:
+                    if isinstance(event, dict):
+                        event["campaign_id"] = campaign_id
+        queue_key_order = [str(value) for value in (plan.get("queue_key_order") or [])]
+        plan["assigned_preview_rows"] = _preview_rows(
+            [
+                row
+                for queue_key in queue_key_order
+                for row in (plan_rows_by_queue.get(queue_key) or [])
+                if isinstance(row, dict)
+            ],
+            queue_headers,
+            DISPATCH_PREVIEW_ROWS,
+        )
     preview = {
         **plan,
         "preview_id": preview_id,
@@ -3944,6 +4081,7 @@ def _confirm_dispatch_preview_impl(
     effective_preview = dict(preview)
     effective_preview["plan_rows_by_queue"] = effective_plan_rows_by_queue
     effective_preview["plan_dispatch_events_by_queue"] = effective_dispatch_events_by_queue
+    _validate_recontact_campaign_identity(effective_preview)
 
     planned_temp_dir = Path(tempfile.mkdtemp(prefix="dispatch_queue_plan_"))
     _temporary_dirs.append(planned_temp_dir)
@@ -4053,6 +4191,7 @@ def _confirm_dispatch_preview_impl(
         "completed_at": completed_at_utc,
         "generated_at_utc": completed_at_utc,
         "preview_id": preview_id,
+        "campaign_id": str(preview.get("campaign_id") or ""),
         "preview_path": str(preview.get("preview_path") or _dispatch_preview_path(preview_id, preview_dir)),
         "campaign_type": campaign_type,
         "allow_previously_sent": allow_previously_sent,
@@ -4169,7 +4308,12 @@ def _confirm_dispatch_preview_impl(
         triaged_reject_path=manifest_reject_path,
         intended_source_path=manifest_source_path,
         state_dir=report_dir,
-        extra={"source": "confirm_dispatch", "run_id": run_id, "preview_id": preview_id},
+        extra={
+            "source": "confirm_dispatch",
+            "run_id": run_id,
+            "preview_id": preview_id,
+            "campaign_id": str(preview.get("campaign_id") or ""),
+        },
     )
     report["active_campaign_manifest_path"] = str(active_manifest_path)
     if int(report.get("total_rows_would_write") or 0) == 0:

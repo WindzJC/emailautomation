@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import os
 import grp
@@ -18,7 +17,11 @@ from runtime_authority import AuthorityError, assert_send_authorized
 from send_shard import (
     GlobalBlockRefresher,
     PROFILES,
+    REPLY_UNSUBSCRIBE_FOOTER,
+    SIGNATURE_BY_FROM,
+    SIGNATURE_CID,
     norm_email,
+    render_message_parts,
     send_via_sendgrid,
 )
 from sendgrid_launch_auth import resolve_sendgrid_api_key
@@ -106,6 +109,34 @@ def _validate_profile(profile: str, profiles: Mapping[str, Mapping[str, object]]
     if not bool(config.get("send_enabled", True)):
         raise ControlledSendGridTestRefused("sender_disabled", "Selected sender is not enabled for production sending.")
     return config, actual_from
+
+
+def _resolve_controlled_signature(profile: str, from_email: str) -> Path:
+    expected_name = f"sig_{profile}_bnmarketing.png"
+    configured_name = str(SIGNATURE_BY_FROM.get(from_email) or "").strip()
+    if configured_name != expected_name:
+        raise ControlledSendGridTestRefused(
+            "signature_identity_mismatch",
+            "Selected sender signature does not match the approved controlled-test identity.",
+        )
+    signature_path = settings.app_path(configured_name)
+    try:
+        signature_path.resolve().relative_to(settings.APP_ROOT.resolve())
+        metadata = signature_path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError("signature is not a regular file")
+        signature_bytes = signature_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise ControlledSendGridTestRefused(
+            "signature_unavailable",
+            "Selected sender signature is unavailable or unreadable.",
+        ) from exc
+    if not signature_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ControlledSendGridTestRefused(
+            "signature_invalid",
+            "Selected sender signature is not a valid PNG asset.",
+        )
+    return signature_path
 
 
 def _profile_env_path(profile: str, profile_env_dir: Path) -> Path:
@@ -320,6 +351,7 @@ def execute_controlled_sendgrid_test(
                     "profile_commit_pin_mismatch",
                     "Selected sender protected expected-commit pin does not match active authority.",
                 )
+        signature_file = _resolve_controlled_signature(profile, from_email)
         fingerprint = _payload_fingerprint(profile, from_email)
         reserved_at = _reserve(Path(state_path), profile, from_email, fingerprint)
         reserved = True
@@ -342,19 +374,34 @@ def execute_controlled_sendgrid_test(
         subject = "Astra controlled SendGrid identity validation"
         body = (
             f"This is the one controlled Astra SendGrid identity validation for {CONTROLLED_TEST_LABELS[profile]}.\n\n"
-            "No production recipient queue was used."
+            "No production recipient queue was used.\n\n"
+            "{SIGIMG}\n\n"
+            f"{REPLY_UNSUBSCRIBE_FOOTER}"
         )
+        subject_text, body_text, html_body, cid = render_message_parts(
+            "",
+            "",
+            subject,
+            body,
+            from_email,
+            signature_file,
+        )
+        if cid != SIGNATURE_CID or f"cid:{SIGNATURE_CID}" not in html_body:
+            raise ControlledSendGridTestRefused(
+                "signature_render_failed",
+                "Selected sender signature could not be embedded in the controlled-test message.",
+            )
         result = provider_send(
             api_key,
             from_email,
             CONTROLLED_TEST_RECIPIENT,
             from_email,
-            subject,
-            body,
-            f"<p>{html.escape(body).replace(chr(10), '<br>')}</p>",
+            subject_text,
+            body_text,
+            html_body,
             from_email,
-            None,
-            None,
+            signature_file,
+            cid,
             int(config.get("unsubscribe_group_id") or 0),
             [int(value) for value in (config.get("groups_to_display") or [])],
             custom_args={

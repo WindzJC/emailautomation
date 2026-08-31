@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import sqlite3
 import threading
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import controlled_sendgrid_test as controlled
+import send_shard
 from runtime_authority import AuthorityError
 
 
@@ -80,6 +82,15 @@ def test_each_approved_identity_uses_exact_profile_credential_and_envelope(tmp_p
     args, kwargs = calls[0]
     assert args[0] == key
     assert args[1:4] == (from_email, controlled.CONTROLLED_TEST_RECIPIENT, from_email)
+    expected_signature = Path(controlled.__file__).resolve().parent / f"sig_{profile}_bnmarketing.png"
+    assert args[8] == expected_signature
+    assert args[9] == controlled.SIGNATURE_CID
+    assert "{SIGIMG}" in args[5]
+    assert f"cid:{controlled.SIGNATURE_CID}" in args[6]
+    assert args[5].count(controlled.REPLY_UNSUBSCRIBE_FOOTER) == 1
+    assert args[6].count(controlled.REPLY_UNSUBSCRIBE_FOOTER) == 1
+    assert "Unsubscribe from this list" not in args[5]
+    assert "Unsubscribe from this list" not in args[6]
     assert kwargs["custom_args"]["astra_profile"] == profile
     assert result["sender"] == label
     assert result["recipient"] == controlled.CONTROLLED_TEST_RECIPIENT
@@ -87,6 +98,139 @@ def test_each_approved_identity_uses_exact_profile_credential_and_envelope(tmp_p
     assert result["production_queue_used"] is False
     assert result["auto_started"] is False
     assert key not in repr(result)
+
+
+def test_controlled_signature_mappings_are_exact_and_distinct() -> None:
+    resolved = {
+        profile: controlled._resolve_controlled_signature(profile, from_email)
+        for profile, (_label, from_email, _key) in APPROVED.items()
+    }
+    assert {path.name for path in resolved.values()} == {
+        "sig_sendgrid_alison_bnmarketing.png",
+        "sig_sendgrid_jodi_bnmarketing.png",
+        "sig_sendgrid_jordan_bnmarketing.png",
+    }
+    assert len(set(resolved.values())) == len(APPROVED)
+
+
+@pytest.mark.parametrize("profile", list(APPROVED))
+def test_controlled_real_provider_payload_contains_footer_header_and_signature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Value:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class Mail:
+        def __init__(self, *, from_email, to_emails, subject):
+            self.contents: list[Value] = []
+            self.headers: list[Value] = []
+            self.attachments: list[Value] = []
+
+        def add_content(self, content):
+            self.contents.append(content)
+
+        def add_header(self, header):
+            self.headers.append(header)
+
+        def add_custom_arg(self, _custom_arg):
+            return None
+
+        def add_attachment(self, attachment):
+            self.attachments.append(attachment)
+
+    class SendGridAPIClient:
+        def __init__(self, _api_key):
+            pass
+
+        def send(self, mail):
+            captured["mail"] = mail
+            return type("Response", (), {"status_code": 202, "headers": {}, "body": b""})()
+
+    helpers = type(
+        "Helpers",
+        (),
+        {
+            "Mail": Mail,
+            "Content": Value,
+            "ReplyTo": Value,
+            "Attachment": Value,
+            "FileContent": Value,
+            "FileName": Value,
+            "FileType": Value,
+            "Disposition": Value,
+            "ContentId": Value,
+            "Header": Value,
+            "Asm": Value,
+            "CustomArg": Value,
+        },
+    )
+    sendgrid = type("SendGrid", (), {"SendGridAPIClient": SendGridAPIClient})
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: sendgrid if name == "sendgrid" else helpers,
+    )
+
+    _execute(tmp_path, profile, send_shard.send_via_sendgrid)
+
+    mail = captured["mail"]
+    contents = {content.args[0]: content.args[1] for content in mail.contents}
+    assert contents["text/plain"].count(send_shard.REPLY_UNSUBSCRIBE_FOOTER) == 1
+    assert contents["text/html"].count(send_shard.REPLY_UNSUBSCRIBE_FOOTER) == 1
+    assert "Unsubscribe from this list" not in contents["text/plain"]
+    assert "Unsubscribe from this list" not in contents["text/html"]
+    headers = {header.args[0]: header.args[1] for header in mail.headers}
+    assert "<mailto:" in headers["List-Unsubscribe"]
+    assert len(mail.attachments) == 1
+    attachment = mail.attachments[0]
+    assert attachment.args[1].args[0] == f"sig_{profile}_bnmarketing.png"
+    assert attachment.args[4].args[0] == send_shard.SIGNATURE_CID
+
+
+@pytest.mark.parametrize("failure", ["missing_mapping", "wrong_mapping", "missing_file"])
+def test_controlled_signature_failure_is_refused_before_reservation_or_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    profile = "sendgrid_alison"
+    from_email = APPROVED[profile][1]
+    if failure == "missing_mapping":
+        monkeypatch.delitem(controlled.SIGNATURE_BY_FROM, from_email)
+        expected_code = "signature_identity_mismatch"
+    elif failure == "wrong_mapping":
+        monkeypatch.setitem(
+            controlled.SIGNATURE_BY_FROM,
+            from_email,
+            "sig_sendgrid_jodi_bnmarketing.png",
+        )
+        expected_code = "signature_identity_mismatch"
+    else:
+        monkeypatch.setattr(controlled.settings, "APP_ROOT", tmp_path / "missing-assets")
+        expected_code = "signature_unavailable"
+
+    calls: list[object] = []
+    state_path = tmp_path / "controlled.sqlite3"
+    with pytest.raises(controlled.ControlledSendGridTestRefused) as refusal:
+        controlled.execute_controlled_sendgrid_test(
+            profile,
+            profile_env_dir=_env_dir(tmp_path),
+            state_path=state_path,
+            profiles=_profiles(),
+            authority_check=lambda: {"status": "active", "authorized_machine": "cloud"},
+            conflict_check=lambda: [],
+            block_classification=lambda: "",
+            provider_send=lambda *args, **kwargs: calls.append(args),
+        )
+    assert refusal.value.code == expected_code
+    assert calls == []
+    assert not state_path.exists()
 
 
 @pytest.mark.parametrize(
