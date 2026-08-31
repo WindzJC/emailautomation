@@ -270,6 +270,7 @@ DISPATCH_PREVIEW_ROWS = 8
 AUTHOR_NAME_COUNT_HEADERS = ("AuthorName", "FullName", "FirstName")
 BOOK_TITLE_COUNT_HEADERS = ("BookTitle", "Title", "booktitle", "book_title")
 REQUIRED_DISPATCH_FIELDS = ("Email", "FirstName", "AuthorEmail", "AuthorName", "BookTitle")
+FULL_RECONTACT_REQUIRED_DISPATCH_FIELDS = ("Email", "AuthorName")
 AUDIT_OUTPUT_HEADERS = ("normalized_email", "correction_applied", "correction_reason")
 ROLE_ACCOUNT_BLOCKLIST = set(ROLE_LOCALPART_BLOCKLIST) | {
     "admin",
@@ -2679,10 +2680,19 @@ def load_dispatch_preview(preview_id: str, preview_dir: Path = DISPATCH_PREVIEWS
     return raw
 
 
-def _missing_required_dispatch_fields(row: Dict[str, object]) -> List[str]:
+def _missing_required_dispatch_fields(
+    row: Dict[str, object],
+    *,
+    full_recontact: bool = False,
+) -> List[str]:
+    required_fields = (
+        FULL_RECONTACT_REQUIRED_DISPATCH_FIELDS
+        if full_recontact
+        else REQUIRED_DISPATCH_FIELDS
+    )
     return [
         field
-        for field in REQUIRED_DISPATCH_FIELDS
+        for field in required_fields
         if not str(row.get(field) or "").strip()
     ]
 
@@ -2822,7 +2832,12 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
         for index, row in enumerate(planned_rows, start=1):
             if not isinstance(row, dict):
                 raise RuntimeError(f"Dispatch preview has invalid planned row {index} in {queue_name}. Re-run Preview Dispatch.")
-            missing_required = _missing_required_dispatch_fields(row)
+            missing_required = _missing_required_dispatch_fields(
+                row,
+                full_recontact=bool(
+                    preview.get("full_recontact_sendgrid_only")
+                ),
+            )
             if missing_required:
                 missing_label = ", ".join(missing_required)
                 raise RuntimeError(
@@ -3410,7 +3425,10 @@ def _build_dispatch_plan(
             normalized["campaign_type"] = normalized_campaign_type
             if full_recontact_sendgrid_only:
                 normalized["dispatch_source_kind"] = RECONTACT_SOURCE_KIND_FULL
-            missing_required = _missing_required_dispatch_fields(normalized)
+            missing_required = _missing_required_dispatch_fields(
+                normalized,
+                full_recontact=full_recontact_sendgrid_only,
+            )
             if missing_required:
                 invalid_malformed_skipped += 1
                 exclusion_reason_counts["missing_required_dispatch_field"] += 1
