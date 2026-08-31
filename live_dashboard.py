@@ -6456,6 +6456,246 @@ def get_active_check_important_leads_job() -> JSONResponse:
     )
 
 
+@app.get("/api/leads/check-important/warm-review")
+def get_warm_research_review() -> JSONResponse:
+    """Return current Warm Outreach rows for dashboard review only.
+
+    This endpoint does not create queues, confirm outreach, start workers,
+    or render email copy independently. It reads the current validated
+    artifacts and, when present, merges the already-generated canonical
+    Warm email preview back into the review rows.
+    """
+    import csv as _csv
+    import send_shard as _send_shard
+
+    job = _current_completed_warm_check_job()
+
+    if not job:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "warm_check_required",
+                "message": "Run a Warm Outreach upload check first.",
+            },
+            status_code=404,
+        )
+
+    email_ready_path = Path(str(job.get("output_path") or ""))
+
+    if (
+        not email_ready_path.exists()
+        or email_ready_path.name != "warm_email_ready.csv"
+    ):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "warm_email_ready_missing",
+                "message": (
+                    "The current warm_email_ready.csv is unavailable. "
+                    "Re-run the Warm Outreach upload check."
+                ),
+            },
+            status_code=409,
+        )
+
+    rejected_value = str(job.get("rejected_path") or "").strip()
+    rejected_path = (
+        Path(rejected_value)
+        if rejected_value
+        else email_ready_path.with_name("warm_rejected.csv")
+    )
+
+    if not rejected_path.exists():
+        rejected_path = email_ready_path.with_name("warm_rejected.csv")
+
+    contact_form_path = email_ready_path.with_name(
+        "warm_contact_form_review.csv"
+    )
+
+    preview_value = str(
+        job.get("warm_email_preview_path") or ""
+    ).strip()
+
+    preview_path = (
+        Path(preview_value)
+        if preview_value
+        else email_ready_path.with_name("warm_email_preview.csv")
+    )
+
+    def _read_rows(path: Path) -> list[dict]:
+        if not path.exists() or not path.is_file():
+            return []
+
+        with path.open(
+            "r",
+            encoding="utf-8-sig",
+            newline="",
+        ) as handle:
+            return [
+                dict(row)
+                for row in _csv.DictReader(handle)
+            ]
+
+    def _clean(value: object) -> str:
+        return str(value or "").strip()
+
+    def _identity(row: dict) -> tuple[str, str]:
+        recipient = (
+            _clean(row.get("AuthorEmail"))
+            or _clean(row.get("ContactPath"))
+        ).casefold()
+
+        project = _clean(
+            row.get("BookTitleOrProject")
+        ).casefold()
+
+        return recipient, project
+
+    ready_rows = _read_rows(email_ready_path)
+    rejected_rows = _read_rows(rejected_path)
+    contact_rows = _read_rows(contact_form_path)
+
+    preview_rows = (
+        _read_rows(preview_path)
+        if preview_path.exists()
+        and preview_path.name == "warm_email_preview.csv"
+        else []
+    )
+
+    preview_by_identity = {
+        _identity(row): row
+        for row in preview_rows
+    }
+
+    def _base_review_row(row: dict) -> dict:
+        return {
+            "AuthorName": _clean(row.get("AuthorName")),
+            "AuthorEmail": _clean(row.get("AuthorEmail")),
+            "BookTitleOrProject": _clean(
+                row.get("BookTitleOrProject")
+            ),
+            "NeedSignal": _clean(row.get("NeedSignal")),
+            "SourcePlatform": _clean(
+                row.get("SourcePlatform")
+            ),
+            "SourceURL": _clean(row.get("SourceURL")),
+            "ContactPath": _clean(row.get("ContactPath")),
+            "RecommendedService": _clean(
+                row.get("RecommendedService")
+            ),
+            "OutreachAngle": _clean(
+                row.get("OutreachAngle")
+            ),
+            "PersonalizationLine": _clean(
+                row.get("PersonalizationLine")
+            ),
+        }
+
+    review_rows: list[dict] = []
+
+    for row in ready_rows:
+        item = _base_review_row(row)
+
+        preview = preview_by_identity.get(
+            _identity(row),
+            {},
+        )
+
+        service = item["RecommendedService"]
+
+        item.update(
+            {
+                "Status": "READY",
+                "BlockReason": "",
+                "PreviewOffer": (
+                    _send_shard.warm_preview_offer(service)
+                    or ""
+                ),
+                "EmailSubject": _clean(
+                    preview.get("EmailSubject")
+                ),
+                "EmailBody": _clean(
+                    preview.get("EmailBody")
+                ),
+            }
+        )
+
+        review_rows.append(item)
+
+    for row in contact_rows:
+        item = _base_review_row(row)
+
+        item.update(
+            {
+                "Status": "CONTACT_FORM_REVIEW",
+                "BlockReason": (
+                    "Professional contact-form route requires "
+                    "manual review; it is not email-ready."
+                ),
+                "PreviewOffer": (
+                    _send_shard.warm_preview_offer(
+                        item["RecommendedService"]
+                    )
+                    or ""
+                ),
+                "EmailSubject": "",
+                "EmailBody": "",
+            }
+        )
+
+        review_rows.append(item)
+
+    for row in rejected_rows:
+        item = _base_review_row(row)
+
+        reject_code = _clean(
+            row.get("reject_code")
+            or row.get("RejectCode")
+        )
+
+        reject_reason = _clean(
+            row.get("reject_reason")
+            or row.get("reason")
+            or row.get("Reason")
+        )
+
+        reason_parts = [
+            value
+            for value in (reject_code, reject_reason)
+            if value
+        ]
+
+        item.update(
+            {
+                "Status": "BLOCKED",
+                "BlockReason": " — ".join(reason_parts),
+                "PreviewOffer": "",
+                "EmailSubject": "",
+                "EmailBody": "",
+            }
+        )
+
+        review_rows.append(item)
+
+    limit = 250
+    returned = review_rows[:limit]
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "job_id": str(job.get("job_id") or ""),
+            "preview_generated": bool(preview_rows),
+            "ready_count": len(ready_rows),
+            "contact_form_count": len(contact_rows),
+            "blocked_count": len(rejected_rows),
+            "total_review_rows": len(review_rows),
+            "returned_rows": len(returned),
+            "truncated": len(review_rows) > limit,
+            "rows": returned,
+        }
+    )
+
+
 @app.post("/api/leads/check-important/warm-preview")
 def generate_warm_research_email_preview() -> JSONResponse:
     job = _current_completed_warm_check_job()

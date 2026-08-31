@@ -42,6 +42,12 @@ describe("DashboardApp", () => {
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
     expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=leads&workflow=cold");
     expect(document.querySelector('[data-leads-workflow="warm"]')).toHaveAttribute("href", "/?tab=leads&workflow=warm");
+    expect(screen.getAllByText("Warm Outreach").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Upload Batch").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Validate").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Review").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Preview Email").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Confirm").length).toBeGreaterThan(0);
     expect(document.querySelector('select#leads-important-upload-type')).not.toBeInTheDocument();
     expect(document.getElementById("auth-overlay")).toBeInTheDocument();
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();

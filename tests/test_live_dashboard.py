@@ -8919,3 +8919,151 @@ class DashboardStabilizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+def test_warm_review_endpoint_exposes_canonical_review_chain(
+    monkeypatch,
+    tmp_path,
+):
+    import csv
+    import json
+
+    ready_path = tmp_path / "warm_email_ready.csv"
+    rejected_path = tmp_path / "warm_rejected.csv"
+    contact_path = tmp_path / "warm_contact_form_review.csv"
+    preview_path = tmp_path / "warm_email_preview.csv"
+
+    def write_rows(path, rows):
+        headers = list(rows[0])
+        with path.open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=headers,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+    ready_row = {
+        "AuthorName": "Taylor Example",
+        "BookTitleOrProject": "Synthetic Project",
+        "NeedSignal": (
+            "The author said they cannot update their website."
+        ),
+        "SourcePlatform": "Synthetic source",
+        "SourceURL": "https://example.test/source",
+        "ContactPath": "taylor@example.com",
+        "RecommendedService": "Custom author website",
+        "OutreachAngle": "Synthetic research context",
+        "PersonalizationLine": (
+            "I saw your note about being unable to update your website."
+        ),
+        "AuthorEmail": "taylor@example.com",
+        "ContactMethod": "email",
+    }
+
+    write_rows(ready_path, [ready_row])
+
+    write_rows(
+        preview_path,
+        [{
+            **ready_row,
+            "EmailSubject": "About Synthetic Project",
+            "EmailBody": "Canonical synthetic warm email body.",
+        }],
+    )
+
+    write_rows(
+        rejected_path,
+        [{
+            "AuthorName": "Blocked Example",
+            "BookTitleOrProject": "Blocked Project",
+            "NeedSignal": "Synthetic need",
+            "SourcePlatform": "Synthetic source",
+            "SourceURL": "https://example.test/blocked",
+            "ContactPath": "blocked@example.com",
+            "RecommendedService": "Custom author website",
+            "OutreachAngle": "Synthetic angle",
+            "PersonalizationLine": "",
+            "reject_code": "unable_to_build_personalization",
+            "reject_reason": "Could not safely build recipient-facing copy.",
+        }],
+    )
+
+    write_rows(
+        contact_path,
+        [{
+            "AuthorName": "Form Example",
+            "BookTitleOrProject": "Form Project",
+            "NeedSignal": "The author said they need a website contact route.",
+            "SourcePlatform": "Synthetic source",
+            "SourceURL": "https://example.test/form",
+            "ContactPath": "https://example.test/contact",
+            "RecommendedService": "Protected author contact form",
+            "OutreachAngle": "Synthetic angle",
+            "PersonalizationLine": (
+                "I saw your note about needing a website contact route."
+            ),
+            "ContactMethod": "contact_form",
+        }],
+    )
+
+    job = {
+        "job_id": "warm-review-job",
+        "output_path": str(ready_path),
+        "rejected_path": str(rejected_path),
+        "warm_email_preview_path": str(preview_path),
+        "check": {
+            "upload_type": "warm_research",
+        },
+    }
+
+    monkeypatch.setattr(
+        live_dashboard,
+        "_current_completed_warm_check_job",
+        lambda: job,
+    )
+
+    response = live_dashboard.get_warm_research_review()
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["ready_count"] == 1
+    assert body["contact_form_count"] == 1
+    assert body["blocked_count"] == 1
+    assert body["preview_generated"] is True
+
+    ready = next(
+        row
+        for row in body["rows"]
+        if row["Status"] == "READY"
+    )
+
+    assert ready["NeedSignal"] == (
+        "The author said they cannot update their website."
+    )
+    assert ready["PersonalizationLine"] == (
+        "I saw your note about being unable to update your website."
+    )
+    assert ready["RecommendedService"] == "Custom author website"
+    assert ready["PreviewOffer"]
+    assert ready["EmailSubject"] == "About Synthetic Project"
+    assert ready["EmailBody"] == (
+        "Canonical synthetic warm email body."
+    )
+
+    blocked = next(
+        row
+        for row in body["rows"]
+        if row["Status"] == "BLOCKED"
+    )
+
+    assert (
+        "unable_to_build_personalization"
+        in blocked["BlockReason"]
+    )

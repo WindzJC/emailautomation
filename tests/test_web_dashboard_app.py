@@ -167,8 +167,8 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, panel_body)
         for expected in [
-            'workflow.reuploadRequired ? "Re-upload Required"',
-            'status: checked ? "Available" : "Locked"',
+            'workflow.reuploadRequired',
+            'status: reviewed ? "Reviewed" : checked ? "Available" : "Locked"',
             'status: draftReady ? "Complete" : checked ? "Available" : "Locked"',
             'status: currentConfirmed ? "Complete" : draftReady ? "Required" : "Locked"',
         ]:
@@ -976,14 +976,14 @@ class WebDashboardAppTests(unittest.TestCase):
             "Contact forms",
             "Already contacted",
             "Warm Research uses its own draft, confirmation, and Private JC lane.",
-            "Warm Research Outputs",
+            "Warm Outreach Validation",
             "Explicit confirmation required",
             "Historical sender activity below does not unlock this upload workflow.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
-            "Generate Warm Draft Preview",
+            "Generate Email Preview",
             "/api/leads/check-important/warm-preview",
-            "warm_email_preview.csv",
+            "/api/leads/check-important/warm-review",
         ]:
             self.assertIn(expected, source)
         self.assertIn("#leads-view.warm-research-mode .leads-campaign-command", styles)
@@ -1647,7 +1647,7 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
 
         for expected in [
-            "Confirm Warm Private JC",
+            "Confirm Warm Outreach",
             "Start Warm Private JC",
             "/api/leads/check-important/warm-confirm",
             "/api/start/private_jc_warm",
@@ -1769,7 +1769,7 @@ class WebDashboardAppTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
 
         for expected in [
-            "Warm Research Outputs",
+            "Warm Outreach Validation",
             "Warm Private JC Sender History",
             "Previous Warm Outreach Run",
             "warm-private-action-panel",
@@ -1804,17 +1804,18 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertEqual(source.count("Warm Private JC Sender History"), 1)
         self.assertEqual(source.count('<p class="eyebrow">Safety Rules</p>'), 1)
 
-    def test_warm_research_uses_one_compact_four_step_workflow(self) -> None:
+    def test_warm_outreach_uses_five_step_workflow(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         warm_start = source.index("if (warmResearchUploadMode()) {", source.index("function renderLeadsWorkflowTaskList"))
         warm_end = source.index("const state = currentRunWorkflowState", warm_start)
         warm_workflow = source[warm_start:warm_end]
 
         for step in [
-            "Upload Warm Research",
-            "Review Split Outputs",
-            "Generate Draft Preview",
-            "Warm Private JC",
+            "Upload Batch",
+            "Validate",
+            "Review",
+            "Preview Email",
+            "Confirm",
         ]:
             self.assertEqual(warm_workflow.count(f'step: "{step}"'), 1)
         for state in ["Complete", "Available", "Waiting", "Required"]:

@@ -148,11 +148,19 @@ export function LeadStepper({ status, steps }) {
       <div className="react-stepper-shell react-legacy-stepper">
         <LegacyNode html={steps} />
       </div>
-      <ol className="operator-flow-line" aria-label="Workflow steps">
+      <ol className="operator-flow-line react-cold-copy" aria-label="Cold workflow steps">
         <li><span>1</span><strong>Source</strong></li>
-        <li><span>2</span><strong className="react-cold-copy">Campaign</strong><strong className="react-warm-copy">Review</strong></li>
+        <li><span>2</span><strong>Campaign</strong></li>
         <li><span>3</span><strong>Preview</strong></li>
         <li><span>4</span><strong>Confirm</strong></li>
+      </ol>
+
+      <ol className="operator-flow-line react-warm-copy" aria-label="Warm Outreach workflow steps">
+        <li><span>1</span><strong>Upload Batch</strong></li>
+        <li><span>2</span><strong>Validate</strong></li>
+        <li><span>3</span><strong>Review</strong></li>
+        <li><span>4</span><strong>Preview Email</strong></li>
+        <li><span>5</span><strong>Confirm</strong></li>
       </ol>
     </section>
   );
@@ -162,7 +170,10 @@ export function SourcePanel({ html }) {
   return (
     <section className="operator-step operator-step-source">
       <header className="operator-step-heading">
-        <h3>Source</h3>
+        <h3>
+          <span className="react-cold-copy">Source</span>
+          <span className="react-warm-copy">Upload Batch</span>
+        </h3>
       </header>
       <LegacyNode html={html} />
     </section>
@@ -174,7 +185,8 @@ export function CommandRail({ left, right }) {
     <div className="leads-command-main react-lead-workspace">
       <section className="operator-step operator-step-campaign">
         <header className="operator-step-heading">
-          <span className="operator-step-number">2</span>
+          <span className="operator-step-number react-cold-copy">2</span>
+          <span className="operator-step-number react-warm-copy">3</span>
           <div>
             <p className="operator-step-kicker">
               <span className="react-cold-copy">Choose the write set</span>
@@ -221,13 +233,13 @@ export function LeadOpsDashboard({ view }) {
         title={(
           <>
             <span className="react-cold-copy">Prepare the next campaign</span>
-            <span className="react-warm-copy">Warm research workspace</span>
+            <span className="react-warm-copy">Warm Outreach</span>
           </>
         )}
         description={(
           <>
             <span className="react-cold-copy">Check source quality, choose a campaign, preview the write set, then confirm.</span>
-            <span className="react-warm-copy">Turn qualified research into reviewed, explicitly confirmed outreach.</span>
+            <span className="react-warm-copy">Upload a qualified warm batch, validate each lead, review the evidence and personalization, preview the exact email, then explicitly confirm.</span>
           </>
         )}
         aside={<StatusPill tone="safe">Safety gated</StatusPill>}

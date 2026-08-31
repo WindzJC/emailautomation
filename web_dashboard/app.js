@@ -4276,6 +4276,9 @@ function previousWarmResearchReport(status = lastLeadsStatus) {
   return report;
 }
 
+let lastWarmLeadReview = null;
+let warmLeadReviewLoading = false;
+
 function currentWarmWorkflowState(status = lastLeadsStatus) {
   const report = currentWarmResearchReport(status);
   const progress = currentLeadOpsProgress(status, "warm_research");
@@ -4330,12 +4333,12 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const commandCenter = document.querySelector("#leads-view .leads-command-center");
   leadsView?.classList.toggle("warm-research-mode", active);
   appShell?.classList.toggle("warm-research-shell", active);
-  if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Check Warm Research" : "Prepare Dispatch");
+  if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Warm Outreach" : "Prepare Dispatch");
   if (els.leadsPipelineMeta) {
     setNodeText(
       els.leadsPipelineMeta,
       active
-        ? "Validate warm research, generate drafts, then explicitly confirm the separate Warm Private JC lane."
+        ? "Upload the warm batch, validate it, review the lead-level evidence, preview the exact email, then explicitly confirm."
         : "Current source, preview, and queue confirmation in one place.",
     );
   }
@@ -4376,6 +4379,213 @@ function warmResearchMetricMarkup(report = {}) {
     { label: "Draft previews", value: Number(report.warm_email_preview_rows || 0), tone: Number(report.warm_email_preview_rows || 0) ? "good" : "" },
   ]);
 }
+
+function warmLeadReviewMarkup(review = lastWarmLeadReview) {
+  if (warmLeadReviewLoading) {
+    return `
+      <div class="operator-empty-state operator-empty-state-inline">
+        <strong>Loading current Warm Outreach review...</strong>
+        <span>Reading the current validated artifacts.</span>
+      </div>
+    `;
+  }
+
+  if (!review || !Array.isArray(review.rows)) {
+    return `
+      <div class="operator-empty-state operator-empty-state-inline">
+        <strong>Review not loaded</strong>
+        <span>Load the validated rows before generating the final email preview.</span>
+      </div>
+    `;
+  }
+
+  if (!review.rows.length) {
+    return `
+      <div class="operator-empty-state operator-empty-state-inline">
+        <strong>No current review rows</strong>
+        <span>The validated Warm Outreach artifacts contain no reviewable rows.</span>
+      </div>
+    `;
+  }
+
+  const cards = review.rows.map((row, index) => {
+    const status = String(row?.Status || "UNKNOWN");
+    const statusTone = status === "READY"
+      ? "good"
+      : status === "BLOCKED"
+        ? "bad"
+        : "warn";
+
+    const sourceUrl = String(row?.SourceURL || "").trim();
+    const sourceMarkup = /^https?:\/\//i.test(sourceUrl)
+      ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`
+      : escapeHtml(sourceUrl || "—");
+
+    const blockReason = String(row?.BlockReason || "").trim();
+
+    const emailPreview = row?.EmailSubject
+      ? `
+        <details class="warm-email-preview">
+          <summary>Preview Email</summary>
+          <div class="warm-live-details">
+            <span><strong>Subject</strong>${escapeHtml(row.EmailSubject)}</span>
+          </div>
+          <pre class="warm-email-preview-body">${escapeHtml(row.EmailBody || "")}</pre>
+        </details>
+      `
+      : `
+        <p class="muted">
+          Canonical email preview has not been generated for this row yet.
+        </p>
+      `;
+
+    return `
+      <article class="warm-private-lane-group warm-review-card">
+        <div class="warm-panel-heading">
+          <div>
+            <p class="eyebrow">
+              ${escapeHtml(status)} · Lead ${index + 1}
+            </p>
+            <strong>${escapeHtml(row?.AuthorName || "Unknown author")}</strong>
+          </div>
+          <span class="mini-pill workflow-track-step-${statusTone}">
+            ${escapeHtml(status)}
+          </span>
+        </div>
+
+        <div class="warm-live-details">
+          <span>
+            <strong>Project</strong>
+            ${escapeHtml(row?.BookTitleOrProject || "—")}
+          </span>
+
+          <span>
+            <strong>Actual Need</strong>
+            ${escapeHtml(row?.NeedSignal || "—")}
+          </span>
+
+          <span>
+            <strong>Personalized Opening</strong>
+            ${escapeHtml(row?.PersonalizationLine || "—")}
+          </span>
+
+          <span>
+            <strong>Astra Service</strong>
+            ${escapeHtml(row?.RecommendedService || "—")}
+          </span>
+
+          ${row?.PreviewOffer ? `
+            <span>
+              <strong>Preview Offer</strong>
+              ${escapeHtml(row.PreviewOffer)}
+            </span>
+          ` : ""}
+
+          <span>
+            <strong>Contact</strong>
+            ${escapeHtml(row?.ContactPath || row?.AuthorEmail || "—")}
+          </span>
+
+          <span>
+            <strong>Evidence</strong>
+            ${sourceMarkup}
+          </span>
+
+          ${blockReason ? `
+            <span>
+              <strong>Block / Review Reason</strong>
+              ${escapeHtml(blockReason)}
+            </span>
+          ` : ""}
+        </div>
+
+        ${emailPreview}
+      </article>
+    `;
+  }).join("");
+
+  return `
+    <div class="warm-review-summary">
+      <span>Ready <strong>${Number(review.ready_count || 0).toLocaleString()}</strong></span>
+      <span>Contact review <strong>${Number(review.contact_form_count || 0).toLocaleString()}</strong></span>
+      <span>Blocked <strong>${Number(review.blocked_count || 0).toLocaleString()}</strong></span>
+    </div>
+
+    ${review.truncated ? `
+      <p class="muted">
+        Showing ${Number(review.returned_rows || 0).toLocaleString()}
+        of ${Number(review.total_review_rows || 0).toLocaleString()} rows.
+      </p>
+    ` : ""}
+
+    <div class="warm-review-list">
+      ${cards}
+    </div>
+  `;
+}
+
+async function loadWarmLeadReview({ silent = false } = {}) {
+  if (!warmResearchUploadMode()) {
+    if (!silent) {
+      showMessage(
+        "Select Warm Outreach before loading the warm review.",
+        "error",
+      );
+    }
+    return null;
+  }
+
+  warmLeadReviewLoading = true;
+  renderLeadsCurrentRunPanel(lastLeadsStatus);
+
+  try {
+    const data = await fetchJson(
+      "/api/leads/check-important/warm-review",
+      { method: "GET" },
+    );
+
+    lastWarmLeadReview = data;
+
+    renderLeadsCurrentRunPanel(lastLeadsStatus);
+    renderLeadsWorkflowTaskList(lastLeadsStatus);
+
+    if (!silent) {
+      showMessage(
+        `Warm review loaded: ${Number(data.ready_count || 0)} ready, ${Number(data.blocked_count || 0)} blocked.`,
+        "success",
+      );
+    }
+
+    return data;
+  } catch (err) {
+    lastWarmLeadReview = null;
+
+    if (!silent) {
+      showMessage(
+        `Warm review failed: ${err}`,
+        "error",
+      );
+    }
+
+    return null;
+  } finally {
+    warmLeadReviewLoading = false;
+    renderLeadsCurrentRunPanel(lastLeadsStatus);
+    renderLeadsWorkflowTaskList(lastLeadsStatus);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(
+    '[data-warm-review-action="load"]'
+  );
+
+  if (!button) return;
+
+  event.preventDefault();
+  void loadWarmLeadReview();
+});
+
 
 function renderImportantDispatch(result) {
   if (warmResearchUploadMode()) {
@@ -5233,7 +5443,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
         <article class="current-run-card current-source-summary-card ${checked ? "current-run-card-ready" : "current-run-card-wait"}">
           <div class="current-run-head">
             <div>
-              <p class="eyebrow">Warm Private JC</p>
+              <p class="eyebrow">Warm Outreach</p>
               <h3>${escapeHtml(warmStateHeadline)}</h3>
               <p class="current-run-subtitle warm-status-summary">${checked ? "Current upload outputs are valid." : "Historical sender activity below does not unlock this upload workflow."}</p>
             </div>
@@ -5242,17 +5452,45 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
               ${warmCap > 0 ? `<span class="mini-pill">Cap ${warmCap.toLocaleString()}</span>` : ""}
             </div>
           </div>
+          <section class="warm-private-lane-group warm-review-panel">
+            <div class="warm-panel-heading">
+              <div>
+                <p class="eyebrow">Step 3 · Review</p>
+                <strong>Review the validated Warm leads</strong>
+              </div>
+              <span class="mini-pill">Read-only</span>
+            </div>
+
+            <p class="muted">
+              Compare the author's actual need with the generated opening and recommended Astra service before previewing any email.
+            </p>
+
+            <div class="leads-action-slot">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                data-warm-review-action="load"
+                ${!checked || warmLeadReviewLoading ? "disabled" : ""}
+              >
+                ${warmLeadReviewLoading ? "Loading Review..." : lastWarmLeadReview ? "Refresh Review" : "Load Review"}
+              </button>
+            </div>
+
+            <div class="warm-review-results">
+              ${warmLeadReviewMarkup()}
+            </div>
+          </section>
+
           <section class="warm-private-action-panel">
             <div class="warm-panel-heading">
               <div>
                 <p class="eyebrow">Warm actions</p>
-                <strong>Preview, confirm, then start</strong>
+                <strong>Preview the exact email, then confirm</strong>
               </div>
             </div>
             <div class="leads-action-slot warm-action-stack">
-              <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Warm Draft Preview"}</button>
-              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Private JC Confirmed" : "Confirm Warm Private JC"}</button>
-              <button class="btn ${warmRunning ? "btn-danger" : "btn-primary"}" type="button" data-leads-next-action="${escapeHtml(warmStartAction)}" ${warmStartDisabled ? "disabled" : ""}>${escapeHtml(warmStartLabel)}</button>
+              <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Email Preview"}</button>
+              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Outreach Confirmed" : "Confirm Warm Outreach"}</button>
             </div>
             ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
             <div class="warm-live-summary" aria-label="Warm sender status">
@@ -5260,6 +5498,26 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
               <span>Remaining <strong>${warmRemaining.toLocaleString()}</strong></span>
               <span>Running <strong>${warmRunning ? "Yes" : "No"}</strong></span>
             </div>
+
+            <section class="warm-private-lane-group">
+              <div class="warm-panel-heading">
+                <div>
+                  <p class="eyebrow">Sender operation</p>
+                  <strong>Separate from the five-step confirmation workflow</strong>
+                </div>
+              </div>
+
+              <div class="leads-action-slot">
+                <button
+                  class="btn ${warmRunning ? "btn-danger" : "btn-primary"}"
+                  type="button"
+                  data-leads-next-action="${escapeHtml(warmStartAction)}"
+                  ${warmStartDisabled ? "disabled" : ""}
+                >
+                  ${escapeHtml(warmStartLabel)}
+                </button>
+              </div>
+            </section>
             <details class="warm-operations-details">
               <summary>Warm sender details</summary>
               <section class="warm-private-lane-group">
@@ -5407,41 +5665,80 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     const checked = workflow.valid;
     const draftReady = checked && Number(report.warm_email_preview_rows || 0) > 0;
     const currentConfirmed = checked && Boolean(report.warm_private_jc_confirmed);
+    const hasCurrentAttempt = Boolean(workflow.progress?.job_id);
+    const reviewed = checked && Boolean(lastWarmLeadReview);
+
     const tasks = [
       {
-        step: "Upload Warm Research",
-        status: running ? "Waiting" : checked ? "Complete" : workflow.reuploadRequired ? "Re-upload Required" : "Available",
-        detail: checked ? `${Number(report.input_rows || 0).toLocaleString()} rows checked` : workflow.reuploadRequired ? "The current job is stale or its required files are unavailable." : "Choose a CSV/XLSX file and click Upload & Check.",
-        tone: running ? "warn" : checked ? "good" : workflow.reuploadRequired ? "bad" : "neutral",
+        step: "Upload Batch",
+        status: hasCurrentAttempt ? "Complete" : "Available",
+        detail: hasCurrentAttempt
+          ? "Current Warm Outreach batch received."
+          : "Choose a CSV/XLSX warm_batch file and upload it.",
+        tone: hasCurrentAttempt ? "good" : "neutral",
       },
       {
-        step: "Review Split Outputs",
-        status: checked ? "Available" : "Locked",
+        step: "Validate",
+        status: running
+          ? "Running"
+          : checked
+            ? "Complete"
+            : workflow.reuploadRequired
+              ? "Failed"
+              : hasCurrentAttempt
+                ? "Waiting"
+                : "Locked",
         detail: checked
-          ? `${Number(report.warm_email_ready_rows || 0).toLocaleString()} email ready · ${Number(report.warm_contact_form_rows || 0).toLocaleString()} contact forms`
-          : "Locked until a valid current Warm Research upload completes.",
-        tone: checked ? "good" : "neutral",
+          ? `${Number(report.warm_email_ready_rows || 0).toLocaleString()} email ready · ${Number(report.warm_contact_form_rows || 0).toLocaleString()} contact review · ${Number(report.warm_rejected_rows || 0).toLocaleString()} blocked`
+          : running
+            ? "Validating suppression, contact, service, and warm-copy safety."
+            : workflow.reuploadRequired
+              ? "Current validation artifacts are stale or unavailable; re-upload required."
+              : "Locked until a batch is uploaded.",
+        tone: running
+          ? "warn"
+          : checked
+            ? "good"
+            : workflow.reuploadRequired
+              ? "bad"
+              : "neutral",
       },
       {
-        step: "Generate Draft Preview",
+        step: "Review",
+        status: reviewed ? "Reviewed" : checked ? "Available" : "Locked",
+        detail: reviewed
+          ? `${Number(lastWarmLeadReview.ready_count || 0).toLocaleString()} ready rows reviewed`
+          : checked
+            ? "Review NeedSignal → PersonalizationLine → RecommendedService before email preview."
+            : "Locked until validation completes.",
+        tone: reviewed ? "good" : checked ? "warn" : "neutral",
+      },
+      {
+        step: "Preview Email",
         status: draftReady ? "Complete" : checked ? "Available" : "Locked",
         detail: draftReady
-          ? `${Number(report.warm_email_preview_rows || 0).toLocaleString()} preview-only drafts generated`
-          : checked ? "Creates warm_email_preview.csv without writing sender queues." : "Locked until current split outputs are valid.",
+          ? `${Number(report.warm_email_preview_rows || 0).toLocaleString()} canonical email previews generated`
+          : checked
+            ? "Generates canonical EmailSubject and EmailBody without writing a sender queue."
+            : "Locked until validation completes.",
         tone: draftReady ? "good" : checked ? "warn" : "neutral",
       },
       {
-        step: "Warm Private JC",
+        step: "Confirm",
         status: currentConfirmed ? "Complete" : draftReady ? "Required" : "Locked",
-        detail: checked ? "Uses the separate Warm Private JC queue and never routes through SendGrid." : "Locked until the current upload has a valid draft preview.",
-        tone: currentConfirmed ? "good" : "neutral",
+        detail: currentConfirmed
+          ? "The reviewed preview has been explicitly confirmed."
+          : draftReady
+            ? "Explicit confirmation creates the protected Warm Private JC queue."
+            : "Locked until the canonical email preview exists.",
+        tone: currentConfirmed ? "good" : draftReady ? "warn" : "neutral",
       },
     ];
     setNodeHtml(
       els.leadsWorkflowTaskList,
       `
-        <div class="workflow-tracker-head"><p class="eyebrow">Warm Research Workflow</p></div>
-        <ol class="workflow-tracker-row warm-workflow-tracker" aria-label="Warm Research check workflow">
+        <div class="workflow-tracker-head"><p class="eyebrow">Warm Outreach Workflow</p></div>
+        <ol class="workflow-tracker-row warm-workflow-tracker" aria-label="Warm Outreach workflow">
           ${tasks.map((task, index) => `
             <li class="workflow-track-step workflow-track-step-${escapeHtml(task.tone)}">
               <span class="workflow-track-number">${index + 1}</span>
@@ -5545,7 +5842,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
             <div class="warm-panel-heading">
               <div>
                 <p class="eyebrow">Current workflow outputs</p>
-                <strong>${workflow.reuploadRequired ? "Re-upload required" : "Warm Research Outputs"}</strong>
+                <strong>${workflow.reuploadRequired ? "Re-upload required" : "Warm Outreach Validation"}</strong>
               </div>
               ${workflow.valid && Number(report.warm_email_preview_rows || 0) > 0 ? `<span class="mini-pill">Draft preview ready</span>` : ""}
             </div>
@@ -6094,6 +6391,10 @@ async function runImportantLeadCheck() {
 
 async function runImportantLeadUploadCheck() {
   const { formData, file, filename, size, extension } = importantLeadUploadPayload();
+
+  if (warmResearchUploadMode()) {
+    lastWarmLeadReview = null;
+  }
   if (!file) {
     showMessage("Choose a CSV or XLSX file before uploading.", "error");
     return;
@@ -6165,7 +6466,8 @@ async function generateWarmDraftPreview() {
       renderLeadsWorkflowTaskList(lastLeadsStatus);
       renderLeadsWorkflowStatusBanner(lastLeadsStatus);
     }
-    showMessage(data.message || "Warm draft preview generated.", "success");
+    await loadWarmLeadReview({ silent: true });
+    showMessage(data.message || "Warm email preview generated.", "success");
   } catch (err) {
     showMessage(`Warm draft preview failed: ${err}`, "error");
   } finally {
