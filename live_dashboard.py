@@ -7597,6 +7597,65 @@ def _preview_recovery_request_block(
     return None
 
 
+def _dispatch_preview_matches_request(
+    preview: dict[str, object],
+    *,
+    campaign_type: str,
+    dispatch_source_mode: str,
+    dispatch_cap: str,
+    source_path: Path,
+) -> bool:
+    """Return True only when a persisted Preview belongs to this exact selection."""
+    if not isinstance(preview, dict) or not preview:
+        return False
+
+    requested_source_mode = str(
+        dispatch_source_mode or ""
+    ).strip().lower()
+
+    # Persisted-preview reuse is intentionally restricted to staged KEEP.
+    # KEEP has the existing run-bound artifact fingerprint/recovery contract.
+    # Cleaned/recontact sources do not currently persist an equivalent source
+    # fingerprint, so they must generate a fresh read-only Preview instead of
+    # reusing a previous Preview solely because the path/cap still match.
+    if requested_source_mode != DISPATCH_SOURCE_TRIAGED_KEEP:
+        return False
+
+    preview_campaign_type = normalize_campaign_type(
+        preview.get("campaign_type") or CAMPAIGN_TYPE_COLD
+    )
+    preview_source_mode = str(
+        preview.get("dispatch_source_mode") or ""
+    ).strip().lower()
+    preview_cap = (
+        str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL).strip().lower()
+        or DISPATCH_CAP_ALL
+    )
+    preview_source_raw = str(
+        preview.get("dispatch_source_path") or ""
+    ).strip()
+
+    if not preview_source_raw:
+        return False
+
+    try:
+        preview_source_path = Path(preview_source_raw).resolve(strict=False)
+        requested_source_path = source_path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+
+    return (
+        preview_campaign_type == normalize_campaign_type(campaign_type)
+        and preview_source_mode == requested_source_mode
+        and preview_cap == (
+            str(dispatch_cap or DISPATCH_CAP_ALL).strip().lower()
+            or DISPATCH_CAP_ALL
+        )
+        and preview_source_path == requested_source_path
+    )
+
+
+
 @app.post("/api/leads/dispatch-important/preview")
 def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     progress_job: dict[str, object] | None = None
@@ -7735,18 +7794,33 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             or saved_phase in {"failed", "stale"}
             or (existing_preview_status == "completed" and persisted_preview is None)
         )
-        if persisted_preview is not None:
-            recovery_block = _preview_recovery_request_block(
-                payload=payload,
-                job=progress_job,
+        persisted_preview_matches_request = bool(
+            persisted_preview is not None
+            and _dispatch_preview_matches_request(
+                persisted_preview,
+                campaign_type=campaign_type,
+                dispatch_source_mode=dispatch_source_mode,
+                dispatch_cap=dispatch_cap,
                 source_path=source_path_for_mode,
-                require_client_binding=recovery_required,
             )
-            if recovery_block is not None:
-                return JSONResponse(
-                    {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
-                    status_code=409,
+        )
+        if persisted_preview_matches_request:
+            # Preview recovery binding is intentionally tied to the staged
+            # Fast-Triage KEEP source. Preserve those fail-closed checks for
+            # KEEP previews, but never apply a KEEP recovery contract to a
+            # different source such as Checked Recontact / cleaned.
+            if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP:
+                recovery_block = _preview_recovery_request_block(
+                    payload=payload,
+                    job=progress_job,
+                    source_path=source_path_for_mode,
+                    require_client_binding=recovery_required,
                 )
+                if recovery_block is not None:
+                    return JSONResponse(
+                        {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
+                        status_code=409,
+                    )
             return JSONResponse(
                 {
                     "ok": True,
@@ -7772,17 +7846,22 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
 
         claim_transferred = False
         try:
-            recovery_block = _preview_recovery_request_block(
-                payload=payload,
-                job=progress_job,
-                source_path=source_path_for_mode,
-                require_client_binding=recovery_required,
-            )
-            if recovery_block is not None:
-                return JSONResponse(
-                    {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
-                    status_code=409,
+            if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP:
+                recovery_block = _preview_recovery_request_block(
+                    payload=payload,
+                    job=progress_job,
+                    source_path=source_path_for_mode,
+                    require_client_binding=recovery_required,
                 )
+                if recovery_block is not None:
+                    return JSONResponse(
+                        {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
+                        status_code=409,
+                    )
+
+            # The binding continues to protect the staged run against
+            # concurrent mutation inside the worker. It is not used to
+            # reinterpret a cleaned/recontact request as KEEP recovery.
             expected_recovery_binding = _preview_recovery_binding(progress_job)
             progress_job["preview_claim_token"] = str(preview_claim.get("claim_token") or "")
             progress_job["preview_claim_acquired_at_utc"] = str(preview_claim.get("acquired_at_utc") or "")

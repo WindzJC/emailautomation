@@ -6178,6 +6178,339 @@ class LiveDashboardTests(unittest.TestCase):
                 )
             )
 
+    def test_persisted_dispatch_preview_does_not_match_different_recontact_source(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=live_dashboard.settings.APP_ROOT
+        ) as tmpdir:
+            tmp = Path(tmpdir)
+            keep_path = tmp / "leads_triaged_keep.csv"
+            cleaned_path = tmp / "leads.csv"
+            keep_path.write_text(
+                "Email\\nkeep@example.test\\n",
+                encoding="utf-8",
+            )
+            cleaned_path.write_text(
+                "Email\\nchecked@example.test\\n",
+                encoding="utf-8",
+            )
+
+            old_cold_preview = {
+                "preview_id": "dispatch_preview_old_cold",
+                "campaign_type": "cold",
+                "dispatch_source_mode": "triaged_keep",
+                "dispatch_cap": "all",
+                "dispatch_source_path": str(keep_path),
+            }
+
+            self.assertFalse(
+                live_dashboard._dispatch_preview_matches_request(
+                    old_cold_preview,
+                    campaign_type="recontact_cold",
+                    dispatch_source_mode="cleaned",
+                    dispatch_cap="all",
+                    source_path=cleaned_path,
+                )
+            )
+
+    def test_persisted_cleaned_recontact_preview_is_never_reused_without_source_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=live_dashboard.settings.APP_ROOT
+        ) as tmpdir:
+            cleaned_path = Path(tmpdir) / "leads.csv"
+            cleaned_path.write_text(
+                "Email\\nchecked@example.test\\n",
+                encoding="utf-8",
+            )
+
+            preview = {
+                "preview_id": "dispatch_preview_recontact",
+                "campaign_type": "recontact_cold",
+                "dispatch_source_mode": "cleaned",
+                "dispatch_cap": "all",
+                "dispatch_source_path": str(cleaned_path),
+            }
+
+            # Cleaned/recontact sources intentionally do not reuse persisted
+            # previews until an equivalent source fingerprint is persisted.
+            self.assertFalse(
+                live_dashboard._dispatch_preview_matches_request(
+                    preview,
+                    campaign_type="recontact_cold",
+                    dispatch_source_mode="cleaned",
+                    dispatch_cap="all",
+                    source_path=cleaned_path,
+                )
+            )
+
+            self.assertFalse(
+                live_dashboard._dispatch_preview_matches_request(
+                    preview,
+                    campaign_type="recontact_cold",
+                    dispatch_source_mode="cleaned",
+                    dispatch_cap="1000",
+                    source_path=cleaned_path,
+                )
+            )
+
+    def test_checked_recontact_with_old_cold_preview_starts_new_cleaned_preview_instead_of_keep_recovery(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=live_dashboard.settings.APP_ROOT
+        ) as tmpdir:
+            tmp = Path(tmpdir)
+
+            input_path = tmp / "leadschecker.csv"
+            cleaned_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            keep_path = tmp / "leads_triaged_keep.csv"
+            verified_path = tmp / "leads_verified.csv"
+
+            self._write_csv(
+                input_path,
+                ["Email"],
+                [{"Email": "checked@example.test"}],
+            )
+            self._write_csv(
+                cleaned_path,
+                ["Email"],
+                [{"Email": "checked@example.test"}],
+            )
+            self._write_csv(
+                rejected_path,
+                ["Email"],
+                [],
+            )
+            self._write_csv(
+                keep_path,
+                ["Email", "Status"],
+                [{"Email": "cold@example.test", "Status": "KEEP"}],
+            )
+            self._write_csv(
+                verified_path,
+                ["Email", "Status"],
+                [{"Email": "strict@example.test", "Status": "KEEP"}],
+            )
+
+            job = {
+                "job_id": "check_exact_recontact_regression",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "total_input_rows": 1,
+                "processed_rows": 1,
+                "auto_triage_processed_rows": 1,
+                "auto_triage_total_rows": 1,
+            }
+
+            old_cold_preview = {
+                "preview_id": "dispatch_preview_old_cold",
+                "campaign_type": "cold",
+                "dispatch_source_mode": "triaged_keep",
+                "dispatch_cap": "all",
+                "dispatch_source_path": str(keep_path),
+            }
+
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                input_path=str(input_path),
+                output_path=str(cleaned_path),
+                rejected_path=str(rejected_path),
+                dispatch_source_mode="cleaned",
+                dispatch_cap="all",
+                campaign_type="recontact_cold",
+                job_id=job["job_id"],
+                current_run_id=job["job_id"],
+                preview_recovery_binding={"old": "keep-binding"},
+            )
+
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_build_live_snapshot",
+                        return_value={},
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_dispatch_preflight_block_response",
+                        return_value=None,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "important_leads_path_state",
+                        return_value={
+                            "input_path": str(input_path),
+                            "output_path": str(cleaned_path),
+                            "rejected_path": str(rejected_path),
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "important_leads_verify_path_state",
+                        return_value={
+                            "verified_path": str(verified_path),
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "important_leads_triage_path_state",
+                        return_value={
+                            "keep_path": str(keep_path),
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_latest_fast_triage_keep_source",
+                        return_value={
+                            "source_resolution": "legacy_important_triaged_keep",
+                            "job": None,
+                            "run_id": "",
+                            "path": keep_path,
+                            "paths": {},
+                            "exists": True,
+                            "row_count": 1,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_dispatch_source_readiness_block",
+                        return_value=None,
+                    )
+                )
+
+                find_job = stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_find_check_job_for_progress_source",
+                        return_value=job,
+                    )
+                )
+
+                persisted = stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_persisted_dispatch_preview_for_job",
+                        return_value=old_cold_preview,
+                    )
+                )
+
+                recovery_guard = stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_preview_recovery_request_block",
+                    )
+                )
+
+                claim = stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_try_acquire_dispatch_preview_claim",
+                        return_value={
+                            "claim_token": "claim-exact-recontact",
+                            "acquired_at_utc": "2026-09-01T00:00:00+00:00",
+                        },
+                    )
+                )
+
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_save_important_check_job",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_write_lead_ops_progress",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "save_state",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_combined_leads_status",
+                        return_value={},
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "_important_check_job_with_progress",
+                        return_value={
+                            "job_id": job["job_id"],
+                            "status": "running",
+                        },
+                    )
+                )
+
+                thread_cls = stack.enter_context(
+                    patch.object(
+                        live_dashboard.threading,
+                        "Thread",
+                    )
+                )
+
+                response = live_dashboard.preview_dispatch_important_leads(
+                    payload
+                )
+
+            body = json.loads(response.body)
+
+            self.assertEqual(202, response.status_code)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["accepted"])
+
+            # The old Cold/KEEP Preview must not be returned/reused.
+            self.assertNotEqual(
+                old_cold_preview.get("preview_id"),
+                body.get("preview", {}).get("preview_id"),
+            )
+
+            # Critical regression assertion:
+            # Checked Recontact must NOT enter the KEEP recovery guard.
+            recovery_guard.assert_not_called()
+
+            find_job.assert_called_once()
+            persisted.assert_called_once()
+            claim.assert_called_once()
+
+            thread_cls.assert_called_once()
+            thread_cls.return_value.start.assert_called_once()
+
+            kwargs = thread_cls.call_args.kwargs["kwargs"]
+
+            self.assertEqual(
+                "cleaned",
+                kwargs["dispatch_source_mode"],
+            )
+            self.assertEqual(
+                "recontact_cold",
+                kwargs["campaign_type"],
+            )
+            self.assertEqual(
+                cleaned_path.resolve(),
+                kwargs["source_path_for_mode"].resolve(),
+            )
+            self.assertEqual(
+                cleaned_path.resolve(),
+                kwargs["master_path"].resolve(),
+            )
+
     def test_preview_dispatch_important_leads_uses_cleaned_source_for_recontact_cold(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)
