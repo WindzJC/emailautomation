@@ -138,6 +138,35 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn('status?.lead_check_status?.outputs_exist', source)
         self.assertIn('status?.lead_check_status?.latest_master_check_matches_current_run', source)
 
+    def test_ready_recontact_source_requires_preview_without_claiming_triage_is_incomplete(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        render_start = source.index("function renderImportantDispatch")
+        render_end = source.index("function renderLeadsShardResults", render_start)
+        render_body = source[render_start:render_end]
+
+        self.assertIn(
+            'selectedDispatchSourceReadiness(\n    selectedCampaignType,\n    dispatchSource,\n    lastLeadsStatus,\n  )',
+            render_body,
+        )
+        self.assertIn(
+            '"Preview required for the selected Checked Recontact source."',
+            render_body,
+        )
+        self.assertIn("selectedSourceReadiness.ready", render_body)
+        self.assertIn("The stored preview does not match the selected source, cap, or campaign.", render_body)
+        self.assertIn('"Locked until Check/Triage completes."', render_body)
+        self.assertLess(
+            render_body.index("selectedSourceReadiness.ready"),
+            render_body.index('"Locked until Check/Triage completes."'),
+        )
+
+        hydrate_start = source.index("function hydrateImportantDispatchPreviewFromStatus")
+        hydrate_end = source.index("function dispatchSummaryMatchesCurrentSource", hydrate_start)
+        hydrate_body = source[hydrate_start:hydrate_end]
+        self.assertIn("if (persistedKey !== currentKey) return false;", hydrate_body)
+        self.assertIn('lastImportantDispatchPreviewState = "ready";', hydrate_body)
+        self.assertNotIn("auto_dispatch_preview_status", hydrate_body)
+
     def test_verify_and_dispatch_refresh_hydration_use_local_storage_and_backend_source(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [

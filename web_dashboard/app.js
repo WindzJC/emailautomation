@@ -4688,6 +4688,15 @@ function renderImportantDispatch(result) {
   const stalePreviewMismatch = !dispatchPreview && Boolean(lastImportantDispatchPreview?.preview_id);
   const previewFeedbackState = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.state || "") : "";
   const previewFeedbackMessage = !dispatchPreview ? String(lastImportantDispatchPreviewFeedback?.message || "") : "";
+  const selectedCampaignType = selectedImportantDispatchCampaignType();
+  const selectedSourceReadiness = selectedDispatchSourceReadiness(
+    selectedCampaignType,
+    dispatchSource,
+    lastLeadsStatus,
+  );
+  const selectedSourcePreviewRequiredMessage = selectedCampaignType === "recontact_cold"
+    ? "Preview required for the selected Checked Recontact source."
+    : "Preview required for the selected Fresh Cold source.";
   const noPreviewTitle = dispatchBlockReason
     ? "Preview locked."
     : previewFeedbackState === "blocked"
@@ -4700,8 +4709,10 @@ function renderImportantDispatch(result) {
   const noPreviewMessage = dispatchBlockReason
     || previewFeedbackMessage
     || (stalePreviewMismatch
-      ? "The stored preview does not match the selected source or cap. Click Preview Dispatch to calculate queue assignments."
-      : "Locked until Check/Triage completes.");
+      ? `${selectedSourcePreviewRequiredMessage} The stored preview does not match the selected source, cap, or campaign.`
+      : selectedSourceReadiness.ready
+        ? selectedSourcePreviewRequiredMessage
+        : "Locked until Check/Triage completes.");
   const previewRouteSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
   const confirmSafety = dispatchConfirmSafetyState(dispatchSource, dispatchPreview);
   const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) === 0;
