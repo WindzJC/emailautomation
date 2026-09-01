@@ -2207,13 +2207,20 @@ def _run_important_check_job(job_id: str) -> None:
             )
             if not Path(str(job.get("output_path") or "")).exists() or not Path(str(job.get("rejected_path") or "")).exists():
                 raise RuntimeError("Check did not produce leads.csv and leads_rejected.csv outputs.")
+        authoritative_input_rows = int(
+            report.get("total_input_rows")
+            or report.get("input_rows")
+            or job.get("total_input_rows")
+            or 0
+        )
+        job["total_input_rows"] = authoritative_input_rows
         if job.get("cancel_requested"):
             job["status"] = "canceled"
             job["stage"] = "canceled"
             job["phase"] = "canceled"
             job["completed_at_utc"] = iso_utc()
             job["check"] = report
-            job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
+            job["processed_rows"] = authoritative_input_rows
             job["remaining_rows"] = 0
             job["eta_seconds"] = 0
             job["progress_percent"] = 100
@@ -2238,7 +2245,7 @@ def _run_important_check_job(job_id: str) -> None:
         job["phase"] = "check_complete"
         job["completed_at_utc"] = iso_utc()
         job["check"] = report
-        job["processed_rows"] = int(report.get("total_input_rows") or report.get("input_rows") or job.get("total_input_rows") or 0)
+        job["processed_rows"] = authoritative_input_rows
         job["remaining_rows"] = 0
         job["eta_seconds"] = 0
         job["progress_percent"] = 100
@@ -3365,12 +3372,20 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     triage_reject_rows = _count_csv_rows(triage_reject_path) if triage_reject_path.exists() else 0
     quarantine_rows = _count_csv_rows(triage_quarantine_path) if triage_quarantine_path.exists() else 0
 
-    latest_master_check = dict(job.get("check") or status.get("latest_master_check") or {})
+    job_check = dict(job.get("check") or {})
+    latest_master_check = dict(job_check or status.get("latest_master_check") or {})
     latest_master_check.update(
         {
             "intake_mode": intake_mode,
             "intake_mode_label": intake_mode_label,
-            "input_rows": int(job.get("total_input_rows") or latest_master_check.get("input_rows") or check_rows),
+            "input_rows": int(
+                job_check.get("input_rows")
+                or job_check.get("total_input_rows")
+                or job.get("total_input_rows")
+                or latest_master_check.get("input_rows")
+                or latest_master_check.get("total_input_rows")
+                or check_rows
+            ),
             "cleaned_rows": check_rows,
             "output_rows": check_rows,
             "rejected_rows": rejected_rows,

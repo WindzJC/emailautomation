@@ -3673,7 +3673,14 @@ class LiveDashboardTests(unittest.TestCase):
                 "created_at_utc": "2026-05-21T16:06:19+00:00",
                 "completed_at_utc": "2026-05-21T16:12:19+00:00",
                 "intake_mode": live_dashboard.TRIAGE_MODE_MANUAL_AUTHOR_RESEARCH,
-                "total_input_rows": 2044,
+                "total_input_rows": 18925,
+                "processed_rows": 19271,
+                "check": {
+                    "input_rows": 19271,
+                    "total_input_rows": 19271,
+                    "cleaned_rows": 15342,
+                    "rejected_rows": 3929,
+                },
                 "output_path": str(output_path),
                 "rejected_path": str(rejected_path),
                 "auto_triage_status": "completed",
@@ -3711,14 +3718,131 @@ class LiveDashboardTests(unittest.TestCase):
                 return_value={"safe": True},
             ), patch.object(live_dashboard, "_load_latest_confirmed_dispatch_summary", return_value={}):
                 status = live_dashboard._combined_leads_status()
+                legacy_job = dict(job)
+                legacy_job.pop("check")
+                legacy_job.pop("processed_rows")
+                legacy_job["total_input_rows"] = 2044
+                (jobs_dir / f"{job['job_id']}.json").write_text(json.dumps(legacy_job), encoding="utf-8")
+                legacy_status = live_dashboard._combined_leads_status()
 
             self.assertEqual("MANUAL_AUTHOR_RESEARCH", status["latest_master_check"]["intake_mode"])
-            self.assertEqual(2044, status["latest_master_check"]["input_rows"])
+            self.assertEqual(19271, status["latest_master_check"]["input_rows"])
             self.assertEqual(2, status["latest_master_check"]["cleaned_rows"])
             self.assertEqual(2, status["latest_lead_triage"]["keep_count"])
             self.assertEqual(live_dashboard._dashboard_path_label(keep_path), status["dispatch_source_path"])
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
+            self.assertEqual(2044, legacy_status["latest_master_check"]["input_rows"])
+
+    def test_staged_source_summary_keeps_check_and_triage_stage_counts_separate(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            paths = {
+                "input": tmp / "leads.csv",
+                "rejected": tmp / "leads_rejected.csv",
+                "keep": tmp / "leads_triaged_keep.csv",
+                "triage_reject": tmp / "leads_triaged_reject.csv",
+                "triage_quarantine": tmp / "leads_triaged_quarantine.csv",
+            }
+            for path in paths.values():
+                path.write_text("Email\n", encoding="utf-8")
+            job = {
+                "job_id": "check_20260831_222138_b8d2806e",
+                "status": "completed",
+                "total_input_rows": 18925,
+                "check": {
+                    "input_rows": 19271,
+                    "cleaned_rows": 15342,
+                    "rejected_rows": 3929,
+                },
+                "auto_triage_report": {
+                    "keep_count": 11221,
+                    "reject_count": 4121,
+                    "quarantine_count": 0,
+                },
+            }
+            row_counts = {
+                "leads.csv": 15342,
+                "leads_rejected.csv": 3929,
+                "leads_triaged_keep.csv": 11221,
+                "leads_triaged_reject.csv": 4121,
+                "leads_triaged_quarantine.csv": 0,
+            }
+            with patch.object(
+                live_dashboard,
+                "_latest_fast_triage_keep_source",
+                return_value={
+                    "source_resolution": "latest_completed_staged_run",
+                    "run_id": job["job_id"],
+                    "job": job,
+                    "paths": paths,
+                },
+            ), patch.object(
+                live_dashboard,
+                "_count_csv_rows",
+                side_effect=lambda path: row_counts[Path(path).name],
+            ):
+                status = live_dashboard._apply_latest_staged_run_status({})
+
+            check = status["latest_master_check"]
+            triage = status["latest_lead_triage"]
+            self.assertEqual(19271, check["input_rows"])
+            self.assertEqual(15342, check["cleaned_rows"])
+            self.assertEqual(3929, check["rejected_rows"])
+            self.assertEqual(19271, check["cleaned_rows"] + check["rejected_rows"])
+            self.assertEqual(11221, triage["keep_count"])
+            self.assertEqual(4121, triage["reject_count"])
+            self.assertEqual(0, triage["quarantine_count"])
+            self.assertEqual(
+                check["cleaned_rows"],
+                triage["keep_count"] + triage["reject_count"] + triage["quarantine_count"],
+            )
+
+    def test_completed_check_job_persists_authoritative_report_input_count(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            jobs_dir.mkdir()
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            output_path.write_text("Email\n", encoding="utf-8")
+            rejected_path.write_text("Email\n", encoding="utf-8")
+            job = {
+                "job_id": "check_count_contract",
+                "status": "queued",
+                "upload_type": "cold",
+                "input_path": str(tmp / "uploaded.csv"),
+                "effective_input_path": str(tmp / "uploaded.csv"),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "total_input_rows": 18925,
+            }
+            report = {
+                "input_label": "uploaded.csv",
+                "output_label": "leads.csv",
+                "input_rows": 19271,
+                "total_input_rows": 19271,
+                "cleaned_rows": 15342,
+                "rejected_rows": 3929,
+                "reason_counts": {"MISSING_EMAIL": 3929},
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard,
+                "_execute_important_check",
+                return_value=report,
+            ), patch.object(
+                live_dashboard,
+                "_run_auto_fast_triage_after_check",
+                side_effect=lambda saved_job: saved_job,
+            ), patch.object(live_dashboard, "_write_lead_ops_progress"):
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._run_important_check_job(job["job_id"])
+
+            saved = json.loads((jobs_dir / f"{job['job_id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(19271, saved["total_input_rows"])
+            self.assertEqual(19271, saved["processed_rows"])
+            self.assertEqual(19271, saved["check"]["input_rows"])
 
     def test_staged_status_enriches_matching_legacy_preview_source_exists(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
