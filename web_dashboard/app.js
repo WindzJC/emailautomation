@@ -2311,9 +2311,7 @@ async function pollImportantLeadCheckJob(jobId, expectedUploadType = selectedLea
         return;
       }
       lastImportantLeadCheck = job.check || null;
-      if (data.status) {
-        renderLeadsStatus(data.status || {});
-      }
+      await fetchLeadsStatus();
       if (job.upload_type === "warm_research") {
         renderImportantLeadCheck(lastImportantLeadCheck);
       } else if (!data.status) {
@@ -5612,10 +5610,14 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
   const selectedDispatchSource = dispatchSourceForSelectedMode().source || {};
   const sourceReadiness = selectedDispatchSourceReadiness(selectedCampaign, selectedDispatchSource, status);
   const recontactSelected = selectedCampaign === "recontact_cold";
-  const checkReadyForCounts = state.checkStatus === "completed";
-  const dispatchSource = recontactSelected || checkReadyForCounts ? selectedDispatchSource : {};
   const latestCheck = state.latestCheck || {};
   const latestTriage = state.latestTriage || {};
+  const checkReadyForCounts = state.checkStatus === "completed" || Boolean(
+    latestCheck.generated_at_utc
+    && status?.lead_check_status?.outputs_exist
+    && status?.lead_check_status?.latest_master_check_matches_current_run,
+  );
+  const dispatchSource = recontactSelected || checkReadyForCounts ? selectedDispatchSource : {};
   const pipeline = status?.pipeline || {};
   const keepRows = checkReadyForCounts ? Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_eligible_row_count || 0) : 0;
   const rejectRows = checkReadyForCounts ? Number(latestTriage.reject_count || latestTriage.rejected_count || 0) : 0;
@@ -6641,14 +6643,11 @@ async function pollImportantLeadDispatchPreviewJob(jobId) {
       job.auto_dispatch_preview_status || "",
     ).toLowerCase();
 
-    if (data.status) {
-      renderLeadsStatus(data.status || {});
-    }
-
     if (previewStatus === "completed") {
+      await fetchLeadsStatus();
       const preview =
         job.auto_dispatch_preview
-        || data.status?.latest_auto_dispatch_preview
+        || lastLeadsStatus?.latest_auto_dispatch_preview
         || {};
 
       importantLeadDispatchPreviewLoading = false;
@@ -6691,6 +6690,7 @@ async function pollImportantLeadDispatchPreviewJob(jobId) {
     }
 
     if (previewStatus === "failed") {
+      await fetchLeadsStatus();
       importantLeadDispatchPreviewLoading = false;
       lastImportantDispatchPreviewState = "failed";
       lastImportantDispatchPreviewFeedback = {

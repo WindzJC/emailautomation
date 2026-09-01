@@ -3734,6 +3734,240 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
             self.assertEqual(2044, legacy_status["latest_master_check"]["input_rows"])
 
+    def test_combined_leads_status_preserves_checked_recontact_source_across_preview_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            runs_dir = tmp / "runs"
+            state_dir = tmp / "state"
+            run_dir = runs_dir / "check_20260831_222138_b8d2806e"
+            jobs_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            paths = {
+                "input": run_dir / "leads.csv",
+                "rejected": run_dir / "leads_rejected.csv",
+                "keep": run_dir / "leads_triaged_keep.csv",
+                "triage_reject": run_dir / "leads_triaged_reject.csv",
+                "triage_quarantine": run_dir / "leads_triaged_quarantine.csv",
+            }
+
+            def rows(prefix: str, count: int, *, status: str = "") -> list[dict[str, str]]:
+                return [
+                    {
+                        "Email": f"{prefix}{index}@example.test",
+                        "Status": status,
+                    }
+                    for index in range(count)
+                ]
+
+            self._write_csv(paths["input"], ["Email", "Status"], rows("clean", 15342))
+            self._write_csv(paths["rejected"], ["Email", "Status"], rows("rejected", 3929))
+            self._write_csv(paths["keep"], ["Email", "Status"], rows("keep", 11221, status="KEEP"))
+            self._write_csv(paths["triage_reject"], ["Email", "Status"], rows("triage", 4121, status="REJECT"))
+            self._write_csv(paths["triage_quarantine"], ["Email", "Status"], [])
+            uploaded_path = run_dir / "uploaded.csv"
+            self._write_csv(uploaded_path, ["Email"], [{"Email": "upload@example.test"}])
+
+            job = {
+                "job_id": run_dir.name,
+                "upload_type": "cold",
+                "status": "completed",
+                "stage": "done",
+                "created_at_utc": "2026-08-31T22:21:38+00:00",
+                "updated_at_utc": live_dashboard.iso_utc(),
+                "completed_at_utc": "2026-08-31T22:45:00+00:00",
+                "auto_triage_status": "completed",
+                "auto_triage_completed_at_utc": "2026-08-31T22:50:00+00:00",
+                "auto_dispatch_preview_status": "running",
+                "auto_dispatch_preview_started_at_utc": "2026-09-01T19:11:55+00:00",
+                "message": "Classifying eligible recipients",
+                "staged_run_dir": str(run_dir),
+                "effective_input_path": str(uploaded_path),
+                "output_path": str(paths["input"]),
+                "rejected_path": str(paths["rejected"]),
+                "auto_triage_keep_path": str(paths["keep"]),
+                "auto_triage_rejected_path": str(paths["triage_reject"]),
+                "auto_triage_quarantine_path": str(paths["triage_quarantine"]),
+                "total_input_rows": 19271,
+                "processed_rows": 19271,
+                "check": {
+                    "job_id": run_dir.name,
+                    "input_rows": 19271,
+                    "cleaned_rows": 15342,
+                    "rejected_rows": 3929,
+                    "output_label": str(paths["input"]),
+                    "rejected_label": str(paths["rejected"]),
+                    "generated_at_utc": "2026-08-31T22:45:00+00:00",
+                },
+                "auto_triage_report": {
+                    "keep_count": 11221,
+                    "reject_count": 4121,
+                    "quarantine_count": 0,
+                    "generated_at_utc": "2026-08-31T22:50:00+00:00",
+                },
+            }
+            keep_status = live_dashboard._dispatch_source_status_for_path(
+                path=paths["keep"],
+                mode=important_leads_workflow.DISPATCH_SOURCE_TRIAGED_KEEP,
+                source_resolution="latest_completed_staged_run",
+                run_id=job["job_id"],
+            )
+            old_keep_preview = {
+                "preview_id": "dispatch_preview_20260831_230238_ca324b03",
+                "campaign_type": "cold",
+                "generated_at_utc": "2026-08-31T23:02:38+00:00",
+                **{
+                    key: keep_status[key]
+                    for key in (
+                        "dispatch_source_mode",
+                        "dispatch_source_path",
+                        "dispatch_source_row_count",
+                        "dispatch_eligible_row_count",
+                        "verification_file_mtime",
+                    )
+                },
+                "dispatch_cap": "all",
+            }
+            stale_global_paths = {
+                "input_path": str(tmp / "legacy" / "leadschecker.csv"),
+                "output_path": str(tmp / "legacy" / "leads.csv"),
+                "rejected_path": str(tmp / "legacy" / "leads_rejected.csv"),
+            }
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir))
+                stack.enter_context(patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs_dir))
+                stack.enter_context(patch.object(live_dashboard.settings, "STATE_DIR", state_dir))
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "load_state",
+                        return_value={
+                            "important_leads_paths": stale_global_paths,
+                            "latest_auto_dispatch_preview": old_keep_preview,
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(live_dashboard, "shard_status", return_value={}))
+                stack.enter_context(
+                    patch.object(
+                        live_dashboard,
+                        "important_leads_status",
+                        return_value={
+                            "dispatch_source_mode": important_leads_workflow.DISPATCH_SOURCE_CLEANED,
+                            "dispatch_source_options": {},
+                            "latest_master_check": {},
+                            "latest_lead_triage": {},
+                        },
+                    )
+                )
+                stack.enter_context(patch.object(live_dashboard, "important_leads_verify_status", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "_find_active_dashboard_job", return_value=None))
+                stack.enter_context(patch.object(live_dashboard, "build_dashboard_queue_safety_report", return_value={"safe": True}))
+                stack.enter_context(patch.object(live_dashboard, "_load_latest_confirmed_dispatch_summary", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "_load_active_campaign_snapshot_summary", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "_load_safer_recontact_source_summary", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "_latest_completed_warm_check_job", return_value=None))
+                stack.enter_context(patch.object(live_dashboard, "build_warm_private_jc_live_status", return_value={}))
+
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="previewing",
+                    status="running",
+                    percent=90,
+                    current_message="Classifying eligible recipients",
+                )
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                try:
+                    running = live_dashboard._combined_leads_status()
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+
+                self.assertEqual("previewing", running["active_important_check_job"]["operational_phase"])
+                self.assertEqual(19271, running["latest_master_check"]["input_rows"])
+                self.assertEqual(15342, running["latest_master_check"]["cleaned_rows"])
+                self.assertEqual(3929, running["latest_master_check"]["rejected_rows"])
+                self.assertEqual(11221, running["latest_lead_triage"]["keep_count"])
+                self.assertEqual(15342, running["dispatch_source_row_count"])
+                self.assertEqual(15342, running["dispatch_eligible_row_count"])
+                self.assertEqual(important_leads_workflow.DISPATCH_SOURCE_CLEANED, running["dispatch_source"]["dispatch_source_mode"])
+                self.assertEqual(str(paths["input"]), running["dispatch_source"]["dispatch_source_path"])
+                self.assertEqual({}, running["latest_auto_dispatch_preview"])
+                self.assertNotEqual("not_started", running["lead_check_status"]["state"])
+
+                cleaned_status = running["dispatch_source"]
+                new_preview_path = run_dir / "dispatch_preview_recontact.json"
+                new_preview_path.write_text("{}\n", encoding="utf-8")
+                new_preview = {
+                    "preview_id": "dispatch_preview_recontact_current",
+                    "preview_path": str(new_preview_path),
+                    "campaign_type": "recontact_cold",
+                    "generated_at_utc": "2026-09-01T19:20:00+00:00",
+                    **{
+                        key: cleaned_status[key]
+                        for key in (
+                            "dispatch_source_mode",
+                            "dispatch_source_path",
+                            "dispatch_source_row_count",
+                            "dispatch_eligible_row_count",
+                            "verification_file_mtime",
+                        )
+                    },
+                    "dispatch_cap": "all",
+                }
+                job.update(
+                    {
+                        "auto_dispatch_preview_status": "completed",
+                        "auto_dispatch_preview": new_preview,
+                        "auto_dispatch_preview_path": str(new_preview_path),
+                        "updated_at_utc": live_dashboard.iso_utc(),
+                    }
+                )
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="preview_complete",
+                    status="preview_complete",
+                    percent=100,
+                    current_message="Preview complete",
+                    preview_path=str(new_preview_path),
+                )
+                completed = live_dashboard._combined_leads_status()
+
+                self.assertEqual(15342, completed["dispatch_source_row_count"])
+                self.assertEqual(important_leads_workflow.DISPATCH_SOURCE_CLEANED, completed["dispatch_source"]["dispatch_source_mode"])
+                self.assertEqual("dispatch_preview_recontact_current", completed["latest_auto_dispatch_preview"]["preview_id"])
+                self.assertTrue(completed["latest_auto_dispatch_preview_current"])
+                self.assertNotEqual("not_started", completed["lead_check_status"]["state"])
+
+                job.pop("auto_dispatch_preview", None)
+                job.pop("auto_dispatch_preview_path", None)
+                job.update(
+                    {
+                        "auto_dispatch_preview_status": "failed",
+                        "auto_dispatch_preview_error": "Synthetic preview failure",
+                        "updated_at_utc": live_dashboard.iso_utc(),
+                    }
+                )
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="failed",
+                    status="failed",
+                    current_message="Preview failed",
+                    error_summary="Synthetic preview failure",
+                )
+                failed = live_dashboard._combined_leads_status()
+
+            self.assertEqual(15342, failed["dispatch_source_row_count"])
+            self.assertEqual(important_leads_workflow.DISPATCH_SOURCE_CLEANED, failed["dispatch_source"]["dispatch_source_mode"])
+            self.assertEqual("Synthetic preview failure", failed["lead_ops_progress"]["error_summary"])
+            self.assertEqual({}, failed["latest_auto_dispatch_preview"])
+            self.assertFalse(failed["latest_auto_dispatch_preview_current"])
+            self.assertFalse(failed["lead_check_status"]["confirm_ready"])
+            self.assertNotEqual("not_started", failed["lead_check_status"]["state"])
+
     def test_staged_source_summary_keeps_check_and_triage_stage_counts_separate(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
             tmp = Path(tmpdir)

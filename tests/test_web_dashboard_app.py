@@ -122,6 +122,22 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, source)
 
+    def test_preview_polling_preserves_full_lead_ops_hydration(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        preview_start = source.index("async function pollImportantLeadDispatchPreviewJob(jobId)")
+        preview_end = source.index("async function previewImportantLeadDispatch", preview_start)
+        preview_poll = source[preview_start:preview_end]
+        self.assertNotIn("renderLeadsStatus(data.status", preview_poll)
+        self.assertGreaterEqual(preview_poll.count("await fetchLeadsStatus()"), 2)
+
+        check_poll_start = source.index("async function pollImportantLeadCheckJob(jobId")
+        check_poll_end = source.index("async function hydrateImportantLeadCheckJobOnLoad", check_poll_start)
+        check_poll = source[check_poll_start:check_poll_end]
+        self.assertIn("await fetchLeadsStatus()", check_poll)
+
+        self.assertIn('status?.lead_check_status?.outputs_exist', source)
+        self.assertIn('status?.lead_check_status?.latest_master_check_matches_current_run', source)
+
     def test_verify_and_dispatch_refresh_hydration_use_local_storage_and_backend_source(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [

@@ -3013,7 +3013,7 @@ def _lead_check_state_paths(status: dict[str, object], state: dict[str, object])
     def path_for(raw_key: str, status_key: str, default_path: Path) -> Path:
         raw_value = raw_paths.get(raw_key) if isinstance(raw_paths, dict) else ""
         status_value = status.get(status_key)
-        return _state_label_path(raw_value or status_value) or default_path
+        return _state_label_path(status_value or raw_value) or default_path
 
     return {
         "input": path_for("input_path", "important_input_label", IMPORTANT_LEADS_INPUT),
@@ -3425,24 +3425,37 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     )
     triage_generated_at = latest_triage.get("generated_at_utc")
 
-    source_status = _dispatch_source_status_for_path(
+    keep_source_status = _dispatch_source_status_for_path(
         path=keep_path,
         mode=DISPATCH_SOURCE_TRIAGED_KEEP,
         source_resolution=str(fast_triage_source.get("source_resolution") or ""),
         run_id=str(fast_triage_source.get("run_id") or ""),
     )
+    cleaned_source_status = _dispatch_source_status_for_path(
+        path=input_path,
+        mode=DISPATCH_SOURCE_CLEANED,
+        source_resolution=str(fast_triage_source.get("source_resolution") or ""),
+        run_id=str(fast_triage_source.get("run_id") or ""),
+    )
     source_options = dict(status.get("dispatch_source_options") or {})
-    source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = source_status
+    source_options[DISPATCH_SOURCE_TRIAGED_KEEP] = keep_source_status
+    source_options[DISPATCH_SOURCE_CLEANED] = cleaned_source_status
+    selected_source_mode = str(
+        status.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP
+    ).strip().lower()
+    selected_source_status = source_options.get(selected_source_mode)
+    if not isinstance(selected_source_status, dict):
+        selected_source_status = keep_source_status
     latest_preview = dict(job.get("auto_dispatch_preview") or status.get("latest_auto_dispatch_preview") or {})
     latest_preview, latest_preview_current = _preview_summary_for_current_staged_source(
         latest_preview,
-        source_status=source_status,
+        source_status=selected_source_status,
         source_generated_at=triage_generated_at,
     )
     latest_dispatch = status.get("latest_dispatch") if isinstance(status.get("latest_dispatch"), dict) else {}
     latest_dispatch_current = _summary_current_for_staged_source(
         latest_dispatch,
-        source_path=keep_path,
+        source_path=Path(str(selected_source_status.get("dispatch_source_path") or "")),
         source_generated_at=triage_generated_at,
         timestamp_reader=_dispatch_summary_timestamp,
     )
@@ -3465,18 +3478,18 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
             "dispatch_source_options": source_options,
         }
     )
-    if str(status.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP).strip().lower() == DISPATCH_SOURCE_TRIAGED_KEEP:
+    if selected_source_mode in {DISPATCH_SOURCE_TRIAGED_KEEP, DISPATCH_SOURCE_CLEANED}:
         status.update(
             {
-                "dispatch_source_path": source_status["dispatch_source_label"],
-                "dispatch_source_exists": source_status["dispatch_source_exists"],
-                "dispatch_source_row_count": source_status["dispatch_source_row_count"],
-                "dispatch_eligible_row_count": source_status["dispatch_eligible_row_count"],
-                "dispatch_block_reason": source_status["dispatch_block_reason"],
-                "verification_required": source_status["verification_required"],
-                "verification_file_mtime": source_status["verification_file_mtime"],
-                "dispatch_source_preview_rows": source_status["dispatch_source_preview_rows"],
-                "dispatch_source": source_status,
+                "dispatch_source_path": selected_source_status["dispatch_source_label"],
+                "dispatch_source_exists": selected_source_status["dispatch_source_exists"],
+                "dispatch_source_row_count": selected_source_status["dispatch_source_row_count"],
+                "dispatch_eligible_row_count": selected_source_status["dispatch_eligible_row_count"],
+                "dispatch_block_reason": selected_source_status["dispatch_block_reason"],
+                "verification_required": selected_source_status["verification_required"],
+                "verification_file_mtime": selected_source_status["verification_file_mtime"],
+                "dispatch_source_preview_rows": selected_source_status["dispatch_source_preview_rows"],
+                "dispatch_source": selected_source_status,
             }
         )
     return status
