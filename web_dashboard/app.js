@@ -2786,6 +2786,9 @@ function syncImportantVerifyPathInputs(status) {
 
 function syncImportantDispatchSourceMode(status) {
   const mode = status?.dispatch_source_mode || lastImportantDispatchSource?.dispatch_source_mode || "triaged_keep";
+  if (els.leadsImportantDispatchCampaignType) {
+    els.leadsImportantDispatchCampaignType.value = mode === "cleaned" ? "recontact_cold" : "cold";
+  }
   if (els.leadsImportantDispatchSourceMode) {
     els.leadsImportantDispatchSourceMode.value = mode === "strict_verified" ? "strict_verified" : mode === "cleaned" ? "cleaned" : "triaged_keep";
   }

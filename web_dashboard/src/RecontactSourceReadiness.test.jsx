@@ -120,6 +120,105 @@ function leadsStatus({
   };
 }
 
+function restartedStagedRecontactStatus() {
+  const runId = "check_20260831_222138_b8d2806e";
+  const freshSource = {
+    ...FRESH_SOURCE,
+    dispatch_source_path: `/_important/runs/${runId}/leads_triaged_keep.csv`,
+    dispatch_source_row_count: 11221,
+    dispatch_eligible_row_count: 11221,
+    run_id: runId,
+    source_resolution: "latest_completed_staged_run",
+  };
+  const recontactSource = {
+    ...RECONTACT_SOURCE,
+    dispatch_source_path: `/_important/runs/${runId}/leads.csv`,
+    dispatch_source_row_count: 15342,
+    dispatch_eligible_row_count: 15342,
+    run_id: runId,
+    source_resolution: "latest_completed_staged_run",
+  };
+  const progress = {
+    job_id: runId,
+    current_run_id: runId,
+    selected_upload_type: "cold",
+    phase: "preview_complete",
+    status: "preview_complete",
+    processed_rows: 19271,
+    total_rows: 19271,
+    output_exists: true,
+    rejected_exists: true,
+    output_path: recontactSource.dispatch_source_path,
+    rejected_path: `/_important/runs/${runId}/leads_rejected.csv`,
+    row_counts: {
+      input_rows: 19271,
+      cleaned_rows: 15342,
+      rejected_rows: 3929,
+      keep_rows: 11221,
+      triage_reject_rows: 4121,
+      quarantine_rows: 0,
+      dispatch_eligible_row_count: 15342,
+    },
+  };
+  const funnelStage = (rowCount) => ({ status: "ready", row_count: rowCount });
+  return {
+    ...leadsStatus({ checkState: "success", freshSource, recontactSource }),
+    lead_check_status: {
+      ...leadCheck("success"),
+      message: "Cleaned and rejected output files exist for the current upload.",
+      cleaned_rows: 15342,
+      rejected_rows: 3929,
+      outputs_exist: true,
+      latest_master_check_matches_current_run: true,
+    },
+    lead_ops_progress: progress,
+    lead_ops_progress_by_workflow: { cold: progress, warm_research: {} },
+    dispatch_source_mode: "cleaned",
+    dispatch_source: recontactSource,
+    dispatch_source_options: {
+      triaged_keep: freshSource,
+      cleaned: recontactSource,
+    },
+    latest_master_check: {
+      job_id: runId,
+      run_id: runId,
+      upload_type: "cold",
+      input_rows: 19271,
+      cleaned_rows: 15342,
+      rejected_rows: 3929,
+      generated_at_utc: "2026-08-31T22:45:00Z",
+    },
+    latest_lead_triage: {
+      run_id: runId,
+      keep_count: 11221,
+      reject_count: 4121,
+      quarantine_count: 0,
+      generated_at_utc: "2026-08-31T22:50:00Z",
+    },
+    latest_auto_dispatch_preview: {},
+    latest_auto_dispatch_preview_current: false,
+    pipeline: {
+      input_rows: 19271,
+      cleaned_rows: 15342,
+      rejected_rows: 3929,
+      dispatch_eligible_rows: 15342,
+    },
+    lead_funnel: {
+      current_live: {},
+      next_batch: {
+        run_id: runId,
+        raw_input: funnelStage(19271),
+        cleaned_after_check: funnelStage(15342),
+        check_rejected: funnelStage(3929),
+        triage_keep: funnelStage(11221),
+        triage_reject: funnelStage(4121),
+        triage_quarantine: funnelStage(0),
+        final_eligible: funnelStage(15342),
+      },
+    },
+  };
+}
+
 function snapshot(active = false) {
   return {
     generated_at: "2026-08-28T00:00:00Z",
@@ -257,6 +356,25 @@ describe("source-scoped Recontact readiness", () => {
       dispatch_source_mode: "cleaned",
       output_path: RECONTACT_SOURCE.dispatch_source_path,
     });
+  });
+
+  it("restores a persisted cleaned Recontact staged run after a process restart", async () => {
+    const boot = await bootController(restartedStagedRecontactStatus());
+    root = boot.root;
+
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Complete");
+    expect(document.getElementById("leads-control-check-result")).toHaveTextContent("Input 19,271");
+    expect(document.getElementById("leads-control-check-result")).toHaveTextContent("Cleaned 15,342");
+    expect(document.getElementById("leads-control-check-result")).toHaveTextContent("Rejected 3,929");
+    expect(document.getElementById("leads-control-check-result")).toHaveTextContent("Keep 11,221");
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("11,221 source rows");
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("15,342 checked rows");
+    expect(document.getElementById("leads-dispatch-campaign-type")).toHaveValue("recontact_cold");
+    expect(document.getElementById("leads-dispatch-source-mode")).toHaveValue("cleaned");
+    expect(document.body).toHaveTextContent("Preview required for the selected Checked Recontact source.");
+    expect(previewButton()).not.toBeDisabled();
+    expect(confirmButton()).toBeDisabled();
+    expect(previewPosts(boot.fetchMock)).toHaveLength(0);
   });
 
   it("allows Recontact preview while a Fresh check status is processing, without making Fresh ready", async () => {
