@@ -4790,6 +4790,8 @@ DASHBOARD_SNAPSHOT_CACHE_PATH = Path(
 _SNAPSHOT_FILE_CACHE_LOCK = threading.Lock()
 _SNAPSHOT_FILE_CACHE_SIGNATURE: tuple[int, int, int, int] | None = None
 _SNAPSHOT_FILE_CACHE_PAYLOAD: dict[str, object] | None = None
+_LEADS_STATUS_FILE_CACHE_SIGNATURE: tuple[int, int, int, int] | None = None
+_LEADS_STATUS_FILE_CACHE_PAYLOAD: dict[str, object] | None = None
 
 # WebSocket clients used to each reconcile and JSON-serialize a full snapshot
 # every ten seconds.  This small in-process fan-out cache makes one caller the
@@ -4869,10 +4871,14 @@ def _snapshot_file_signature(path: Path) -> tuple[int, int, int, int] | None:
 def _reset_snapshot_caches_for_tests() -> None:
     global _SNAPSHOT_FILE_CACHE_SIGNATURE
     global _SNAPSHOT_FILE_CACHE_PAYLOAD
+    global _LEADS_STATUS_FILE_CACHE_SIGNATURE
+    global _LEADS_STATUS_FILE_CACHE_PAYLOAD
     global _SNAPSHOT_FANOUT_REVISION
     with _SNAPSHOT_FILE_CACHE_LOCK:
         _SNAPSHOT_FILE_CACHE_SIGNATURE = None
         _SNAPSHOT_FILE_CACHE_PAYLOAD = None
+        _LEADS_STATUS_FILE_CACHE_SIGNATURE = None
+        _LEADS_STATUS_FILE_CACHE_PAYLOAD = None
     with _SNAPSHOT_FANOUT_LOCK:
         _SNAPSHOT_FANOUT_CACHE.clear()
         waiters = list(_SNAPSHOT_FANOUT_INFLIGHT.values())
@@ -4914,6 +4920,74 @@ def _load_cached_live_snapshot() -> dict[str, object] | None:
         _SNAPSHOT_FILE_CACHE_SIGNATURE = signature
         _SNAPSHOT_FILE_CACHE_PAYLOAD = cached_snapshot
     return cached_snapshot
+
+
+
+def _load_cached_leads_status() -> dict[str, object] | None:
+    global _LEADS_STATUS_FILE_CACHE_SIGNATURE
+    global _LEADS_STATUS_FILE_CACHE_PAYLOAD
+
+    signature = _snapshot_file_signature(DASHBOARD_SNAPSHOT_CACHE_PATH)
+    if signature is None:
+        return None
+
+    with _SNAPSHOT_FILE_CACHE_LOCK:
+        if (
+            signature == _LEADS_STATUS_FILE_CACHE_SIGNATURE
+            and isinstance(_LEADS_STATUS_FILE_CACHE_PAYLOAD, dict)
+        ):
+            return dict(_LEADS_STATUS_FILE_CACHE_PAYLOAD)
+
+    try:
+        payload = json.loads(
+            DASHBOARD_SNAPSHOT_CACHE_PATH.read_text(encoding="utf-8")
+        )
+        cached_status = payload.get("leads_status")
+        if not isinstance(cached_status, dict):
+            return None
+    except (OSError, TypeError, json.JSONDecodeError):
+        return None
+
+    # Do not publish an in-process cache entry if the producer replaced
+    # the atomic snapshot file while this process was reading it.
+    ending_signature = _snapshot_file_signature(
+        DASHBOARD_SNAPSHOT_CACHE_PATH
+    )
+    if ending_signature != signature:
+        return dict(cached_status)
+
+    with _SNAPSHOT_FILE_CACHE_LOCK:
+        _LEADS_STATUS_FILE_CACHE_SIGNATURE = signature
+        _LEADS_STATUS_FILE_CACHE_PAYLOAD = dict(cached_status)
+
+    return dict(cached_status)
+
+
+def _display_leads_status() -> dict[str, object]:
+    """Fast status payload for dashboard/UI responses.
+
+    Production must never run the expensive full Lead Ops reconstruction in
+    an HTTP polling request. The systemd cache-refresh service performs that
+    work outside the request path and persists the last known-good result.
+
+    Non-systemd development retains the historical synchronous fallback so
+    local development does not require the production timer.
+    """
+    cached_status = _load_cached_leads_status()
+    if cached_status is not None:
+        return cached_status
+
+    if runtime_control.backend_name() != "systemd":
+        return _combined_leads_status()
+
+    return {
+        "status_cache_ready": False,
+        "status_cache_source": "persisted_dashboard_refresh",
+        "status_cache_message": (
+            "Lead Ops status cache is warming up. "
+            "No synchronous production rebuild was attempted."
+        ),
+    }
 
 
 def _reconcile_snapshot_runtime(snapshot: dict[str, object]) -> dict[str, object]:
@@ -7073,7 +7147,7 @@ def generate_warm_research_email_preview() -> JSONResponse:
             "message": str(preview.get("message") or "Warm draft preview generated."),
             "preview": preview,
             "warm_check": updated_check,
-            "status": _combined_leads_status(),
+            "status": _display_leads_status(),
         }
     )
 
@@ -7114,7 +7188,7 @@ def confirm_warm_research_private_jc() -> JSONResponse:
         "message": str(confirmation.get("message") or "Warm Private JC confirmed."),
         "confirmation": confirmation,
         "warm_check": updated_check,
-        "status": _combined_leads_status(),
+        "status": _display_leads_status(),
     })
 
 
@@ -7794,7 +7868,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "ok": True,
                     "message": "Dispatch preview ready.",
                     "preview": preview,
-                    "status": _combined_leads_status(),
+                    "status": _display_leads_status(),
                 },
                 status_code=200,
             )
@@ -7842,7 +7916,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "ok": True,
                     "message": "Dispatch preview already complete.",
                     "preview": persisted_preview,
-                    "status": _combined_leads_status(),
+                    "status": _display_leads_status(),
                 },
                 status_code=200,
             )
@@ -7855,7 +7929,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "accepted": True,
                     "message": "Preview Dispatch is already running.",
                     "job": _important_check_job_with_progress(progress_job),
-                    "status": _combined_leads_status(),
+                    "status": _display_leads_status(),
                 },
                 status_code=202,
             )
@@ -7937,7 +8011,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "accepted": True,
                     "message": "Preview Dispatch started.",
                     "job": _important_check_job_with_progress(progress_job),
-                    "status": _combined_leads_status(),
+                    "status": _display_leads_status(),
                 },
                 status_code=202,
             )
@@ -7991,7 +8065,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             "ok": True,
             "message": f"Preview ready for {preview['dispatch_source_name']}.",
             "preview": preview,
-            "status": _combined_leads_status(),
+            "status": _display_leads_status(),
             "snapshot": _build_live_snapshot(),
         }
     )
@@ -8016,7 +8090,7 @@ def create_safer_recontact_pool(payload: ImportantLeadDispatchPayload | None = N
             "ok": True,
             "message": f"Safer recontact pool created with {int(summary.get('safer_rows_written') or 0)} row(s).",
             "summary": summary,
-            "status": _combined_leads_status(),
+            "status": _display_leads_status(),
             "snapshot": _build_live_snapshot(),
         }
     )
@@ -9070,7 +9144,7 @@ def preview_shard(payload: ShardLeadsPayload) -> JSONResponse:
 
 @app.get("/api/leads/status")
 def leads_status() -> JSONResponse:
-    return JSONResponse({"ok": True, "status": _combined_leads_status()})
+    return JSONResponse({"ok": True, "status": _display_leads_status()})
 
 
 def _process_sendgrid_webhook_payload(
