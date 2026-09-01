@@ -2349,6 +2349,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             jc_before = jc_queue.read_text(encoding="utf-8")
             sg_before = [path.read_text(encoding="utf-8") for path in sg_queues]
+            progress_events: list[tuple[str, dict[str, object]]] = []
 
             preview = preview_dispatch_master_leads(
                 master_path=master_path,
@@ -2364,6 +2365,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 unsubscribed_path=unsubscribed_path,
                 lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
                 preview_dir=preview_dir,
+                progress_callback=lambda stage, metadata: progress_events.append((stage, metadata)),
             )
 
             self.assertEqual("triaged_keep", preview["active_source_key"])
@@ -2397,6 +2399,26 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertIs(True, persisted_preview["dispatch_source_exists"])
             self.assertEqual(jc_before, jc_queue.read_text(encoding="utf-8"))
             self.assertEqual(sg_before, [path.read_text(encoding="utf-8") for path in sg_queues])
+            stages = [stage for stage, _metadata in progress_events]
+            for stage in ["prepare", "build_plan", "classification", "archive", "persist", "complete"]:
+                self.assertIn(stage, stages)
+            timings = preview["performance_timings_seconds"]
+            for timing_name in [
+                "master_source_loading",
+                "suppression_unsubscribe_loading",
+                "dispatch_source_loading",
+                "queue_loading",
+                "send_history_bad_event_loading",
+                "dispatch_history_ledger_reads",
+                "classification_plan_construction",
+                "dependency_state_collection",
+                "total_build_plan",
+                "preview_archive",
+                "preview_persist",
+                "total_preview",
+            ]:
+                self.assertIn(timing_name, timings)
+                self.assertGreaterEqual(float(timings[timing_name]), 0.0)
 
     def test_preview_dispatch_master_leads_skips_rows_missing_required_dispatch_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

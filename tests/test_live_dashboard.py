@@ -6272,6 +6272,8 @@ class LiveDashboardTests(unittest.TestCase):
             self._write_csv(output_path, ["FirstName", "Email"], [{"FirstName": "Ava", "Email": "ava@example.test"}])
             self._write_csv(rejected_path, ["FirstName", "Email"], [])
             self._write_csv(staged_keep_path, ["FirstName", "Email", "Status"], [{"FirstName": "Ava", "Email": "ava@example.test", "Status": "KEEP"}])
+            self._write_csv(run_dir / "leads_triaged_reject.csv", ["FirstName", "Email"], [])
+            self._write_csv(run_dir / "leads_triaged_quarantine.csv", ["FirstName", "Email"], [])
             job = {
                 "job_id": "check_20260521_160619_9eb75e28",
                 "status": "completed",
@@ -6377,9 +6379,11 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(rejected_path, worker_kwargs["rejected_path"])
             self.assertEqual("triaged_keep", worker_kwargs["dispatch_source_mode"])
             self.assertEqual("all", worker_kwargs["dispatch_cap"])
+            self.assertEqual(job["job_id"], worker_kwargs["expected_recovery_binding"]["job_id"])
 
             thread_cls.return_value.start.assert_called_once_with()
             preview_dispatch_master_leads.assert_not_called()
+            live_dashboard._release_dispatch_preview_claim(worker_kwargs["preview_claim"])
 
     def test_preview_dispatch_important_leads_blocks_empty_current_staged_keep(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -8229,6 +8233,837 @@ class LiveDashboardTests(unittest.TestCase):
         controlled_report.assert_called_once_with(profile)
         production_report.assert_not_called()
         lead_state.assert_not_called()
+
+
+    def test_completed_check_with_running_auto_preview_is_operationally_active(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            jobs_dir.mkdir()
+            job = {
+                "job_id": "check_preview_active",
+                "upload_type": "cold",
+                "status": "completed",
+                "stage": "done",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "updated_at_utc": live_dashboard.iso_utc(),
+            }
+            (jobs_dir / "check_preview_active.json").write_text(json.dumps(job), encoding="utf-8")
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                try:
+                    active = live_dashboard._find_active_important_check_job("cold")
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+
+            self.assertIsNotNone(active)
+            self.assertEqual("previewing", active["operational_phase"])
+
+            job["updated_at_utc"] = "2026-01-01T00:00:00+00:00"
+            (jobs_dir / "check_preview_active.json").write_text(json.dumps(job), encoding="utf-8")
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                self.assertIsNone(live_dashboard._find_active_important_check_job("cold"))
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                try:
+                    active_with_claim = live_dashboard._find_active_important_check_job("cold")
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+            self.assertEqual("previewing", active_with_claim["operational_phase"])
+
+    def test_failed_parent_cannot_be_reactivated_by_preview_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            job = {
+                "job_id": "check_failed_preview_metadata",
+                "status": "failed",
+                "auto_dispatch_preview_status": "running",
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir):
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                try:
+                    self.assertEqual("", live_dashboard._important_check_job_operational_phase(job))
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+
+    def test_advanced_subordinate_phase_wins_over_parent_check_state(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            checking_parent = {
+                "job_id": "check_parent_still_running",
+                "status": "running",
+                "auto_dispatch_preview_status": "running",
+            }
+            triaging_child = {
+                "job_id": "check_parent_completed_triage_running",
+                "status": "completed",
+                "auto_triage_status": "running",
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir):
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(checking_parent["job_id"])
+                try:
+                    self.assertEqual(
+                        "previewing",
+                        live_dashboard._important_check_job_operational_phase(checking_parent),
+                    )
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+                self.assertEqual(
+                    "triaging",
+                    live_dashboard._important_check_job_operational_phase(triaging_child),
+                )
+
+    def test_previewing_active_job_builds_processing_status_not_not_started(self) -> None:
+        active_job = {
+            "job_id": "check_preview_status",
+            "status": "completed",
+            "stage": "done",
+            "operational_phase": "previewing",
+            "auto_dispatch_preview_status": "running",
+            "message": "Classifying eligible recipients",
+            "updated_at_utc": live_dashboard.iso_utc(),
+        }
+        status = {
+            "active_important_check_job": active_job,
+            "latest_master_check": {},
+            "important_input_label": "",
+            "important_output_label": "",
+            "important_rejected_label": "",
+        }
+
+        result = live_dashboard._build_lead_check_status(status, {})
+
+        self.assertEqual("processing", result["state"])
+        self.assertEqual("Building dispatch preview", result["label"])
+        self.assertEqual("Classifying eligible recipients", result["message"])
+
+    def test_previewing_progress_is_not_downgraded_when_triage_artifacts_exist(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            jobs_dir.mkdir()
+            paths = {
+                "input_path": tmp / "upload.csv",
+                "output_path": tmp / "leads.csv",
+                "rejected_path": tmp / "leads_rejected.csv",
+                "keep_path": tmp / "leads_triaged_keep.csv",
+                "triage_reject_path": tmp / "leads_triaged_reject.csv",
+                "quarantine_path": tmp / "leads_triaged_quarantine.csv",
+            }
+            for key, path in paths.items():
+                rows = [{"Email": "synthetic@example.test"}] if key in {"input_path", "output_path", "keep_path"} else []
+                self._write_csv(path, ["Email"], rows)
+            progress = {
+                "job_id": "check_preview_progress",
+                "selected_upload_type": "cold",
+                "phase": "previewing",
+                "status": "running",
+                "updated_at_utc": live_dashboard.iso_utc(),
+                **{key: str(path) for key, path in paths.items()},
+            }
+            (jobs_dir / "check_preview_progress.json").write_text(
+                json.dumps({"job_id": "check_preview_progress", "status": "completed"}),
+                encoding="utf-8",
+            )
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir):
+                reconciled = live_dashboard._reconcile_lead_ops_progress(progress, {"check_preview_progress"})
+
+            self.assertEqual("previewing", reconciled["phase"])
+            self.assertEqual("running", reconciled["status"])
+
+    def test_dispatch_preview_claim_allows_exactly_one_concurrent_builder(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            barrier = threading.Barrier(2)
+            executions: list[str] = []
+
+            def worker() -> None:
+                barrier.wait()
+                claim = live_dashboard._try_acquire_dispatch_preview_claim("check_claim")
+                if claim is None:
+                    return
+                try:
+                    executions.append(str(claim["claim_token"]))
+                    time.sleep(0.1)
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(claim)
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir):
+                threads = [threading.Thread(target=worker) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                recovered_claim = live_dashboard._try_acquire_dispatch_preview_claim("check_claim")
+                self.assertIsNotNone(recovered_claim)
+                live_dashboard._release_dispatch_preview_claim(recovered_claim)
+
+            self.assertEqual(1, len(executions))
+
+    def test_dispatch_preview_claims_for_different_jobs_do_not_block_each_other(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            jobs_dir = Path(tmpdir) / "jobs"
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir):
+                first = live_dashboard._try_acquire_dispatch_preview_claim("check_first")
+                second = live_dashboard._try_acquire_dispatch_preview_claim("check_second")
+                try:
+                    self.assertIsNotNone(first)
+                    self.assertIsNotNone(second)
+                finally:
+                    live_dashboard._release_dispatch_preview_claim(second)
+                    live_dashboard._release_dispatch_preview_claim(first)
+
+    def test_previewing_state_without_process_lock_reloads_as_stale_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            run_dir = tmp / "run"
+            run_dir.mkdir()
+            job = {
+                "job_id": "check_restarted_preview",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "output_path": str(run_dir / "leads.csv"),
+                "rejected_path": str(run_dir / "leads_rejected.csv"),
+                "auto_triage_keep_path": str(run_dir / "leads_triaged_keep.csv"),
+                "auto_triage_rejected_path": str(run_dir / "leads_triaged_reject.csv"),
+                "auto_triage_quarantine_path": str(run_dir / "leads_triaged_quarantine.csv"),
+                "created_at_utc": live_dashboard.iso_utc(),
+            }
+            for key in [
+                "output_path",
+                "rejected_path",
+                "auto_triage_keep_path",
+                "auto_triage_rejected_path",
+                "auto_triage_quarantine_path",
+            ]:
+                rows = [{"Email": "synthetic@example.test"}] if key in {"output_path", "auto_triage_keep_path"} else []
+                self._write_csv(Path(job[key]), ["Email"], rows)
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                live_dashboard._save_important_check_job(job)
+                progress = live_dashboard._write_lead_ops_progress(
+                    job,
+                    phase="previewing",
+                    status="running",
+                    current_message="Building dispatch preview",
+                )
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                live_dashboard._release_dispatch_preview_claim(claim)
+
+                reloaded_job = live_dashboard._load_important_check_job(job["job_id"])
+                reloaded_progress = live_dashboard._load_lead_ops_progress(job["job_id"])
+                active = live_dashboard._find_active_important_check_job("cold")
+                reconciled = live_dashboard._reconcile_lead_ops_progress(reloaded_progress, set())
+
+            self.assertEqual("running", progress["status"])
+            self.assertEqual("running", reloaded_job["auto_dispatch_preview_status"])
+            self.assertIsNone(active)
+            self.assertEqual("stale", reconciled["phase"])
+            self.assertTrue(reconciled["retry_safe"])
+            self.assertEqual("Retry Preview", reconciled["retry_action"])
+            self.assertTrue(reconciled["preview_recovery_binding"])
+
+    def test_preview_recovery_binding_fails_closed_for_wrong_run_or_changed_source(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            run_dir = tmp / "runs" / "check_binding"
+            run_dir.mkdir(parents=True)
+            filenames = {
+                "output_path": "leads.csv",
+                "rejected_path": "leads_rejected.csv",
+                "auto_triage_keep_path": "leads_triaged_keep.csv",
+                "auto_triage_rejected_path": "leads_triaged_reject.csv",
+                "auto_triage_quarantine_path": "leads_triaged_quarantine.csv",
+            }
+            job = {
+                "job_id": "check_binding",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "staged_run_dir": str(run_dir),
+            }
+            for key, filename in filenames.items():
+                path = run_dir / filename
+                rows = [{"Email": "synthetic@example.test"}] if key in {"output_path", "auto_triage_keep_path"} else []
+                self._write_csv(path, ["Email"], rows)
+                job[key] = str(path)
+            binding = live_dashboard._preview_recovery_binding(job)
+            wrong_run = live_dashboard.ImportantLeadDispatchPayload(
+                job_id=job["job_id"],
+                current_run_id="different_run",
+                preview_recovery_binding=binding,
+            )
+            with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job):
+                block = live_dashboard._preview_recovery_request_block(
+                    payload=wrong_run,
+                    job=job,
+                    source_path=Path(job["auto_triage_keep_path"]),
+                    require_client_binding=True,
+                )
+            self.assertEqual("preview_recovery_run_mismatch", block["error"])
+
+            with Path(job["auto_triage_keep_path"]).open("a", encoding="utf-8") as handle:
+                handle.write("changed@example.test\n")
+            stale_binding = live_dashboard.ImportantLeadDispatchPayload(
+                job_id=job["job_id"],
+                current_run_id=job["job_id"],
+                preview_recovery_binding=binding,
+            )
+            with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job):
+                block = live_dashboard._preview_recovery_request_block(
+                    payload=stale_binding,
+                    job=job,
+                    source_path=Path(job["auto_triage_keep_path"]),
+                    require_client_binding=True,
+                )
+            self.assertEqual("preview_recovery_fingerprint_mismatch", block["error"])
+
+    def test_preview_worker_revalidates_recovery_binding_before_builder(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            job = {
+                "job_id": "check_worker_binding",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "output_path": str(tmp / "leads.csv"),
+                "rejected_path": str(tmp / "leads_rejected.csv"),
+                "auto_triage_keep_path": str(tmp / "leads_triaged_keep.csv"),
+                "auto_triage_rejected_path": str(tmp / "leads_triaged_reject.csv"),
+                "auto_triage_quarantine_path": str(tmp / "leads_triaged_quarantine.csv"),
+            }
+            for key in [
+                "output_path",
+                "rejected_path",
+                "auto_triage_keep_path",
+                "auto_triage_rejected_path",
+                "auto_triage_quarantine_path",
+            ]:
+                rows = [{"Email": "synthetic@example.test"}] if key in {"output_path", "auto_triage_keep_path"} else []
+                self._write_csv(Path(job[key]), ["Email"], rows)
+            expected_binding = live_dashboard._preview_recovery_binding(job)
+            with Path(job["auto_triage_keep_path"]).open("a", encoding="utf-8") as handle:
+                handle.write("changed@example.test\n")
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(live_dashboard, "preview_dispatch_master_leads") as preview_builder:
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._run_claimed_manual_dispatch_preview_background(
+                    check_job_id=job["job_id"],
+                    master_path=Path(job["output_path"]),
+                    rejected_path=Path(job["rejected_path"]),
+                    verified_source_path=tmp / "verified.csv",
+                    triaged_keep_source_path=Path(job["auto_triage_keep_path"]),
+                    source_path_for_mode=Path(job["auto_triage_keep_path"]),
+                    dispatch_source_mode="triaged_keep",
+                    dispatch_cap="all",
+                    campaign_type="cold",
+                    preview_dir=tmp / "previews",
+                    expected_recovery_binding=expected_binding,
+                )
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+
+            preview_builder.assert_not_called()
+            self.assertEqual("failed", saved_job["auto_dispatch_preview_status"])
+            self.assertIn("changed before preview execution", saved_job["auto_dispatch_preview_error"])
+
+    def test_preview_worker_rejects_source_change_during_builder(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            job = {
+                "job_id": "check_worker_mid_build_binding",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "output_path": str(tmp / "leads.csv"),
+                "rejected_path": str(tmp / "leads_rejected.csv"),
+                "auto_triage_keep_path": str(tmp / "leads_triaged_keep.csv"),
+                "auto_triage_rejected_path": str(tmp / "leads_triaged_reject.csv"),
+                "auto_triage_quarantine_path": str(tmp / "leads_triaged_quarantine.csv"),
+            }
+            for key in [
+                "output_path",
+                "rejected_path",
+                "auto_triage_keep_path",
+                "auto_triage_rejected_path",
+                "auto_triage_quarantine_path",
+            ]:
+                rows = [{"Email": "synthetic@example.test"}] if key in {"output_path", "auto_triage_keep_path"} else []
+                self._write_csv(Path(job[key]), ["Email"], rows)
+            expected_binding = live_dashboard._preview_recovery_binding(job)
+
+            def mutate_source_during_build(**_kwargs: object) -> dict[str, object]:
+                with Path(job["auto_triage_keep_path"]).open("a", encoding="utf-8") as handle:
+                    handle.write("changed@example.test\n")
+                return {"preview_id": "orphaned_preview", "preview_path": str(tmp / "orphaned.json")}
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                side_effect=mutate_source_during_build,
+            ):
+                live_dashboard._save_important_check_job(job)
+                live_dashboard._run_claimed_manual_dispatch_preview_background(
+                    check_job_id=job["job_id"],
+                    master_path=Path(job["output_path"]),
+                    rejected_path=Path(job["rejected_path"]),
+                    verified_source_path=tmp / "verified.csv",
+                    triaged_keep_source_path=Path(job["auto_triage_keep_path"]),
+                    source_path_for_mode=Path(job["auto_triage_keep_path"]),
+                    dispatch_source_mode="triaged_keep",
+                    dispatch_cap="all",
+                    campaign_type="cold",
+                    preview_dir=tmp / "previews",
+                    expected_recovery_binding=expected_binding,
+                )
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+
+            self.assertEqual("failed", saved_job["auto_dispatch_preview_status"])
+            self.assertIn("changed during preview execution", saved_job["auto_dispatch_preview_error"])
+            self.assertNotIn("auto_dispatch_preview_id", saved_job)
+            self.assertNotIn("auto_dispatch_preview_path", saved_job)
+
+    def test_completed_preview_duplicate_request_reuses_artifact_and_changed_source_blocks(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            keep_path = tmp / "leads_triaged_keep.csv"
+            triage_reject_path = tmp / "leads_triaged_reject.csv"
+            quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            for path, rows in [
+                (output_path, [{"Email": "synthetic@example.test"}]),
+                (rejected_path, []),
+                (keep_path, [{"Email": "synthetic@example.test"}]),
+                (triage_reject_path, []),
+                (quarantine_path, []),
+            ]:
+                self._write_csv(path, ["Email"], rows)
+            preview_path = tmp / "dispatch_previews" / "dispatch_preview_existing.json"
+            preview_path.parent.mkdir()
+            existing_preview = {
+                "preview_id": "dispatch_preview_existing",
+                "preview_path": str(preview_path),
+                "dispatch_source_path": str(keep_path),
+                "dispatch_source_mode": "triaged_keep",
+            }
+            preview_path.write_text(json.dumps(existing_preview), encoding="utf-8")
+            job = {
+                "job_id": "check_idempotent_preview",
+                "status": "completed",
+                "created_at_utc": live_dashboard.iso_utc(),
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "auto_dispatch_preview_id": existing_preview["preview_id"],
+                "auto_dispatch_preview_path": str(preview_path),
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "auto_triage_keep_path": str(keep_path),
+                "auto_triage_rejected_path": str(triage_reject_path),
+                "auto_triage_quarantine_path": str(quarantine_path),
+            }
+
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                live_dashboard._save_important_check_job(job)
+                binding = live_dashboard._preview_recovery_binding(job)
+                payload = live_dashboard.ImportantLeadDispatchPayload(
+                    output_path=str(output_path),
+                    rejected_path=str(rejected_path),
+                    dispatch_source_mode="triaged_keep",
+                    job_id=job["job_id"],
+                    current_run_id=job["job_id"],
+                    preview_recovery_binding=binding,
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_path_state", return_value={"input_path": str(output_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_verify_path_state", return_value={"verified_path": str(tmp / "verified.csv")}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_triage_path_state", return_value={"keep_path": str(keep_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_fast_triage_keep_source", return_value={"source_resolution": "latest_completed_staged_run", "job": job, "run_id": job["job_id"], "path": keep_path, "paths": live_dashboard._staged_triage_paths_for_job(job), "exists": True, "row_count": 1}))
+                    stack.enter_context(patch.object(live_dashboard, "_find_check_job_for_progress_source", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_source_readiness_block", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "_combined_leads_status", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "save_state"))
+                    stack.enter_context(
+                        patch.object(
+                            live_dashboard,
+                            "validate_dispatch_preview",
+                            return_value=existing_preview,
+                        )
+                    )
+                    preview_builder = stack.enter_context(patch.object(live_dashboard, "preview_dispatch_master_leads"))
+                    claim_builder = stack.enter_context(patch.object(live_dashboard, "_try_acquire_dispatch_preview_claim", wraps=live_dashboard._try_acquire_dispatch_preview_claim))
+
+                    response = live_dashboard.preview_dispatch_important_leads(payload)
+
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual(existing_preview["preview_id"], json.loads(response.body)["preview"]["preview_id"])
+                    preview_builder.assert_not_called()
+                    claim_builder.assert_not_called()
+
+                    with keep_path.open("a", encoding="utf-8") as handle:
+                        handle.write("changed@example.test\n")
+                    changed_response = live_dashboard.preview_dispatch_important_leads(payload)
+
+            self.assertEqual(409, changed_response.status_code)
+            self.assertEqual("preview_recovery_fingerprint_mismatch", json.loads(changed_response.body)["error"])
+            preview_builder.assert_not_called()
+
+    def test_completed_preview_with_changed_dependency_is_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            preview_path = Path(tmpdir) / "dispatch_preview_stale.json"
+            preview_path.write_text(
+                json.dumps({"preview_id": "dispatch_preview_stale"}),
+                encoding="utf-8",
+            )
+            job = {
+                "auto_dispatch_preview_id": "dispatch_preview_stale",
+                "auto_dispatch_preview_path": str(preview_path),
+            }
+            with patch.object(
+                live_dashboard,
+                "validate_dispatch_preview",
+                side_effect=RuntimeError("Dispatch preview is stale. Changed inputs: suppression.csv"),
+            ) as validator:
+                preview = live_dashboard._persisted_dispatch_preview_for_job(job)
+
+            self.assertIsNone(preview)
+            validator.assert_called_once_with(
+                "dispatch_preview_stale",
+                preview_dir=preview_path.parent,
+            )
+
+    def test_exception_before_preview_thread_start_releases_claim(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            keep_path = tmp / "leads_triaged_keep.csv"
+            triage_reject_path = tmp / "leads_triaged_reject.csv"
+            quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            for path, rows in [
+                (output_path, [{"Email": "synthetic@example.test"}]),
+                (rejected_path, []),
+                (keep_path, [{"Email": "synthetic@example.test"}]),
+                (triage_reject_path, []),
+                (quarantine_path, []),
+            ]:
+                self._write_csv(path, ["Email"], rows)
+            job = {
+                "job_id": "check_pre_thread_failure",
+                "status": "completed",
+                "created_at_utc": live_dashboard.iso_utc(),
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "failed",
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "auto_triage_keep_path": str(keep_path),
+                "auto_triage_rejected_path": str(triage_reject_path),
+                "auto_triage_quarantine_path": str(quarantine_path),
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                live_dashboard._save_important_check_job(job)
+                binding = live_dashboard._preview_recovery_binding(job)
+                payload = live_dashboard.ImportantLeadDispatchPayload(
+                    output_path=str(output_path),
+                    rejected_path=str(rejected_path),
+                    dispatch_source_mode="triaged_keep",
+                    job_id=job["job_id"],
+                    current_run_id=job["job_id"],
+                    preview_recovery_binding=binding,
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_path_state", return_value={"input_path": str(output_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_verify_path_state", return_value={"verified_path": str(tmp / "verified.csv")}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_triage_path_state", return_value={"keep_path": str(keep_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_fast_triage_keep_source", return_value={"source_resolution": "latest_completed_staged_run", "job": job, "run_id": job["job_id"], "path": keep_path, "paths": live_dashboard._staged_triage_paths_for_job(job), "exists": True, "row_count": 1}))
+                    stack.enter_context(patch.object(live_dashboard, "_find_check_job_for_progress_source", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_source_readiness_block", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "_combined_leads_status", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "save_state"))
+                    thread_cls = stack.enter_context(patch.object(live_dashboard.threading, "Thread"))
+                    thread_cls.return_value.start.side_effect = RuntimeError("synthetic thread start failure")
+
+                    response = live_dashboard.preview_dispatch_important_leads(payload)
+
+                recovered_claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                self.assertIsNotNone(recovered_claim)
+                live_dashboard._release_dispatch_preview_claim(recovered_claim)
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+
+            self.assertEqual(409, response.status_code)
+            self.assertEqual("dispatch_preview_blocked", json.loads(response.body)["error"])
+            self.assertEqual("failed", saved_job["auto_dispatch_preview_status"])
+            self.assertNotIn("preview_claim_token", saved_job)
+
+    def test_owner_metadata_persistence_failure_releases_claim(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            output_path = tmp / "leads.csv"
+            rejected_path = tmp / "leads_rejected.csv"
+            keep_path = tmp / "leads_triaged_keep.csv"
+            triage_reject_path = tmp / "leads_triaged_reject.csv"
+            quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            for path, rows in [
+                (output_path, [{"Email": "synthetic@example.test"}]),
+                (rejected_path, []),
+                (keep_path, [{"Email": "synthetic@example.test"}]),
+                (triage_reject_path, []),
+                (quarantine_path, []),
+            ]:
+                self._write_csv(path, ["Email"], rows)
+            job = {
+                "job_id": "check_metadata_failure",
+                "status": "completed",
+                "created_at_utc": live_dashboard.iso_utc(),
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "failed",
+                "output_path": str(output_path),
+                "rejected_path": str(rejected_path),
+                "auto_triage_keep_path": str(keep_path),
+                "auto_triage_rejected_path": str(triage_reject_path),
+                "auto_triage_quarantine_path": str(quarantine_path),
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                live_dashboard._save_important_check_job(job)
+                payload = live_dashboard.ImportantLeadDispatchPayload(
+                    output_path=str(output_path),
+                    rejected_path=str(rejected_path),
+                    dispatch_source_mode="triaged_keep",
+                    job_id=job["job_id"],
+                    current_run_id=job["job_id"],
+                    preview_recovery_binding=live_dashboard._preview_recovery_binding(job),
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_path_state", return_value={"input_path": str(output_path), "output_path": str(output_path), "rejected_path": str(rejected_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_verify_path_state", return_value={"verified_path": str(tmp / "verified.csv")}))
+                    stack.enter_context(patch.object(live_dashboard, "important_leads_triage_path_state", return_value={"keep_path": str(keep_path)}))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_fast_triage_keep_source", return_value={"source_resolution": "latest_completed_staged_run", "job": job, "run_id": job["job_id"], "path": keep_path, "paths": live_dashboard._staged_triage_paths_for_job(job), "exists": True, "row_count": 1}))
+                    stack.enter_context(patch.object(live_dashboard, "_find_check_job_for_progress_source", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job))
+                    stack.enter_context(patch.object(live_dashboard, "_dispatch_source_readiness_block", return_value=None))
+                    stack.enter_context(patch.object(live_dashboard, "_combined_leads_status", return_value={}))
+                    stack.enter_context(patch.object(live_dashboard, "save_state"))
+                    stack.enter_context(patch.object(live_dashboard, "_save_important_check_job", side_effect=RuntimeError("synthetic metadata persistence failure")))
+
+                    response = live_dashboard.preview_dispatch_important_leads(payload)
+
+                recovered_claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                self.assertIsNotNone(recovered_claim)
+                live_dashboard._release_dispatch_preview_claim(recovered_claim)
+
+            self.assertEqual(409, response.status_code)
+            self.assertEqual("dispatch_preview_blocked", json.loads(response.body)["error"])
+
+    def test_preview_stage_callback_persists_stage_and_monotonic_elapsed_time(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            job = {
+                "job_id": "check_preview_stage",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "total_input_rows": 10,
+                "auto_triage_processed_rows": 10,
+                "created_at_utc": live_dashboard.iso_utc(),
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ):
+                live_dashboard._save_important_check_job(job)
+                callback = live_dashboard._preview_progress_callback(job["job_id"])
+                callback("build_plan", {"performance_timings_seconds": {"queue_loading": 0.25}})
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+                progress = live_dashboard._load_lead_ops_progress(job["job_id"])
+
+            self.assertEqual("build_plan", saved_job["preview_stage"])
+            self.assertGreaterEqual(float(saved_job["preview_elapsed_seconds"]), 0.0)
+            self.assertEqual("previewing", progress["phase"])
+            self.assertEqual("build_plan", progress["preview_stage"])
+            self.assertEqual(0.25, progress["performance_timings_seconds"]["queue_loading"])
+
+
+    def test_manual_preview_exception_marks_failed_and_releases_claim(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            job = {
+                "job_id": "check_preview_failure",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "running",
+                "created_at_utc": live_dashboard.iso_utc(),
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                side_effect=RuntimeError("synthetic preview failure"),
+            ):
+                live_dashboard._save_important_check_job(job)
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                self.assertIsNotNone(claim)
+                live_dashboard._run_manual_dispatch_preview_background(
+                    preview_claim=claim,
+                    check_job_id=job["job_id"],
+                    master_path=tmp / "leads.csv",
+                    rejected_path=tmp / "leads_rejected.csv",
+                    verified_source_path=tmp / "verified.csv",
+                    triaged_keep_source_path=tmp / "keep.csv",
+                    source_path_for_mode=tmp / "keep.csv",
+                    dispatch_source_mode="triaged_keep",
+                    dispatch_cap="all",
+                    campaign_type="cold",
+                    preview_dir=tmp / "previews",
+                )
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+                progress = live_dashboard._load_lead_ops_progress(job["job_id"])
+                recovered_claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                self.assertIsNotNone(recovered_claim)
+                live_dashboard._release_dispatch_preview_claim(recovered_claim)
+
+            self.assertEqual("failed", saved_job["auto_dispatch_preview_status"])
+            self.assertIn("synthetic preview failure", saved_job["auto_dispatch_preview_error"])
+            self.assertEqual("failed", progress["phase"])
+            self.assertIn("synthetic preview failure", progress["error_summary"])
+            self.assertNotIn("preview_claim_token", saved_job)
+
+    def test_preview_only_recovery_runs_preview_once_without_check_triage_or_confirm(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            jobs_dir = tmp / "jobs"
+            state_dir = tmp / "state"
+            preview_path = tmp / "previews" / "dispatch_preview_recovered.json"
+            preview_path.parent.mkdir()
+            preview_path.write_text("{}", encoding="utf-8")
+            job = {
+                "job_id": "check_preview_recovery",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "failed",
+                "auto_triage_processed_rows": 4,
+                "auto_triage_total_rows": 4,
+                "created_at_utc": live_dashboard.iso_utc(),
+            }
+            fake_preview = {
+                "preview_id": "dispatch_preview_recovered",
+                "preview_path": str(preview_path),
+                "dispatch_source_path": str(tmp / "keep.csv"),
+                "dispatch_source_row_count": 4,
+                "dispatch_eligible_row_count": 4,
+                "dispatch_selected_row_count": 4,
+                "total_rows_would_write": 4,
+                "skipped_rows": 0,
+                "queue_safety": {"safe": True},
+            }
+            with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
+                live_dashboard.settings,
+                "STATE_DIR",
+                state_dir,
+            ), patch.object(
+                live_dashboard,
+                "preview_dispatch_master_leads",
+                return_value=fake_preview,
+            ) as preview_builder, patch.object(
+                live_dashboard,
+                "check_master_leads",
+            ) as check_builder, patch.object(
+                live_dashboard,
+                "fast_triage_master_leads",
+            ) as triage_builder, patch.object(
+                live_dashboard,
+                "confirm_dispatch_preview",
+            ) as confirm_dispatch, patch.object(live_dashboard, "save_state"):
+                live_dashboard._save_important_check_job(job)
+                claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                live_dashboard._run_manual_dispatch_preview_background(
+                    preview_claim=claim,
+                    check_job_id=job["job_id"],
+                    master_path=tmp / "leads.csv",
+                    rejected_path=tmp / "leads_rejected.csv",
+                    verified_source_path=tmp / "verified.csv",
+                    triaged_keep_source_path=tmp / "keep.csv",
+                    source_path_for_mode=tmp / "keep.csv",
+                    dispatch_source_mode="triaged_keep",
+                    dispatch_cap="all",
+                    campaign_type="cold",
+                    preview_dir=tmp / "previews",
+                )
+                saved_job = live_dashboard._load_important_check_job(job["job_id"])
+                progress = live_dashboard._load_lead_ops_progress(job["job_id"])
+                recovered_claim = live_dashboard._try_acquire_dispatch_preview_claim(job["job_id"])
+                self.assertIsNotNone(recovered_claim)
+                live_dashboard._release_dispatch_preview_claim(recovered_claim)
+
+            preview_builder.assert_called_once()
+            check_builder.assert_not_called()
+            triage_builder.assert_not_called()
+            confirm_dispatch.assert_not_called()
+            self.assertEqual("completed", saved_job["auto_dispatch_preview_status"])
+            self.assertEqual("dispatch_preview_recovered", saved_job["auto_dispatch_preview_id"])
+            self.assertEqual(str(preview_path), saved_job["auto_dispatch_preview_path"])
+            self.assertEqual("preview_complete", progress["phase"])
+            self.assertEqual(4, progress["row_counts"]["planned_count"])
+            self.assertEqual({"safe": True}, progress["safety_summary"])
+            self.assertNotIn("preview_claim_token", saved_job)
 
 
 class StartReadySendersTests(unittest.TestCase):

@@ -88,6 +88,39 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("/api/leads/check-important/active", source)
         self.assertIn("resumeImportantLeadCheckJob", source)
         self.assertIn("bootstrapAuthenticatedDashboard", source)
+        bootstrap_start = source.index("async function bootstrapAuthenticatedDashboard()")
+        bootstrap_end = source.index("async function bootstrapDashboard()", bootstrap_start)
+        leads_bootstrap = source[bootstrap_start:bootstrap_end]
+        self.assertIn("await fetchLeadsStatus()", leads_bootstrap)
+        self.assertIn("await hydrateImportantLeadCheckJobOnLoad()", leads_bootstrap)
+        self.assertLess(
+            leads_bootstrap.index("await fetchLeadsStatus()"),
+            leads_bootstrap.index("await hydrateImportantLeadCheckJobOnLoad()"),
+        )
+        hydration_start = source.index("async function hydrateImportantLeadCheckJobOnLoad()")
+        hydration_end = source.index("function stopImportantLeadVerifyJobPolling()", hydration_start)
+        hydration = source[hydration_start:hydration_end]
+        self.assertIn('if (String(err || "").includes("not found"))', hydration)
+        self.assertIn("clearSavedImportantLeadCheckJobId(savedJobId)", hydration)
+        self.assertIn("importantLeadCheckJobPollId !== savedJobId", hydration)
+        self.assertIn("void pollImportantLeadCheckJob(savedJobId, selectedLeadUploadType())", hydration)
+
+    def test_preview_subordinate_state_and_recovery_binding_survive_refresh(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        for expected in [
+            "job?.operational_phase",
+            "job.preview_stage || job.operational_phase",
+            "job.preview_elapsed_seconds",
+            "progress?.preview_recovery_binding || activeJob?.preview_recovery_binding",
+            "payload.preview_recovery_binding = recoveryBinding",
+            "&& !progress?.job_id",
+            "Check and Fast Triage are complete. Retry Preview only.",
+            'const statusMessage = phase === "previewing"',
+            "current_message: statusMessage",
+            'const previewInProgress = String(job.operational_phase || "").toLowerCase() === "previewing"',
+            "Preview stage: ${escapeHtml(stage)}",
+        ]:
+            self.assertIn(expected, source)
 
     def test_verify_and_dispatch_refresh_hydration_use_local_storage_and_backend_source(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -428,9 +461,13 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_lead_check_dispatch_preview_and_queue_statuses_are_distinct(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        self.assertIn('const label = previewReady ? "Complete" : failed ? "Failed" : progressLabel;', source)
+        self.assertIn(
+            'const label = phase === "stale" ? "Stale" : failed ? "Failed" : processing ? progressLabel : previewReady ? "Complete" : progressLabel;',
+            source,
+        )
         self.assertIn('const failed = ["failed", "stale"].includes(phase) || (completedCheckPhase && !previewReady);', source)
-        self.assertIn('message: completedCheckPhase ? "Lead check complete."', source)
+        self.assertIn('const statusMessage = phase === "previewing"', source)
+        self.assertIn("message: statusMessage", source)
         self.assertIn('previewStatus = currentPreviewReady', source)
         self.assertIn('lastImportantDispatchPreviewState = "not_generated"', source)
         self.assertIn('lastImportantDispatchPreviewState = "ready"', source)

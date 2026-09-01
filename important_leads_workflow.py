@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
 import uuid
 from collections import Counter
@@ -3383,21 +3384,43 @@ def _build_dispatch_plan(
     lead_ledger_db_path: Path | None = None,
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
+    progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
+    build_started = time.monotonic()
+    performance_timings: Dict[str, float] = {}
+
+    def emit_progress(stage: str, **metadata: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            stage,
+            {
+                "elapsed_seconds": round(time.monotonic() - build_started, 6),
+                "performance_timings_seconds": dict(performance_timings),
+                **metadata,
+            },
+        )
+
+    emit_progress("prepare")
     if not master_path.exists():
         raise FileNotFoundError(f"Master leads file not found: {master_path}")
 
+    source_load_started = time.monotonic()
     master_headers, _master_rows = _read_csv_rows(master_path)
     if not master_headers:
         raise ValueError("Master leads file is empty.")
     if "Email" not in master_headers:
         raise ValueError("Master leads file must contain an Email column.")
 
+    performance_timings["master_source_loading"] = round(time.monotonic() - source_load_started, 6)
+    suppression_started = time.monotonic()
     blocked_emails, suppression_summary = _blocked_email_set(
         sendgrid_suppressions_path=sendgrid_suppressions_path,
         suppressed_path=suppressed_path,
         unsubscribed_path=unsubscribed_path,
     )
+    performance_timings["suppression_unsubscribe_loading"] = round(time.monotonic() - suppression_started, 6)
+    emit_progress("build_plan")
     configured_sendgrid_routing = sendgrid_queue_paths is None
     default_jc_path: Path | None = None
     default_sendgrid_paths: List[Path] | None = None
@@ -3457,6 +3480,7 @@ def _build_dispatch_plan(
         # Cold blocks it globally before routing. Queue and campaign
         # idempotency remain fail-closed for both modes.
         allow_previously_sent = is_recontact_cold_campaign(normalized_campaign_type)
+        source_started = time.monotonic()
         source_state = _dispatch_source_snapshot(
             source_mode=source_mode,
             cleaned_path=master_path,
@@ -3474,6 +3498,7 @@ def _build_dispatch_plan(
             raise ValueError(f"{source_state['dispatch_source_name']} dispatch source is empty: {source_path}")
         if not source_rows:
             raise ValueError(f"{source_state['dispatch_source_name']} dispatch source has no eligible rows: {source_path}")
+        performance_timings["dispatch_source_loading"] = round(time.monotonic() - source_started, 6)
         safer_recontact_source = is_safer_recontact_source_path(source_path)
         full_recontact_sendgrid_only = (
             is_recontact_cold_campaign(normalized_campaign_type)
@@ -3482,13 +3507,16 @@ def _build_dispatch_plan(
         dispatch_source_name = "Safer Recontact Pool" if safer_recontact_source else str(source_state["dispatch_source_name"])
         dispatch_source_detail = "Safer recontact CSV — not found in active history" if safer_recontact_source else dispatch_source_name
 
+        queue_load_started = time.monotonic()
         queue_headers_by_path: Dict[Path, List[str]] = {}
         queue_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
         for path in safety_queue_paths:
             headers, rows = _read_queue_rows(path)
             queue_headers_by_path[path] = headers
             queue_rows_by_path[path] = rows
+        performance_timings["queue_loading"] = round(time.monotonic() - queue_load_started, 6)
 
+        history_load_started = time.monotonic()
         warm_cfg = PROFILES.get("private_jc_warm", {})
         warm_log_value = str(warm_cfg.get("log") or "").strip()
         private_history_paths = [jc_log]
@@ -3502,6 +3530,7 @@ def _build_dispatch_plan(
         sendgrid_sent = _sent_email_set(authoritative_sg_logs)
         bad_event_emails = load_bad_sendgrid_event_emails(sendgrid_events_path) | load_done_statuses_from_logs(authoritative_log_paths, {"INVALID"})
         global_queue_block_emails = _existing_queue_email_set(queue_rows_by_path)
+        performance_timings["send_history_bad_event_loading"] = round(time.monotonic() - history_load_started, 6)
         source_email_by_lead_id: Dict[str, str] = {}
         source_emails: set[str] = set()
         for row in source_rows:
@@ -3514,6 +3543,7 @@ def _build_dispatch_plan(
                 continue
             source_email_by_lead_id[lead_id] = email
             source_emails.add(email)
+        ledger_read_started = time.monotonic()
         (
             astra_contacted_lead_ids,
             astra_warm_contacted_lead_ids,
@@ -3529,6 +3559,7 @@ def _build_dispatch_plan(
         }
         ignored_history_emails |= _source_email_matches_in_paths(source_emails, ignored_history_paths)
         ledger_state = dispatch_history_state(ledger_conn)
+        performance_timings["dispatch_history_ledger_reads"] = round(time.monotonic() - ledger_read_started, 6)
 
         eligible_rows_total = len(source_rows)
         rows_with_booktitle = sum(1 for row in source_rows if _row_has_any_value(row, BOOK_TITLE_COUNT_HEADERS))
@@ -3567,6 +3598,8 @@ def _build_dispatch_plan(
         successful_contact_lead_ids = astra_lane_contacted_lead_ids | sendgrid_contacted_lead_ids
         successful_send_emails = jc_sent | sendgrid_sent
 
+        emit_progress("classification", source_row_count=len(source_rows))
+        classification_started = time.monotonic()
         for row in source_rows:
             if normalized_cap != DISPATCH_CAP_ALL and (added_astra + added_sendgrid) >= selected_limit:
                 break
@@ -3733,6 +3766,7 @@ def _build_dispatch_plan(
                     exclusion_reason_counts["not_routed"] += 1
 
         total_dispatch_rows = selected_rows_scanned
+        performance_timings["classification_plan_construction"] = round(time.monotonic() - classification_started, 6)
 
         queue_headers = _queue_output_headers(
             (queue_headers_by_path[path] for path in queue_paths),
@@ -3805,6 +3839,7 @@ def _build_dispatch_plan(
             "suppressed_bounce": 0,
             "skipped_from_non_authoritative_history_ignored": len(ignored_history_emails),
         }
+        dependency_started = time.monotonic()
         dependency_fingerprints = _collect_dispatch_input_fingerprints(
             source_path=source_path,
             queue_paths=safety_queue_paths,
@@ -3813,6 +3848,7 @@ def _build_dispatch_plan(
             suppressed_path=suppressed_path,
             unsubscribed_path=unsubscribed_path,
         )
+        performance_timings["dependency_state_collection"] = round(time.monotonic() - dependency_started, 6)
         skipped_rows = int(sum(int(value or 0) for value in exclusion_reason_counts.values()))
 
         plan = {
@@ -3948,8 +3984,11 @@ def _build_dispatch_plan(
             "rows_written_per_queue": rows_written_per_queue,
             "dependency_fingerprints": dependency_fingerprints,
             "lead_dispatch_history_state": ledger_state,
+            "performance_timings_seconds": performance_timings,
         }
         plan.update(_dispatch_alias_fields(plan))
+        performance_timings["total_build_plan"] = round(time.monotonic() - build_started, 6)
+        emit_progress("build_plan_complete", planned_count=added_astra + added_sendgrid)
         return plan
     finally:
         ledger_conn.close()
@@ -3974,7 +4013,22 @@ def preview_dispatch_master_leads(
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
     preview_dir: Path = DISPATCH_PREVIEWS_DIR,
+    progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
+    preview_started = time.monotonic()
+
+    def emit_progress(stage: str, **metadata: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            stage,
+            {
+                "elapsed_seconds": round(time.monotonic() - preview_started, 6),
+                **metadata,
+            },
+        )
+
+    emit_progress("prepare")
     plan = _build_dispatch_plan(
         master_path=master_path,
         rejected_path=rejected_path,
@@ -3992,6 +4046,7 @@ def preview_dispatch_master_leads(
         lead_ledger_db_path=lead_ledger_db_path,
         sendgrid_events_path=sendgrid_events_path,
         campaign_type=campaign_type,
+        progress_callback=progress_callback,
     )
     preview_id = f"dispatch_preview_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     if (
@@ -4045,9 +4100,38 @@ def preview_dispatch_master_leads(
         "preview_path": str(_dispatch_preview_path(preview_id, preview_dir)),
         "lead_ledger_db_path": str(_lead_ledger_db_path(lead_ledger_db_path)),
     }
+    emit_progress(
+        "archive",
+        performance_timings_seconds=dict(preview.get("performance_timings_seconds") or {}),
+    )
+    archive_started = time.monotonic()
     assigned_preview_archive_path = _archive_assigned_dispatch_preview(preview)
     preview["assigned_preview_archive_path"] = str(assigned_preview_archive_path)
+    preview.setdefault("performance_timings_seconds", {})["preview_archive"] = round(
+        time.monotonic() - archive_started,
+        6,
+    )
+    emit_progress(
+        "persist",
+        preview_id=preview_id,
+        preview_path=str(preview["preview_path"]),
+        performance_timings_seconds=dict(preview.get("performance_timings_seconds") or {}),
+    )
+    persist_started = time.monotonic()
     _save_dispatch_preview(preview, preview_dir)
+    preview["performance_timings_seconds"]["preview_persist"] = round(
+        time.monotonic() - persist_started,
+        6,
+    )
+    preview["performance_timings_seconds"]["total_preview"] = round(
+        time.monotonic() - preview_started,
+        6,
+    )
+    emit_progress(
+        "complete",
+        preview_id=preview_id,
+        performance_timings_seconds=dict(preview.get("performance_timings_seconds") or {}),
+    )
     return preview
 
 

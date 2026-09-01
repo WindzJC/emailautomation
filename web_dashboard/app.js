@@ -1341,10 +1341,26 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   const previewReady = completedCheckPhase && cleanedRows > 0 && outputExists && rejectedExists;
   const failed = ["failed", "stale"].includes(phase) || (completedCheckPhase && !previewReady);
   const processing = ["upload_received", "checking", "triaging", "previewing", "confirming"].includes(phase);
-  const label = previewReady ? "Complete" : failed ? "Failed" : progressLabel;
-  const state = failed ? (["failed", "stale"].includes(phase) ? phase : "failed") : previewReady ? "success" : processing ? "processing" : "not_ready";
+  const previewRecoverable = ["failed", "stale"].includes(phase)
+    && Boolean(progress.retry_safe)
+    && Boolean(progress.preview_recovery_binding);
+  const label = phase === "stale" ? "Stale" : failed ? "Failed" : processing ? progressLabel : previewReady ? "Complete" : progressLabel;
+  const statusMessage = phase === "previewing"
+    ? String(progress.current_message || "Building dispatch preview")
+    : completedCheckPhase
+      ? "Lead check complete."
+      : String(progress.current_message || label);
+  const state = failed
+    ? (["failed", "stale"].includes(phase) ? phase : "failed")
+    : processing
+      ? "processing"
+      : previewReady
+        ? "success"
+        : "not_ready";
   const guidance = failed
-    ? "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
+    ? previewRecoverable
+      ? "Check and Fast Triage are complete. Retry Preview only."
+      : "Do not preview. Re-upload a clean lead CSV and run Upload & Check again."
       : phase === "ready_for_preview"
       ? "Lead check complete. Review counts, then run Dispatch Preview."
       : phase === "preview_complete"
@@ -1355,12 +1371,18 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
   return {
     state,
     label,
-    message: completedCheckPhase ? "Lead check complete." : String(progress.current_message || label),
+    message: statusMessage,
     guidance,
     preview_ready: previewReady,
     preview_state: previewReady ? "ready" : "not_ready",
     preview_label: previewReady ? "Ready for preview" : "Not ready for preview",
-    preview_block_reason: previewReady ? "" : failed ? "Check failed or stale: no cleaned/rejected output files were produced." : "Lead check is still processing.",
+    preview_block_reason: previewReady
+      ? ""
+      : previewRecoverable
+        ? "Preview is incomplete. Check and Fast Triage outputs remain current; Retry Preview only."
+        : failed
+          ? "Check failed or stale: no cleaned/rejected output files were produced."
+          : "Lead check is still processing.",
     cleaned_rows: cleanedRows,
     rejected_rows: rejectedRows,
     output_exists: outputExists,
@@ -1384,11 +1406,13 @@ function leadOpsProgressAsCheckStatus(progress = {}) {
     stale_reason: progress.stale_reason || "",
     last_successful_step: progress.last_successful_step || "",
     retry_safe: progress.retry_safe,
+    preview_recovery_binding: progress.preview_recovery_binding || null,
+    preview_recoverable: previewRecoverable,
     reupload_required: progress.reupload_required,
     input_exists: progress.input_exists,
     job_record_exists: progress.job_record_exists,
     phase,
-    current_message: completedCheckPhase ? "Lead check complete." : progress.current_message || label,
+    current_message: statusMessage,
     error_summary: progress.error_summary || "",
     confirm_ready: false,
     tone: failed ? "bad" : processing ? "active" : previewReady ? "good" : "wait",
@@ -1410,8 +1434,9 @@ function currentLeadCheckStatus(status = lastLeadsStatus) {
     && typeof check === "object"
     && authoritativeState
     && !isActiveImportantLeadCheckJob(activeJob)
+    && !progress?.job_id
   ) {
-    return progress?.job_id ? { ...check, lead_ops_progress: progress } : check;
+    return check;
   }
   if (progress?.job_id) {
     const progressPhase = String(progress.phase || progress.status || "").toLowerCase();
@@ -1563,6 +1588,7 @@ function leadCheckWorkflowStatus(check = currentLeadCheckStatus()) {
 function leadCheckBlocksPreview(check = currentLeadCheckStatus()) {
   if (!check || !check.state) return "";
   if (check.preview_ready === true || String(check.preview_state || "").toLowerCase() === "ready") return "";
+  if (check.preview_recoverable === true && check.preview_recovery_binding) return "";
   return String(check.preview_block_reason || check.message || "Lead check is not ready for preview.");
 }
 
@@ -1949,6 +1975,14 @@ function importantLeadDispatchPayload(includePreviewId = false) {
     dispatch_cap: els.leadsImportantDispatchCap?.value || "all",
     campaign_type: campaignType,
   };
+  const progress = currentLeadOpsProgress(lastLeadsStatus, "cold");
+  const activeJob = currentImportantCheckJob(lastLeadsStatus, "cold");
+  const recoveryBinding = progress?.preview_recovery_binding || activeJob?.preview_recovery_binding || null;
+  const recoveryJobId = String(progress?.job_id || activeJob?.job_id || "").trim();
+  const recoveryRunId = String(progress?.current_run_id || activeJob?.current_run_id || recoveryJobId).trim();
+  if (recoveryJobId) payload.job_id = recoveryJobId;
+  if (recoveryRunId) payload.current_run_id = recoveryRunId;
+  if (recoveryBinding) payload.preview_recovery_binding = recoveryBinding;
   if (includePreviewId) {
     payload.preview_id = lastImportantDispatchPreview?.preview_id || "";
   }
@@ -2074,7 +2108,7 @@ function updateImportantLeadUploadNote(extra = "") {
 }
 
 function importantLeadCheckJobStatus(job) {
-  return String(job?.status || job?.stage || "queued").toLowerCase();
+  return String(job?.operational_phase || job?.status || job?.stage || "queued").toLowerCase();
 }
 
 function isTerminalImportantLeadCheckJob(job) {
@@ -2214,7 +2248,9 @@ function renderImportantLeadCheckJob(job) {
   }
   renderLeadsWorkflowStatusBanner(lastLeadsStatus);
   if (status !== "completed" && status !== "failed" && els.leadsImportantCheckResults) {
-    const stage = job.stage || status || "queued";
+    const stage = job.preview_stage || job.operational_phase || job.stage || status || "queued";
+    const previewInProgress = String(job.operational_phase || "").toLowerCase() === "previewing"
+      || Boolean(job.preview_stage);
     const totalRows = Number(job.total_input_rows || 0);
     const processedRows = Number(job.processed_rows || 0);
     const remainingRows = Number(job.remaining_rows || Math.max(0, totalRows - processedRows));
@@ -2231,7 +2267,9 @@ function renderImportantLeadCheckJob(job) {
       `
         <article class="leads-result-card">
           <h3>Upload Job</h3>
-          ${accessibleProgressBar(progressPercent, etaText, "Check progress")}
+          ${previewInProgress
+            ? `<p class="muted">Preview stage: ${escapeHtml(stage)}${Number.isFinite(Number(job.preview_elapsed_seconds)) ? ` · Elapsed ${escapeHtml(humanizeDurationCompact(Number(job.preview_elapsed_seconds)))}` : ""}</p>`
+            : accessibleProgressBar(progressPercent, etaText, "Check progress")}
           <div class="leads-kpis">
             <div class="leads-kpi"><div class="label">Stage</div><div class="value">${escapeHtml(stage)}</div></div>
             <div class="leads-kpi"><div class="label">Rows</div><div class="value">${totalRows}</div></div>
@@ -2248,6 +2286,8 @@ function renderImportantLeadCheckJob(job) {
             <span class="mini-pill">Selected ${escapeHtml(selectedFilename)}</span>
             <span class="mini-pill">Server ${escapeHtml(serverFilename)}</span>
             ${sheetName ? `<span class="mini-pill">Sheet ${escapeHtml(sheetName)}</span>` : ""}
+            ${job.preview_stage ? `<span class="mini-pill">Preview ${escapeHtml(job.preview_stage)}</span>` : ""}
+            ${Number.isFinite(Number(job.preview_elapsed_seconds)) ? `<span class="mini-pill">Preview elapsed ${escapeHtml(humanizeDurationCompact(Number(job.preview_elapsed_seconds)))}</span>` : ""}
           </div>
         </article>
       `,
@@ -2263,7 +2303,7 @@ async function pollImportantLeadCheckJob(jobId, expectedUploadType = selectedLea
     const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(jobId)}`);
     const job = data.job || {};
     renderImportantLeadCheckJob(job);
-    if (job.status === "completed") {
+    if (!isActiveImportantLeadCheckJob(job) && job.status === "completed") {
       stopImportantLeadCheckJobPolling();
       const jobUploadType = reportUploadType(job);
       clearSavedImportantLeadCheckJobId(job.job_id || jobId, jobUploadType);
@@ -2333,7 +2373,11 @@ async function hydrateImportantLeadCheckJobOnLoad() {
         }
       }
     } catch (err) {
-      clearSavedImportantLeadCheckJobId(savedJobId);
+      if (String(err || "").includes("not found")) {
+        clearSavedImportantLeadCheckJobId(savedJobId);
+      } else if (importantLeadCheckJobPollId !== savedJobId) {
+        void pollImportantLeadCheckJob(savedJobId, selectedLeadUploadType());
+      }
     }
   }
   try {
@@ -10419,6 +10463,7 @@ async function bootstrapAuthenticatedDashboard() {
   });
   if (isLeadsTabVisible()) {
     await fetchLeadsStatus();
+    await hydrateImportantLeadCheckJobOnLoad();
     stopSocket();
     return;
   }

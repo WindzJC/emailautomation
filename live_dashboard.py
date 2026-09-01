@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import csv
+import fcntl
 import hashlib
 import io
 import json
@@ -361,6 +362,9 @@ class ImportantLeadDispatchPayload(BaseModel):
     campaign_type: str = CAMPAIGN_TYPE_COLD
     preview_id: str = ""
     recontact_recency_override: bool = False
+    job_id: str = ""
+    current_run_id: str = ""
+    preview_recovery_binding: dict[str, object] = Field(default_factory=dict)
 
 
 class QuarantineReviewActionPayload(BaseModel):
@@ -549,14 +553,56 @@ def _important_check_job_with_progress(job: dict[str, object]) -> dict[str, obje
     payload["remaining_rows"] = remaining_rows
     if payload.get("source_sheet") and not payload.get("current_sheet"):
         payload["current_sheet"] = payload.get("source_sheet")
+    operational_phase = _important_check_job_operational_phase(payload)
+    if operational_phase:
+        payload["operational_phase"] = operational_phase
+    recovery_binding = _preview_recovery_binding(payload)
+    if recovery_binding:
+        payload["preview_recovery_binding"] = recovery_binding
     return payload
+
+
+def _important_check_job_operational_phase(job: dict[str, object]) -> str:
+    status = str(job.get("status") or job.get("stage") or "").strip().lower()
+    if status in {"failed", "triage_failed", "canceled", "cancelled"}:
+        return ""
+    job_id = str(job.get("job_id") or "").strip()
+    preview_claim_held = _dispatch_preview_claim_is_held(job_id)
+    preview_status = str(job.get("auto_dispatch_preview_status") or "").strip().lower()
+    progress: dict[str, object] = {}
+    if job_id:
+        progress = _load_lead_ops_progress(job_id)
+    progress_phase = str(progress.get("phase") or "").strip().lower()
+    progress_status = str(progress.get("status") or "").strip().lower()
+    progress_updated = _parse_iso_timestamp(progress.get("updated_at_utc"))
+    progress_age = (datetime.now(timezone.utc) - progress_updated).total_seconds() if progress_updated else None
+    progress_live = progress_age is not None and progress_age < LEAD_OPS_PROGRESS_STALE_SECONDS
+
+    # Subordinate work is authoritative over the completed parent Check. A
+    # preview is live only while its OS claim is held; persisted "running"
+    # metadata without the claim is crash residue and reconciles as stale.
+    if preview_claim_held and (
+        preview_status == "running"
+        or (progress_phase == "previewing" and progress_status == "running")
+    ):
+        return "previewing"
+    if (
+        status == "auto_triage_running"
+        or str(job.get("auto_triage_status") or "").strip().lower() == "running"
+        or (progress_phase == "triaging" and progress_status == "running" and progress_live)
+    ):
+        return "triaging"
+    if status in {"queued", "running", "checking"}:
+        return "checking"
+    if progress_phase == "checking" and progress_status == "running" and progress_live:
+        return "checking"
+    return ""
 
 
 def _find_active_important_check_job(upload_type: str | None = None) -> dict[str, object] | None:
     if not IMPORTANT_LEADS_CHECK_JOBS.exists():
         return None
     expected_upload_type = str(upload_type or "").strip().lower()
-    active_statuses = {"queued", "running", "checking", "auto_triage_running"}
     candidates: list[tuple[float, dict[str, object]]] = []
     for path in IMPORTANT_LEADS_CHECK_JOBS.glob("*.json"):
         try:
@@ -568,8 +614,7 @@ def _find_active_important_check_job(upload_type: str | None = None) -> dict[str
         job_upload_type = str(job.get("upload_type") or "cold").strip().lower()
         if expected_upload_type and job_upload_type != expected_upload_type:
             continue
-        status = str(job.get("status") or job.get("stage") or "").strip().lower()
-        if status not in active_statuses:
+        if not _important_check_job_operational_phase(job):
             continue
         try:
             sort_key = path.stat().st_mtime
@@ -647,6 +692,102 @@ def _auto_triage_already_running(exclude_check_job_id: str = "") -> bool:
 def _file_signature(path: Path) -> tuple[int, int]:
     stat = path.stat()
     return stat.st_mtime_ns, stat.st_size
+
+
+def _preview_recovery_binding(job: dict[str, object]) -> dict[str, object]:
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id or str(job.get("auto_triage_status") or "").strip().lower() != "completed":
+        return {}
+    paths = _staged_triage_paths_for_job(job)
+    artifacts: dict[str, dict[str, object]] = {}
+    for name, path in paths.items():
+        try:
+            mtime_ns, size = _file_signature(path)
+        except (FileNotFoundError, OSError):
+            return {}
+        artifacts[name] = {
+            "path": str(path.resolve(strict=False)),
+            "mtime_ns": mtime_ns,
+            "size": size,
+        }
+    return {
+        "job_id": job_id,
+        "current_run_id": job_id,
+        "master_path": artifacts["input"]["path"],
+        "triaged_keep_path": artifacts["keep"]["path"],
+        "artifacts": artifacts,
+    }
+
+
+def _preview_claim_path(job_id: str) -> Path:
+    return IMPORTANT_LEADS_CHECK_JOBS / f"{_safe_progress_job_id(job_id)}.preview.lock"
+
+
+def _try_acquire_dispatch_preview_claim(job_id: str) -> dict[str, object] | None:
+    IMPORTANT_LEADS_CHECK_JOBS.mkdir(parents=True, exist_ok=True)
+    path = _preview_claim_path(job_id)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    token = uuid.uuid4().hex
+    claim = {
+        "job_id": str(job_id),
+        "claim_token": token,
+        "owner_pid": os.getpid(),
+        "acquired_at_utc": iso_utc(),
+    }
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps(claim, sort_keys=True) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+    return {**claim, "path": str(path), "handle": handle}
+
+
+def _release_dispatch_preview_claim(claim: dict[str, object] | None) -> None:
+    if not claim:
+        return
+    handle = claim.get("handle")
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _record_dispatch_preview_claim_released(job_id: str) -> None:
+    try:
+        released_job = _load_important_check_job(job_id)
+        released_job.pop("preview_claim_token", None)
+        released_job["preview_claim_released_at_utc"] = iso_utc()
+        _save_important_check_job(released_job)
+    except Exception:
+        pass
+
+
+def _dispatch_preview_claim_is_held(job_id: str) -> bool:
+    if not str(job_id or "").strip():
+        return False
+    path = _preview_claim_path(job_id)
+    if not path.exists():
+        return False
+    try:
+        handle = path.open("r+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
 
 
 def _copy_csv_atomic(source: Path, destination: Path) -> None:
@@ -805,7 +946,91 @@ def _auto_dispatch_preview_summary(
     }
 
 
+def _preview_progress_callback(job_id: str) -> Callable[[str, dict[str, object]], None]:
+    preview_started = time.monotonic()
+    current_stage = ""
+    stage_started_at = ""
+    stage_labels = {
+        "prepare": "Preparing dispatch preview",
+        "build_plan": "Building dispatch plan",
+        "classification": "Classifying eligible recipients",
+        "build_plan_complete": "Dispatch plan built",
+        "archive": "Archiving dispatch preview",
+        "persist": "Saving dispatch preview",
+        "complete": "Preview complete",
+    }
+
+    def update(stage: str, metadata: dict[str, object]) -> None:
+        nonlocal current_stage, stage_started_at
+        job = _load_important_check_job(job_id)
+        if stage != current_stage:
+            current_stage = stage
+            stage_started_at = iso_utc()
+        elapsed = round(time.monotonic() - preview_started, 3)
+        timings = dict(metadata.get("performance_timings_seconds") or {})
+        preview_id = str(metadata.get("preview_id") or "").strip()
+        preview_path = str(metadata.get("preview_path") or "").strip()
+        job["preview_stage"] = stage
+        job["preview_stage_started_at_utc"] = stage_started_at
+        job["preview_elapsed_seconds"] = elapsed
+        job["preview_performance_timings_seconds"] = timings
+        if preview_id:
+            job["auto_dispatch_preview_id"] = preview_id
+        if preview_path:
+            job["auto_dispatch_preview_path"] = preview_path
+        job["message"] = stage_labels.get(stage, "Building dispatch preview")
+        _save_important_check_job(job)
+        _write_lead_ops_progress(
+            job,
+            phase="previewing",
+            status="running",
+            processed_rows=int(job.get("auto_triage_processed_rows") or job.get("processed_rows") or 0),
+            total_rows=int(job.get("auto_triage_total_rows") or job.get("total_input_rows") or 0),
+            percent=90,
+            current_message=stage_labels.get(stage, "Building dispatch preview"),
+            preview_stage=stage,
+            preview_stage_started_at_utc=stage_started_at,
+            preview_elapsed_seconds=elapsed,
+            performance_timings=timings,
+            preview_path=preview_path,
+        )
+
+    return update
+
+
 def _run_auto_dispatch_preview_after_triage(
+    *,
+    job: dict[str, object],
+    triage_report: dict[str, object],
+    master_path: Path,
+    keep_path: Path,
+    rejected_path: Path,
+    quarantine_path: Path,
+    preview_dir: Path | None = None,
+) -> dict[str, object]:
+    job_id = str(job.get("job_id") or "").strip()
+    claim = _try_acquire_dispatch_preview_claim(job_id)
+    if claim is None:
+        job["message"] = "Dispatch preview is already running for this check job."
+        return job
+    job["preview_claim_token"] = str(claim.get("claim_token") or "")
+    job["preview_claim_acquired_at_utc"] = str(claim.get("acquired_at_utc") or "")
+    try:
+        return _run_claimed_auto_dispatch_preview_after_triage(
+            job=job,
+            triage_report=triage_report,
+            master_path=master_path,
+            keep_path=keep_path,
+            rejected_path=rejected_path,
+            quarantine_path=quarantine_path,
+            preview_dir=preview_dir,
+        )
+    finally:
+        _release_dispatch_preview_claim(claim)
+        _record_dispatch_preview_claim_released(job_id)
+
+
+def _run_claimed_auto_dispatch_preview_after_triage(
     *,
     job: dict[str, object],
     triage_report: dict[str, object],
@@ -829,6 +1054,7 @@ def _run_auto_dispatch_preview_after_triage(
         percent=90,
         current_message="Previewing dispatch",
     )
+    progress_callback = _preview_progress_callback(str(job.get("job_id") or ""))
     try:
         preview = preview_dispatch_master_leads(
             master_path=master_path,
@@ -855,6 +1081,7 @@ def _run_auto_dispatch_preview_after_triage(
                 settings.LOGS_DIR / "sendgrid_domain_log.csv",
             ],
             preview_dir=target_preview_dir,
+            progress_callback=progress_callback,
         )
         summary = _auto_dispatch_preview_summary(
             preview=preview,
@@ -1255,6 +1482,10 @@ def _write_lead_ops_progress(
     row_counts: dict[str, object] | None = None,
     safety_summary: dict[str, object] | None = None,
     preview_path: str | Path = "",
+    preview_stage: str = "",
+    preview_stage_started_at_utc: str = "",
+    preview_elapsed_seconds: float | int | str = "",
+    performance_timings: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload = _lead_ops_progress_base(job)
     now = iso_utc()
@@ -1310,6 +1541,18 @@ def _write_lead_ops_progress(
             in {"ready_for_preview", "previewing", "preview_complete", "confirming", "confirm_complete"},
             "row_counts": row_counts or {},
             "safety_summary": safety_summary or {},
+            "preview_stage": str(preview_stage or job.get("preview_stage") or ""),
+            "preview_stage_started_at_utc": str(
+                preview_stage_started_at_utc
+                or job.get("preview_stage_started_at_utc")
+                or ""
+            ),
+            "preview_elapsed_seconds": preview_elapsed_seconds
+            if preview_elapsed_seconds not in {"", None}
+            else job.get("preview_elapsed_seconds", ""),
+            "performance_timings_seconds": performance_timings
+            if performance_timings is not None
+            else dict(job.get("preview_performance_timings_seconds") or {}),
         }
     )
     settings.STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1421,6 +1664,14 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     active_job_ids = active_job_ids or set()
     input_state = _lead_ops_progress_input_state(payload)
     job_record_exists = bool(job_id and _important_check_job_path(job_id).exists())
+    job_record: dict[str, object] = {}
+    if job_record_exists:
+        try:
+            job_record = _load_important_check_job(job_id)
+        except Exception:
+            job_record = {}
+    if not payload.get("preview_path") and job_record.get("auto_dispatch_preview_path"):
+        payload["preview_path"] = str(job_record["auto_dispatch_preview_path"])
     output_path = Path(str(payload.get("output_path") or "")) if payload.get("output_path") else None
     output_exists = bool(output_path and output_path.exists())
     output_has_rows = _path_has_rows(payload.get("output_path"))
@@ -1435,21 +1686,38 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     stale_age = (datetime.now(timezone.utc) - updated).total_seconds() if updated else None
     if stale_age is not None:
         payload["stale_age_seconds"] = int(max(0, stale_age))
-    if preview_exists and phase != "preview_complete":
+    if phase == "preview_complete" and payload.get("preview_path") and not preview_exists:
+        payload["phase"] = "stale"
+        payload["status"] = "stale"
+        payload["current_message"] = "Stale — dispatch preview artifact is unavailable"
+        payload["error_summary"] = "Preview completion was recorded, but the bound preview artifact is missing."
+        payload["stale_reason"] = "preview_artifact_missing"
+        payload["last_successful_step"] = "Check and Fast Triage complete"
+        payload["stale_warning"] = LEAD_OPS_PROGRESS_STALE_WARNING
+        payload["retry_safe"] = True
+    elif preview_exists and phase not in {"preview_complete", "confirming", "confirm_complete", "failed", "stale"}:
         payload["phase"] = "preview_complete"
         payload["status"] = "preview_complete"
         payload["percent"] = 100
         payload["current_message"] = "Preview complete"
         payload["completed_at_utc"] = payload.get("completed_at_utc") or payload.get("updated_at_utc") or iso_utc()
         payload["generated_at_utc"] = payload.get("generated_at_utc") or payload["completed_at_utc"]
-    elif output_ready and rejected_exists and keep_ready and triage_reject_exists and quarantine_exists and phase in LEAD_OPS_PROGRESS_RUNNING_PHASES:
+    elif (
+        output_ready
+        and rejected_exists
+        and keep_ready
+        and triage_reject_exists
+        and quarantine_exists
+        and phase in {"upload_received", "checking", "triaging", "ready_for_preview"}
+    ):
         payload["phase"] = "ready_for_preview"
         payload["status"] = "ready_for_preview"
         payload["percent"] = 100
         payload["current_message"] = "Ready for preview"
     elif phase in LEAD_OPS_PROGRESS_RUNNING_PHASES:
         stale = job_id not in active_job_ids
-        if stale_age is not None and stale_age >= LEAD_OPS_PROGRESS_STALE_SECONDS:
+        preview_claim_held = phase == "previewing" and _dispatch_preview_claim_is_held(job_id)
+        if stale_age is not None and stale_age >= LEAD_OPS_PROGRESS_STALE_SECONDS and not preview_claim_held:
             stale = True
         if stale:
             payload["phase"] = "stale"
@@ -1489,6 +1757,13 @@ def _reconcile_lead_ops_progress(progress: dict[str, object], active_job_ids: se
     payload["input_exists"] = input_state["input_exists"]
     payload["job_record_exists"] = job_record_exists
     payload["latest_master_check_matches_current_run"] = bool(output_ready and rejected_exists and phase not in {"failed", "stale"})
+    if job_record_exists:
+        recovery_binding = _preview_recovery_binding(job_record)
+        if recovery_binding:
+            payload["preview_recovery_binding"] = recovery_binding
+            if phase in {"failed", "stale", "ready_for_preview"}:
+                payload["retry_safe"] = True
+                payload["retry_action"] = "Retry Preview"
     return payload
 
 
@@ -2783,11 +3058,18 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
     latest_matches = _latest_check_matches_paths(latest_check, output_path, rejected_path)
     active_status = str(active_check.get("status") if active_check else "").strip().lower()
     active_stage = str(active_check.get("stage") if active_check else "").strip().lower()
+    active_operational_phase = str(active_check.get("operational_phase") if active_check else "").strip().lower()
     active_job_id = str(active_check.get("job_id") if active_check else "").strip()
     active_updated_at = str(active_check.get("updated_at_utc") if active_check else "").strip()
     stale_seconds = _seconds_since_timestamp(active_updated_at) if active_check else None
     stale_threshold_seconds = 15 * 60
-    active_running = bool(active_check and active_status not in {"completed", "done", "failed", "canceled", "cancelled"})
+    active_running = bool(
+        active_check
+        and (
+            active_operational_phase in {"checking", "triaging", "previewing"}
+            or active_status not in {"completed", "done", "failed", "canceled", "cancelled"}
+        )
+    )
     active_stale = bool(
         active_running
         and not outputs_exist
@@ -2809,8 +3091,24 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
     if active_running and not active_stale:
         queued_like = active_status in {"queued", "pending", "uploaded", "upload_received"} or active_stage in {"queued", "uploaded", "upload_received"}
         state_key = "upload_received" if queued_like else "processing"
-        label = "Upload received" if queued_like else "Processing / checking"
-        message = "Dashboard has the upload and is waiting to run the check." if queued_like else "Lead check is processing."
+        label = (
+            "Upload received"
+            if queued_like
+            else "Building dispatch preview"
+            if active_operational_phase == "previewing"
+            else "Fast triage"
+            if active_operational_phase == "triaging"
+            else "Processing / checking"
+        )
+        message = (
+            "Dashboard has the upload and is waiting to run the check."
+            if queued_like
+            else str(active_check.get("message") or "Dispatch preview is processing.")
+            if active_operational_phase == "previewing"
+            else "Fast Triage is processing."
+            if active_operational_phase == "triaging"
+            else "Lead check is processing."
+        )
         guidance = "Processing: wait."
         tone = "active"
     elif active_stale:
@@ -7013,6 +7311,19 @@ def cancel_verify_important_leads_job(job_id: str) -> JSONResponse:
 
 def _run_manual_dispatch_preview_background(
     *,
+    preview_claim: dict[str, object],
+    **kwargs: object,
+) -> None:
+    check_job_id = str(kwargs.get("check_job_id") or "")
+    try:
+        _run_claimed_manual_dispatch_preview_background(**kwargs)
+    finally:
+        _release_dispatch_preview_claim(preview_claim)
+        _record_dispatch_preview_claim_released(check_job_id)
+
+
+def _run_claimed_manual_dispatch_preview_background(
+    *,
     check_job_id: str,
     master_path: Path,
     rejected_path: Path,
@@ -7023,6 +7334,7 @@ def _run_manual_dispatch_preview_background(
     dispatch_cap: str,
     campaign_type: str,
     preview_dir: Path,
+    expected_recovery_binding: dict[str, object] | None = None,
 ) -> None:
     try:
         job = _load_important_check_job(check_job_id)
@@ -7030,6 +7342,8 @@ def _run_manual_dispatch_preview_background(
         return
 
     try:
+        if expected_recovery_binding and _preview_recovery_binding(job) != expected_recovery_binding:
+            raise RuntimeError("Preview recovery refused: staged source artifacts changed before preview execution.")
         preview = preview_dispatch_master_leads(
             master_path=master_path,
             rejected_path=rejected_path,
@@ -7039,7 +7353,18 @@ def _run_manual_dispatch_preview_background(
             dispatch_cap=dispatch_cap,
             campaign_type=campaign_type,
             preview_dir=preview_dir,
+            progress_callback=_preview_progress_callback(check_job_id),
         )
+        if expected_recovery_binding:
+            post_build_job = _load_important_check_job(check_job_id)
+            if _preview_recovery_binding(post_build_job) != expected_recovery_binding:
+                post_build_job.pop("auto_dispatch_preview_id", None)
+                post_build_job.pop("auto_dispatch_preview_path", None)
+                post_build_job.pop("auto_dispatch_preview", None)
+                _save_important_check_job(post_build_job)
+                raise RuntimeError(
+                    "Preview recovery refused: staged source artifacts changed during preview execution."
+                )
 
         completed_at = iso_utc()
         summary = dict(preview)
@@ -7184,6 +7509,79 @@ def _run_manual_dispatch_preview_background(
         )
 
 
+def _persisted_dispatch_preview_for_job(job: dict[str, object]) -> dict[str, object] | None:
+    preview_id = str(job.get("auto_dispatch_preview_id") or "").strip()
+    preview_path_text = str(job.get("auto_dispatch_preview_path") or "").strip()
+    if not preview_id or not preview_path_text:
+        return None
+    preview_path = Path(preview_path_text)
+    if not preview_path.is_absolute():
+        preview_path = settings.APP_ROOT / preview_path
+    try:
+        raw = validate_dispatch_preview(preview_id, preview_dir=preview_path.parent)
+    except Exception:
+        return None
+    if not isinstance(raw, dict) or str(raw.get("preview_id") or "").strip() != preview_id:
+        return None
+    return raw
+
+
+def _preview_recovery_request_block(
+    *,
+    payload: ImportantLeadDispatchPayload | None,
+    job: dict[str, object],
+    source_path: Path,
+    require_client_binding: bool,
+) -> dict[str, str] | None:
+    job_id = str(job.get("job_id") or "").strip()
+    latest_job = _latest_completed_important_check_job()
+    if not latest_job or str(latest_job.get("job_id") or "").strip() != job_id:
+        return {
+            "error": "preview_recovery_run_mismatch",
+            "message": "Preview recovery refused: this is not the latest completed Check/Fast Triage run.",
+        }
+    if str(job.get("auto_triage_status") or "").strip().lower() != "completed":
+        return {
+            "error": "preview_recovery_triage_incomplete",
+            "message": "Preview recovery refused: Fast Triage is not complete for this run.",
+        }
+    current_binding = _preview_recovery_binding(job)
+    if not current_binding:
+        return {
+            "error": "preview_recovery_artifacts_incomplete",
+            "message": "Preview recovery refused: required staged artifacts are missing or unreadable.",
+        }
+    if not _dashboard_paths_match(current_binding.get("triaged_keep_path"), source_path):
+        return {
+            "error": "preview_recovery_source_mismatch",
+            "message": "Preview recovery refused: the selected source is not the staged KEEP file for this run.",
+        }
+    requested_job_id = str(getattr(payload, "job_id", "") if payload else "").strip()
+    requested_run_id = str(getattr(payload, "current_run_id", "") if payload else "").strip()
+    requested_binding = dict(getattr(payload, "preview_recovery_binding", {}) or {}) if payload else {}
+    if requested_job_id and requested_job_id != job_id:
+        return {
+            "error": "preview_recovery_job_mismatch",
+            "message": "Preview recovery refused: job ID does not match the current staged run.",
+        }
+    if requested_run_id and requested_run_id != job_id:
+        return {
+            "error": "preview_recovery_run_mismatch",
+            "message": "Preview recovery refused: current run ID does not match the staged run.",
+        }
+    if require_client_binding and not requested_binding:
+        return {
+            "error": "preview_recovery_binding_required",
+            "message": "Preview recovery refused: refresh Lead Ops before retrying Preview.",
+        }
+    if requested_binding and requested_binding != current_binding:
+        return {
+            "error": "preview_recovery_fingerprint_mismatch",
+            "message": "Preview recovery refused: staged source artifacts changed after the page was loaded.",
+        }
+    return None
+
+
 @app.post("/api/leads/dispatch-important/preview")
 def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     progress_job: dict[str, object] | None = None
@@ -7280,16 +7678,26 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 status_code=409,
             )
         if not progress_job:
-            preview = preview_dispatch_master_leads(
-                master_path=output_path,
-                rejected_path=rejected_path,
-                verified_path=verified_source_path,
-                triaged_keep_path=triaged_keep_source_path,
-                dispatch_source_mode=dispatch_source_mode,
-                dispatch_cap=dispatch_cap,
-                campaign_type=campaign_type,
-                preview_dir=preview_dir,
-            )
+            claim_key = f"manual_{hashlib.sha256(str(source_path_for_mode.resolve(strict=False)).encode()).hexdigest()[:24]}"
+            preview_claim = _try_acquire_dispatch_preview_claim(claim_key)
+            if preview_claim is None:
+                return JSONResponse(
+                    {"ok": False, "blocked": True, "error": "preview_already_running", "message": "Preview Dispatch is already running for this source."},
+                    status_code=409,
+                )
+            try:
+                preview = preview_dispatch_master_leads(
+                    master_path=output_path,
+                    rejected_path=rejected_path,
+                    verified_path=verified_source_path,
+                    triaged_keep_path=triaged_keep_source_path,
+                    dispatch_source_mode=dispatch_source_mode,
+                    dispatch_cap=dispatch_cap,
+                    campaign_type=campaign_type,
+                    preview_dir=preview_dir,
+                )
+            finally:
+                _release_dispatch_preview_claim(preview_claim)
             save_state(latest_auto_dispatch_preview=preview)
             return JSONResponse(
                 {
@@ -7304,8 +7712,38 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
         existing_preview_status = str(
             progress_job.get("auto_dispatch_preview_status") or ""
         ).strip().lower()
+        saved_progress = _load_lead_ops_progress(progress_job.get("job_id"))
+        saved_phase = str(saved_progress.get("phase") or "").strip().lower()
+        persisted_preview = _persisted_dispatch_preview_for_job(progress_job)
+        recovery_required = (
+            existing_preview_status in {"running", "failed"}
+            or saved_phase in {"failed", "stale"}
+            or (existing_preview_status == "completed" and persisted_preview is None)
+        )
+        if persisted_preview is not None:
+            recovery_block = _preview_recovery_request_block(
+                payload=payload,
+                job=progress_job,
+                source_path=source_path_for_mode,
+                require_client_binding=recovery_required,
+            )
+            if recovery_block is not None:
+                return JSONResponse(
+                    {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "message": "Dispatch preview already complete.",
+                    "preview": persisted_preview,
+                    "status": _combined_leads_status(),
+                },
+                status_code=200,
+            )
 
-        if existing_preview_status == "running":
+        preview_claim = _try_acquire_dispatch_preview_claim(str(progress_job.get("job_id") or ""))
+        if preview_claim is None:
             return JSONResponse(
                 {
                     "ok": True,
@@ -7317,64 +7755,96 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 status_code=202,
             )
 
-        progress_job["auto_dispatch_preview_status"] = "running"
-        progress_job["auto_dispatch_preview_started_at_utc"] = iso_utc()
-        progress_job["auto_dispatch_preview_completed_at_utc"] = ""
-        progress_job["auto_dispatch_preview_error"] = ""
-        progress_job["auto_dispatch_preview_id"] = ""
-        progress_job["auto_dispatch_preview_path"] = ""
-        progress_job.pop("auto_dispatch_preview", None)
-        progress_job["message"] = "Preview Dispatch is running."
-        _save_important_check_job(progress_job)
+        claim_transferred = False
+        try:
+            recovery_block = _preview_recovery_request_block(
+                payload=payload,
+                job=progress_job,
+                source_path=source_path_for_mode,
+                require_client_binding=recovery_required,
+            )
+            if recovery_block is not None:
+                return JSONResponse(
+                    {"ok": False, "blocked": True, **recovery_block, "status": _combined_leads_status()},
+                    status_code=409,
+                )
+            expected_recovery_binding = _preview_recovery_binding(progress_job)
+            progress_job["preview_claim_token"] = str(preview_claim.get("claim_token") or "")
+            progress_job["preview_claim_acquired_at_utc"] = str(preview_claim.get("acquired_at_utc") or "")
+            progress_job["auto_dispatch_preview_status"] = "running"
+            progress_job["auto_dispatch_preview_started_at_utc"] = iso_utc()
+            progress_job["auto_dispatch_preview_completed_at_utc"] = ""
+            progress_job["auto_dispatch_preview_error"] = ""
+            progress_job["auto_dispatch_preview_id"] = ""
+            progress_job["auto_dispatch_preview_path"] = ""
+            progress_job.pop("auto_dispatch_preview", None)
+            progress_job["message"] = "Preview Dispatch is running."
+            _save_important_check_job(progress_job)
 
-        save_state(latest_auto_dispatch_preview={})
+            save_state(latest_auto_dispatch_preview={})
 
-        _write_lead_ops_progress(
-            progress_job,
-            phase="previewing",
-            status="running",
-            processed_rows=int(
-                progress_job.get("auto_triage_processed_rows")
-                or progress_job.get("processed_rows")
-                or 0
-            ),
-            total_rows=int(
-                progress_job.get("auto_triage_total_rows")
-                or progress_job.get("total_input_rows")
-                or 0
-            ),
-            percent=90,
-            current_message="Previewing dispatch",
-        )
+            _write_lead_ops_progress(
+                progress_job,
+                phase="previewing",
+                status="running",
+                processed_rows=int(
+                    progress_job.get("auto_triage_processed_rows")
+                    or progress_job.get("processed_rows")
+                    or 0
+                ),
+                total_rows=int(
+                    progress_job.get("auto_triage_total_rows")
+                    or progress_job.get("total_input_rows")
+                    or 0
+                ),
+                percent=90,
+                current_message="Previewing dispatch",
+            )
 
-        thread = threading.Thread(
-            target=_run_manual_dispatch_preview_background,
-            kwargs={
-                "check_job_id": str(progress_job.get("job_id") or ""),
-                "master_path": output_path,
-                "rejected_path": rejected_path,
-                "verified_source_path": verified_source_path,
-                "triaged_keep_source_path": triaged_keep_source_path,
-                "source_path_for_mode": source_path_for_mode,
-                "dispatch_source_mode": dispatch_source_mode,
-                "dispatch_cap": dispatch_cap,
-                "campaign_type": campaign_type,
-                "preview_dir": preview_dir,
-            },
-            daemon=True,
-        )
-        thread.start()
-
-        return JSONResponse(
-            {
-                "ok": True,
-                "accepted": True,
-                "message": "Preview Dispatch started.",
-                "job": _important_check_job_with_progress(progress_job),
-                "status": _combined_leads_status(),
-            },
-            status_code=202,
-        )
+            thread = threading.Thread(
+                target=_run_manual_dispatch_preview_background,
+                kwargs={
+                    "preview_claim": preview_claim,
+                    "check_job_id": str(progress_job.get("job_id") or ""),
+                    "master_path": output_path,
+                    "rejected_path": rejected_path,
+                    "verified_source_path": verified_source_path,
+                    "triaged_keep_source_path": triaged_keep_source_path,
+                    "source_path_for_mode": source_path_for_mode,
+                    "dispatch_source_mode": dispatch_source_mode,
+                    "dispatch_cap": dispatch_cap,
+                    "campaign_type": campaign_type,
+                    "preview_dir": preview_dir,
+                    "expected_recovery_binding": expected_recovery_binding,
+                },
+                daemon=True,
+            )
+            thread.start()
+            claim_transferred = True
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "accepted": True,
+                    "message": "Preview Dispatch started.",
+                    "job": _important_check_job_with_progress(progress_job),
+                    "status": _combined_leads_status(),
+                },
+                status_code=202,
+            )
+        except Exception as exc:
+            progress_job["auto_dispatch_preview_status"] = "failed"
+            progress_job["auto_dispatch_preview_error"] = str(exc)
+            progress_job["auto_dispatch_preview_completed_at_utc"] = iso_utc()
+            progress_job["message"] = f"Dispatch preview failed before worker start: {exc}"
+            try:
+                _save_important_check_job(progress_job)
+            except Exception:
+                pass
+            raise
+        finally:
+            if not claim_transferred:
+                _release_dispatch_preview_claim(preview_claim)
+                _record_dispatch_preview_claim_released(str(progress_job.get("job_id") or ""))
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
     except ValueError as exc:
