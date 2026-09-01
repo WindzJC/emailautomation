@@ -4719,7 +4719,10 @@ def _human_upload_limit(limit: int) -> str:
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "build" / "index.html",
+        headers={"Cache-Control": "no-cache, max-age=0, must-revalidate"},
+    )
 
 
 @app.get("/api/health")

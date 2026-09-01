@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import re
 import unittest
@@ -14,9 +16,75 @@ TAILWIND_CSS = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "
 LIVE_DASHBOARD_PY = Path(__file__).resolve().parents[1] / "live_dashboard.py"
 CONTROLLED_SENDGRID_TEST_PY = Path(__file__).resolve().parents[1] / "controlled_sendgrid_test.py"
 REACT_MAIN = Path(__file__).resolve().parents[1] / "web_dashboard" / "src" / "main.jsx"
+VITE_CONFIG = Path(__file__).resolve().parents[1] / "vite.config.js"
+BUILD_DIR = Path(__file__).resolve().parents[1] / "web_dashboard" / "build"
+BUILT_INDEX_HTML = BUILD_DIR / "index.html"
+BUILD_MANIFEST = BUILD_DIR / ".vite" / "manifest.json"
 
 
 class WebDashboardAppTests(unittest.TestCase):
+    def test_runtime_frontend_assets_are_automatically_content_fingerprinted(self) -> None:
+        source_html = INDEX_HTML.read_text(encoding="utf-8")
+        react_source = REACT_MAIN.read_text(encoding="utf-8")
+        vite_source = VITE_CONFIG.read_text(encoding="utf-8")
+        backend_source = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+        built_html = BUILT_INDEX_HTML.read_text(encoding="utf-8")
+        manifest = json.loads(BUILD_MANIFEST.read_text(encoding="utf-8"))
+
+        old_runtime_keys = (
+            "controlled-sendgrid-test-" + "20260829a",
+            "snapshot-polling-" + "20260803a",
+        )
+        for old_key in old_runtime_keys:
+            self.assertNotIn(old_key, source_html)
+            self.assertNotIn(old_key, react_source)
+            self.assertNotIn(old_key, built_html)
+
+        self.assertIn('href="/styles.css"', source_html)
+        self.assertIn('src="/src/main.jsx"', source_html)
+        self.assertNotIn("/static/build/dashboard.js", source_html)
+        self.assertNotIn("/static/build/dashboard.css", source_html)
+        self.assertIn('entryFileNames: "assets/dashboard-[hash].js"', vite_source)
+        self.assertIn("manifest: true", vite_source)
+        self.assertIn('input: resolve(dashboardRoot, "index.html")', vite_source)
+
+        dashboard_match = re.search(
+            r'src="(/static/build/assets/dashboard-[A-Za-z0-9_-]+\.js)"',
+            built_html,
+        )
+        stylesheet_match = re.search(
+            r'href="(/static/build/assets/[A-Za-z0-9_-]+\.css)"',
+            built_html,
+        )
+        self.assertIsNotNone(dashboard_match)
+        self.assertIsNotNone(stylesheet_match)
+        self.assertNotIn("?v=", dashboard_match.group(1))
+        self.assertTrue((BUILD_DIR / dashboard_match.group(1).removeprefix("/static/build/")).is_file())
+        self.assertTrue((BUILD_DIR / stylesheet_match.group(1).removeprefix("/static/build/")).is_file())
+
+        entry = manifest["index.html"]
+        self.assertEqual(
+            dashboard_match.group(1).removeprefix("/static/build/"),
+            entry["file"],
+        )
+        self.assertIn(
+            stylesheet_match.group(1).removeprefix("/static/build/"),
+            entry["css"],
+        )
+        built_dashboard = BUILD_DIR / entry["file"]
+        built_dashboard_source = built_dashboard.read_text(encoding="utf-8")
+        expected_app_fingerprint = hashlib.sha256(APP_JS.read_bytes()).hexdigest()[:16]
+        self.assertIn(
+            f"/static/app.js?v={expected_app_fingerprint}",
+            built_dashboard_source,
+        )
+        self.assertIn("script.src = __LEGACY_APP_ASSET_URL__", react_source)
+
+        self.assertIn('STATIC_DIR / "build" / "index.html"', backend_source)
+        self.assertIn('"Cache-Control": "no-cache, max-age=0, must-revalidate"', backend_source)
+        self.assertFalse((BUILD_DIR / "dashboard.js").exists())
+        self.assertFalse((BUILD_DIR / "dashboard.css").exists())
+
     def test_controlled_sendgrid_card_has_fixed_recipient_and_only_approved_senders(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         html = INDEX_HTML.read_text(encoding="utf-8")

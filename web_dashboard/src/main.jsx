@@ -276,7 +276,7 @@ export function AppShell({ template }) {
 function DashboardControllerBridge() {
   useEffect(() => {
     const script = document.createElement("script");
-    script.src = "/static/app.js?v=snapshot-polling-20260803a";
+    script.src = __LEGACY_APP_ASSET_URL__;
     script.dataset.dashboardController = "true";
     document.body.append(script);
     return () => script.remove();
