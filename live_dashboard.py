@@ -7862,7 +7862,14 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
             triaged_keep_source_path = Path(str(fast_triage_source["path"]))
             triaged_keep_source_resolution = str(fast_triage_source.get("source_resolution") or "")
             staged_paths = fast_triage_source.get("paths") if isinstance(fast_triage_source.get("paths"), dict) else {}
-            if dispatch_source_mode == DISPATCH_SOURCE_TRIAGED_KEEP and staged_paths:
+            if staged_paths and dispatch_source_mode in {
+                DISPATCH_SOURCE_TRIAGED_KEEP,
+                DISPATCH_SOURCE_CLEANED,
+            }:
+                # Bind both Fresh Cold KEEP and Checked Recontact / cleaned
+                # to the authoritative artifacts from the same completed
+                # staged Lead Check run. Never silently fall back to the
+                # mutable global cleaned output when a staged run exists.
                 output_path = Path(staged_paths.get("input") or output_path)
                 rejected_path = Path(staged_paths.get("rejected") or rejected_path)
         else:
