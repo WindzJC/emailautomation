@@ -41,6 +41,7 @@ const els = {
   controlledSendTestFrom: document.getElementById("controlled-send-test-from"),
   controlledSendTestBtn: document.getElementById("controlled-send-test-btn"),
   controlledSendTestAllBtn: document.getElementById("controlled-send-test-all-btn"),
+  controlledSendTestAllStatus: document.getElementById("controlled-send-test-all-status"),
   controlledSendTestStatus: document.getElementById("controlled-send-test-status"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
@@ -10030,6 +10031,30 @@ async function runControlledSendTest() {
 }
 
 
+
+function renderControlledAllSendTestStatus(
+  payload,
+  ok = false,
+) {
+  if (!els.controlledSendTestAllStatus) return;
+
+  const message = String(
+    payload?.message || "",
+  ).trim();
+
+  els.controlledSendTestAllStatus.className =
+    "controlled-send-test-status "
+    + (ok ? "status-success" : "status-error");
+
+  els.controlledSendTestAllStatus.textContent =
+    message
+    || (
+      ok
+        ? "All-6 controlled test completed."
+        : "All-6 controlled test failed safely."
+    );
+}
+
 async function runControlledAllSenderTest() {
   if (
     controlledSendTestPending
@@ -10052,7 +10077,7 @@ async function runControlledAllSenderTest() {
   );
 
   if (!confirmed) {
-    renderControlledSendTestStatus(
+    renderControlledAllSendTestStatus(
       {
         message:
           "All-sender controlled test cancelled. "
@@ -10078,11 +10103,11 @@ async function runControlledAllSenderTest() {
   els.controlledSendTestAllBtn.textContent =
     "Sending 6 controlled tests...";
 
-  if (els.controlledSendTestStatus) {
-    els.controlledSendTestStatus.className =
+  if (els.controlledSendTestAllStatus) {
+    els.controlledSendTestAllStatus.className =
       "controlled-send-test-status status-pending";
 
-    els.controlledSendTestStatus.textContent =
+    els.controlledSendTestAllStatus.textContent =
       "Submitting six isolated sender validations sequentially...";
   }
 
@@ -10130,12 +10155,12 @@ async function runControlledAllSenderTest() {
 
     const allPassed = result.all_passed === true;
 
-    if (els.controlledSendTestStatus) {
-      els.controlledSendTestStatus.className =
+    if (els.controlledSendTestAllStatus) {
+      els.controlledSendTestAllStatus.className =
         "controlled-send-test-status "
         + (allPassed ? "status-success" : "status-error");
 
-      els.controlledSendTestStatus.textContent = [
+      els.controlledSendTestAllStatus.textContent = [
         `Accepted: ${Number(result.accepted || 0)}/6`,
         `Failed: ${Number(result.failed || 0)}`,
         ...lines,
@@ -10152,7 +10177,7 @@ async function runControlledAllSenderTest() {
       allPassed ? "success" : "error",
     );
   } catch (err) {
-    renderControlledSendTestStatus(
+    renderControlledAllSendTestStatus(
       {
         message:
           `All-sender controlled test failed safely: ${err}`,

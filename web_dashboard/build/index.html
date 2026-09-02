@@ -350,7 +350,7 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="/static/build/assets/dashboard-DAU1k-P4.js"></script>
+    <script type="module" crossorigin src="/static/build/assets/dashboard-C1QvGZGk.js"></script>
     <link rel="stylesheet" crossorigin href="/static/build/assets/index-BWMrAInj.css">
   </head>
   <body>
@@ -479,15 +479,21 @@
 
             <section class="panel panel-shell controlled-send-test-card" aria-labelledby="controlled-send-test-title">
               <div class="controlled-send-test-copy">
-                <p class="eyebrow">Manual validation</p>
-                <h2 id="controlled-send-test-title">Controlled Send Test</h2>
-                <p>Sends exactly one validation email to the fixed Astra test inbox. Does not use production recipient queues.</p>
+                <p class="eyebrow">Manual validation · Single sender</p>
+                <h2 id="controlled-send-test-title">Single Sender Controlled Send Test</h2>
+                <p>
+                  Tests one legacy approved SendGrid identity at a time.
+                  The selector intentionally contains only Alison, Jodi, and Jordan.
+                  Does not use production recipient queues.
+                </p>
               </div>
+
               <div class="controlled-send-test-grid">
                 <div class="controlled-send-test-fixed">
                   <span>Recipient</span>
                   <strong id="controlled-send-test-recipient">astraproductionsbyjc@gmail.com</strong>
                 </div>
+
                 <label class="controlled-send-test-field">
                   <span>Sender</span>
                   <select id="controlled-send-test-profile">
@@ -496,24 +502,66 @@
                     <option value="sendgrid_jordan" data-from-email="jordankendrick@bnmarketing.info">Jordan</option>
                   </select>
                 </label>
+
                 <div class="controlled-send-test-fixed">
                   <span>Resolved From / Reply-To</span>
                   <strong id="controlled-send-test-from">alisonaguiar@bnmarketing.info</strong>
                 </div>
-                <button id="controlled-send-test-btn" class="btn btn-primary" type="button">Send 1 Controlled Test</button>
+
+                <button
+                  id="controlled-send-test-btn"
+                  class="btn btn-primary"
+                  type="button"
+                >Send 1 Controlled Test</button>
+              </div>
+
+              <div
+                id="controlled-send-test-status"
+                class="controlled-send-test-status"
+                aria-live="polite"
+              ></div>
+            </section>
+
+            <section class="panel panel-shell controlled-send-test-card" aria-labelledby="controlled-send-test-all-title">
+              <div class="controlled-send-test-copy">
+                <p class="eyebrow">All 6 sender test</p>
+                <h2 id="controlled-send-test-all-title">All 6 Sender Controlled Test</h2>
+                <p>
+                  Sends one isolated validation email from every production identity.
+                  Does not use or modify production recipient queues.
+                </p>
+              </div>
+
+              <div class="controlled-send-test-grid">
                 <div class="controlled-send-test-fixed">
-                  <span>All 6 sender test</span>
-                  <strong>Recipient: astraproductionsbyjc+allsendersv1@gmail.com</strong>
-                  <span>JC · Annette · Jordan · Jodi · Alison · Fiorela</span>
+                  <span>Recipient</span>
+                  <strong id="controlled-send-test-all-recipient">astraproductionsbyjc+allsendersv1@gmail.com</strong>
                 </div>
+
+                <div class="controlled-send-test-fixed">
+                  <span>Senders</span>
+                  <strong>JC · Annette · Jordan · Jodi · Alison · Fiorela</strong>
+                </div>
+
+                <div class="controlled-send-test-fixed">
+                  <span>Transport</span>
+                  <strong>JC: PrivateEmail SMTP · 5: SendGrid</strong>
+                </div>
+
                 <button
                   id="controlled-send-test-all-btn"
                   class="btn btn-primary"
                   type="button"
                 >Send All 6 Controlled Tests</button>
               </div>
-              <div id="controlled-send-test-status" class="controlled-send-test-status" aria-live="polite"></div>
+
+              <div
+                id="controlled-send-test-all-status"
+                class="controlled-send-test-status"
+                aria-live="polite"
+              ></div>
             </section>
+
 
             <section class="workspace-primary">
               <details id="detail-panel" class="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">

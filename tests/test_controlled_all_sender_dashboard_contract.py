@@ -16,7 +16,11 @@ def test_all_sender_control_is_present_and_isolated():
     assert "Send All 6 Controlled Tests" in index
     assert "All 6 sender test" in index
     assert (
-        "Recipient: astraproductionsbyjc+allsendersv1@gmail.com"
+        'id="controlled-send-test-all-recipient"'
+        in index
+    )
+    assert (
+        "astraproductionsbyjc+allsendersv1@gmail.com"
         in index
     )
     assert (
@@ -26,6 +30,40 @@ def test_all_sender_control_is_present_and_isolated():
 
     assert '"/api/controlled-test/all"' in app
     assert "runControlledAllSenderTest" in app
+    assert 'id="controlled-send-test-all-title"' in index
+    assert 'id="controlled-send-test-all-status"' in index
+    assert "Single Sender Controlled Send Test" in index
+    assert "All 6 Sender Controlled Test" in index
+    assert "controlledSendTestAllStatus" in app
+
+    single_start = index.index(
+        'id="controlled-send-test-title"'
+    )
+    all_start = index.index(
+        'id="controlled-send-test-all-title"'
+    )
+
+    single_segment = index[single_start:all_start]
+    all_segment = index[all_start:]
+
+    assert 'id="controlled-send-test-profile"' in single_segment
+    assert 'id="controlled-send-test-btn"' in single_segment
+    assert 'id="controlled-send-test-all-btn"' not in single_segment
+
+    assert 'id="controlled-send-test-all-btn"' in all_segment
+    assert 'id="controlled-send-test-profile"' not in all_segment
+
+    function_start = app.index(
+        "async function runControlledAllSenderTest()"
+    )
+    function_end = app.index(
+        "async function postAction(path, options = {})",
+        function_start,
+    )
+    all_function = app[function_start:function_end]
+
+    assert "controlledSendTestAllStatus" in all_function
+    assert "controlledSendTestStatus" not in all_function
     assert "exactly SIX real validation emails" in app
 
     assert '@app.get("/api/controlled-test/all")' in backend
