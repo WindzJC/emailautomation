@@ -3262,20 +3262,86 @@ def _preview_summary_for_current_staged_source(
     source_exists = bool(source_status.get("dispatch_source_exists"))
     if not source_exists:
         return enriched, False
-    if str(enriched.get("dispatch_source_mode") or "").strip().lower() != str(
+
+    source_mode = str(
         source_status.get("dispatch_source_mode") or ""
-    ).strip().lower():
+    ).strip().lower()
+    preview_mode = str(
+        enriched.get("dispatch_source_mode") or ""
+    ).strip().lower()
+    if preview_mode != source_mode:
         return enriched, False
-    if not _dashboard_paths_match(enriched.get("dispatch_source_path"), source_path):
+
+    # Preview artifacts created by the existing dispatch-preview path use
+    # source_path/source_file_path, while newer dashboard status objects use
+    # dispatch_source_path. Treat them as aliases, but still require an exact
+    # normalized source identity match.
+    preview_source_path = (
+        enriched.get("dispatch_source_path")
+        or enriched.get("source_path")
+        or enriched.get("source_file_path")
+        or ""
+    )
+    if not _dashboard_paths_match(preview_source_path, source_path):
         return enriched, False
-    for key in ("dispatch_source_row_count", "dispatch_eligible_row_count"):
-        try:
-            if int(enriched.get(key)) != int(source_status.get(key)):
-                return enriched, False
-        except (TypeError, ValueError):
+
+    # Likewise, persisted preview summaries historically used source_row_count
+    # (and selected_rows for the eligible input population) rather than the
+    # dashboard's dispatch_* count names. Require the values to agree exactly.
+    preview_source_rows = enriched.get("dispatch_source_row_count")
+    if preview_source_rows is None:
+        preview_source_rows = enriched.get("source_row_count")
+    if preview_source_rows is None:
+        preview_source_rows = enriched.get("total_source_rows")
+
+    preview_eligible_rows = enriched.get("dispatch_eligible_row_count")
+    if preview_eligible_rows is None:
+        preview_eligible_rows = enriched.get("selected_rows")
+    if preview_eligible_rows is None:
+        preview_eligible_rows = preview_source_rows
+
+    try:
+        source_rows = int(source_status.get("dispatch_source_row_count"))
+        eligible_rows = int(source_status.get("dispatch_eligible_row_count"))
+        if int(preview_source_rows) != source_rows:
             return enriched, False
-    if str(enriched.get("verification_file_mtime") or "") != str(
+        if int(preview_eligible_rows) != eligible_rows:
+            return enriched, False
+    except (TypeError, ValueError):
+        return enriched, False
+
+    # Verification metadata is authoritative when verification is required.
+    # Non-verification sources may legitimately have an empty preview mtime
+    # even though the source-status object exposes the source file's mtime.
+    source_verification_required = bool(
+        source_status.get("verification_required")
+    )
+    preview_verification_required = bool(
+        enriched.get("verification_required")
+    )
+
+    if (
+        "verification_required" in enriched
+        and preview_verification_required != source_verification_required
+    ):
+        return enriched, False
+
+    preview_verification_mtime = str(
+        enriched.get("verification_file_mtime") or ""
+    )
+    source_verification_mtime = str(
         source_status.get("verification_file_mtime") or ""
+    )
+
+    if source_verification_required:
+        if not preview_verification_mtime:
+            return enriched, False
+        if preview_verification_mtime != source_verification_mtime:
+            return enriched, False
+    elif (
+        preview_verification_mtime
+        and source_verification_mtime
+        and preview_verification_mtime != source_verification_mtime
     ):
         return enriched, False
 
@@ -3284,6 +3350,12 @@ def _preview_summary_for_current_staged_source(
             return enriched, False
     else:
         enriched["dispatch_source_exists"] = source_exists
+
+    # Normalize legacy persisted preview summaries for downstream consumers.
+    enriched.setdefault("dispatch_source_path", str(source_path))
+    enriched.setdefault("dispatch_source_row_count", source_rows)
+    enriched.setdefault("dispatch_eligible_row_count", eligible_rows)
+
     return enriched, True
 
 
