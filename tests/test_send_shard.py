@@ -16,7 +16,8 @@ from contextlib import ExitStack
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import send_shard
 import settings
@@ -67,6 +68,72 @@ class SendShardTests(unittest.TestCase):
             writer = csv.DictWriter(handle, fieldnames=headers, lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)
+
+    def _call_fake_sendgrid(self, response_or_error, phase_callback):
+        class Value:
+            def __init__(self, *args):
+                self.args = args
+
+        class Mail:
+            def __init__(self, **_kwargs):
+                self.reply_to = None
+
+            def add_content(self, _content):
+                return None
+
+            def add_header(self, _header):
+                return None
+
+            def add_custom_arg(self, _arg):
+                return None
+
+            def add_attachment(self, _attachment):
+                return None
+
+        class SendGridAPIClient:
+            def __init__(self, _api_key):
+                pass
+
+            def send(self, _mail):
+                if isinstance(response_or_error, BaseException):
+                    raise response_or_error
+                return response_or_error
+
+        helpers = SimpleNamespace(
+            Mail=Mail,
+            Content=Value,
+            ReplyTo=Value,
+            Attachment=Value,
+            FileContent=Value,
+            FileName=Value,
+            FileType=Value,
+            Disposition=Value,
+            ContentId=Value,
+            Header=Value,
+            Asm=Value,
+            CustomArg=Value,
+        )
+        sendgrid = SimpleNamespace(SendGridAPIClient=SendGridAPIClient)
+
+        def fake_import(name: str):
+            return sendgrid if name == "sendgrid" else helpers
+
+        with patch("importlib.import_module", side_effect=fake_import):
+            return send_shard.send_via_sendgrid(
+                "synthetic-key",
+                "sender@example.test",
+                "recipient@example.test",
+                "sender@example.test",
+                "Subject",
+                "Body",
+                "<p>Body</p>",
+                "unsubscribe@example.test",
+                None,
+                None,
+                0,
+                [],
+                delivery_phase_callback=phase_callback,
+            )
 
     def test_private_jc_auth_diagnostic_logs_in_without_sending_or_printing_secret(self) -> None:
         calls: list[str] = []
@@ -1783,6 +1850,7 @@ class SendShardTests(unittest.TestCase):
         send_side_effect=None,
         max_total: int = 0,
         profile_name: str = "sendgrid_annette",
+        expect_keyboard_interrupt: bool = False,
     ) -> tuple[str, object]:
         (
             base,
@@ -1812,6 +1880,27 @@ class SendShardTests(unittest.TestCase):
             }
         )
         stdout = io.StringIO()
+        def synthetic_sendgrid(*call_args, **call_kwargs):
+            phase_callback = call_args[-1] if call_args and callable(call_args[-1]) else None
+            if phase_callback:
+                phase_callback(send_shard.DELIVERY_PROVIDER_CALL_STARTED)
+            try:
+                if callable(send_side_effect):
+                    result = send_side_effect(*call_args, **call_kwargs)
+                elif send_side_effect is not None:
+                    raise send_side_effect
+                else:
+                    result = {"message_id": "synthetic-message"}
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                if isinstance(exc, smtplib.SMTPResponseException) or status_code is not None:
+                    if phase_callback:
+                        phase_callback(send_shard.DELIVERY_PROVIDER_REJECTED)
+                raise
+            if phase_callback:
+                phase_callback(send_shard.DELIVERY_ACCEPTED)
+            return result
+
         with ExitStack() as stack:
             stack.enter_context(patch.object(settings, "APP_ROOT", base))
             stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
@@ -1838,8 +1927,7 @@ class SendShardTests(unittest.TestCase):
                 patch.object(
                     send_shard,
                     "send_via_sendgrid",
-                    side_effect=send_side_effect,
-                    return_value={"message_id": "synthetic-message"},
+                    side_effect=synthetic_sendgrid,
                 )
             )
             stack.enter_context(patch.object(send_shard, "domain_wait_for_slot", return_value=""))
@@ -1865,8 +1953,59 @@ class SendShardTests(unittest.TestCase):
                 argv.extend(["--max_total", str(max_total)])
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(redirect_stdout(stdout))
-            send_shard.main()
+            if expect_keyboard_interrupt:
+                with self.assertRaises(KeyboardInterrupt):
+                    send_shard.main()
+            else:
+                send_shard.main()
         return stdout.getvalue(), send_mock
+
+    def _run_synthetic_private(self, fixture, smtp_client) -> str:
+        base, shards, logs, state, _old_csv, unsub, suppress, sg_suppress, counters, profile = fixture
+        csv_path = shards / "recipients_private_jc.csv"
+        log_path = logs / "private_jc_log.csv"
+        profile.clear()
+        profile.update(
+            {
+                **send_shard.PROFILES["private_jc"],
+                "csv": csv_path.name,
+                "log": log_path.name,
+                "interval": 0,
+                "cooldown_seconds": 0,
+                "repeat": False,
+                "max_messages_1h": 0,
+                "stop_at_local": "",
+                "always_send": "",
+                "global_dedupe": False,
+                "prune_sent": False,
+            }
+        )
+        stdout = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(settings, "APP_ROOT", base))
+            stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
+            stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
+            stack.enter_context(patch.object(settings, "STATE_DIR", state))
+            stack.enter_context(patch.object(settings, "WEBHOOK_EVENTS_PATH", state / "sendgrid_events.jsonl"))
+            stack.enter_context(patch.object(settings, "LEAD_LEDGER_DB_PATH", state / "lead_ledger.sqlite3"))
+            stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
+            stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
+            stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
+            stack.enter_context(patch.object(send_shard, "ROOT", base))
+            stack.enter_context(patch.object(send_shard, "DEFAULT_UNSUB_CSV", unsub))
+            stack.enter_context(patch.object(send_shard, "DEFAULT_SUPPRESS_CSV", suppress))
+            stack.enter_context(patch.object(send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress))
+            stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
+            stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
+            stack.enter_context(patch.object(send_shard, "smtp_login", return_value=smtp_client))
+            stack.enter_context(patch.object(send_shard.time, "sleep", return_value=None))
+            stack.enter_context(patch.object(send_shard, "sleep_with_jitter", return_value=None))
+            stack.enter_context(patch.dict(send_shard.PROFILES, {"private_jc": profile}, clear=False))
+            stack.enter_context(patch.dict(send_shard.os.environ, {"PRIVATE_JC_PASSWORD": "synthetic-secret"}, clear=False))
+            stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "private_jc"]))
+            stack.enter_context(redirect_stdout(stdout))
+            send_shard.main()
+        return stdout.getvalue()
 
     def test_controlled_sendgrid_stops_after_one_provider_submission_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2485,7 +2624,134 @@ class SendShardTests(unittest.TestCase):
                 )[0]
             )
 
-    def test_definite_provider_rejection_keeps_existing_invalid_policy_without_retry(self) -> None:
+    def test_sendgrid_delivery_phases_cover_accept_reject_and_ambiguity(self) -> None:
+        accepted_phases: list[str] = []
+        result = self._call_fake_sendgrid(
+            SimpleNamespace(status_code=202, headers={"X-Message-Id": "sg-test"}, body=b""),
+            accepted_phases.append,
+        )
+        self.assertEqual("sg-test", result["message_id"])
+        self.assertEqual(
+            [send_shard.DELIVERY_PROVIDER_CALL_STARTED, send_shard.DELIVERY_ACCEPTED],
+            accepted_phases,
+        )
+
+        for status_code in (400, 401, 403, 429):
+            with self.subTest(status_code=status_code):
+                phases: list[str] = []
+                with self.assertRaisesRegex(RuntimeError, f"status={status_code}"):
+                    self._call_fake_sendgrid(
+                        SimpleNamespace(status_code=status_code, headers={}, body=b"rejected"),
+                        phases.append,
+                    )
+                self.assertEqual(
+                    [
+                        send_shard.DELIVERY_PROVIDER_CALL_STARTED,
+                        send_shard.DELIVERY_PROVIDER_REJECTED,
+                    ],
+                    phases,
+                )
+
+        timeout_phases: list[str] = []
+        with self.assertRaisesRegex(RuntimeError, "synthetic timeout"):
+            self._call_fake_sendgrid(
+                TimeoutError("synthetic timeout"),
+                timeout_phases.append,
+            )
+        self.assertEqual(
+            [send_shard.DELIVERY_PROVIDER_CALL_STARTED],
+            timeout_phases,
+        )
+
+    def test_retry_settlement_requires_all_durable_steps(self) -> None:
+        for failed_step in ("domain", "restore", "release"):
+            with self.subTest(failed_step=failed_step):
+                calls: list[str] = []
+
+                def step(name: str):
+                    def run():
+                        calls.append(name)
+                        return name != failed_step
+                    return run
+
+                result = send_shard.settle_retryable_provider_attempt(
+                    finalize_callback=step("domain"),
+                    restore_callback=step("restore"),
+                    release_callback=step("release"),
+                )
+                self.assertEqual(["domain", "restore", "release"], calls)
+                self.assertFalse(result["settled"])
+                self.assertFalse(result[{"domain": "domain_finalized", "restore": "restored", "release": "released"}[failed_step]])
+
+    def test_sendgrid_accepted_bookkeeping_failure_is_never_requeued(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path = fixture[4]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "accepted@example.test,Ada,Book A,campaign-accepted\n",
+                encoding="utf-8",
+            )
+
+            real_log_row = send_shard.log_row
+
+            def fail_sent_log(path, email, status, info=""):
+                if status == "SENT":
+                    raise OSError("synthetic bookkeeping failure")
+                return real_log_row(path, email, status, info)
+
+            with patch.object(send_shard, "log_row", side_effect=fail_sent_log):
+                output, send_mock = self._run_synthetic_sendgrid(fixture)
+
+            self.assertEqual(1, send_mock.call_count)
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+            self.assertIn("accepted-send bookkeeping failed", output)
+
+    def test_deferred_sigint_after_sendgrid_rejection_settles_before_interrupt(self) -> None:
+        class Rejected(RuntimeError):
+            status_code = 429
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            state = fixture[3]
+            csv_path = fixture[4]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "deferred@example.test,Ada,Book A,campaign-deferred\n",
+                encoding="utf-8",
+            )
+
+            def interrupt_then_reject(*_args, **_kwargs):
+                signal_handler = send_shard.signal.getsignal(send_shard.signal.SIGINT)
+                signal_handler(send_shard.signal.SIGINT, None)
+                raise Rejected("synthetic 429")
+
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                send_side_effect=interrupt_then_reject,
+                expect_keyboard_interrupt=True,
+            )
+
+            self.assertEqual(1, send_mock.call_count)
+            with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(["deferred@example.test"], [row["Email"] for row in csv.DictReader(handle)])
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="campaign-deferred",
+                    provider="sendgrid",
+                    email="deferred@example.test",
+                    profile="sendgrid_annette",
+                    queue_file=csv_path.name,
+                    db_path=state / "send_idempotency.sqlite3",
+                )[0]
+            )
+            self.assertIn("provider_rejected", output)
+
+    def test_definite_sendgrid_http_rejection_restores_for_later_run(self) -> None:
+        class Rejected(RuntimeError):
+            status_code = 400
+
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = self._build_sendgrid_runtime_fixture(tmpdir)
             state = fixture[3]
@@ -2500,9 +2766,7 @@ class SendShardTests(unittest.TestCase):
                 "TimestampUTC,Email,Status,Info\n",
                 encoding="utf-8",
             )
-            rejection = smtplib.SMTPRecipientsRefused(
-                {"rejected@example.test": (550, b"5.1.1 user unknown")}
-            )
+            rejection = Rejected("status=400 body=synthetic rejection")
 
             _output, send_mock = self._run_synthetic_sendgrid(
                 fixture,
@@ -2512,10 +2776,10 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual(1, send_mock.call_count)
             with log_path.open(newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(["INVALID"], [row["Status"] for row in rows])
+            self.assertEqual(["ERROR"], [row["Status"] for row in rows])
             with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-                self.assertEqual([], list(csv.DictReader(handle)))
-            self.assertFalse(
+                self.assertEqual(["rejected@example.test"], [row["Email"] for row in csv.DictReader(handle)])
+            self.assertTrue(
                 send_shard.reserve_send_idempotency(
                     campaign_id="rejected-campaign",
                     provider="sendgrid",
@@ -2525,6 +2789,155 @@ class SendShardTests(unittest.TestCase):
                     db_path=state / "send_idempotency.sqlite3",
                 )[0]
             )
+
+    def test_private_smtp_disconnect_during_send_is_ambiguous_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            shards, logs, state = fixture[1], fixture[2], fixture[3]
+            queue = shards / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "ambiguous@example.test,Ada,Book A,private-ambiguous\n",
+                encoding="utf-8",
+            )
+            (logs / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+            smtp.send_message.side_effect = smtplib.SMTPServerDisconnected("response lost")
+
+            output = self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(1, smtp.send_message.call_count)
+            with queue.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+            with send_shard.sqlite3.connect(state / "send_idempotency.sqlite3") as conn:
+                self.assertEqual(
+                    ("ambiguous",),
+                    conn.execute(
+                        "SELECT status FROM send_reservations WHERE email = ?",
+                        ("ambiguous@example.test",),
+                    ).fetchone(),
+                )
+            self.assertIn("AMBIGUOUS", output)
+
+    def test_private_smtp_451_retries_once_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue = fixture[1] / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "temporary@example.test,Ada,Book A,private-temporary\n",
+                encoding="utf-8",
+            )
+            (fixture[2] / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+            smtp.send_message.side_effect = [
+                smtplib.SMTPDataError(451, b"4.3.0 try later"),
+                {},
+            ]
+
+            output = self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(2, smtp.send_message.call_count)
+            self.assertIn("SENT (retry)", output)
+            with queue.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+
+    def test_private_smtp_second_451_restores_and_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            shards, logs, state = fixture[1], fixture[2], fixture[3]
+            queue = shards / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "temporary@example.test,Ada,Book A,private-retryable\n",
+                encoding="utf-8",
+            )
+            (logs / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+            smtp.send_message.side_effect = [
+                smtplib.SMTPDataError(451, b"4.3.0 try later"),
+                smtplib.SMTPDataError(451, b"4.3.0 still unavailable"),
+            ]
+
+            output = self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(2, smtp.send_message.call_count)
+            with queue.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(["temporary@example.test"], [row["Email"] for row in csv.DictReader(handle)])
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="private-retryable",
+                    provider="private",
+                    email="temporary@example.test",
+                    profile="private_jc",
+                    queue_file=queue.name,
+                    db_path=state / "send_idempotency.sqlite3",
+                )[0]
+            )
+            self.assertIn("retry_rejected_settled", (logs / "private_jc_log.csv").read_text(encoding="utf-8"))
+            self.assertNotIn("settlement_failed", output)
+
+    def test_private_smtp_recipients_refused_550_uses_invalid_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue = fixture[1] / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "invalid@example.test,Ada,Book A,private-invalid\n",
+                encoding="utf-8",
+            )
+            log = fixture[2] / "private_jc_log.csv"
+            log.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+            smtp.send_message.side_effect = smtplib.SMTPRecipientsRefused(
+                {"invalid@example.test": (550, b"5.1.1 user unknown")}
+            )
+
+            self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(1, smtp.send_message.call_count)
+            with log.open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual(["INVALID"], [row["Status"] for row in csv.DictReader(handle)])
+
+    def test_private_smtp_recipients_refused_4xx_uses_bounded_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue = fixture[1] / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "temporary@example.test,Ada,Book A,private-refused\n",
+                encoding="utf-8",
+            )
+            (fixture[2] / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+            smtp.send_message.side_effect = [
+                smtplib.SMTPRecipientsRefused(
+                    {"temporary@example.test": (451, b"4.3.0 try later")}
+                ),
+                {},
+            ]
+
+            output = self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(2, smtp.send_message.call_count)
+            self.assertIn("SENT (retry)", output)
+
+    def test_private_smtp_normal_success_remains_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue = fixture[1] / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "success@example.test,Ada,Book A,private-success\n",
+                encoding="utf-8",
+            )
+            (fixture[2] / "private_jc_log.csv").write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            smtp = Mock()
+
+            output = self._run_synthetic_private(fixture, smtp)
+
+            self.assertEqual(1, smtp.send_message.call_count)
+            self.assertIn("SENT success@example.test", output)
 
     def test_new_global_block_between_synthetic_sends_prevents_second_submission(self) -> None:
         cases = ("unsubscribed", "global_suppression", "bad_outcome")

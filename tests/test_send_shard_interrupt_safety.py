@@ -293,14 +293,40 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
                 )
             )
 
+            def phase_aware_sendgrid_stub(*args, **kwargs):
+                callback = kwargs.get("delivery_phase_callback")
+
+                if callback is None and args:
+                    candidate = args[-1]
+                    if callable(candidate):
+                        callback = candidate
+
+                if not callable(callback):
+                    raise AssertionError(
+                        "send_via_sendgrid delivery phase callback "
+                        "was not supplied"
+                    )
+
+                callback(
+                    send_shard.DELIVERY_PROVIDER_CALL_STARTED
+                )
+
+                if send_side_effect is not None:
+                    result = send_side_effect(*args, **kwargs)
+                else:
+                    result = {
+                        "message_id":
+                            "synthetic-interrupt-message",
+                    }
+
+                callback(send_shard.DELIVERY_ACCEPTED)
+                return result
+
             send_mock = stack.enter_context(
                 patch.object(
                     send_shard,
                     "send_via_sendgrid",
-                    side_effect=send_side_effect,
-                    return_value={
-                        "message_id": "synthetic-interrupt-message",
-                    },
+                    side_effect=phase_aware_sendgrid_stub,
                 )
             )
 

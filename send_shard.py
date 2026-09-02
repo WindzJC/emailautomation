@@ -79,6 +79,11 @@ SENDGRID_SKIP_PRUNE_ON_STARTUP = os.environ.get("SENDGRID_SKIP_PRUNE_ON_STARTUP"
 RUNTIME_LOCKS_DIR = STATE_DIR / "locks"
 SEND_IDEMPOTENCY_DB_PATH = STATE_DIR / "send_idempotency.sqlite3"
 
+DELIVERY_PRE_SUBMIT = "PRE_SUBMIT"
+DELIVERY_PROVIDER_CALL_STARTED = "PROVIDER_CALL_STARTED"
+DELIVERY_PROVIDER_REJECTED = "PROVIDER_REJECTED"
+DELIVERY_ACCEPTED = "ACCEPTED"
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -1357,6 +1362,27 @@ def restore_claimed_queue_row(
         rewrite_csv_rows(csv_path, fieldnames, rows)
         receipt["restored"] = True
     return True
+
+
+def settle_retryable_provider_attempt(
+    *,
+    finalize_callback,
+    restore_callback,
+    release_callback,
+) -> dict[str, bool]:
+    """Attempt every durable retry-settlement step and fail closed on any failure."""
+    results: dict[str, bool] = {}
+    for name, callback in (
+        ("domain_finalized", finalize_callback),
+        ("restored", restore_callback),
+        ("released", release_callback),
+    ):
+        try:
+            results[name] = bool(callback())
+        except Exception:
+            results[name] = False
+    results["settled"] = all(results.values())
+    return results
 
 # ===== SIGNATURES =====
 SIGNATURE_CID = "sigimg"
@@ -3685,6 +3711,7 @@ def send_via_sendgrid(
     unsubscribe_group_id: int,
     groups_to_display: list[int],
     custom_args: dict[str, str] | None = None,
+    delivery_phase_callback=None,
 ) -> dict[str, str]:
     try:
         import importlib
@@ -3743,9 +3770,18 @@ def send_via_sendgrid(
             )
         )
 
+    if delivery_phase_callback is not None:
+        delivery_phase_callback(DELIVERY_PROVIDER_CALL_STARTED)
     try:
         response = SendGridAPIClient(api_key).send(mail)
     except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        try:
+            concrete_http_rejection = int(status_code) != 202
+        except (TypeError, ValueError):
+            concrete_http_rejection = False
+        if concrete_http_rejection and delivery_phase_callback is not None:
+            delivery_phase_callback(DELIVERY_PROVIDER_REJECTED)
         # Surface SendGrid API error payload (when present) to avoid opaque 401s.
         body = getattr(exc, "body", None)
         if isinstance(body, (bytes, bytearray)):
@@ -3755,10 +3791,14 @@ def send_via_sendgrid(
             detail = f"{detail} body={body}"
         raise RuntimeError(f"sendgrid_error: {detail}") from exc
     if response.status_code != 202:
+        if delivery_phase_callback is not None:
+            delivery_phase_callback(DELIVERY_PROVIDER_REJECTED)
         body = response.body
         if isinstance(body, bytes):
             body = body.decode("utf-8", errors="replace")
         raise RuntimeError(f"sendgrid_error: status={response.status_code} body={body}")
+    if delivery_phase_callback is not None:
+        delivery_phase_callback(DELIVERY_ACCEPTED)
     headers = getattr(response, "headers", {}) or {}
     message_id = (
         headers.get("X-Message-Id")
@@ -3798,6 +3838,29 @@ def _decode_smtp_err(x) -> str:
     if isinstance(x, (bytes, bytearray)):
         return x.decode(errors="ignore")
     return str(x)
+
+
+def smtp_refusal_for_target(
+    recipients: object,
+    target_email: str,
+) -> tuple[int, str] | None:
+    """Return a trustworthy SMTP refusal only for the exact target recipient."""
+    if not isinstance(recipients, dict):
+        return None
+    target = norm_email(target_email)
+    matches = [value for key, value in recipients.items() if norm_email(str(key)) == target]
+    if len(matches) != 1:
+        return None
+    refusal = matches[0]
+    if not isinstance(refusal, (tuple, list)) or len(refusal) < 2:
+        return None
+    try:
+        code = int(refusal[0])
+    except (TypeError, ValueError):
+        return None
+    if code < 400 or code > 599:
+        return None
+    return code, _decode_smtp_err(refusal[1])
 
 
 def classify_smtp(code: int | None, text: str) -> str:
@@ -4821,6 +4884,7 @@ def main() -> int | None:
     last_recipient_for_audit = ""
     runtime_lock_context = None
     provider_submission_active = False
+    delivery_phase = DELIVERY_PRE_SUBMIT
     deferred_stop_requested = False
 
     def emit_worker_event(event_type: str, reason: str, **fields: object) -> None:
@@ -5673,20 +5737,25 @@ def main() -> int | None:
         html_body,
         cid,
     ):
-        nonlocal provider_submission_active
-        provider_submission_active = True
-        try:
-            return send_one(
-                msg,
-                email,
-                subject_text,
-                body_text,
-                html_body,
-                cid,
-            )
-        except BaseException:
-            provider_submission_active = False
-            raise
+        nonlocal delivery_phase
+        delivery_phase = DELIVERY_PRE_SUBMIT
+        result = send_one(
+            msg,
+            email,
+            subject_text,
+            body_text,
+            html_body,
+            cid,
+        )
+        if delivery_phase != DELIVERY_ACCEPTED:
+            set_delivery_phase(DELIVERY_ACCEPTED)
+        return result
+
+    def set_delivery_phase(phase: str) -> None:
+        nonlocal delivery_phase, provider_submission_active
+        delivery_phase = phase
+        if phase == DELIVERY_PROVIDER_CALL_STARTED:
+            provider_submission_active = True
 
     def finalize_accepted_send(
         *,
@@ -5722,6 +5791,51 @@ def main() -> int | None:
             email,
             "sent",
             send_info,
+        )
+
+    def settle_retryable_attempt(
+        *,
+        reservation_token: str,
+        email: str,
+        campaign_id: str,
+        queue_claim_receipt: dict[str, object] | None,
+        idempotency_reserved: bool,
+        outcome: str,
+        info: str,
+        domain_finalized: bool | None = None,
+    ) -> tuple[bool, bool, bool, bool]:
+        """Settle a definitely retryable attempt; every durable step must pass."""
+        result = settle_retryable_provider_attempt(
+            finalize_callback=(
+                lambda: bool(domain_finalized)
+                if domain_finalized is not None
+                else finalize_domain_attempt_slot(
+                    reservation_token,
+                    email,
+                    outcome,
+                    info,
+                )
+            ),
+            restore_callback=(
+                lambda: restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                if queue_claim_receipt is not None
+                else True
+            ),
+            release_callback=(
+                lambda: release_send_idempotency_reservation(
+                    campaign_id=campaign_id,
+                    provider=args.provider,
+                    email=email,
+                )
+                if idempotency_reserved
+                else True
+            ),
+        )
+        return (
+            result["settled"],
+            result["restored"],
+            result["released"],
+            result["domain_finalized"],
         )
 
     def prevent_blocked_retry(
@@ -5810,17 +5924,36 @@ def main() -> int | None:
                 sendgrid_unsub_group_id,
                 sendgrid_groups_to_display,
                 sendgrid_custom_args,
+                set_delivery_phase,
             )
+
+        def send_smtp_message(smtp_client: smtplib.SMTP) -> None:
+            set_delivery_phase(DELIVERY_PROVIDER_CALL_STARTED)
+            try:
+                smtp_client.send_message(msg)
+            except smtplib.SMTPRecipientsRefused as exc:
+                refusal = smtp_refusal_for_target(exc.recipients, to_email)
+                if refusal is None:
+                    raise
+                code, text = refusal
+                set_delivery_phase(DELIVERY_PROVIDER_REJECTED)
+                raise smtplib.SMTPDataError(code, text.encode("utf-8")) from exc
+            except smtplib.SMTPResponseException:
+                set_delivery_phase(DELIVERY_PROVIDER_REJECTED)
+                raise
+            set_delivery_phase(DELIVERY_ACCEPTED)
+
         result: dict[str, str] = {}
         if args.provider == "private":
             smtp_close(smtp)
             smtp = None
             s = ensure_smtp()
-            s.send_message(msg)
+            send_smtp_message(s)
             smtp_close(s)
             smtp = None
         else:
-            ensure_smtp().send_message(msg)
+            s = ensure_smtp()
+            send_smtp_message(s)
         return result
 
     def backoff_seconds() -> int:
@@ -5958,7 +6091,7 @@ def main() -> int | None:
                 row_campaign_id = campaign_id_for_row(r, row_campaign_type)
                 idempotency_reserved = False
                 queue_claim_receipt: dict[str, object] | None = None
-                submission_attempted = False
+                delivery_phase = DELIVERY_PRE_SUBMIT
                 accepted_send_bookkeeping_failed = False
                 last_recipient_for_audit = to_email
                 audit_worker(
@@ -6289,7 +6422,6 @@ def main() -> int | None:
                                 ),
                             )
                             continue
-                        submission_attempted = True
                         send_result = submit_provider_message(msg, to_email, subject_text, body_text, html_body, cid)
                         send_info = ""
                         if args.provider == "sendgrid" and send_result.get("message_id"):
@@ -6386,89 +6518,38 @@ def main() -> int | None:
                             stop_reason = "max_total"
 
                 except smtplib.SMTPRecipientsRefused as e:
-                    rec = e.recipients.get(to_email) or next(iter(e.recipients.values()), None)
-                    if rec:
-                        code = rec[0]
-                        text = _decode_smtp_err(rec[1])
-                        cls = classify_smtp(int(code) if code is not None else None, text)
-
-                        if cls == "BAD_RECIPIENT":
-                            finalize_domain_attempt_slot(attempt_slot_token, to_email, "invalid", f"{code} {text}")
-                            log_row(log_path, to_email, "INVALID", campaign_log_info(f"{code} {text}", row_campaign_type))
-                            invalid_count += 1
-                            print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
-                            if args.suppress_invalid:
-                                append_suppressed_email(suppress_csv_path, to_email)
-                            quality_reason = note_quality_event(is_invalid=True)
-                            if quality_reason:
-                                print(f"STOP: {quality_reason}")
-                                stop_reason = "invalid_rate_1h"
-                                break
-                            continue
-
-                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "recipient_error", f"{code} {text}")
-                        log_row(log_path, to_email, "ERROR", campaign_log_info(f"{code} {text}", row_campaign_type))
-                        error_count += 1
-                        print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(f'{code} {text}')}")
-                        circuit_reason = note_error()
-                        if circuit_reason:
-                            print(f"STOP: {circuit_reason} after recipient errors")
-                            stop_reason = circuit_reason
-                            break
-                        if args.provider == "private":
-                            t = (f"{code} {text}").lower()
-                            if "4.7.1" in t and "sending limit" in t:
-                                throttle_count_after = max(1, int(provider_guard.get("recent_throttle_count_24h") or 0) + 1)
-                                wait_seconds = throttle_pause_seconds(args.provider, throttle_count_after)
-                                guard_status = record_provider_throttle(
-                                    str(args.profile or ""),
-                                    str(args.provider or ""),
-                                    wait_seconds,
-                                    cooldown_seconds,
-                                    f"{code} {text}",
-                                )
-                                cooldown_until = str(guard_status.get("cooldown_until_utc") or "")
-                                recommended = max(0, int(guard_status.get("recommended_cooldown_seconds") or cooldown_seconds))
-                                print(
-                                    "PAUSE: private throttle detected; provider cooldown until "
-                                    f"{cooldown_until or '-'} with {recommended}s pacing on recovery"
-                                )
-                                print("STOP: provider_throttle_cooldown")
-                                stop_reason = "provider_throttle_cooldown"
-                            break
-                        continue
-
-                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "recipient_error", str(e))
-                    log_row(log_path, to_email, "ERROR", campaign_log_info(str(e), row_campaign_type))
+                    # Trustworthy single-target refusals are normalized to
+                    # SMTPDataError inside send_one. Reaching this handler means
+                    # the refusal payload cannot prove what happened to this
+                    # recipient, so preserve the claim for manual review.
+                    finalize_domain_attempt_slot(attempt_slot_token, to_email, "ambiguous", str(e))
+                    log_row(
+                        log_path,
+                        to_email,
+                        "ERROR",
+                        campaign_log_info(
+                            "event_type=AMBIGUOUS_PROVIDER_RESULT "
+                            f"phase={delivery_phase.lower()} error={single_line(str(e))}",
+                            row_campaign_type,
+                        ),
+                    )
+                    if idempotency_reserved:
+                        record_send_idempotency_outcome(
+                            campaign_id=row_campaign_id,
+                            provider=args.provider,
+                            email=to_email,
+                            outcome="ambiguous",
+                            info=str(e),
+                        )
+                    provider_submission_active = False
                     error_count += 1
-                    print(f"[{i}/{len(pending)}] RECIPIENT ERROR {to_email} :: {single_line(str(e))}")
-                    circuit_reason = note_error()
-                    if circuit_reason:
-                        print(f"STOP: {circuit_reason} after recipient errors")
-                        stop_reason = circuit_reason
-                        break
-                    if args.provider == "private":
-                        t = str(e).lower()
-                        if "4.7.1" in t and "sending limit" in t:
-                            throttle_count_after = max(1, int(provider_guard.get("recent_throttle_count_24h") or 0) + 1)
-                            wait_seconds = throttle_pause_seconds(args.provider, throttle_count_after)
-                            guard_status = record_provider_throttle(
-                                str(args.profile or ""),
-                                str(args.provider or ""),
-                                wait_seconds,
-                                cooldown_seconds,
-                                str(e),
-                            )
-                            cooldown_until = str(guard_status.get("cooldown_until_utc") or "")
-                            recommended = max(0, int(guard_status.get("recommended_cooldown_seconds") or cooldown_seconds))
-                            print(
-                                "PAUSE: private throttle detected; provider cooldown until "
-                                f"{cooldown_until or '-'} with {recommended}s pacing on recovery"
-                            )
-                            print("STOP: provider_throttle_cooldown")
-                            stop_reason = "provider_throttle_cooldown"
-                            break
-                    continue
+                    print(
+                        f"[{i}/{len(pending)}] AMBIGUOUS {to_email} :: "
+                        f"{single_line(str(e))}; manual review required"
+                    )
+                    stop_reason = "ambiguous_recipient_refusal"
+                    honor_deferred_stop()
+                    break
 
                 except smtplib.SMTPAuthenticationError as e:
                     code, text = extract_code_text_from_exception(e)
@@ -6672,11 +6753,45 @@ def main() -> int | None:
                     break
 
                 except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError) as e:
+                    if delivery_phase == DELIVERY_PROVIDER_CALL_STARTED:
+                        finalize_domain_attempt_slot(
+                            attempt_slot_token,
+                            to_email,
+                            "ambiguous",
+                            str(e),
+                        )
+                        log_row(
+                            log_path,
+                            to_email,
+                            "ERROR",
+                            campaign_log_info(
+                                "event_type=AMBIGUOUS_PROVIDER_RESULT "
+                                f"phase={delivery_phase.lower()} error={single_line(str(e))}",
+                                row_campaign_type,
+                            ),
+                        )
+                        if idempotency_reserved:
+                            record_send_idempotency_outcome(
+                                campaign_id=row_campaign_id,
+                                provider=args.provider,
+                                email=to_email,
+                                outcome="ambiguous",
+                                info=str(e),
+                            )
+                        provider_submission_active = False
+                        error_count += 1
+                        print(
+                            f"[{i}/{len(pending)}] AMBIGUOUS {to_email} :: "
+                            f"{single_line(str(e))}; manual review required"
+                        )
+                        stop_reason = "ambiguous_provider_result"
+                        honor_deferred_stop()
+                        break
                     finalize_domain_attempt_slot(attempt_slot_token, to_email, "disconnect", str(e))
                     log_row(log_path, to_email, "ERROR", campaign_log_info(f"disconnected: {e}", row_campaign_type))
                     error_count += 1
                     circuit_reason = note_error(is_throttle=True)
-                    print(f"[{i}/{len(pending)}] DISCONNECTED {to_email} :: reconnecting and retrying once")
+                    print(f"[{i}/{len(pending)}] PRE-SUBMIT DISCONNECT {to_email} :: reconnecting and retrying once")
                     if circuit_reason:
                         print(f"STOP: {circuit_reason} after disconnects")
                         stop_reason = circuit_reason
@@ -6790,6 +6905,8 @@ def main() -> int | None:
                         print(f"[{i}/{len(pending)}] INVALID {to_email} :: {single_line(f'{code} {text}')}")
                         if args.suppress_invalid:
                             append_suppressed_email(suppress_csv_path, to_email)
+                        provider_submission_active = False
+                        honor_deferred_stop()
                         quality_reason = note_quality_event(is_invalid=True)
                         if quality_reason:
                             print(f"STOP: {quality_reason}")
@@ -6798,17 +6915,51 @@ def main() -> int | None:
                         continue
 
                     if cls == "TEMP_THROTTLE":
-                        finalize_domain_attempt_slot(attempt_slot_token, to_email, "temp_throttle", f"{code} {text}")
+                        rejection_domain_finalized = finalize_domain_attempt_slot(
+                            attempt_slot_token,
+                            to_email,
+                            "temp_throttle",
+                            f"{code} {text}",
+                        )
                         log_row(log_path, to_email, "ERROR", campaign_log_info(f"{code} {text}", row_campaign_type))
                         wait_s = backoff_seconds()
                         error_count += 1
                         circuit_reason = note_error(is_throttle=True)
                         print(f"[{i}/{len(pending)}] THROTTLED {to_email} :: backoff {wait_s}s then retry")
                         if circuit_reason:
+                            settled, _restored, released, _domain_ok = settle_retryable_attempt(
+                                reservation_token=attempt_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                queue_claim_receipt=queue_claim_receipt,
+                                idempotency_reserved=idempotency_reserved,
+                                outcome="temp_throttle",
+                                info=f"{code} {text}",
+                                domain_finalized=rejection_domain_finalized,
+                            )
+                            if released:
+                                idempotency_reserved = False
+                            provider_submission_active = False
                             print(f"STOP: {circuit_reason} after throttles")
-                            stop_reason = circuit_reason
+                            stop_reason = circuit_reason if settled else "settlement_failed"
                             break
 
+                        if deferred_stop_requested:
+                            settled, _restored, released, _domain_ok = settle_retryable_attempt(
+                                reservation_token=attempt_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                queue_claim_receipt=queue_claim_receipt,
+                                idempotency_reserved=idempotency_reserved,
+                                outcome="temp_throttle",
+                                info=f"{code} {text}",
+                                domain_finalized=rejection_domain_finalized,
+                            )
+                            if released:
+                                idempotency_reserved = False
+                            provider_submission_active = False
+                            if not settled:
+                                emit_worker_event("ERROR", "retry_settlement_failed", phase="provider_rejected")
                         honor_deferred_stop()
                         audit_sleep(wait_s, action="THROTTLE_WAIT")
                         smtp_close(smtp)
@@ -6902,12 +7053,68 @@ def main() -> int | None:
                             continue
                         except Exception as e2:
                             code2, text2 = extract_code_text_from_exception(e2)
-                            finalize_domain_attempt_slot(retry_slot_token, to_email, "retry_failed", f"{code2} {text2}")
-                            log_row(log_path, to_email, "ERROR", campaign_log_info(f"retry_failed: {code2} {text2}", row_campaign_type))
+                            retry_info = f"{code2} {text2 or e2}"
+                            if delivery_phase in {DELIVERY_PRE_SUBMIT, DELIVERY_PROVIDER_REJECTED}:
+                                settled, restored, released, domain_ok = settle_retryable_attempt(
+                                    reservation_token=retry_slot_token,
+                                    email=to_email,
+                                    campaign_id=row_campaign_id,
+                                    queue_claim_receipt=queue_claim_receipt,
+                                    idempotency_reserved=idempotency_reserved,
+                                    outcome=(
+                                        "not_submitted"
+                                        if delivery_phase == DELIVERY_PRE_SUBMIT
+                                        else "provider_rejected"
+                                    ),
+                                    info=retry_info,
+                                )
+                                if released:
+                                    idempotency_reserved = False
+                                retry_event = (
+                                    "retry_rejected_settled" if settled else "settlement_failed"
+                                )
+                                log_row(
+                                    log_path,
+                                    to_email,
+                                    "ERROR",
+                                    campaign_log_info(
+                                        f"event_type={retry_event} restored={str(restored).lower()} "
+                                        f"reservation_released={str(released).lower()} "
+                                        f"domain_finalized={str(domain_ok).lower()} error={retry_info}",
+                                        row_campaign_type,
+                                    ),
+                                )
+                                stop_reason = "retry_failed" if settled else "settlement_failed"
+                            elif delivery_phase == DELIVERY_ACCEPTED:
+                                finalize_domain_attempt_slot(
+                                    retry_slot_token,
+                                    to_email,
+                                    "sent",
+                                    "accepted_send_bookkeeping_failed",
+                                )
+                                stop_reason = "accepted_send_bookkeeping_failed"
+                            else:
+                                finalize_domain_attempt_slot(retry_slot_token, to_email, "ambiguous", retry_info)
+                                if idempotency_reserved:
+                                    record_send_idempotency_outcome(
+                                        campaign_id=row_campaign_id,
+                                        provider=args.provider,
+                                        email=to_email,
+                                        outcome="ambiguous",
+                                        info=retry_info,
+                                    )
+                                log_row(
+                                    log_path,
+                                    to_email,
+                                    "ERROR",
+                                    campaign_log_info("event_type=AMBIGUOUS_PROVIDER_RESULT " + retry_info, row_campaign_type),
+                                )
+                                stop_reason = "ambiguous_provider_result"
+                            provider_submission_active = False
                             error_count += 1
                             note_error(is_throttle=True)
                             print(f"[{i}/{len(pending)}] ERROR (stop) {to_email} :: {single_line(f'{code2} {text2}')}")
-                            stop_reason = "retry_failed"
+                            honor_deferred_stop()
                             break
 
                     finalize_domain_attempt_slot(attempt_slot_token, to_email, "smtp_error", f"{code} {text}")
@@ -6922,9 +7129,8 @@ def main() -> int | None:
 
                 except Exception as e:
                     accepted_send_bookkeeping_failed = (
-                        provider_submission_active
+                        delivery_phase == DELIVERY_ACCEPTED
                     )
-                    provider_submission_active = False
                     err_text = str(e)
                     if accepted_send_bookkeeping_failed:
                         finalize_domain_attempt_slot(
@@ -6934,6 +7140,7 @@ def main() -> int | None:
                             "accepted_send_bookkeeping_failed",
                         )
                         error_count += 1
+                        provider_submission_active = False
                         print(
                             "STOP: accepted-send bookkeeping failed "
                             "after provider submission; recipient "
@@ -6941,54 +7148,71 @@ def main() -> int | None:
                         )
                         stop_reason = "accepted_send_bookkeeping_failed"
                         break
-                    if not submission_attempted:
-                        finalize_domain_attempt_slot(
-                            attempt_slot_token,
-                            to_email,
-                            "not_submitted",
-                            err_text,
+                    if delivery_phase in {
+                        DELIVERY_PRE_SUBMIT,
+                        DELIVERY_PROVIDER_REJECTED,
+                    }:
+                        settlement_outcome = (
+                            "not_submitted"
+                            if delivery_phase == DELIVERY_PRE_SUBMIT
+                            else "provider_rejected"
                         )
-                        restored = (
-                            restore_claimed_queue_row(csv_path, queue_claim_receipt)
-                            if queue_claim_receipt is not None
-                            else True
-                        )
-                        released = (
-                            release_send_idempotency_reservation(
-                                campaign_id=row_campaign_id,
-                                provider=args.provider,
+                        settled, restored, released, domain_finalized = (
+                            settle_retryable_attempt(
+                                reservation_token=attempt_slot_token,
                                 email=to_email,
+                                campaign_id=row_campaign_id,
+                                queue_claim_receipt=queue_claim_receipt,
+                                idempotency_reserved=idempotency_reserved,
+                                outcome=settlement_outcome,
+                                info=err_text,
                             )
-                            if idempotency_reserved
-                            else True
                         )
-                        idempotency_reserved = False
+                        if released:
+                            idempotency_reserved = False
                         log_row(
                             log_path,
                             to_email,
                             "ERROR",
                             campaign_log_info(
                                 "event_type=DEFINITELY_NOT_SUBMITTED "
-                                f"phase=pre_submit restored={str(restored).lower()} "
+                                f"phase={delivery_phase.lower()} "
+                                f"restored={str(restored).lower()} "
                                 f"reservation_released={str(released).lower()} "
+                                f"domain_finalized={str(domain_finalized).lower()} "
                                 f"error={single_line(err_text)}",
                                 row_campaign_type,
                             ),
                         )
                         emit_worker_event(
                             "ERROR",
-                            "pre_submit_failure_not_submitted",
-                            phase="pre_submit",
+                            (
+                                "provider_rejected_settled"
+                                if delivery_phase == DELIVERY_PROVIDER_REJECTED and settled
+                                else "pre_submit_failure_not_submitted"
+                                if delivery_phase == DELIVERY_PRE_SUBMIT and settled
+                                else "retry_settlement_failed"
+                            ),
+                            phase=delivery_phase.lower(),
                             restored=bool(restored),
                             reservation_released=bool(released),
+                            domain_finalized=bool(domain_finalized),
                             error_type=type(e).__name__,
                         )
                         error_count += 1
+                        provider_submission_active = False
                         print(
-                            f"[{i}/{len(pending)}] ERROR (not submitted) "
+                            f"[{i}/{len(pending)}] ERROR ({settlement_outcome}) "
                             f"{to_email} :: {single_line(err_text)}"
                         )
-                        stop_reason = "pre_submit_failure"
+                        stop_reason = (
+                            "pre_submit_failure"
+                            if settled and delivery_phase == DELIVERY_PRE_SUBMIT
+                            else "provider_rejected"
+                            if settled
+                            else "settlement_failed"
+                        )
+                        honor_deferred_stop()
                         break
                     code, text = extract_code_text_from_exception(e)
                     if not text:
@@ -7003,6 +7227,7 @@ def main() -> int | None:
                             outcome="ambiguous",
                             info=err_text,
                         )
+                    provider_submission_active = False
                     error_count += 1
                     print(f"[{i}/{len(pending)}] ERROR {to_email} :: {single_line(err_text)}")
                     sendgrid_err_cls = "OTHER"
