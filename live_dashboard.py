@@ -58,6 +58,11 @@ except Exception:  # pragma: no cover - dependency fallback
 import runtime_control
 import runtime_audit
 import settings
+from controlled_all_sender_test import (
+    ControlledAllSenderTestRefused,
+    controlled_all_sender_public_config,
+    execute_controlled_all_sender_test,
+)
 from controlled_sendgrid_test import (
     ControlledSendGridTestRefused,
     controlled_test_public_config,
@@ -6504,6 +6509,61 @@ async def controlled_sendgrid_test_endpoint(payload: ControlledSendGridTestPaylo
             status_code=409,
         )
     return JSONResponse({"ok": True, "message": "Controlled SendGrid test accepted by the provider.", "result": result})
+
+
+
+@app.get("/api/controlled-test/all")
+def controlled_all_sender_test_config_endpoint() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            **controlled_all_sender_public_config(),
+        }
+    )
+
+
+@app.post("/api/controlled-test/all")
+async def controlled_all_sender_test_endpoint() -> JSONResponse:
+    live_action_block = _manual_live_action_block_response(
+        "private_jc"
+    )
+    if live_action_block is not None:
+        return live_action_block
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        result = await loop.run_in_executor(
+            _SENDER_START_EXECUTOR,
+            partial(
+                execute_controlled_all_sender_test,
+                conflict_check=_controlled_sendgrid_test_conflicts,
+            ),
+        )
+    except ControlledAllSenderTestRefused as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": exc.code,
+                "message": str(exc),
+                "auto_started": False,
+            },
+            status_code=409,
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                "All six controlled sender tests completed."
+                if result.get("all_passed")
+                else "All-sender controlled test completed with one "
+                "or more failed identities."
+            ),
+            "result": result,
+        }
+    )
 
 
 @app.get("/api/start-ready")

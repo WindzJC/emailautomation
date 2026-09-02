@@ -148,11 +148,22 @@ def test_unconfigured_systemd_profiles_refuse_before_systemctl(
         return subprocess.CompletedProcess([], 0, "", "")
 
     monkeypatch.setattr(runtime_backend_systemd, "_control", fake_control)
+    monkeypatch.setattr(
+        runtime_backend_systemd,
+        "profile_send_unavailable_reason",
+        lambda profile: (
+            "Test profile is not configured for sending."
+            if profile in {"sendgrid_annette", "sendgrid_fiorela"}
+            else ""
+        ),
+    )
 
     for profile in ("sendgrid_annette", "sendgrid_fiorela"):
         ok, message = runtime_backend_systemd.start_sender(profile)
         assert not ok
         assert "not configured for sending" in message
+
+    assert calls == []
 
     assert calls == []
 

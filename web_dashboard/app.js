@@ -40,6 +40,7 @@ const els = {
   controlledSendTestProfile: document.getElementById("controlled-send-test-profile"),
   controlledSendTestFrom: document.getElementById("controlled-send-test-from"),
   controlledSendTestBtn: document.getElementById("controlled-send-test-btn"),
+  controlledSendTestAllBtn: document.getElementById("controlled-send-test-all-btn"),
   controlledSendTestStatus: document.getElementById("controlled-send-test-status"),
   stopBtn: document.getElementById("stop-btn"),
   archiveBtn: document.getElementById("archive-btn"),
@@ -10028,6 +10029,158 @@ async function runControlledSendTest() {
   }
 }
 
+
+async function runControlledAllSenderTest() {
+  if (
+    controlledSendTestPending
+    || !els.controlledSendTestAllBtn
+  ) return;
+
+  const confirmed = window.confirm(
+    "CONTROLLED TEST — ALL 6 SENDERS\n\n"
+    + "This will send exactly SIX real validation emails:\n"
+    + "• JC via PrivateEmail SMTP\n"
+    + "• Annette via SendGrid\n"
+    + "• Jordan via SendGrid\n"
+    + "• Jodi via SendGrid\n"
+    + "• Alison via SendGrid\n"
+    + "• Fiorela via SendGrid\n\n"
+    + "Every message goes only to the fixed Astra controlled-test inbox.\n"
+    + "Production recipient queues are not used or modified.\n"
+    + "There are no automatic retries after a provider attempt.\n\n"
+    + "Send the six controlled tests now?",
+  );
+
+  if (!confirmed) {
+    renderControlledSendTestStatus(
+      {
+        message:
+          "All-sender controlled test cancelled. "
+          + "No request was submitted.",
+      },
+      false,
+    );
+    return;
+  }
+
+  controlledSendTestPending = true;
+
+  els.controlledSendTestAllBtn.disabled = true;
+
+  if (els.controlledSendTestBtn) {
+    els.controlledSendTestBtn.disabled = true;
+  }
+
+  if (els.controlledSendTestProfile) {
+    els.controlledSendTestProfile.disabled = true;
+  }
+
+  els.controlledSendTestAllBtn.textContent =
+    "Sending 6 controlled tests...";
+
+  if (els.controlledSendTestStatus) {
+    els.controlledSendTestStatus.className =
+      "controlled-send-test-status status-pending";
+
+    els.controlledSendTestStatus.textContent =
+      "Submitting six isolated sender validations sequentially...";
+  }
+
+  try {
+    const response = await fetch(
+      "/api/controlled-test/all",
+      { method: "POST" },
+    );
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || data.ok === false) {
+      throw new Error(
+        data.message
+        || `All-sender controlled test failed (${response.status}).`,
+      );
+    }
+
+    const result = data.result || {};
+    const rows = Array.isArray(result.results)
+      ? result.results
+      : [];
+
+    const lines = rows.map((item) => {
+      const sender = String(
+        item?.sender || item?.profile || "Sender",
+      );
+
+      const provider = String(item?.provider || "");
+      const ok = item?.ok === true;
+
+      const providerStatus = String(
+        item?.provider_status || "",
+      );
+
+      const error = String(
+        item?.error || item?.message || "",
+      );
+
+      return `${ok ? "PASS" : "FAIL"} — ${sender}`
+        + `${provider ? ` (${provider})` : ""}`
+        + `${providerStatus ? ` · ${providerStatus}` : ""}`
+        + `${!ok && error ? ` · ${error}` : ""}`;
+    });
+
+    const allPassed = result.all_passed === true;
+
+    if (els.controlledSendTestStatus) {
+      els.controlledSendTestStatus.className =
+        "controlled-send-test-status "
+        + (allPassed ? "status-success" : "status-error");
+
+      els.controlledSendTestStatus.textContent = [
+        `Accepted: ${Number(result.accepted || 0)}/6`,
+        `Failed: ${Number(result.failed || 0)}`,
+        ...lines,
+      ].join(" | ");
+    }
+
+    showMessage(
+      data.message
+      || (
+        allPassed
+          ? "All six controlled sender tests passed."
+          : "All-sender controlled test completed with failures."
+      ),
+      allPassed ? "success" : "error",
+    );
+  } catch (err) {
+    renderControlledSendTestStatus(
+      {
+        message:
+          `All-sender controlled test failed safely: ${err}`,
+      },
+      false,
+    );
+
+    showMessage(
+      `All-sender controlled test failed safely: ${err}`,
+      "error",
+    );
+  } finally {
+    controlledSendTestPending = false;
+
+    els.controlledSendTestAllBtn.disabled = false;
+    els.controlledSendTestAllBtn.textContent =
+      "Send All 6 Controlled Tests";
+
+    if (els.controlledSendTestBtn) {
+      els.controlledSendTestBtn.disabled = false;
+    }
+
+    if (els.controlledSendTestProfile) {
+      els.controlledSendTestProfile.disabled = false;
+    }
+  }
+}
+
 async function postAction(path, options = {}) {
   const { profileName = "", action = "", body = null } = options;
   const manualSenderStart = path.startsWith("/api/start/");
@@ -10466,6 +10619,7 @@ if (els.controlledSendTestProfile) {
   syncControlledSendTestIdentity();
 }
 if (els.controlledSendTestBtn) els.controlledSendTestBtn.addEventListener("click", () => runControlledSendTest());
+if (els.controlledSendTestAllBtn) els.controlledSendTestAllBtn.addEventListener("click", () => runControlledAllSenderTest());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
