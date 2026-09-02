@@ -1874,16 +1874,22 @@ function renderSelectedDispatchWorkflowState() {
   renderLeadsWorkflowStatusBanner(lastLeadsStatus);
 }
 
+function normalizeDispatchPlanPath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
 function currentDispatchPlanKey() {
   const selected = dispatchSourceForSelectedMode();
   const source = selected.source || {};
+  const verificationRequired = source.verification_required === true;
   return [
     selectedImportantDispatchSourceMode(),
-    String(source.dispatch_source_path || ""),
+    normalizeDispatchPlanPath(source.dispatch_source_path),
     String(source.dispatch_source_exists ?? ""),
     String(source.dispatch_source_row_count ?? ""),
     String(source.dispatch_eligible_row_count ?? ""),
-    String(source.verification_file_mtime || ""),
+    String(verificationRequired),
+    verificationRequired ? String(source.verification_file_mtime || "") : "",
     els.leadsImportantDispatchCap?.value || "all",
     selectedImportantDispatchCampaignType(),
   ].join("|");
@@ -1895,13 +1901,15 @@ function dispatchPreviewMatchesCurrentSelection() {
 
 function persistedImportantDispatchPreviewKey(preview) {
   if (!preview?.preview_id) return "";
+  const verificationRequired = preview.verification_required === true;
   return [
     String(preview.dispatch_source_mode || ""),
-    String(preview.dispatch_source_path || ""),
+    normalizeDispatchPlanPath(preview.dispatch_source_path),
     String(preview.dispatch_source_exists ?? ""),
     String(preview.dispatch_source_row_count ?? ""),
     String(preview.dispatch_eligible_row_count ?? ""),
-    String(preview.verification_file_mtime || ""),
+    String(verificationRequired),
+    verificationRequired ? String(preview.verification_file_mtime || "") : "",
     String(preview.dispatch_cap || "all"),
     String(preview.campaign_type || "cold"),
   ].join("|");
@@ -1920,8 +1928,12 @@ function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
   }
 
   lastImportantDispatchPreview = { ...(preview || {}), _preview_key: persistedKey };
-  if (persistedKey !== currentKey) return false;
+  if (status?.latest_auto_dispatch_preview_current !== true || persistedKey !== currentKey) {
+    lastImportantDispatchPreview._preview_key = "";
+    return false;
+  }
 
+  lastImportantDispatchPreview._preview_key = currentKey;
   lastImportantDispatchPreviewState = "ready";
   lastImportantDispatchPreviewFeedback = {
     state: "ready",
@@ -3259,7 +3271,7 @@ function renderDispatchModeCards(preview = null) {
   const coldPlanned = validColdPreview ? routeSummary.uniquePlanned : 0;
   const coldSafety = dispatchConfirmSafetyState(freshSource, validColdPreview ? preview : null);
   const recency = recontactPreview ? recontactRecencySummary(recontactPreview) : recontactRecencySummary(null);
-  const recontactCount = Number(recency.plannedUnique || recontactSource.dispatch_eligible_row_count || recontactSource.dispatch_source_row_count || 0);
+  const recontactCount = Number(recontactSource.dispatch_eligible_row_count || recontactSource.dispatch_source_row_count || 0);
   const freshMetric = validColdPreview
     ? `${coldPlanned.toLocaleString()} cold-safe lead${coldPlanned === 1 ? "" : "s"} after history filtering`
     : `${freshCount.toLocaleString()} source row${freshCount === 1 ? "" : "s"}`;

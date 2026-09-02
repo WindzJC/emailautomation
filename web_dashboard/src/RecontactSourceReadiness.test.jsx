@@ -80,6 +80,7 @@ function leadsStatus({
   freshSource = FRESH_SOURCE,
   recontactSource = RECONTACT_SOURCE,
   preview = {},
+  previewCurrent = false,
   activeDispatch = null,
 } = {}) {
   const progress = checkState === "failed" ? {
@@ -109,6 +110,7 @@ function leadsStatus({
       cleaned: recontactSource,
     },
     latest_auto_dispatch_preview: preview,
+    latest_auto_dispatch_preview_current: previewCurrent,
     latest_master_check: {},
     latest_lead_triage: {},
     latest_dispatch: {},
@@ -135,6 +137,8 @@ function restartedStagedRecontactStatus() {
     dispatch_source_path: `/_important/runs/${runId}/leads.csv`,
     dispatch_source_row_count: 15342,
     dispatch_eligible_row_count: 15342,
+    verification_required: false,
+    verification_file_mtime: "2026-08-31T22:36:57.412396+00:00",
     run_id: runId,
     source_resolution: "latest_completed_staged_run",
   };
@@ -216,6 +220,33 @@ function restartedStagedRecontactStatus() {
         final_eligible: funnelStage(15342),
       },
     },
+  };
+}
+
+function currentRecontactPreview(status, overrides = {}) {
+  return {
+    preview_id: "dispatch_preview_20260902_004950_8c591597",
+    status: "previewed",
+    campaign_type: "recontact_cold",
+    dispatch_source_mode: "cleaned",
+    dispatch_source_kind: "cleaned",
+    dispatch_source_path: status.dispatch_source_options.cleaned.dispatch_source_path,
+    source_path: status.dispatch_source_options.cleaned.dispatch_source_path,
+    source_file_path: status.dispatch_source_options.cleaned.dispatch_source_path,
+    dispatch_source_exists: true,
+    dispatch_source_row_count: 15342,
+    dispatch_eligible_row_count: 15342,
+    source_row_count: 15342,
+    selected_rows: 15342,
+    total_source_rows: 15342,
+    total_planned_unique_count: 15341,
+    total_rows_would_write: 15341,
+    verification_required: false,
+    verification_file_mtime: "",
+    dispatch_cap: "all",
+    queue_safety: { safe: true },
+    updated_at_utc: "2026-09-02T00:49:51+00:00",
+    ...overrides,
   };
 }
 
@@ -316,6 +347,15 @@ function previewPosts(fetchMock) {
   ));
 }
 
+function dispatchMutationPosts(fetchMock) {
+  return fetchMock.mock.calls.filter(([url, options = {}]) => (
+    [
+      "/api/leads/dispatch-important/preview",
+      "/api/leads/dispatch-important/confirm",
+    ].includes(String(url)) && options.method === "POST"
+  ));
+}
+
 describe("source-scoped Recontact readiness", () => {
   let root;
 
@@ -374,7 +414,12 @@ describe("source-scoped Recontact readiness", () => {
     expect(document.body).toHaveTextContent("Preview required for the selected Checked Recontact source.");
     expect(previewButton()).not.toBeDisabled();
     expect(confirmButton()).toBeDisabled();
-    expect(previewPosts(boot.fetchMock)).toHaveLength(0);
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+    const requestedPaths = boot.fetchMock.mock.calls.map(([url]) => String(url));
+    expect(requestedPaths.indexOf("/api/leads/status")).toBeGreaterThanOrEqual(0);
+    expect(requestedPaths.indexOf("/api/leads/check-important/active")).toBeGreaterThan(
+      requestedPaths.indexOf("/api/leads/status"),
+    );
   });
 
   it("allows Recontact preview while a Fresh check status is processing, without making Fresh ready", async () => {
@@ -439,7 +484,7 @@ describe("source-scoped Recontact readiness", () => {
       total_rows_would_write: 321,
       queue_safety: { safe: true },
     };
-    const boot = await bootController(leadsStatus({ checkState: "success", preview }));
+    const boot = await bootController(leadsStatus({ checkState: "success", preview, previewCurrent: true }));
     root = boot.root;
 
     selectCampaign("recontact");
@@ -477,4 +522,101 @@ describe("source-scoped Recontact readiness", () => {
     selectCampaign("recontact");
     expect(previewButton()).toBeDisabled();
   });
+
+  it("restores a restarted cleaned Recontact source when its persisted Preview is already current", async () => {
+    const status = restartedStagedRecontactStatus();
+    const preview = currentRecontactPreview(status);
+
+    status.latest_auto_dispatch_preview = preview;
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(
+      document.getElementById("lead-check-status-card"),
+    ).toHaveTextContent("Complete");
+
+    expect(
+      document.getElementById("leads-control-check-result"),
+    ).toHaveTextContent("Input 19,271");
+
+    expect(
+      document.getElementById("leads-control-check-result"),
+    ).toHaveTextContent("Cleaned 15,342");
+
+    expect(
+      document.getElementById("leads-control-check-result"),
+    ).toHaveTextContent("Rejected 3,929");
+
+    expect(
+      document.getElementById("leads-control-check-result"),
+    ).toHaveTextContent("Keep 11,221");
+
+    expect(
+      document.getElementById("leads-dispatch-mode-cards"),
+    ).toHaveTextContent("11,221 source rows");
+
+    expect(
+      document.getElementById("leads-dispatch-mode-cards"),
+    ).toHaveTextContent("15,342 checked rows");
+
+    expect(
+      document.getElementById(
+        "leads-dispatch-campaign-type",
+      ),
+    ).toHaveValue("recontact_cold");
+
+    expect(
+      document.getElementById(
+        "leads-dispatch-source-mode",
+      ),
+    ).toHaveValue("cleaned");
+
+    expect(document.body).toHaveTextContent(
+      "Eligible after mandatory safety: 15,341",
+    );
+
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it.each([
+    ["server marks the Preview stale", {}, false],
+    ["source path differs", { dispatch_source_path: "/synthetic/other/leads.csv" }, true],
+    ["source row count differs", { dispatch_source_row_count: 15341 }, true],
+    ["campaign differs", { campaign_type: "cold" }, true],
+    ["source mode differs", { dispatch_source_mode: "triaged_keep" }, true],
+    ["dispatch cap differs", { dispatch_cap: "100" }, true],
+  ])("rejects a persisted Preview when %s", async (_label, previewOverrides, backendCurrent) => {
+    const status = restartedStagedRecontactStatus();
+    status.latest_auto_dispatch_preview = currentRecontactPreview(status, previewOverrides);
+    status.latest_auto_dispatch_preview_current = backendCurrent;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("15,342 checked rows");
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("Eligible after mandatory safety: Preview required");
+    expect(confirmButton()).toBeDisabled();
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("fails closed when a required verification fingerprint differs", async () => {
+    const status = restartedStagedRecontactStatus();
+    status.dispatch_source.verification_required = true;
+    status.dispatch_source_options.cleaned.verification_required = true;
+    status.latest_auto_dispatch_preview = currentRecontactPreview(status, {
+      verification_required: true,
+      verification_file_mtime: "2026-08-31T22:30:00+00:00",
+    });
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("Eligible after mandatory safety: Preview required");
+    expect(confirmButton()).toBeDisabled();
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
 });

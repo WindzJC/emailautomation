@@ -231,7 +231,9 @@ class WebDashboardAppTests(unittest.TestCase):
         hydrate_start = source.index("function hydrateImportantDispatchPreviewFromStatus")
         hydrate_end = source.index("function dispatchSummaryMatchesCurrentSource", hydrate_start)
         hydrate_body = source[hydrate_start:hydrate_end]
-        self.assertIn("if (persistedKey !== currentKey) return false;", hydrate_body)
+        self.assertIn("status?.latest_auto_dispatch_preview_current !== true", hydrate_body)
+        self.assertIn("persistedKey !== currentKey", hydrate_body)
+        self.assertIn('lastImportantDispatchPreview._preview_key = "";', hydrate_body)
         self.assertIn('lastImportantDispatchPreviewState = "ready";', hydrate_body)
         self.assertNotIn("auto_dispatch_preview_status", hydrate_body)
 
