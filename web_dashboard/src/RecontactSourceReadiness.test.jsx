@@ -608,6 +608,41 @@ describe("source-scoped Recontact readiness", () => {
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
+  it("keeps authoritative persisted success after terminal progress hydration", async () => {
+    const status = restartedStagedRecontactStatus();
+    const preview = currentRecontactPreview(status);
+
+    status.lead_ops_progress.phase = "ready_for_preview";
+    status.lead_ops_progress.status = "ready_for_preview";
+    status.lead_ops_progress_by_workflow.cold = status.lead_ops_progress;
+    status.latest_auto_dispatch_preview = preview;
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Complete");
+    expect(document.getElementById("lead-check-status-card")).not.toHaveTextContent("Not started");
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("11,221 source rows");
+    expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("15,342 checked rows");
+    expect(document.getElementById("leads-dispatch-campaign-type")).toHaveValue("recontact_cold");
+    expect(document.body).toHaveTextContent("Eligible after mandatory safety: 15,341");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("keeps Not started when no authoritative Lead Check run exists", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.lead_check_status = {};
+    status.lead_ops_progress = {};
+    status.lead_ops_progress_by_workflow = { cold: {}, warm_research: {} };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Not started");
+    expect(document.getElementById("lead-check-status-card")).not.toHaveTextContent("Complete");
+  });
+
   it.each([
     ["server marks the Preview stale", {}, false],
     ["source path differs", { dispatch_source_path: "/synthetic/other/leads.csv" }, true],

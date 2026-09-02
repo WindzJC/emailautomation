@@ -181,7 +181,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "job.preview_elapsed_seconds",
             "progress?.preview_recovery_binding || activeJob?.preview_recovery_binding",
             "payload.preview_recovery_binding = recoveryBinding",
-            "&& !progress?.job_id",
+            "&& !progressIsOperationallyActive",
             "Check and Fast Triage are complete. Retry Preview only.",
             'const statusMessage = phase === "previewing"',
             "current_message: statusMessage",

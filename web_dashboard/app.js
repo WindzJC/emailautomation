@@ -1420,21 +1420,34 @@ function currentLeadCheckStatus(status = lastLeadsStatus) {
   const progress = currentLeadOpsProgress(status, uploadType);
   const check = status?.lead_check_status;
   const authoritativeState = String(check?.state || "").toLowerCase();
+  const progressPhase = String(progress?.phase || progress?.status || "").toLowerCase();
+  const progressIsOperationallyActive = [
+    "upload_received",
+    "checking",
+    "triaging",
+    "previewing",
+    "confirming",
+  ].includes(progressPhase) && !["failed", "canceled", "cancelled"].includes(
+    String(progress?.status || "").toLowerCase(),
+  );
   const activeJob = status?.active_important_check_jobs?.[uploadType]
     || (uploadType === "cold" ? status?.active_important_check_job : null)
     || null;
+  // Persisted terminal/ready progress is supporting workflow context, not a
+  // replacement for the backend's authoritative Lead Check result.
   if (
     uploadType === "cold"
     && check
     && typeof check === "object"
     && authoritativeState
     && !isActiveImportantLeadCheckJob(activeJob)
-    && !progress?.job_id
+    && !progressIsOperationallyActive
   ) {
-    return check;
+    return progress?.job_id
+      ? { ...check, lead_ops_progress: progress, phase: progressPhase || check.phase }
+      : check;
   }
   if (progress?.job_id) {
-    const progressPhase = String(progress.phase || progress.status || "").toLowerCase();
     if (["confirming", "confirm_complete"].includes(progressPhase) && status?.lead_check_status) {
       return {
         ...status.lead_check_status,
