@@ -273,6 +273,7 @@ DISPATCH_SOURCE_STRICT_VERIFIED = "strict_verified"
 DISPATCH_SOURCE_CLEANED = "cleaned"
 DISPATCH_CAP_ALL = "all"
 DISPATCH_CAP_OPTIONS = ("100", "500", "1000", DISPATCH_CAP_ALL)
+FULL_RECONTACT_PRIVATE_JC_CAP = 500
 TRIAGED_KEEP_PATH = IMPORTANT_DIR / "leads_triaged_keep.csv"
 TRIAGED_REJECT_PATH = IMPORTANT_DIR / "leads_triaged_reject.csv"
 TRIAGED_QUARANTINE_PATH = IMPORTANT_DIR / "leads_triaged_quarantine.csv"
@@ -2945,6 +2946,8 @@ def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
 
     if "dispatch_source_kind" not in queue_headers:
         raise RuntimeError("Full Recontact preview is missing the dispatch source kind queue field. Re-run Preview Dispatch.")
+    if "campaign_type" not in queue_headers:
+        raise RuntimeError("Full Recontact preview is missing the campaign type queue field. Re-run Preview Dispatch.")
     for queue_name, planned_rows in plan_rows_by_queue.items():
         if not isinstance(planned_rows, list):
             raise RuntimeError(f"Full Recontact preview has invalid planned rows for {queue_name}. Re-run Preview Dispatch.")
@@ -2954,6 +2957,11 @@ def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
             if str(row.get("dispatch_source_kind") or "").strip() != RECONTACT_SOURCE_KIND_FULL:
                 raise RuntimeError(
                     f"Full Recontact preview planned row {index} in {queue_name} has a missing or mismatched dispatch source kind. "
+                    "Re-run Preview Dispatch."
+                )
+            if str(row.get("campaign_type") or "").strip() != str(preview.get("campaign_type") or "").strip():
+                raise RuntimeError(
+                    f"Full Recontact preview planned row {index} in {queue_name} has a missing or mismatched campaign type. "
                     "Re-run Preview Dispatch."
                 )
 
@@ -2968,8 +2976,11 @@ def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
         raise RuntimeError("Full Recontact preview is missing the campaign ID queue field. Re-run Preview Dispatch.")
 
     private_rows = plan_rows_by_queue.get("private_jc") or []
-    if private_rows:
-        raise RuntimeError("Full Recontact preview must route recipients only to enabled SendGrid profiles.")
+    if len(private_rows) > FULL_RECONTACT_PRIVATE_JC_CAP:
+        raise RuntimeError(
+            f"Full Recontact preview exceeds the Private JC cap of {FULL_RECONTACT_PRIVATE_JC_CAP}. "
+            "Re-run Preview Dispatch."
+        )
     for queue_name, planned_rows in plan_rows_by_queue.items():
         for index, row in enumerate(planned_rows, start=1):
             row_campaign_id = str(row.get("campaign_id") or "").strip()
@@ -3500,6 +3511,8 @@ def _build_dispatch_plan(
             raise ValueError(f"{source_state['dispatch_source_name']} dispatch source has no eligible rows: {source_path}")
         performance_timings["dispatch_source_loading"] = round(time.monotonic() - source_started, 6)
         safer_recontact_source = is_safer_recontact_source_path(source_path)
+        # Backwards-compatible minimal-schema marker. Its historical name no
+        # longer means that Full Recontact must assign zero Private JC rows.
         full_recontact_sendgrid_only = (
             is_recontact_cold_campaign(normalized_campaign_type)
             and not safer_recontact_source
@@ -3674,9 +3687,9 @@ def _build_dispatch_plan(
             if email in (jc_sent | sendgrid_sent) and allow_previously_sent:
                 previously_sent_allowed += 1
 
-            # Full Recontact is the SendGrid resend lane. Fresh Cold and the
-            # separately generated Safer Recontact pool retain their existing
-            # balanced routing behavior.
+            # Full Recontact reserves a small deterministic Private JC lane,
+            # then uses the existing SendGrid round-robin order. Fresh Cold
+            # and Safer Recontact retain their existing balanced routing.
             prefer_sendgrid = added_astra > added_sendgrid
 
             def add_to_astra() -> bool:
@@ -3725,7 +3738,10 @@ def _build_dispatch_plan(
                 return True
 
             if full_recontact_sendgrid_only:
-                added_to_sendgrid = add_to_sendgrid()
+                if added_astra < FULL_RECONTACT_PRIVATE_JC_CAP:
+                    added_to_astra = add_to_astra()
+                else:
+                    added_to_sendgrid = add_to_sendgrid()
             elif prefer_sendgrid:
                 added_to_sendgrid = add_to_sendgrid()
                 if not added_to_sendgrid:
@@ -3864,6 +3880,9 @@ def _build_dispatch_plan(
             "dispatch_source_mode": source_mode,
             "dispatch_source_kind": "safer_recontact" if safer_recontact_source else source_mode,
             "full_recontact_sendgrid_only": full_recontact_sendgrid_only,
+            "full_recontact_private_jc_cap": (
+                FULL_RECONTACT_PRIVATE_JC_CAP if full_recontact_sendgrid_only else 0
+            ),
             "dispatch_source_name": dispatch_source_name,
             "dispatch_source_detail": dispatch_source_detail,
             "dispatch_source_path": str(source_path),
