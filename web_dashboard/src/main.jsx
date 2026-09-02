@@ -48,7 +48,7 @@ export function CommandBar({ html }) {
       <div className="react-section-heading">
         <div>
           <p className="react-section-label">Global controls</p>
-          <span>Emergency stop, refresh, and send-cap settings</span>
+          <span>Start, stop, and refresh controls</span>
         </div>
         <span className="react-section-state">No bulk start</span>
       </div>

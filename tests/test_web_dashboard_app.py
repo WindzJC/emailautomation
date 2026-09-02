@@ -221,7 +221,7 @@ class WebDashboardAppTests(unittest.TestCase):
             render_body,
         )
         self.assertIn("selectedSourceReadiness.ready", render_body)
-        self.assertIn("The stored preview does not match the selected source, cap, or campaign.", render_body)
+        self.assertIn("The stored preview does not match the selected source or campaign.", render_body)
         self.assertIn('"Locked until Check/Triage completes."', render_body)
         self.assertLess(
             render_body.index("selectedSourceReadiness.ready"),
@@ -395,7 +395,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "confirmImportantLeadDispatch",
             "dispatchPreviewMatchesCurrentSelection",
             "currentDispatchPlanKey",
-            "leadsImportantDispatchCap",
+            "selectedImportantDispatchCap",
             "leadsImportantDispatchCampaignType",
             "selectedImportantDispatchCampaignType",
             "selectedImportantDispatchSourceMode",
@@ -627,10 +627,10 @@ class WebDashboardAppTests(unittest.TestCase):
             "Check Result",
             "No completed check yet.",
             "Next source action",
-            "Preview cap",
-            "Use <strong>all</strong> or enter a number.",
         ]:
             self.assertIn(expected, markup)
+        self.assertNotIn("Preview cap", markup)
+        self.assertNotIn("leads-dispatch-cap", markup)
 
         for expected in [
             'label: state === "processing" ? "Checking…" : "Failed/Stale — check did not produce outputs"',
@@ -711,11 +711,17 @@ class WebDashboardAppTests(unittest.TestCase):
             "source.dispatch_source_row_count",
             "source.dispatch_eligible_row_count",
             "source.verification_file_mtime",
-            "els.leadsImportantDispatchCap",
+            "selectedImportantDispatchCap()",
             "selectedImportantDispatchCampaignType()",
         ]:
             self.assertIn(expected, plan_body)
-        self.assertLess(plan_body.index("source.dispatch_source_path"), plan_body.index("els.leadsImportantDispatchCap"))
+        self.assertLess(plan_body.index("source.dispatch_source_path"), plan_body.index("selectedImportantDispatchCap()"))
+
+        cap_start = source.index("function selectedImportantDispatchCap")
+        cap_end = source.index("function selectedImportantDispatchSourceMode", cap_start)
+        cap_body = source[cap_start:cap_end]
+        self.assertIn('return "all";', cap_body)
+        self.assertNotIn("document", cap_body)
 
         persisted_start = source.index("function persistedImportantDispatchPreviewKey")
         persisted_end = source.index("function hydrateImportantDispatchPreviewFromStatus", persisted_start)
@@ -1245,7 +1251,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Locked until Check/Triage completes.",
             "Preview failed. Retry Preview Dispatch.",
             "Preview blocked.",
-            "Preview/source/cap mismatch. Retry Preview Dispatch.",
+            "Preview/source/campaign mismatch. Retry Preview Dispatch.",
             "Triage not ready: leads_triaged_keep.csv is missing. Run Fast Triage after Check Leads completes.",
             "Triage not ready: leads_triaged_keep.csv has no Keep rows. Review/Quarantine rows are not dispatched automatically.",
             "Manual Author Research mode keeps rows with valid AuthorName and AuthorEmail when no hard safety blocker exists. Rows missing BookTitle are kept only when the selected template has a safe fallback subject/body. Missing proof/enrichment fields are warnings, not dispatch blockers.",
@@ -1330,7 +1336,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("position: static !important;", styles)
         self.assertIn("transform: none !important;", styles)
         self.assertIn("overflow-wrap: anywhere;", styles)
-        self.assertIn("width: min(100%, 150px);", styles)
+        self.assertNotIn("#leads-view #leads-dispatch-cap", styles)
         self.assertIn("max-height: none;", styles)
         self.assertIn("max-height: 54px;", styles)
         self.assertIn("#leads-view #leads-important-check-meta", styles)
@@ -1650,9 +1656,6 @@ class WebDashboardAppTests(unittest.TestCase):
           "workspace-header",
           "workspace-controls-card",
           "workspace-controls toolbar",
-          "toolbar-field-window",
-          "toolbar-field-cap",
-          "send-cap-note",
           "ops-progress-strip",
           "ops-progress-shell",
           "ops-alerts-strip",
@@ -1677,6 +1680,39 @@ class WebDashboardAppTests(unittest.TestCase):
           "Profile Detail",
         ]:
             self.assertIn(expected, source)
+
+    def test_obsolete_dashboard_controls_are_absent_while_runtime_defaults_remain_explicit(self) -> None:
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
+
+        for obsolete in [
+            'id="hours-select"',
+            'id="send-cap-input"',
+            'id="send-cap-note"',
+            'id="send-cap-save-btn"',
+            'id="leads-dispatch-cap"',
+            "Preview cap",
+            "Send target",
+        ]:
+            self.assertNotIn(obsolete, markup)
+
+        for obsolete_copy in [
+            "Run complete. No pending queues.",
+            "JC daily ${automation.private_jc_daily.local_time}",
+            "Choose a SendGrid target of 5,000 or 10,000.",
+        ]:
+            self.assertNotIn(obsolete_copy, source)
+
+        hours_start = source.index("function currentActivityHours")
+        hours_end = source.index("function currentTailLines", hours_start)
+        self.assertIn('return "24";', source[hours_start:hours_end])
+        self.assertIn("function selectedImportantDispatchCap", source)
+        self.assertIn("dispatch_cap: selectedImportantDispatchCap()", source)
+
+        # Removing the editor does not remove the operational backend setting.
+        self.assertIn('"/api/settings/send-cap"', backend)
+        self.assertIn("save_dashboard_send_cap_per_profile", backend)
 
     def test_profile_detail_uses_compact_core_runtime_and_collapsible_diagnostics(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

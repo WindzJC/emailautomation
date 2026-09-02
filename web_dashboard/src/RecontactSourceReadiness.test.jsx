@@ -256,7 +256,9 @@ function snapshot(active = false) {
     profiles: active ? [{ name: "private_jc", runtime_state: "running", pending_count: 1 }] : [],
     summary: { total_pending: active ? 1 : 0 },
     controls: { send_target_total: 5000 },
-    automation: {},
+    automation: {
+      private_jc_daily: { enabled: true, local_time: "18:00" },
+    },
     alerts: [],
     queue_safety: { safe: true },
     private_queue_safety: { safe: true },
@@ -367,6 +369,32 @@ describe("source-scoped Recontact readiness", () => {
     vi.restoreAllMocks();
     document.head.innerHTML = "";
     document.body.innerHTML = "";
+  });
+
+  it("removes obsolete dashboard controls while keeping fixed request defaults", async () => {
+    const boot = await bootController(restartedStagedRecontactStatus());
+    root = boot.root;
+
+    expect(document.getElementById("leads-dispatch-cap")).toBeNull();
+    expect(document.getElementById("hours-select")).toBeNull();
+    expect(document.getElementById("send-cap-input")).toBeNull();
+    expect(document.getElementById("send-cap-note")).toBeNull();
+    expect(document.body).not.toHaveTextContent("Preview cap");
+    expect(document.body).not.toHaveTextContent("Send target");
+    expect(document.body).not.toHaveTextContent("Run complete. No pending queues.");
+    expect(document.body).not.toHaveTextContent("JC daily 18:00");
+
+    selectCampaign("recontact");
+    fireEvent.click(previewButton());
+    await act(async () => flushMicrotasks());
+
+    expect(previewPosts(boot.fetchMock)).toHaveLength(1);
+    const [, request] = previewPosts(boot.fetchMock)[0];
+    expect(JSON.parse(request.body)).toMatchObject({
+      campaign_type: "recontact_cold",
+      dispatch_source_mode: "cleaned",
+      dispatch_cap: "all",
+    });
   });
 
   it("keeps failed Fresh blocked while allowing the independent checked Recontact source", async () => {

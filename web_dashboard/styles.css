@@ -262,8 +262,8 @@ h3 {
 }
 
 .workspace-controls.toolbar {
-  grid-template-columns: 120px 150px minmax(260px, 1fr) auto !important;
-  grid-template-areas: "window cap note actions" !important;
+  grid-template-columns: 1fr !important;
+  grid-template-areas: "actions" !important;
   align-items: end !important;
 }
 
@@ -288,21 +288,6 @@ h3 {
 
 .toolbar-field {
   min-width: 0;
-}
-
-.toolbar-field-window {
-  grid-area: window;
-}
-
-.toolbar-field-cap {
-  grid-area: cap;
-}
-
-#send-cap-note {
-  grid-area: note;
-  align-self: start;
-  margin-top: -2px;
-  padding-right: 10px;
 }
 
 /* Tab buttons */
@@ -5118,21 +5103,6 @@ pre {
   background: rgba(255, 255, 255, 0.025);
 }
 
-.topbar-controlsbar .toolbar-field-window {
-  grid-area: window;
-}
-
-.topbar-controlsbar .toolbar-field-cap {
-  grid-area: cap;
-}
-
-.topbar-controlsbar #send-cap-note {
-  grid-area: note;
-  align-self: center;
-  margin: 0;
-  padding-right: 0;
-}
-
 .topbar-controlsbar .toolbar-actions {
   grid-area: actions;
   display: flex;
@@ -7771,8 +7741,7 @@ body {
   color: #ffd0d0 !important;
 }
 
-#ops-view .workspace-controls #refresh-btn,
-#ops-view .workspace-controls #send-cap-save-btn {
+#ops-view .workspace-controls #refresh-btn {
   background: rgba(18, 27, 42, 0.78) !important;
 }
 
@@ -9150,10 +9119,6 @@ body {
 #leads-view .leads-command-controls .leads-quick-file:not(.dispatch-technical-select) {
   max-width: 180px;
   padding: 7px;
-}
-
-#leads-view #leads-dispatch-cap {
-  width: min(100%, 150px);
 }
 
 @media (max-width: 1180px) {
@@ -10942,10 +10907,6 @@ body {
   padding: 6px;
   border-radius: 7px;
   background: #0d1828;
-}
-
-#leads-view #leads-dispatch-cap {
-  min-height: 34px;
 }
 
 #leads-view .leads-preview-command {
@@ -12816,7 +12777,6 @@ h3,
 #leads-view .workflow-tracker-row { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 #leads-view .btn.is-locked,
 #leads-view .btn:disabled { box-shadow: none; opacity: .72; }
-#leads-view #leads-dispatch-cap { border-radius: 9px; font-weight: 750; }
 @media (max-width: 1180px) {
   #leads-view:not(.warm-research-mode) .leads-control-bar {
     grid-template-columns: 1fr 1fr;

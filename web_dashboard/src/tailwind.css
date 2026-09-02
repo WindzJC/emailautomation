@@ -1142,23 +1142,15 @@
   .react-command-bar { padding: 10px; }
   .react-command-bar .workspace-controls.toolbar {
     display: grid;
-    grid-template-columns: 1fr 1fr !important;
+    grid-template-columns: 1fr !important;
     grid-template-areas: none !important;
     gap: 8px !important;
     width: 100%;
     min-width: 0;
   }
-  .react-command-bar .toolbar-field-window { grid-area: 1 / 1 !important; }
-  .react-command-bar .toolbar-field-cap { grid-area: 1 / 2 !important; }
-  .react-command-bar .toolbar-field-note {
-    grid-area: 2 / 1 / auto / -1 !important;
-    max-width: 100%;
-    overflow: visible;
-    white-space: normal;
-  }
   .react-command-bar .toolbar-actions {
     display: grid !important;
-    grid-area: 3 / 1 / auto / -1 !important;
+    grid-area: 1 / 1 / auto / -1 !important;
     grid-template-columns: repeat(2,minmax(0,1fr));
     gap: 7px;
     width: 100%;
@@ -1414,12 +1406,6 @@
   font-size: .72rem;
   font-weight: 800;
   text-transform: none;
-}
-
-.react-leads-page #leads-dispatch-cap {
-  height: 34px;
-  border-radius: 9px;
-  font-weight: 750;
 }
 
 .react-leads-page .btn.is-locked,
@@ -1951,7 +1937,7 @@
 
 #ops-view .workspace-status-row .workspace-controls.toolbar {
   display: grid !important;
-  grid-template-columns: 80px 100px minmax(170px, 1fr) auto;
+  grid-template-columns: 1fr;
   align-items: end;
   gap: 8px;
   min-height: 0;
@@ -2502,11 +2488,6 @@
   margin-top: 6px;
 }
 
-.operator-step-campaign #leads-dispatch-cap {
-  width: 100%;
-  min-height: 30px;
-}
-
 .operator-step-campaign
 .leads-command-controls
 .leads-quick-file:not(.dispatch-technical-select) {
@@ -2950,7 +2931,7 @@
   }
 
   #ops-view .workspace-status-row .workspace-controls.toolbar {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
 
   #ops-view .workspace-status-row .toolbar-field-note,
