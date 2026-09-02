@@ -22,8 +22,9 @@ PHONEISH_RE = re.compile(r"^[+()\d\s.\-]{7,}$")
 URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 BAD_LITERAL_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(?:nan|none)(?![A-Za-z0-9])")
 BAD_PLACEHOLDERS = ("{FirstName}", "{BookTitle}", "{PersonalizedOpeningLine}")
-CONSIGNMENT_SUBJECT_FALLBACK = "Independent author shelf review opportunity"
+CONSIGNMENT_SUBJECT_FALLBACK = "Bookstore shelf review"
 CONSIGNMENT_SUBJECT_FALLBACKS = {
+    "Bookstore shelf review",
     "Independent author shelf review opportunity",
     "Independent author shelf consideration",
     "Bookstore placement review",
@@ -35,6 +36,7 @@ BOOK_TITLE_PERSONALIZED_OPENINGS = (
     "My team came across",
 )
 CONSIGNMENT_SUBJECT_TEMPLATES = (
+    "Shelf review: {book_title}",
     "Shelf review opportunity for {book_title}",
     "Shelf consideration for {book_title}",
     "Reviewing {book_title} for bookstore placement",

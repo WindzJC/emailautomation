@@ -1377,56 +1377,40 @@ SIGNATURE_BY_FROM: dict[str, str] = {
 SIGNATURE_BY_PITCH = {
     }
 
-
 # ===== SENDGRID / BOOKSTORE PITCH COPY =====
+
+SENDGRID_BOOK_TITLE_SUBJECT = "Shelf review: {BookTitle}"
+
 SENDGRID_BOOK_TITLE_OPENING = (
-"Our team came across {BookTitle} and thought it may be a good fit for readers "
-"browsing independent books this summer."
+    "While reviewing independent titles for our bookstore shelves, "
+    "{BookTitle} seemed worth a closer look."
 )
 
-SENDGRID_BOOK_TITLE_SUBJECT = "Shelf review opportunity for {BookTitle}"
-
-BOOK_TITLE_GENERIC_SUBJECT = "Independent author shelf review opportunity"
+BOOK_TITLE_GENERIC_SUBJECT = "Bookstore shelf review"
 
 BOOK_TITLE_GENERIC_OPENING = (
-"Our team came across your author profile and thought your work may be a good fit "
-"for readers browsing independent books this summer."
+    "While reviewing independent authors for our bookstore shelves, "
+    "your work seemed worth a closer look."
 )
 
 BOOK_TITLE_MISSING_FALLBACK_OPENING = BOOK_TITLE_GENERIC_OPENING
 
-REPLY_UNSUBSCRIBE_FOOTER = 'P.S. If you would rather not hear from me again, reply “unsubscribe.”'
+REPLY_UNSUBSCRIBE_FOOTER = (
+    'P.S. If you would rather not hear from me again, reply “unsubscribe.”'
+)
 
 PITCH_1_5_BODY = f"""Hi {{FirstName}},
 
 {SENDGRID_BOOK_TITLE_OPENING}
 
-We’re currently reviewing a limited number of independent books for possible consignment placement on our physical bookstore shelves.
+We’re reviewing a small number of independently published books for physical consignment placement.
 
-We’d like to take a look at {{BookTitle}} for the next available shelf review slot. This is not a publishing offer, and approval is not guaranteed. Each title is reviewed for quality, presentation, genre fit, pricing, retail suitability, and reader interest.
+If approved, you’d receive 85% of sales, with quarterly reporting and payouts. Our stocking and distribution options start at $250, and there’s no cost to have the title reviewed.
 
-
-If approved, your book would be stocked under a consignment arrangement. You would receive 85% of total book sales, with quarterly sales reports and payouts.
-
-As part of our mid-year author promotion, approved authors will also receive a free premium author website built by our web development team. A strong book can still lose attention if the reader’s first impression does not feel clear, polished, and credible, so this bonus is designed to help selected authors present their work professionally and turn more reader interest into clicks.
-
-For approved titles, the author-covered stocking and distribution packages are:
-
-750 copies — $250
-1,500 copies — $500
-2,500 copies — $750
-3,500 copies — $1,000
-
-Each package supports the physical stocking and distribution process. Final approval depends on our review and whether the title is a suitable fit for our shelves.
-
-If you have another title you’d prefer us to consider, you’re welcome to send that instead.
-
-Would you like us to take a look and see if {{BookTitle}} is a fit for the next available shelf review slot?
+Would you be open to having {{BookTitle}} reviewed for an upcoming shelf slot?
 
 Best regards,
 {{SIGIMG}}
-
-If this is not a fit, no problem — just reply “no” and we will not follow up.
 
 {REPLY_UNSUBSCRIBE_FOOTER}
 """
@@ -1435,32 +1419,14 @@ PITCH_1_5_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {BOOK_TITLE_GENERIC_OPENING}
 
-We’re currently reviewing a limited number of independent books for possible consignment placement on our physical bookstore shelves.
+We’re reviewing a small number of independently published books for physical consignment placement.
 
-We’d be happy to take a look at one of your titles for the next available shelf review slot. This is not a publishing offer, and approval is not guaranteed. Each title is reviewed for quality, presentation, genre fit, pricing, retail suitability, and reader interest.
+If approved, you’d receive 85% of sales, with quarterly reporting and payouts. Our stocking and distribution options start at $250, and there’s no cost to have the title reviewed.
 
-
-If approved, your book would be stocked under a consignment arrangement. You would receive 85% of total book sales, with quarterly sales reports and payouts.
-
-As part of our mid-year author promotion, approved authors will also receive a free premium author website built by our web development team. A strong book can still lose attention if the reader’s first impression does not feel clear, polished, and credible, so this bonus is designed to help selected authors present their work professionally and turn more reader interest into clicks.
-
-For approved titles, the author-covered stocking and distribution packages are:
-
-750 copies — $250
-1,500 copies — $500
-2,500 copies — $750
-3,500 copies — $1,000
-
-Each package supports the physical stocking and distribution process. Final approval depends on our review and whether the title is a suitable fit for our shelves.
-
-If you have a specific title you’d like us to consider first, you’re welcome to send it for review.
-
-Would you like us to take a look at one of your titles for the next available shelf review slot?
+Would you be open to having one of your titles reviewed for an upcoming shelf slot?
 
 Best regards,
 {{SIGIMG}}
-
-If this is not a fit, no problem — just reply “no” and we will not follow up.
 
 {REPLY_UNSUBSCRIBE_FOOTER}
 """

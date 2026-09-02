@@ -36,7 +36,7 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": "",
-                        "Subject": "Independent author shelf review opportunity",
+                        "Subject": "Bookstore shelf review",
                         "Body": f"Hi JC,\n\n{generic_opening}\n\nWe are opening consignment spots for independent authors.",
                     }
                 ],
@@ -59,11 +59,11 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": title,
-                        "Subject": f"Shelf review opportunity for {title}",
+                        "Subject": f"Shelf review: {title}",
                         "Body": (
                             "Hi JC,\n\n"
-                            f"Our team came across {title} and thought it may be a strong fit for readers "
-                            "discovering new independent books this summer.\n\n"
+                            f"While reviewing independent titles for our bookstore shelves, "
+                            f"{title} seemed worth a closer look.\n\n"
                             "We are opening consignment spots for independent authors."
                         ),
                     }
@@ -85,7 +85,7 @@ class ValidateMessagePreviewTests(unittest.TestCase):
                         "Email": "reader@example.test",
                         "FirstName": "JC",
                         "BookTitle": "",
-                        "Subject": "Independent author shelf review opportunity",
+                        "Subject": "Bookstore shelf review",
                         "Body": "Hi JC,\n\nWe came across your book.\n\nWe are opening consignment spots.",
                     }
                 ],
