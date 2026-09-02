@@ -14,6 +14,11 @@ def test_all_sender_control_is_present_and_isolated():
 
     assert 'id="controlled-send-test-all-btn"' in index
     assert "Send All 6 Controlled Tests" in index
+    assert "All 6 sender test" in index
+    assert (
+        "Recipient: astraproductionsbyjc+allsendersv1@gmail.com"
+        in index
+    )
     assert (
         "JC · Annette · Jordan · Jodi · Alison · Fiorela"
         in index
