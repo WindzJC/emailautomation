@@ -4403,6 +4403,13 @@ def _confirm_dispatch_preview_impl(
     effective_preview["plan_rows_by_queue"] = effective_plan_rows_by_queue
     effective_preview["plan_dispatch_events_by_queue"] = effective_dispatch_events_by_queue
     _validate_recontact_campaign_identity(effective_preview)
+    full_recontact_checked_source = (
+        is_recontact_campaign
+        and bool(effective_preview.get("full_recontact_sendgrid_only"))
+        and _normalize_dispatch_source_mode(effective_preview.get("dispatch_source_mode"))
+        == DISPATCH_SOURCE_CLEANED
+        and not is_safer_recontact_source_path(effective_preview.get("dispatch_source_path"))
+    )
 
     planned_temp_dir = Path(tempfile.mkdtemp(prefix="dispatch_queue_plan_"))
     _temporary_dirs.append(planned_temp_dir)
@@ -4424,6 +4431,7 @@ def _confirm_dispatch_preview_impl(
         sendgrid_log_paths=sendgrid_log_paths,
         allow_sendgrid_already_sent=allow_previously_sent,
         campaign_type=campaign_type,
+        full_recontact_checked_source=full_recontact_checked_source,
     )
     if not bool(planned_safety.get("safe")):
         reasons = ", ".join(str(reason) for reason in (planned_safety.get("unsafe_reasons") or [])) or "unknown unsafe planned state"
@@ -4620,7 +4628,13 @@ def _confirm_dispatch_preview_impl(
     manifest_checked_path = archived_by_key.get("cleaned") or cleanup_paths.get("cleaned") or MASTER_OUTPUT_PATH
     manifest_keep_path = archived_by_key.get("triaged_keep") or cleanup_paths.get("triaged_keep") or Path(str(preview.get("dispatch_source_path") or ""))
     manifest_reject_path = archived_by_key.get("triaged_reject") or cleanup_paths.get("triaged_reject") or TRIAGED_REJECT_PATH
-    manifest_source_path = manifest_keep_path if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) == DISPATCH_SOURCE_TRIAGED_KEEP else Path(str(preview.get("dispatch_source_path") or manifest_checked_path))
+    manifest_source_path = (
+        manifest_checked_path
+        if full_recontact_checked_source
+        else manifest_keep_path
+        if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) == DISPATCH_SOURCE_TRIAGED_KEEP
+        else Path(str(preview.get("dispatch_source_path") or manifest_checked_path))
+    )
     active_manifest_target = active_campaign_manifest_path(report_dir)
     _snapshot_file(active_manifest_target, _snapshots)
     active_manifest_path = write_active_campaign_manifest(
@@ -4634,6 +4648,13 @@ def _confirm_dispatch_preview_impl(
             "run_id": run_id,
             "preview_id": preview_id,
             "campaign_id": str(preview.get("campaign_id") or ""),
+            "campaign_type": campaign_type,
+            "dispatch_source_mode": str(preview.get("dispatch_source_mode") or ""),
+            "dispatch_source_kind": (
+                RECONTACT_SOURCE_KIND_FULL
+                if full_recontact_checked_source
+                else str(preview.get("dispatch_source_kind") or "")
+            ),
         },
     )
     report["active_campaign_manifest_path"] = str(active_manifest_path)

@@ -46,6 +46,8 @@ EMAIL_HEADER_CANDIDATES = ("email", "authoremail", "author_email", "e_mail", "e-
 FIRST_NAME_CANDIDATES = ("firstname", "first_name", "first name", "authorname", "author_name", "author")
 TRIAGE_REJECT_REASON_HEADERS = ("VerificationReason", "reject_code", "RejectReason", "Reason", "Status")
 RECONTACT_COLD_CAMPAIGN_TYPE = "recontact_cold"
+FULL_RECONTACT_SOURCE_KIND = "full_recontact"
+FULL_RECONTACT_CAMPAIGN_ID_RE = re.compile(r"dispatch_preview_\d{8}_\d{6}_[0-9a-f]{8}")
 RECONTACT_COLD_ALLOWED_TRIAGE_REJECT_REASONS = {
     "MISSING_FULL_NAME",
     "MISSING_USABLE_PERSON_NAME",
@@ -651,12 +653,16 @@ def build_queue_safety_report(
     sendgrid_log_paths: Sequence[Path] | None = None,
     allow_sendgrid_already_sent: bool = False,
     campaign_type: str = "",
+    full_recontact_checked_source: bool | None = None,
     recontact_blocked_overlap_export_path: Path | None = None,
     scan_cache: QueueSafetyScanCache | None = None,
     sendgrid_sent_emails: set[str] | None = None,
 ) -> Dict[str, object]:
     important_dir = settings.APP_ROOT / "_important"
     default_sources = default_queue_safety_sources(important_dir)
+    explicit_source_paths = any(
+        (intended_source_path, checked_path, triaged_keep_path, triaged_reject_path)
+    )
     intended = intended_source_path or Path(default_sources["intended"])
     checked = checked_path or Path(default_sources["checked"])
     triaged_keep = triaged_keep_path or Path(default_sources["triaged_keep"])
@@ -710,10 +716,48 @@ def build_queue_safety_report(
     reject_overlap = shard_emails & reject_emails
     sendgrid_sent_overlap = sendgrid_shard_emails & effective_sendgrid_sent_emails
     source_reject_overlap = intended_emails & reject_emails
-    normalized_campaign_type = str(campaign_type or "").strip().lower()
+    manifest = default_sources.get("manifest")
+    normalized_campaign_type = str(
+        campaign_type
+        or (
+            manifest.get("campaign_type")
+            if not explicit_source_paths and isinstance(manifest, dict)
+            else ""
+        )
+        or ""
+    ).strip().lower()
+    manifest_full_recontact = (
+        not explicit_source_paths
+        and isinstance(manifest, dict)
+        and str(manifest.get("campaign_type") or "").strip().lower()
+        == RECONTACT_COLD_CAMPAIGN_TYPE
+        and str(manifest.get("dispatch_source_kind") or "").strip().lower()
+        == FULL_RECONTACT_SOURCE_KIND
+        and str(manifest.get("source") or "").strip() == "confirm_dispatch"
+        and bool(
+            FULL_RECONTACT_CAMPAIGN_ID_RE.fullmatch(
+                str(manifest.get("campaign_id") or "").strip()
+            )
+        )
+    )
+    requested_full_recontact = (
+        manifest_full_recontact
+        if full_recontact_checked_source is None
+        else bool(full_recontact_checked_source)
+    )
+    allow_full_recontact_reject_overlap = (
+        normalized_campaign_type == RECONTACT_COLD_CAMPAIGN_TYPE
+        and requested_full_recontact
+        and intended.resolve(strict=False) == checked.resolve(strict=False)
+    )
     allow_name_quality_reject_overlap = normalized_campaign_type == RECONTACT_COLD_CAMPAIGN_TYPE
     reject_rows_by_email: Dict[str, List[Dict[str, str]]] = {}
-    if allow_name_quality_reject_overlap:
+    if allow_full_recontact_reject_overlap:
+        allowed_reject_overlap = set(reject_overlap)
+        blocked_reject_overlap = set()
+        allowed_source_reject_overlap = set(source_reject_overlap)
+        blocked_source_reject_overlap = set()
+    elif allow_name_quality_reject_overlap:
         reject_rows_by_email = cache.reject_rows_by_email(triaged_reject)
         allowed_reject_overlap = {
             email
@@ -789,6 +833,7 @@ def build_queue_safety_report(
         "blocked_triaged_reject_overlap_count": len(blocked_reject_overlap),
         "allowed_intended_source_reject_overlap_count": len(allowed_source_reject_overlap),
         "blocked_intended_source_reject_overlap_count": len(blocked_source_reject_overlap),
+        "full_recontact_reject_overlap_allowed": allow_full_recontact_reject_overlap,
         "missing_required_header_shards": missing_required_header_shards,
         "missing_required_header_shard_count": len(missing_required_header_shards),
         "outside_intended_source_fingerprint": set_fingerprint(outside_intended) if outside_intended else "",

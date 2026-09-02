@@ -3273,8 +3273,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 ],
             )
             write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
-            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"], rows)
-            write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"], rows[:1])
+            write_csv(
+                triaged_reject_path,
+                ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status", "VerificationReason"],
+                [{**rows[1], "Status": "REJECT", "VerificationReason": "RESEARCH_SCOPE_REJECT"}],
+            )
             write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
             write_csv(jc_queue, ["Email", "FirstName"], [])
             for path in sg_queues:
@@ -3294,7 +3298,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 master_path=master_path,
                 triaged_keep_path=triaged_keep_path,
                 rejected_path=rejected_path,
-                dispatch_source_mode="triaged_keep",
+                dispatch_source_mode="cleaned",
                 jc_queue_path=jc_queue,
                 sendgrid_queue_paths=sg_queues,
                 jc_log_path=logs[0],
@@ -3328,6 +3332,10 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 private_rows = list(csv.DictReader(handle))
             self.assertEqual(["alpha@example.com", "beta@example.com"], [row["Email"] for row in private_rows])
             self.assertEqual({preview["campaign_id"]}, {row["campaign_id"] for row in private_rows})
+            active_manifest = json.loads((report_dir / "active_campaign_snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual("recontact_cold", active_manifest["campaign_type"])
+            self.assertEqual("full_recontact", active_manifest["dispatch_source_kind"])
+            self.assertEqual(active_manifest["checked_path"], active_manifest["intended_source_path"])
             sendgrid_emails: list[str] = []
             sendgrid_campaign_ids: set[str] = set()
             for path in sg_queues:
@@ -3337,6 +3345,70 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     sendgrid_campaign_ids.update(row["campaign_id"] for row in rows_from_queue)
             self.assertEqual([], sendgrid_emails)
             self.assertEqual(set(), sendgrid_campaign_ids)
+
+    def test_confirm_fresh_cold_still_blocks_triaged_reject_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            preview_dir = tmp / "previews"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            row = {
+                "FullName": "Fresh Person",
+                "FirstName": "Fresh",
+                "Email": "fresh@example.com",
+                "AuthorEmail": "fresh@example.com",
+                "AuthorName": "Fresh Person",
+                "BookTitle": "Fresh Book",
+                "Status": "KEEP",
+            }
+            headers = ["FullName", "FirstName", "Email", "AuthorEmail", "AuthorName", "BookTitle", "Status"]
+            write_csv(master_path, headers, [row])
+            write_csv(triaged_keep_path, headers, [row])
+            write_csv(
+                triaged_reject_path,
+                [*headers, "VerificationReason"],
+                [{**row, "Status": "REJECT", "VerificationReason": "RESEARCH_SCOPE_REJECT"}],
+            )
+            write_csv(tmp / "leads_rejected.csv", ["Email", "reject_code"], [])
+            write_csv(tmp / "leads_triaged_quarantine.csv", ["Email", "Status"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                campaign_type="cold",
+                preview_dir=preview_dir,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "TRIAGED_REJECT_OVERLAP"):
+                confirm_dispatch_preview(
+                    preview["preview_id"],
+                    require_stopped=False,
+                    backup_root=tmp / "backups",
+                    report_dir=tmp / "reports",
+                    persist_state=False,
+                    preview_dir=preview_dir,
+                )
+            self.assertEqual([], read_csv_rows(jc_queue))
+            self.assertEqual([], [row for path in sg_queues for row in read_csv_rows(path)])
 
     def test_confirm_dispatch_preview_failure_preserves_staged_files_and_queues(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1301,6 +1301,66 @@ def test_normal_sendgrid_recompute_still_requires_campaign_source_lineage(
     assert profile["outside_intended_source_count"] == 1
 
 
+@pytest.mark.parametrize(
+    ("source_kind", "expected_safe"),
+    [("full_recontact", True), ("cleaned", False)],
+)
+def test_runtime_queue_safety_scopes_reject_overlap_to_authoritative_full_recontact_manifest(
+    tmp_path,
+    monkeypatch,
+    source_kind,
+    expected_safe,
+):
+    recipient = "normal@example.test"
+    queue = tmp_path / "data/shards/recipients_sendgrid_1.csv"
+    checked = tmp_path / "_important/leads.csv"
+    keep = tmp_path / "_important/leads_triaged_keep.csv"
+    reject = tmp_path / "_important/leads_triaged_reject.csv"
+    state = tmp_path / "data/state/active_campaign_snapshot.json"
+    for path in (queue, checked, keep, reject, state):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "Email,FirstName,BookTitle,CampaignType\n"
+        f"{recipient},Test,Book,recontact_cold\n",
+        encoding="utf-8",
+    )
+    checked.write_text(f"Email\n{recipient}\n", encoding="utf-8")
+    keep.write_text("Email\n", encoding="utf-8")
+    reject.write_text(f"Email\n{recipient}\n", encoding="utf-8")
+    state.write_text(
+        json.dumps(
+            {
+                "source": "confirm_dispatch",
+                "campaign_id": "dispatch_preview_20260831_120000_deadbeef",
+                "campaign_type": "recontact_cold",
+                "dispatch_source_kind": source_kind,
+                "checked_path": "_important/leads.csv",
+                "intended_source_path": "_important/leads.csv",
+                "triaged_keep_path": "_important/leads_triaged_keep.csv",
+                "triaged_reject_path": "_important/leads_triaged_reject.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runtime_handoff,
+        "_preview_safety",
+        lambda *_args, **_kwargs: {"safe": True, "message": "ok"},
+    )
+
+    safety = runtime_handoff.recompute_queue_safety(tmp_path)
+
+    assert safety["safe"] is expected_safe
+    profile = safety["profiles"][0]
+    assert profile["reject_overlap_count"] == 1
+    assert profile["blocked_reject_overlap_count"] == (0 if expected_safe else 1)
+    assert profile["full_recontact_reject_overlap_allowed"] is expected_safe
+    if expected_safe:
+        assert "queue source validation failures" not in safety["unsafe_reasons"]
+    else:
+        assert "queue source validation failures" in safety["unsafe_reasons"]
+
+
 def test_unknown_profile_pitch_validation_mode_refuses(monkeypatch):
     monkeypatch.setattr(
         runtime_handoff,

@@ -126,6 +126,9 @@ EXCLUDED_PARTS = {
 ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".zip", ".age", ".gpg")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 QUEUE_SAFETY_MANIFEST = Path("data/state/active_campaign_snapshot.json")
+RECONTACT_COLD_CAMPAIGN_TYPE = "recontact_cold"
+FULL_RECONTACT_SOURCE_KIND = "full_recontact"
+FULL_RECONTACT_CAMPAIGN_ID_RE = re.compile(r"dispatch_preview_\d{8}_\d{6}_[0-9a-f]{8}")
 QUEUE_SAFETY_FALLBACKS = {
     "checked": Path("_important/leads.csv"),
     "intended": Path("_important/leads_triaged_keep.csv"),
@@ -3271,6 +3274,24 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
         "triaged_keep": _email_fingerprint(_read_email_set(sources["triaged_keep"])),
         "triaged_reject": _email_fingerprint(reject_emails),
     }
+    source_manifest = sources.get("manifest")
+    allow_full_recontact_reject_overlap = (
+        sources.get("origin") == "active_campaign_manifest"
+        and isinstance(source_manifest, dict)
+        and str(source_manifest.get("campaign_type") or "").strip().lower()
+        == RECONTACT_COLD_CAMPAIGN_TYPE
+        and str(source_manifest.get("dispatch_source_kind") or "").strip().lower()
+        == FULL_RECONTACT_SOURCE_KIND
+        and str(source_manifest.get("source") or "").strip() == "confirm_dispatch"
+        and bool(
+            FULL_RECONTACT_CAMPAIGN_ID_RE.fullmatch(
+                str(source_manifest.get("campaign_id") or "").strip()
+            )
+        )
+        and intended_path is not None
+        and checked_path is not None
+        and intended_path.resolve(strict=False) == checked_path.resolve(strict=False)
+    )
     source_fingerprint_mismatches: list[str] = []
     manifest_files = sources.get("manifest", {}).get("files")
     if isinstance(manifest_files, dict):
@@ -3336,10 +3357,14 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
                 else set(queue_emails)
             )
             reject_overlap = queue_emails & reject_emails
+            blocked_reject_overlap = (
+                set() if allow_full_recontact_reject_overlap else reject_overlap
+            )
         else:
             outside_checked = set()
             outside_intended = set()
             reject_overlap = set()
+            blocked_reject_overlap = set()
         profile_suppressed = queue_emails & suppressed_emails
         suppression_overlap.update(profile_suppressed)
         provider = str(config.get("provider") or "").strip().lower()
@@ -3367,14 +3392,16 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
         source_failures = (
             len(outside_checked)
             + len(outside_intended)
-            + len(reject_overlap)
+            + len(blocked_reject_overlap)
         )
         if source_failures:
             reasons.append("queue source validation failures")
             details.append(
                 f"profile={profile} queue={queue_path} overlap_count={source_failures} "
                 f"outside_checked={len(outside_checked)} outside_intended={len(outside_intended)} "
-                f"reject_overlap={len(reject_overlap)} authoritative_source={source_description} "
+                f"reject_overlap={len(blocked_reject_overlap)} "
+                f"observed_reject_overlap={len(reject_overlap)} "
+                f"authoritative_source={source_description} "
                 f"queue_fingerprint={queue_state['fingerprint']}"
             )
         if source_lineage_applicable and source_fingerprint_mismatches:
@@ -3431,6 +3458,8 @@ def recompute_queue_safety(runtime_root: Path) -> dict[str, Any]:
                 "outside_checked_output_count": len(outside_checked),
                 "outside_intended_source_count": len(outside_intended),
                 "reject_overlap_count": len(reject_overlap),
+                "blocked_reject_overlap_count": len(blocked_reject_overlap),
+                "full_recontact_reject_overlap_allowed": allow_full_recontact_reject_overlap,
                 "duplicate_overlap_count": int(queue_state["duplicate_count"]),
                 "suppression_overlap_count": len(profile_suppressed),
                 "sent_overlap_count": len(profile_sent),

@@ -247,6 +247,75 @@ class RebuildRecipientQueuesTests(unittest.TestCase):
             self.assertNotIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
             self.assertEqual([], read_rows(export))
 
+    def test_full_recontact_checked_source_allows_intended_triage_reject_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            keep = tmp / "leads_triaged_keep.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_private_jc.csv"
+            export = tmp / "blocked.csv"
+            headers = ["Email", "FirstName", "AuthorName", "BookTitle", "Status", "VerificationReason"]
+            rows = [
+                {"Email": "a@example.test", "FirstName": "A", "AuthorName": "A", "BookTitle": "A", "Status": "KEEP", "VerificationReason": ""},
+                {"Email": "b@example.test", "FirstName": "B", "AuthorName": "B", "BookTitle": "B", "Status": "REJECT", "VerificationReason": "RESEARCH_SCOPE_REJECT"},
+                {"Email": "c@example.test", "FirstName": "C", "AuthorName": "C", "BookTitle": "C", "Status": "REJECT", "VerificationReason": "RESEARCH_SCOPE_REJECT"},
+            ]
+            write_csv(checked, headers, rows)
+            write_csv(keep, headers, rows[:1])
+            write_csv(reject, headers, rows[1:])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": row["FirstName"]} for row in rows])
+
+            report = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=checked,
+                checked_path=checked,
+                triaged_keep_path=keep,
+                triaged_reject_path=reject,
+                campaign_type="recontact_cold",
+                full_recontact_checked_source=True,
+                recontact_blocked_overlap_export_path=export,
+            )
+
+            self.assertTrue(report["safe"])
+            self.assertTrue(report["full_recontact_reject_overlap_allowed"])
+            self.assertEqual(2, report["overlap_with_triaged_reject"])
+            self.assertEqual(2, report["allowed_triaged_reject_overlap_count"])
+            self.assertEqual(0, report["blocked_triaged_reject_overlap_count"])
+            self.assertNotIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
+            self.assertNotIn("INTENDED_SOURCE_OVERLAPS_REJECT", report["unsafe_reasons"])
+
+    def test_full_recontact_label_cannot_allow_reject_overlap_for_non_checked_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            checked = tmp / "leads.csv"
+            intended = tmp / "selected.csv"
+            reject = tmp / "leads_triaged_reject.csv"
+            shard = tmp / "recipients_private_jc.csv"
+            export = tmp / "blocked.csv"
+            headers = ["Email", "FirstName", "VerificationReason"]
+            row = {"Email": "reject@example.test", "FirstName": "Reject", "VerificationReason": "RESEARCH_SCOPE_REJECT"}
+            write_csv(checked, headers, [row])
+            write_csv(intended, headers, [row])
+            write_csv(reject, headers, [row])
+            write_csv(shard, ["Email", "FirstName"], [{"Email": row["Email"], "FirstName": row["FirstName"]}])
+
+            report = build_queue_safety_report(
+                shard_paths=[shard],
+                intended_source_path=intended,
+                checked_path=checked,
+                triaged_keep_path=tmp / "leads_triaged_keep.csv",
+                triaged_reject_path=reject,
+                campaign_type="recontact_cold",
+                full_recontact_checked_source=True,
+                recontact_blocked_overlap_export_path=export,
+            )
+
+            self.assertFalse(report["safe"])
+            self.assertFalse(report["full_recontact_reject_overlap_allowed"])
+            self.assertIn("TRIAGED_REJECT_OVERLAP", report["unsafe_reasons"])
+            self.assertIn("INTENDED_SOURCE_OVERLAPS_REJECT", report["unsafe_reasons"])
+
     def test_recontact_cold_queue_safety_blocks_local_bounce_risk_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
