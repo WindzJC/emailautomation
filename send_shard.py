@@ -2605,7 +2605,7 @@ def row_merge_fields(row: dict[str, str], to_email: str, first_name: str, book_t
     return {
         "FirstName": (first_name or GENERIC_SALUTATION).strip() or GENERIC_SALUTATION,
         "AuthorName": get_row_value_ci(row, ["AuthorName", "author_name", "FullName", "full_name", "author", "name"]),
-        "AuthorEmail": get_row_value_ci(row, ["AuthorEmail", "author_email"]) or to_email,
+        "AuthorEmail": to_email,
         "BookTitle": resolved_book_title,
         "PersonalizedOpeningLine": get_row_value_ci(
             row,

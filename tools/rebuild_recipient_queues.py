@@ -569,6 +569,7 @@ def _active_campaign_manifest_source_paths(state_dir: Path = settings.STATE_DIR)
         "triaged_keep": triaged_keep,
         "triaged_reject": triaged_reject,
         "active_campaign_manifest_path": manifest_path,
+        "manifest": manifest,
     }
 
 

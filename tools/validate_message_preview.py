@@ -166,12 +166,35 @@ def first_nonblank_line(text: str) -> str:
     return ""
 
 
-def contains_bad_render_tokens(value: str, field_name: str) -> List[str]:
+def contains_bad_render_tokens(
+    value: str,
+    field_name: str,
+    *,
+    allowed_render_values: Sequence[str] = (),
+) -> List[str]:
     failures: List[str] = []
+    candidate = str(value or "")
     for placeholder in BAD_PLACEHOLDERS:
-        if placeholder in value:
+        if placeholder in candidate:
             failures.append(f"{field_name}_unrendered_placeholder:{placeholder}")
-    if BAD_LITERAL_RE.search(value or ""):
+
+    # A legitimate source value may itself contain a word such as "None"
+    # or "Nan" (for example, the book title "Death Has None"). Mask only
+    # the exact validated render value before looking for accidental Python/
+    # dataframe literals. Any additional standalone None/nan remains blocked.
+    literal_scan = candidate
+    for allowed_value in allowed_render_values:
+        allowed = normalize_space(allowed_value)
+        if not allowed or not BAD_LITERAL_RE.search(allowed):
+            continue
+        literal_scan = re.sub(
+            re.escape(allowed),
+            "",
+            literal_scan,
+            flags=re.IGNORECASE,
+        )
+
+    if BAD_LITERAL_RE.search(literal_scan):
         failures.append(f"{field_name}_bad_literal_nan_or_none")
     return failures
 
@@ -227,6 +250,7 @@ def validate_book_title_fallback_rendering(subject: str, body: str, mode: Previe
 
 def validate_row(row: Dict[str, str], mode: PreviewMode) -> List[str]:
     email = normalize_space(row.get("Email", ""))
+    author_email = normalize_space(row.get("AuthorEmail", ""))
     author_name = normalize_space(row.get("AuthorName", ""))
     first_name = normalize_space(row.get("FirstName", ""))
     book_title = normalize_space(row.get("BookTitle", ""))
@@ -240,6 +264,13 @@ def validate_row(row: Dict[str, str], mode: PreviewMode) -> List[str]:
         failures.append("missing_email")
     elif not EMAIL_RE.match(email):
         failures.append("invalid_email_syntax")
+
+    if author_email:
+        if not EMAIL_RE.match(author_email):
+            failures.append("invalid_author_email_syntax")
+        elif email and author_email.lower() != email.lower():
+            failures.append("author_email_mismatch")
+
     if mode == "researched" and not author_name:
         failures.append("missing_author_name")
     elif normalize_key(author_name) in BAD_AUTHOR_KEYS:
@@ -290,8 +321,21 @@ def validate_row(row: Dict[str, str], mode: PreviewMode) -> List[str]:
         expected_greeting = f"Hi {first_name},"
         if first_nonblank_line(body) != expected_greeting:
             failures.append("greeting_first_name_mismatch")
-    failures.extend(contains_bad_render_tokens(subject, "subject"))
-    failures.extend(contains_bad_render_tokens(body, "body"))
+    allowed_render_values = (book_title,) if safe_book_title else ()
+    failures.extend(
+        contains_bad_render_tokens(
+            subject,
+            "subject",
+            allowed_render_values=allowed_render_values,
+        )
+    )
+    failures.extend(
+        contains_bad_render_tokens(
+            body,
+            "body",
+            allowed_render_values=allowed_render_values,
+        )
+    )
     return failures
 
 
