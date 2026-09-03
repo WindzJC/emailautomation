@@ -6361,15 +6361,23 @@ def main() -> int | None:
                     else:
                         final_block = global_block_refresher.classification(to_email)
                         if final_block:
-                            if queue_claim_receipt is not None:
-                                restore_claimed_queue_row(csv_path, queue_claim_receipt)
-                            if idempotency_reserved:
-                                release_send_idempotency_reservation(
-                                    campaign_id=row_campaign_id,
-                                    provider=args.provider,
-                                    email=to_email,
-                                )
+                            settled, restored, released, _domain_ok = settle_retryable_attempt(
+                                reservation_token=attempt_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                queue_claim_receipt=queue_claim_receipt,
+                                idempotency_reserved=idempotency_reserved,
+                                outcome="blocked_before_submission",
+                                info=final_block,
+                                domain_finalized=True,
+                            )
+                            if released:
                                 idempotency_reserved = False
+                            if not settled:
+                                emit_worker_event("ERROR", "retry_settlement_failed", phase="pre_submit_block")
+                                error_count += 1
+                                stop_reason = "settlement_failed"
+                                break
                             log_row(
                                 log_path,
                                 to_email,
@@ -6396,21 +6404,22 @@ def main() -> int | None:
                         )
                         final_block = global_block_refresher.classification(to_email)
                         if final_block:
-                            if queue_claim_receipt is not None:
-                                restore_claimed_queue_row(csv_path, queue_claim_receipt)
-                            if idempotency_reserved:
-                                release_send_idempotency_reservation(
-                                    campaign_id=row_campaign_id,
-                                    provider=args.provider,
-                                    email=to_email,
-                                )
-                                idempotency_reserved = False
-                            finalize_domain_attempt_slot(
-                                attempt_slot_token,
-                                to_email,
-                                "blocked_before_submission",
-                                final_block,
+                            settled, restored, released, _domain_ok = settle_retryable_attempt(
+                                reservation_token=attempt_slot_token,
+                                email=to_email,
+                                campaign_id=row_campaign_id,
+                                queue_claim_receipt=queue_claim_receipt,
+                                idempotency_reserved=idempotency_reserved,
+                                outcome="blocked_before_submission",
+                                info=final_block,
                             )
+                            if released:
+                                idempotency_reserved = False
+                            if not settled:
+                                emit_worker_event("ERROR", "retry_settlement_failed", phase="pre_submit_block")
+                                error_count += 1
+                                stop_reason = "settlement_failed"
+                                break
                             log_row(
                                 log_path,
                                 to_email,
