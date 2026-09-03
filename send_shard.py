@@ -38,7 +38,9 @@ from protected_profile_env import (
     DEFAULT_PROFILE_ENV_DIR,
     JC_PROFILE_NAMES,
     ProtectedProfileEnvError,
+    SENDGRID_PROFILE_NAMES,
     resolve_canonical_jc_credential,
+    resolve_sendgrid_profile_credential,
 )
 from provider_pacing import (
     mark_recovery_started,
@@ -3865,6 +3867,27 @@ def resolve_private_sender_password(
     return password
 
 
+def resolve_sendgrid_sender_api_key(
+    profile_name: str,
+    profile_config: dict[str, object],
+    *,
+    profile_env_dir: Path | None = None,
+) -> str:
+    """Resolve a production SendGrid key inside the worker process."""
+
+    try:
+        api_key, _source = resolve_sendgrid_profile_credential(
+            profile_name,
+            profile_config,
+            profile_env_dir=profile_env_dir or PROTECTED_PROFILE_ENV_DIR,
+        )
+    except ProtectedProfileEnvError as exc:
+        raise RuntimeError(
+            "Protected SendGrid credential is unavailable or unsafe."
+        ) from exc
+    return api_key
+
+
 def smtp_close(s: smtplib.SMTP | None) -> None:
     if not s:
         return
@@ -4877,6 +4900,21 @@ def main() -> int | None:
     if controlled_config_error:
         print(f"REFUSED: {controlled_config_error}")
         return 1 if args.preflight else None
+
+    profile_name = str(args.profile or "").strip()
+    if (
+        args.provider == "sendgrid"
+        and profile_name in SENDGRID_PROFILE_NAMES
+        and (bool(args.preflight) or not inspection_only)
+    ):
+        try:
+            sendgrid_api_key = resolve_sendgrid_sender_api_key(
+                profile_name,
+                profile_defaults,
+            )
+        except RuntimeError as exc:
+            print(f"REFUSED: {exc}")
+            return 1
 
     if args.provider == "sendgrid" and not inspection_only and not sendgrid_api_key:
         print("ERROR: SENDGRID_API_KEY is required for --provider sendgrid.")

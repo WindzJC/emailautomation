@@ -18,10 +18,12 @@ from protected_profile_env import (
     read_protected_profile_env,
     resolve_canonical_jc_credential,
     resolve_protected_profile_credential,
+    resolve_sendgrid_profile_credential,
 )
 
 
 FAKE_SECRET = "unit-test-private-jc-secret"
+FAKE_SENDGRID_SECRET = "SG.unit-test.sendgrid-secret"
 
 
 def _profile_dir(tmp_path: Path, profile: str = "private_jc", value: str = FAKE_SECRET) -> Path:
@@ -208,6 +210,109 @@ def test_canonical_jc_resolver_rejects_non_jc_profile(tmp_path: Path) -> None:
 
     assert refusal.value.code == "credential_identity_mismatch"
     assert FAKE_SECRET not in str(refusal.value)
+
+
+@pytest.mark.parametrize("profile", sorted(protected_profile_env.SENDGRID_PROFILE_NAMES))
+def test_production_sendgrid_resolves_exact_profile_file(
+    tmp_path: Path,
+    profile: str,
+) -> None:
+    env_dir = tmp_path / "profiles"
+    env_dir.mkdir()
+    for candidate in protected_profile_env.SENDGRID_PROFILE_NAMES:
+        value = FAKE_SENDGRID_SECRET if candidate == profile else f"SG.wrong.{candidate}"
+        (env_dir / f"{candidate}.env").write_text(
+            f"SENDGRID_API_KEY={value}\n",
+            encoding="utf-8",
+        )
+
+    with patch.dict(os.environ, {}, clear=True):
+        secret, source = resolve_sendgrid_profile_credential(
+            profile,
+            {"provider": "sendgrid"},
+            profile_env_dir=env_dir,
+        )
+
+    assert secret == FAKE_SENDGRID_SECRET
+    assert source == f"{profile}.env"
+    assert "SENDGRID_API_KEY" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "profile,provider",
+    [
+        ("private_jc", "private"),
+        ("private_jc_warm", "private"),
+        ("sendgrid_controlled_test", "sendgrid"),
+        ("sendgrid_unknown", "sendgrid"),
+        ("sendgrid_alison", "private"),
+    ],
+)
+def test_production_sendgrid_resolver_rejects_wrong_identity_or_provider(
+    tmp_path: Path,
+    profile: str,
+    provider: str,
+) -> None:
+    env_dir = tmp_path / "profiles"
+    env_dir.mkdir()
+    (env_dir / f"{profile}.env").write_text(
+        f"SENDGRID_API_KEY={FAKE_SENDGRID_SECRET}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProtectedProfileEnvError) as refusal:
+        resolve_sendgrid_profile_credential(
+            profile,
+            {"provider": provider},
+            profile_env_dir=env_dir,
+        )
+
+    assert refusal.value.code == "credential_identity_mismatch"
+    assert FAKE_SENDGRID_SECRET not in str(refusal.value)
+
+
+@pytest.mark.parametrize("content", [None, "", "SENDGRID_API_KEY=\n"])
+def test_production_sendgrid_resolver_rejects_missing_or_empty_key(
+    tmp_path: Path,
+    content: str | None,
+) -> None:
+    env_dir = tmp_path / "profiles"
+    env_dir.mkdir()
+    if content is not None:
+        (env_dir / "sendgrid_alison.env").write_text(content, encoding="utf-8")
+
+    with patch.dict(os.environ, {}, clear=True), pytest.raises(
+        ProtectedProfileEnvError
+    ) as refusal:
+        resolve_sendgrid_profile_credential(
+            "sendgrid_alison",
+            {"provider": "sendgrid"},
+            profile_env_dir=env_dir,
+        )
+
+    assert FAKE_SENDGRID_SECRET not in str(refusal.value)
+
+
+def test_production_sendgrid_resolver_never_falls_back_to_process_environment(
+    tmp_path: Path,
+) -> None:
+    env_dir = tmp_path / "profiles"
+    env_dir.mkdir()
+    (env_dir / "sendgrid_alison.env").write_text(
+        "SENDGRID_API_KEY=\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProtectedProfileEnvError) as refusal:
+        resolve_sendgrid_profile_credential(
+            "sendgrid_alison",
+            {"provider": "sendgrid"},
+            profile_env_dir=env_dir,
+            environment={"SENDGRID_API_KEY": FAKE_SENDGRID_SECRET},
+        )
+
+    assert refusal.value.code == "credential_invalid"
+    assert FAKE_SENDGRID_SECRET not in str(refusal.value)
 
 
 def test_symlink_profile_file_is_rejected(tmp_path: Path) -> None:

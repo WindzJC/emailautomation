@@ -30,7 +30,9 @@ from protected_profile_env import (
     DEFAULT_PROFILE_ENV_DIR,
     JC_PROFILE_NAMES,
     ProtectedProfileEnvError,
+    SENDGRID_PROFILE_NAMES,
     resolve_canonical_jc_credential,
+    resolve_sendgrid_profile_credential,
 )
 from provider_pacing import provider_pacing_status
 from send_shard import (
@@ -58,7 +60,6 @@ from sendgrid_hygiene import (
     parse_activity_file,
     parse_iso_utc,
 )
-from sendgrid_launch_auth import resolve_sendgrid_api_key
 from tools.rebuild_recipient_queues import (
     QueueSafetyScanCache,
     build_queue_safety_report,
@@ -1267,7 +1268,7 @@ def _running_sender_processes(
     allowed_profiles = set(profile_names or DASHBOARD_PROFILES)
     processes: List[Dict[str, object]] = []
     try:
-        ps = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+        ps = subprocess.check_output(["ps", "-eo", "pid=,comm=,args="], text=True)
     except Exception:
         return processes
     current_pid = os.getpid()
@@ -1275,8 +1276,8 @@ def _running_sender_processes(
         text = line.strip()
         if not text or "send_shard.py" not in text or "--profile" not in text:
             continue
-        parts = text.split(None, 1)
-        if len(parts) != 2:
+        parts = text.split(None, 2)
+        if len(parts) != 3:
             continue
         try:
             pid = int(parts[0])
@@ -1284,7 +1285,10 @@ def _running_sender_processes(
             continue
         if pid == current_pid:
             continue
-        command = parts[1]
+        process_name = Path(parts[1]).name.lower()
+        if not process_name.startswith("python") and not process_name.startswith("pypy"):
+            continue
+        command = parts[2]
         if not include_preview and "--preview_messages" in command:
             continue
         match = re.search(r"--profile(?:=|\s+)([^\s]+)", command)
@@ -1342,15 +1346,91 @@ def _compact_launcher_output(text: str, limit: int = 600) -> str:
     return cleaned[: limit - 3].rstrip() + "..."
 
 
-def _wait_for_started_profiles(profiles: Sequence[str], wait_seconds: float = 5.0) -> set[str]:
+def wait_for_profile_worker_started(
+    profile_name: str,
+    *,
+    timeout_seconds: float = 5.0,
+    stable_seconds: float = 1.0,
+    poll_seconds: float = 0.1,
+) -> Dict[str, object] | None:
+    """Require one exact send_shard worker to remain present before success."""
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    stable_pid = 0
+    stable_since = 0.0
+    while True:
+        now = time.monotonic()
+        matches = _running_sender_processes([profile_name], include_preview=False)
+        by_pid = {
+            int(proc.get("pid") or 0): proc
+            for proc in matches
+            if int(proc.get("pid") or 0) > 0
+            and str(proc.get("profile") or "") == profile_name
+        }
+        if stable_pid and stable_pid in by_pid:
+            if now - stable_since >= max(0.0, stable_seconds):
+                return by_pid[stable_pid]
+        elif by_pid:
+            stable_pid = min(by_pid)
+            stable_since = now
+            if stable_seconds <= 0:
+                return by_pid[stable_pid]
+        else:
+            stable_pid = 0
+            stable_since = 0.0
+        if now >= deadline:
+            return None
+        time.sleep(max(0.0, min(poll_seconds, deadline - now)))
+
+
+def _wait_for_started_profiles(
+    profiles: Sequence[str],
+    wait_seconds: float = 5.0,
+    stable_seconds: float = 1.0,
+) -> set[str]:
     expected = {str(profile) for profile in profiles}
     deadline = time.monotonic() + max(0.0, wait_seconds)
-    active: set[str] = set()
+    stable_since: dict[tuple[str, int], float] = {}
+    stable_profiles: set[str] = set()
     while True:
-        active = active_or_locked_sender_profiles(expected)
-        if expected.issubset(active) or time.monotonic() >= deadline:
-            return active
-        time.sleep(0.25)
+        now = time.monotonic()
+        running = _running_sender_processes(expected, include_preview=False)
+        current = {
+            (str(proc.get("profile") or ""), int(proc.get("pid") or 0))
+            for proc in running
+            if str(proc.get("profile") or "") in expected
+            and int(proc.get("pid") or 0) > 0
+        }
+        stable_since = {
+            key: started for key, started in stable_since.items() if key in current
+        }
+        for key in current:
+            stable_since.setdefault(key, now)
+        stable_profiles = {
+            profile
+            for (profile, _pid), started in stable_since.items()
+            if now - started >= max(0.0, stable_seconds)
+        }
+        if expected.issubset(stable_profiles) or now >= deadline:
+            return stable_profiles
+        time.sleep(max(0.0, min(0.1, deadline - now)))
+
+
+def protected_sendgrid_credential_error(profile_name: str) -> str:
+    """Return a secret-free readiness error for a production SendGrid lane."""
+
+    if profile_name not in SENDGRID_PROFILE_NAMES:
+        return ""
+    try:
+        credential, _source = resolve_sendgrid_profile_credential(
+            profile_name,
+            PROFILES.get(profile_name) or {},
+            profile_env_dir=PROTECTED_PROFILE_ENV_DIR,
+        )
+    except ProtectedProfileEnvError:
+        return "Protected SendGrid credential is unavailable or unsafe."
+    del credential
+    return ""
 
 
 def stop_sender_processes(
@@ -1432,16 +1512,13 @@ def _apply_process_runtime_fallback(snapshot: ProfileSnapshot) -> None:
 
 def run_sendgrid_launcher() -> tuple[bool, str]:
     env = os.environ.copy()
+    env.pop("SENDGRID_API_KEY", None)
     profiles = [profile for profile in START_ALL_PROFILES if profile in SENDGRID_PROFILES]
     if not profiles:
         return False, "No SendGrid profiles are configured for Start All."
     active_profiles = active_or_locked_sender_profiles(profiles)
     if active_profiles:
         return False, f"Start All blocked; profiles already running or locked: {', '.join(sorted(active_profiles))}."
-    key_resolution = resolve_sendgrid_api_key(env=env, env_files=SENDGRID_ENV_FILES)
-    if not key_resolution.ok:
-        return False, key_resolution.error
-    env["SENDGRID_API_KEY"] = key_resolution.key
     python_bin = _python_runtime_bin()
     if not python_bin:
         return False, "Missing Python runtime for SendGrid preflight."
@@ -1640,7 +1717,10 @@ def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
     if proc.returncode != 0:
         output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
         return False, output or f"Unable to start {profile_name} in pane {pane_index}."
-    return True, f"Started {profile_name} in pane {pane_index}."
+    worker = wait_for_profile_worker_started(profile_name)
+    if worker is None:
+        return False, f"Startup verification failed for {profile_name}; the expected worker did not remain active."
+    return True, f"Started and verified {profile_name} in pane {pane_index}."
 
 
 def stop_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
@@ -1659,10 +1739,9 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     if not PYTHON_BIN.exists():
         return False, f"Missing Python venv at {PYTHON_BIN}"
 
-    key_resolution = resolve_sendgrid_api_key(env=os.environ, env_files=SENDGRID_ENV_FILES)
-    if not key_resolution.ok:
-        return False, key_resolution.error
-    api_key = key_resolution.key
+    credential_error = protected_sendgrid_credential_error(profile_name)
+    if credential_error:
+        return False, credential_error
 
     ok, message = ensure_sendgrid_session_layout(session)
     if not ok:
@@ -1675,7 +1754,7 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
         return False, f"{profile_name} is already running in pane {pane_index}."
 
     env = os.environ.copy()
-    env["SENDGRID_API_KEY"] = api_key
+    env.pop("SENDGRID_API_KEY", None)
     max_total_override = dashboard_send_cap_per_profile()
     hourly_cap_override = dashboard_sendgrid_hourly_target_cap()
     preflight = subprocess.run(
@@ -1703,21 +1782,9 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     if profile_name in active_or_locked_sender_profiles([profile_name]):
         return False, f"{profile_name} is already running or locked."
 
-    proc = subprocess.run(
-        ["tmux", "set-environment", "-t", session, "SENDGRID_API_KEY", api_key],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
-        return False, output or f"Unable to set SENDGRID_API_KEY for tmux session {session}."
-
     target = f"{session}:run.{pane_index}"
     command = (
         f"cd {shlex.quote(str(ROOT))} && "
-        f"export SENDGRID_API_KEY={shlex.quote(api_key)} && "
         f"{shlex.quote(str(PYTHON_BIN))} send_shard.py --profile {shlex.quote(profile_name)} "
         f"--max_total {max_total_override} --max_messages_1h {hourly_cap_override}"
     )
@@ -1738,7 +1805,10 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
     if proc.returncode != 0:
         output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
         return False, output or f"Unable to start {profile_name} in pane {pane_index}."
-    return True, f"Started {profile_name} in pane {pane_index}."
+    worker = wait_for_profile_worker_started(profile_name)
+    if worker is None:
+        return False, f"Startup verification failed for {profile_name}; the expected worker did not remain active."
+    return True, f"Started and verified {profile_name} in pane {pane_index}."
 
 
 def archive_reset_sender_logs(session: str = "sendgrid") -> tuple[bool, str]:

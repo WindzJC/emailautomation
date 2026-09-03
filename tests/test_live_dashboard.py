@@ -8925,6 +8925,86 @@ class LiveDashboardTests(unittest.TestCase):
         production_report.assert_not_called()
         lead_state.assert_not_called()
 
+    def test_start_preconditions_require_protected_sendgrid_credential(self) -> None:
+        profile = "sendgrid_alison"
+        with patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value={"safe": True, "unsafe_reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_profile_provider_block_reason_from_snapshot",
+            return_value="",
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "protected_sendgrid_credential_error",
+            return_value="Protected SendGrid credential is unavailable or unsafe.",
+        ):
+            report = live_dashboard._build_start_preconditions_report(
+                profile_name=profile,
+                snapshot={"profiles": []},
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertIn(
+            "sendgrid_alison: Protected SendGrid credential is unavailable or unsafe.",
+            report["blocked_reasons"],
+        )
+
+    def test_start_preconditions_accept_resolvable_sendgrid_credential(self) -> None:
+        profile = "sendgrid_alison"
+        with patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value={"safe": True, "unsafe_reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "_profile_provider_block_reason_from_snapshot",
+            return_value="",
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ), patch.object(
+            live_dashboard,
+            "protected_sendgrid_credential_error",
+            return_value="",
+        ):
+            report = live_dashboard._build_start_preconditions_report(
+                profile_name=profile,
+                snapshot={"profiles": []},
+            )
+
+        self.assertTrue(report["ok"])
+
 
     def test_completed_check_with_running_auto_preview_is_operationally_active(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:

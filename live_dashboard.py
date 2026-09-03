@@ -91,6 +91,7 @@ from dashboard_core import (
     message_preview_path_for_profile,
     private_jc_authoritative_blocked_emails,
     private_jc_removal_accounting_reason,
+    protected_sendgrid_credential_error,
     profile_expected_pitch_mode,
     save_dashboard_send_cap_per_profile,
 )
@@ -5539,6 +5540,9 @@ def _build_start_preconditions_report(
     for profile in profiles:
         readiness = _profile_readiness_from_snapshot(request_snapshot, profile)
         readiness_by_profile[profile] = readiness
+        credential_error = protected_sendgrid_credential_error(profile)
+        if credential_error:
+            blocked_reasons.append(f"{profile}: {credential_error}")
         provider_block = _profile_provider_block_reason_from_snapshot(request_snapshot, profile)
         if provider_block:
             blocked_reasons.append(provider_block)

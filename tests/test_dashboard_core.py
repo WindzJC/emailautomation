@@ -15,7 +15,6 @@ import provider_pacing
 import settings
 import sendgrid_hygiene
 from tools import rebuild_recipient_queues
-from sendgrid_launch_auth import SendGridKeyResolution
 
 
 class DashboardCoreTests(unittest.TestCase):
@@ -2026,11 +2025,10 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_RUN_SETTINGS_PATH=settings_path,
                 ensure_sendgrid_session_layout=lambda session="sendgrid": (True, "ok"),
                 tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "bash", "dead": "0"}},
-                resolve_sendgrid_api_key=lambda **kwargs: SimpleNamespace(
-                    ok=True,
-                    key="SG.test-key",
-                    error="",
-                ),
+                wait_for_profile_worker_started=lambda profile_name: {
+                    "pid": 123,
+                    "profile": profile_name,
+                },
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, _ = dashboard_core.start_sendgrid_profile("sendgrid_alpha", 0)
 
@@ -2070,13 +2068,6 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=["sendgrid_annette", "sendgrid_jordan", "private_jc"],
                 START_ALL_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(
                 dashboard_core,
                 "_wait_for_started_profiles",
@@ -2105,6 +2096,100 @@ class DashboardCoreTests(unittest.TestCase):
             return_value={"locked": True, "pid": 1234},
         ):
             self.assertEqual({"sendgrid_annette"}, dashboard_core.active_or_locked_sender_profiles(["sendgrid_annette"]))
+
+    def test_running_sender_processes_ignores_shell_text_and_matches_exact_profile(self) -> None:
+        process_table = "\n".join(
+            [
+                "101 bash bash -lc python send_shard.py --profile sendgrid_alison",
+                "102 python python send_shard.py --profile sendgrid_jordan",
+                "103 python python send_shard.py --profile sendgrid_alison",
+            ]
+        )
+        with patch.object(
+            dashboard_core.subprocess,
+            "check_output",
+            return_value=process_table,
+        ):
+            processes = dashboard_core._running_sender_processes(
+                ["sendgrid_alison"],
+                include_preview=False,
+            )
+
+        self.assertEqual([103], [process["pid"] for process in processes])
+
+    def test_wait_for_profile_worker_requires_continuous_exact_process(self) -> None:
+        worker = {
+            "pid": 4321,
+            "profile": "sendgrid_alison",
+            "command": "python send_shard.py --profile sendgrid_alison",
+        }
+        with patch.object(
+            dashboard_core,
+            "_running_sender_processes",
+            side_effect=[[worker], [worker], [worker]],
+        ), patch.object(
+            dashboard_core.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.5, 1.1],
+        ), patch.object(dashboard_core.time, "sleep"):
+            result = dashboard_core.wait_for_profile_worker_started(
+                "sendgrid_alison",
+                timeout_seconds=2.0,
+                stable_seconds=1.0,
+            )
+
+        self.assertEqual(worker, result)
+
+    def test_wait_for_profile_worker_rejects_disappearing_process_and_stale_lock(self) -> None:
+        worker = {
+            "pid": 4321,
+            "profile": "sendgrid_alison",
+            "command": "python send_shard.py --profile sendgrid_alison",
+        }
+        with patch.object(
+            dashboard_core,
+            "_running_sender_processes",
+            side_effect=[[worker], [], []],
+        ), patch.object(
+            dashboard_core.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.5, 1.1],
+        ), patch.object(dashboard_core.time, "sleep"), patch.object(
+            dashboard_core,
+            "profile_runtime_lock_status",
+            return_value={"locked": True, "pid": 4321},
+        ) as lock_status:
+            result = dashboard_core.wait_for_profile_worker_started(
+                "sendgrid_alison",
+                timeout_seconds=1.0,
+                stable_seconds=1.0,
+            )
+
+        self.assertIsNone(result)
+        lock_status.assert_not_called()
+
+    def test_wait_for_profile_worker_rejects_wrong_profile(self) -> None:
+        wrong = {
+            "pid": 4321,
+            "profile": "sendgrid_jordan",
+            "command": "python send_shard.py --profile sendgrid_jordan",
+        }
+        with patch.object(
+            dashboard_core,
+            "_running_sender_processes",
+            side_effect=[[wrong], [wrong]],
+        ), patch.object(
+            dashboard_core.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 1.1],
+        ), patch.object(dashboard_core.time, "sleep"):
+            result = dashboard_core.wait_for_profile_worker_started(
+                "sendgrid_alison",
+                timeout_seconds=1.0,
+                stable_seconds=1.0,
+            )
+
+        self.assertIsNone(result)
 
     def test_run_sendgrid_launcher_refuses_already_running_or_locked_profile(self) -> None:
         with patch.multiple(
@@ -2146,13 +2231,6 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=profiles + ["private_jc"],
                 START_ALL_PROFILES=profiles,
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(
                 dashboard_core,
                 "_wait_for_started_profiles",
@@ -2189,13 +2267,6 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=profiles + ["private_jc"],
                 START_ALL_PROFILES=profiles,
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(
                 dashboard_core,
                 "_wait_for_started_profiles",
@@ -2237,13 +2308,6 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=profiles + ["private_jc"],
                 START_ALL_PROFILES=profiles,
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2259,6 +2323,25 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertIn("send_shard.py --profile $profile", script)
         self.assertIn("PARTIALLY_STARTED: missing profiles", script)
         self.assertIn("TMUX_SENDGRID_DRY_RUN", script)
+        self.assertNotIn("SENDGRID_API_KEY_RESOLVED", script)
+        self.assertNotIn("export SENDGRID_API_KEY=", script)
+        self.assertNotIn('set-environment -t "$SESSION_NAME" SENDGRID_API_KEY', script)
+        self.assertNotIn("Authorization: Bearer", script)
+        self.assertIn("profile_worker_running", script)
+        self.assertIn('sender_script = 1', script)
+        self.assertIn('matching_profile = 1', script)
+        self.assertIn("startup stability window", script)
+        self.assertNotIn('pgrep -af "[s]end_shard.py --profile $profile"', script)
+
+    def test_legacy_streamlit_launcher_does_not_forward_sendgrid_key(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "streamlit_monitor.py"
+        ).read_text(encoding="utf-8")
+        function = source.split("def run_sendgrid_launcher()", 1)[1].split(
+            "\ndef stop_sendgrid_session", 1
+        )[0]
+
+        self.assertIn('env.pop("SENDGRID_API_KEY", None)', function)
 
     def test_run_sendgrid_tmux_script_does_not_normalize_or_rewrite_shards(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "run_sendgrid_tmux.sh").read_text(encoding="utf-8")
@@ -2302,13 +2385,6 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=profiles,
                 START_ALL_PROFILES=profiles,
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(
                 dashboard_core,
                 "_wait_for_started_profiles",
@@ -2338,13 +2414,6 @@ class DashboardCoreTests(unittest.TestCase):
                 SENDGRID_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
                 START_ALL_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="SG.synthetic",
-                    source_label="synthetic",
-                    masked_key="SG.s...",
-                    warning="",
-                    error="",
-                ),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run) as run_mock:
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2471,6 +2540,10 @@ class DashboardCoreTests(unittest.TestCase):
                 ensure_single_profile_session=lambda session: (True, "ready"),
                 profile_pane_index=lambda profile_name: 0,
                 tmux_pane_map=lambda session: {},
+                wait_for_profile_worker_started=lambda profile_name: {
+                    "pid": 123,
+                    "profile": profile_name,
+                },
             ), patch.object(
                 dashboard_core.subprocess,
                 "run",
@@ -2490,6 +2563,53 @@ class DashboardCoreTests(unittest.TestCase):
         )
         self.assertNotIn(fake_secret, message)
 
+    def test_start_private_profile_send_keys_success_without_worker_is_failure(self) -> None:
+        profile = {
+            "provider": "private",
+            "from_email": "jc@astraproductions.co",
+            "password_env": "PRIVATE_JC_PASSWORD",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            python_bin = Path(tmpdir) / "python"
+            python_bin.write_text("", encoding="utf-8")
+            with patch.multiple(
+                dashboard_core,
+                ROOT=Path(tmpdir),
+                PROFILES={"private_jc": profile},
+                DASHBOARD_PROFILES=["private_jc"],
+                active_or_locked_sender_profiles=lambda profile_names=None: set(),
+                provider_pacing_status=lambda *args, **kwargs: {
+                    "cooldown_remaining_seconds": 0
+                },
+                load_dashboard_recovery_timer=lambda: {},
+                resolve_canonical_jc_credential=Mock(
+                    return_value=("synthetic-not-transported", "private_jc.env")
+                ),
+                _python_runtime_bin=lambda: python_bin,
+                ensure_single_profile_session=lambda session: (True, "ready"),
+                profile_pane_index=lambda profile_name: 0,
+                tmux_pane_map=lambda session: {"0": {"cmd": "bash"}},
+                wait_for_profile_worker_started=Mock(return_value=None),
+            ), patch.object(
+                dashboard_core.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_mock:
+                ok, message = dashboard_core.start_private_profile(
+                    "private_jc",
+                    session="private_jc",
+                )
+
+        self.assertFalse(ok)
+        self.assertIn("Startup verification failed", message)
+        launches = [
+            call
+            for call in run_mock.call_args_list
+            if call.args[0][:3] == ["tmux", "send-keys", "-t"]
+            and "--profile private_jc" in " ".join(call.args[0])
+        ]
+        self.assertEqual(1, len(launches))
+
     def test_start_private_profile_refuses_runtime_locked_profile(self) -> None:
         with patch.object(dashboard_core, "DASHBOARD_PROFILES", ["private_jc"]), patch.object(
             dashboard_core,
@@ -2500,7 +2620,12 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("already running or locked", message)
-        run_mock.assert_not_called()
+        self.assertFalse(
+            any(
+                call.args[0][:3] == ["tmux", "send-keys", "-t"]
+                for call in run_mock.call_args_list
+            )
+        )
 
     def test_start_private_profile_blocks_while_provider_cooldown_active(self) -> None:
         profiles = {
@@ -2549,12 +2674,13 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("provider cooldown", message.lower())
 
-    def test_start_sendgrid_profile_rejects_placeholder_key_resolution(self) -> None:
+    def test_start_sendgrid_profile_refuses_protected_credential_failure(self) -> None:
+        fake_secret = "SG.distinctive.refused-secret"
         profiles = {
-            "sendgrid_alpha": {
+            "sendgrid_alison": {
                 "provider": "sendgrid",
-                "csv": "recipients_alpha.csv",
-                "log": "sendgrid_alpha_log.csv",
+                "csv": "recipients_sendgrid_4.csv",
+                "log": "sendgrid_alison_log.csv",
                 "from_email": "alpha@example.com",
                 "always_send": "probe@example.com",
                 "max_total": 100,
@@ -2580,22 +2706,142 @@ class DashboardCoreTests(unittest.TestCase):
                 WEBHOOK_DEDUPE_PATH=base / dashboard_core.WEBHOOK_DEDUPE_DB,
                 LOG_RESET_BACKUP_ROOT=base / "backups",
                 PROFILES=profiles,
-                SENDGRID_PROFILES=["sendgrid_alpha"],
-                DASHBOARD_PROFILES=["sendgrid_alpha"],
-                START_ALL_PROFILES=["sendgrid_alpha"],
+                SENDGRID_PROFILES=["sendgrid_alison"],
+                DASHBOARD_PROFILES=["sendgrid_alison"],
+                START_ALL_PROFILES=["sendgrid_alison"],
                 PYTHON_BIN=python_bin,
-                resolve_sendgrid_api_key=lambda **kwargs: SendGridKeyResolution(
-                    key="",
-                    source_label="inherited environment",
-                    masked_key="(invalid)",
-                    warning="",
-                    error="SENDGRID_API_KEY from the inherited environment is a placeholder or blank value.",
+                resolve_sendgrid_profile_credential=Mock(
+                    side_effect=dashboard_core.ProtectedProfileEnvError(
+                        "credential_unavailable",
+                        f"synthetic failure {fake_secret}",
+                    )
                 ),
-            ):
-                ok, message = dashboard_core.start_sendgrid_profile("sendgrid_alpha", 0)
+            ), patch.object(dashboard_core.subprocess, "run") as run_mock:
+                ok, message = dashboard_core.start_sendgrid_profile("sendgrid_alison", 0)
 
         self.assertFalse(ok)
-        self.assertIn("placeholder or blank value", message)
+        self.assertEqual("Protected SendGrid credential is unavailable or unsafe.", message)
+        self.assertNotIn(fake_secret, message)
+        self.assertFalse(
+            any(
+                call.args[0][:3] == ["tmux", "send-keys", "-t"]
+                for call in run_mock.call_args_list
+            )
+        )
+
+    def test_start_sendgrid_profile_is_secret_free_and_requires_verified_worker(self) -> None:
+        fake_secret = "SG.distinctive.dashboard-secret"
+        profiles = {
+            "sendgrid_alison": {
+                "provider": "sendgrid",
+                "csv": "recipients_sendgrid_4.csv",
+                "log": "sendgrid_alison_log.csv",
+                "from_email": "alpha@example.test",
+                "max_total": 100,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            python_bin = base / "python"
+            python_bin.write_text("", encoding="utf-8")
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def fake_run(cmd, **kwargs):
+                calls.append((list(cmd), dict(kwargs)))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.dict(os.environ, {}, clear=True), patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                PROFILES=profiles,
+                SENDGRID_PROFILES=["sendgrid_alison"],
+                DASHBOARD_PROFILES=["sendgrid_alison"],
+                PYTHON_BIN=python_bin,
+                active_or_locked_sender_profiles=lambda profile_names=None: set(),
+                ensure_sendgrid_session_layout=lambda session="sendgrid": (True, "ready"),
+                tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "bash"}},
+                resolve_sendgrid_profile_credential=Mock(
+                    return_value=(fake_secret, "sendgrid_alison.env")
+                ),
+                wait_for_profile_worker_started=Mock(
+                    return_value={"pid": 123, "profile": "sendgrid_alison"}
+                ),
+                dashboard_send_cap_per_profile=lambda: 5000,
+                dashboard_sendgrid_hourly_target_cap=lambda: 600,
+            ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
+                ok, message = dashboard_core.start_sendgrid_profile(
+                    "sendgrid_alison",
+                    0,
+                )
+
+        self.assertTrue(ok, message)
+        rendered = repr(calls)
+        self.assertNotIn(fake_secret, rendered)
+        self.assertNotIn("export SENDGRID_API_KEY", rendered)
+        self.assertFalse(
+            any(
+                command[:2] == ["tmux", "set-environment"]
+                and "SENDGRID_API_KEY" in command
+                for command, _kwargs in calls
+            )
+        )
+        preflight_env = next(
+            kwargs["env"]
+            for command, kwargs in calls
+            if "--preflight" in command
+        )
+        self.assertNotIn("SENDGRID_API_KEY", preflight_env)
+        launch = next(
+            command
+            for command, _kwargs in calls
+            if command[:3] == ["tmux", "send-keys", "-t"]
+            and "--profile sendgrid_alison" in " ".join(command)
+        )
+        launch_text = " ".join(launch)
+        self.assertIn("--max_total 5000", launch_text)
+        self.assertIn("--max_messages_1h 600", launch_text)
+
+    def test_start_sendgrid_profile_send_keys_success_without_worker_fails_once(self) -> None:
+        profiles = {
+            "sendgrid_alison": {
+                "provider": "sendgrid",
+                "csv": "recipients_sendgrid_4.csv",
+                "log": "sendgrid_alison_log.csv",
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            python_bin = Path(tmpdir) / "python"
+            python_bin.write_text("", encoding="utf-8")
+            with patch.multiple(
+                dashboard_core,
+                ROOT=Path(tmpdir),
+                PROFILES=profiles,
+                SENDGRID_PROFILES=["sendgrid_alison"],
+                DASHBOARD_PROFILES=["sendgrid_alison"],
+                PYTHON_BIN=python_bin,
+                active_or_locked_sender_profiles=lambda profile_names=None: set(),
+                ensure_sendgrid_session_layout=lambda session="sendgrid": (True, "ready"),
+                tmux_pane_map=lambda session="sendgrid": {"0": {"cmd": "bash"}},
+                resolve_sendgrid_profile_credential=Mock(
+                    return_value=("SG.fake.not-transported", "sendgrid_alison.env")
+                ),
+                wait_for_profile_worker_started=Mock(return_value=None),
+            ), patch.object(
+                dashboard_core.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_mock:
+                ok, message = dashboard_core.start_sendgrid_profile("sendgrid_alison", 0)
+
+        self.assertFalse(ok)
+        self.assertIn("Startup verification failed", message)
+        launches = [
+            call
+            for call in run_mock.call_args_list
+            if call.args[0][:3] == ["tmux", "send-keys", "-t"]
+            and "--profile sendgrid_alison" in " ".join(call.args[0])
+        ]
+        self.assertEqual(1, len(launches))
 
     def test_build_run_status_items_ignores_idle_profiles_during_partial_run(self) -> None:
         base_fields = {

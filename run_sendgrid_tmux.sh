@@ -33,62 +33,9 @@ if [[ ! -x "$PY" ]]; then
   fi
 fi
 
-eval "$("$PY" - <<'PY'
-import os
-import shlex
-
-import settings
-from sendgrid_launch_auth import resolve_sendgrid_api_key
-
-resolution = resolve_sendgrid_api_key(env=os.environ, env_files=settings.ENV_FILES)
-if not resolution.ok:
-    print("SENDGRID_KEY_OK=0")
-    print(f"SENDGRID_KEY_ERROR={shlex.quote(resolution.error)}")
-else:
-    print("SENDGRID_KEY_OK=1")
-    print(f"SENDGRID_API_KEY_RESOLVED={shlex.quote(resolution.key)}")
-    print(f"SENDGRID_API_KEY_SOURCE={shlex.quote(resolution.source_label)}")
-    print(f"SENDGRID_API_KEY_MASKED={shlex.quote(resolution.masked_key)}")
-    print(f"SENDGRID_API_KEY_WARNING={shlex.quote(resolution.warning)}")
-PY
-)"
-
-if [[ "${SENDGRID_KEY_OK:-0}" != "1" ]]; then
-  echo "SendGrid startup aborted: ${SENDGRID_KEY_ERROR:-SENDGRID_API_KEY resolution failed.}"
-  echo "Expected SENDGRID_API_KEY in the canonical env files (.env.local, .env) or a valid inherited environment value."
-  exit 1
-fi
-
-SENDGRID_API_KEY="$SENDGRID_API_KEY_RESOLVED"
-export SENDGRID_API_KEY
-
-echo "SendGrid key source: $SENDGRID_API_KEY_SOURCE ($SENDGRID_API_KEY_MASKED)"
-if [[ -n "${SENDGRID_API_KEY_WARNING:-}" ]]; then
-  echo "WARNING: $SENDGRID_API_KEY_WARNING"
-fi
-
-echo "Checking SendGrid credits..."
-CREDITS_JSON="$(curl -fsS -H "Authorization: Bearer $SENDGRID_API_KEY" https://api.sendgrid.com/v3/user/credits)" || {
-  echo "SendGrid credit check failed. Verify the API key/account."
-  exit 1
-}
-
-if ! python3 - "$CREDITS_JSON" <<'PY'
-import json
-import sys
-
-raw = sys.argv[1]
-data = json.loads(raw)
-remain = data.get("remain")
-total = data.get("total")
-if isinstance(remain, int) and remain <= 0:
-    print(f"SendGrid credits exhausted: remain={remain} total={total}")
-    raise SystemExit(1)
-print(f"SendGrid credits OK: remain={remain} total={total}")
-PY
-then
-  exit 1
-fi
+# Production workers resolve their own exact protected profile credential.
+# Do not carry a dashboard/shell key into tmux or worker command text.
+unset SENDGRID_API_KEY
 
 EXTRA_ARGS=()
 if [[ -n "$MAX_TOTAL_OVERRIDE" ]]; then
@@ -146,7 +93,6 @@ tmux split-window -v -t "$SESSION_NAME":run.1
 tmux split-window -v -t "$SESSION_NAME":run.2
 tmux select-layout -t "$SESSION_NAME":run tiled
 
-tmux set-environment -t "$SESSION_NAME" SENDGRID_API_KEY "$SENDGRID_API_KEY"
 tmux set-environment -t "$SESSION_NAME" SENDGRID_SKIP_PRUNE_ON_STARTUP "$STARTUP_PRUNE_GUARD"
 
 mapfile -t PANE_IDS < <(tmux list-panes -t "$SESSION_NAME:run" -F '#{pane_index} #{pane_id}' | sort -n | awk '{print $2}')
@@ -159,9 +105,8 @@ fi
 for idx in "${!PROFILES[@]}"; do
   profile="${PROFILES[$idx]}"
   pane="${PANE_IDS[$idx]}"
-  escaped_key="$(printf '%q' "$SENDGRID_API_KEY")"
   escaped_guard="$(printf '%q' "$STARTUP_PRUNE_GUARD")"
-  launch_command="cd \"$ROOT\"; export SENDGRID_API_KEY=$escaped_key; export SENDGRID_SKIP_PRUNE_ON_STARTUP=$escaped_guard; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
+  launch_command="cd \"$ROOT\"; export SENDGRID_SKIP_PRUNE_ON_STARTUP=$escaped_guard; $PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
   echo "Launching $profile in pane $pane"
   echo "Launch command: $PY send_shard.py --profile $profile$EXTRA_ARGS_STR"
   tmux send-keys -t "$pane" "$launch_command" C-m
@@ -169,22 +114,66 @@ done
 
 missing_profiles=()
 deadline=$((SECONDS + 8))
+stable_since=-1
+startup_verified=0
+
+profile_worker_running() {
+  local profile="$1"
+  ps -eo comm=,args= | awk -v expected_profile="$profile" '
+    $1 ~ /^(python([0-9.]*)?|pypy([0-9.]*)?)$/ {
+      sender_script = 0
+      matching_profile = 0
+      for (index = 2; index <= NF; index += 1) {
+        if ($index == "send_shard.py" || $index ~ /\/send_shard[.]py$/) {
+          sender_script = 1
+        }
+        if ($index == "--profile" && $(index + 1) == expected_profile) {
+          matching_profile = 1
+        }
+        if ($index == "--profile=" expected_profile) {
+          matching_profile = 1
+        }
+      }
+      if (sender_script && matching_profile) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
 while true; do
   missing_profiles=()
   for profile in "${PROFILES[@]}"; do
-    if ! pgrep -af "[s]end_shard.py --profile $profile" >/dev/null; then
+    if ! profile_worker_running "$profile"; then
       missing_profiles+=("$profile")
     fi
   done
-  if [[ "${#missing_profiles[@]}" -eq 0 || "$SECONDS" -ge "$deadline" ]]; then
+  if [[ "${#missing_profiles[@]}" -eq 0 ]]; then
+    if [[ "$stable_since" -lt 0 ]]; then
+      stable_since=$SECONDS
+    elif [[ $((SECONDS - stable_since)) -ge 1 ]]; then
+      startup_verified=1
+      break
+    fi
+  else
+    stable_since=-1
+  fi
+  if [[ "$SECONDS" -ge "$deadline" ]]; then
     break
   fi
-  sleep 1
+  sleep 0.2
 done
-if [[ "${#missing_profiles[@]}" -gt 0 ]]; then
-  echo "PARTIALLY_STARTED: missing profiles: ${missing_profiles[*]}"
+if [[ "$startup_verified" != "1" ]]; then
+  if [[ "${#missing_profiles[@]}" -gt 0 ]]; then
+    echo "PARTIALLY_STARTED: missing profiles: ${missing_profiles[*]}"
+  else
+    echo "PARTIALLY_STARTED: workers did not survive the startup stability window"
+  fi
   echo "Current send_shard.py processes:"
-  pgrep -af "[s]end_shard.py --profile" || true
+  ps -eo pid=,comm=,args= | awk '
+    $2 ~ /^(python([0-9.]*)?|pypy([0-9.]*)?)$/ && /send_shard[.]py/ && /--profile/ { print }
+  ' || true
   echo "Current tmux panes:"
   tmux list-panes -t "$SESSION_NAME:run" -F '#{pane_index} #{pane_id} #{pane_current_command}' || true
   exit 2

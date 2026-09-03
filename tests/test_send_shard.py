@@ -1851,6 +1851,8 @@ class SendShardTests(unittest.TestCase):
         max_total: int = 0,
         profile_name: str = "sendgrid_annette",
         expect_keyboard_interrupt: bool = False,
+        preflight: bool = False,
+        protected_key: str | None = "SG.synthetic.protected-key",
     ) -> tuple[str, object]:
         (
             base,
@@ -1867,6 +1869,13 @@ class SendShardTests(unittest.TestCase):
         events = state / "sendgrid_events.jsonl"
         events.touch(exist_ok=True)
         ledger = state / "lead_ledger.sqlite3"
+        protected_profiles = base / "protected-profiles"
+        protected_profiles.mkdir(exist_ok=True)
+        if protected_key is not None:
+            (protected_profiles / f"{profile_name}.env").write_text(
+                f"SENDGRID_API_KEY={protected_key}\n",
+                encoding="utf-8",
+            )
         profile.update(
             {
                 "repeat": False,
@@ -1923,6 +1932,9 @@ class SendShardTests(unittest.TestCase):
             )
             stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
             stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
+            stack.enter_context(
+                patch.object(send_shard, "PROTECTED_PROFILE_ENV_DIR", protected_profiles)
+            )
             send_mock = stack.enter_context(
                 patch.object(
                     send_shard,
@@ -1941,16 +1953,23 @@ class SendShardTests(unittest.TestCase):
                     clear=False,
                 )
             )
+            synthetic_environment = (
+                {}
+                if profile_name in send_shard.SENDGRID_PROFILE_NAMES
+                else {"SENDGRID_API_KEY": "SG.synthetic-key"}
+            )
             stack.enter_context(
                 patch.dict(
                     send_shard.os.environ,
-                    {"SENDGRID_API_KEY": "SG.synthetic-key"},
-                    clear=False,
+                    synthetic_environment,
+                    clear=True,
                 )
             )
             argv = ["send_shard.py", "--profile", profile_name]
             if max_total:
                 argv.extend(["--max_total", str(max_total)])
+            if preflight:
+                argv.append("--preflight")
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(redirect_stdout(stdout))
             if expect_keyboard_interrupt:
@@ -1959,6 +1978,71 @@ class SendShardTests(unittest.TestCase):
             else:
                 send_shard.main()
         return stdout.getvalue(), send_mock
+
+    def test_production_sendgrid_worker_self_resolves_exact_protected_key(self) -> None:
+        fake_secret = "SG.distinctive.worker-secret"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                protected_key=fake_secret,
+            )
+
+        self.assertGreater(send_mock.call_count, 0, output)
+        self.assertTrue(
+            all(call.args[0] == fake_secret for call in send_mock.call_args_list)
+        )
+        self.assertNotIn(fake_secret, output)
+        self.assertNotIn("SENDGRID_API_KEY", send_shard.os.environ)
+
+    def test_production_sendgrid_preflight_validates_protected_key_without_provider_call(self) -> None:
+        fake_secret = "SG.distinctive.preflight-secret"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                preflight=True,
+                protected_key=fake_secret,
+            )
+
+        self.assertIn("PREFLIGHT: ok (no sending).", output)
+        self.assertNotIn(fake_secret, output)
+        send_mock.assert_not_called()
+
+    def test_production_sendgrid_missing_protected_key_fails_secret_free_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                preflight=True,
+                protected_key=None,
+            )
+
+        self.assertIn("Protected SendGrid credential is unavailable or unsafe", output)
+        self.assertNotIn("SG.distinctive", output)
+        send_mock.assert_not_called()
+
+    def test_production_sendgrid_unsafe_protected_key_fails_before_provider(self) -> None:
+        fake_secret = "SG.distinctive.unsafe-secret"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            protected_profiles = fixture[0] / "protected-profiles"
+            protected_profiles.mkdir()
+            target = fixture[0] / "unsafe-sendgrid.env"
+            target.write_text(
+                f"SENDGRID_API_KEY={fake_secret}\n",
+                encoding="utf-8",
+            )
+            (protected_profiles / "sendgrid_annette.env").symlink_to(target)
+            output, send_mock = self._run_synthetic_sendgrid(
+                fixture,
+                preflight=True,
+                protected_key=None,
+            )
+
+        self.assertIn("Protected SendGrid credential is unavailable or unsafe", output)
+        self.assertNotIn(fake_secret, output)
+        send_mock.assert_not_called()
 
     def _run_synthetic_private(self, fixture, smtp_client) -> str:
         base, shards, logs, state, _old_csv, unsub, suppress, sg_suppress, counters, profile = fixture

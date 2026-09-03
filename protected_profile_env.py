@@ -12,6 +12,16 @@ DEFAULT_PROFILE_ENV_DIR = Path("/etc/astra-emailautomation/profiles")
 CANONICAL_JC_PROFILE = "private_jc"
 JC_PROFILE_NAMES = frozenset({"private_jc", "private_jc_warm"})
 JC_PASSWORD_ENV = "PRIVATE_JC_PASSWORD"
+SENDGRID_API_KEY_ENV = "SENDGRID_API_KEY"
+SENDGRID_PROFILE_NAMES = frozenset(
+    {
+        "sendgrid_alison",
+        "sendgrid_annette",
+        "sendgrid_fiorela",
+        "sendgrid_jodi",
+        "sendgrid_jordan",
+    }
+)
 _PROFILE_NAME_RE = re.compile(r"[a-z0-9_]+")
 
 
@@ -237,4 +247,33 @@ def resolve_canonical_jc_credential(
         JC_PASSWORD_ENV,
         profile_env_dir=profile_env_dir,
         environment=environment,
+    )
+
+
+def resolve_sendgrid_profile_credential(
+    profile: str,
+    profile_config: Mapping[str, object],
+    *,
+    profile_env_dir: Path = DEFAULT_PROFILE_ENV_DIR,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Resolve one production SendGrid lane from its exact protected file."""
+
+    profile_name = str(profile or "").strip()
+    provider = str(profile_config.get("provider") or "").strip().lower()
+    if profile_name not in SENDGRID_PROFILE_NAMES or provider != "sendgrid":
+        raise ProtectedProfileEnvError(
+            "credential_identity_mismatch",
+            "Protected SendGrid credential mapping is invalid.",
+        )
+
+    # Production SendGrid lanes are intentionally file-authoritative. Do not
+    # let a dashboard, shell, or tmux environment satisfy a missing profile
+    # credential.
+    return resolve_protected_profile_credential(
+        profile_name,
+        SENDGRID_API_KEY_ENV,
+        SENDGRID_API_KEY_ENV,
+        profile_env_dir=profile_env_dir,
+        environment={},
     )

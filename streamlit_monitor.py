@@ -174,6 +174,7 @@ def tmux_capture_tail(pane_index: int, session: str = "sendgrid", lines: int = 1
 
 def run_sendgrid_launcher() -> tuple[bool, str]:
     env = os.environ.copy()
+    env.pop("SENDGRID_API_KEY", None)
     env["TMUX_SENDGRID_ATTACH"] = "0"
     try:
         proc = subprocess.run(
