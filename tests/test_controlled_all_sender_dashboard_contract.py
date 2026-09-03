@@ -88,3 +88,88 @@ def test_all_sender_ui_never_starts_production_workers():
     assert "/api/start/" not in segment
     assert "/api/start-ready" not in segment
     assert "send_shard.py" not in segment
+
+
+def test_jc_only_control_is_present_and_isolated():
+    index = INDEX.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    backend = BACKEND.read_text(encoding="utf-8")
+
+    assert 'id="controlled-send-test-jc-title"' in index
+    assert "JC Controlled Send Test" in index
+    assert 'id="controlled-send-test-jc-btn"' in index
+    assert 'id="controlled-send-test-jc-status"' in index
+    assert (
+        'id="controlled-send-test-jc-recipient"'
+        in index
+    )
+
+    assert "jc@astraproductions.co" in index
+    assert (
+        "astraproductionsbyjc+allsendersv1@gmail.com"
+        in index
+    )
+    assert "PrivateEmail SMTP" in index
+    assert "LOGO ASTRA bg.png" in index
+
+    assert '"/api/controlled-test/jc"' in app
+    assert "runControlledJcSenderTest" in app
+    assert "controlledSendTestJcStatus" in app
+
+    jc_start = index.index(
+        'id="controlled-send-test-jc-title"'
+    )
+    all_start = index.index(
+        'id="controlled-send-test-all-title"'
+    )
+
+    jc_segment = index[jc_start:all_start]
+
+    assert 'id="controlled-send-test-jc-btn"' in jc_segment
+    assert 'id="controlled-send-test-all-btn"' not in jc_segment
+    assert 'id="controlled-send-test-profile"' not in jc_segment
+
+    function_start = app.index(
+        "async function runControlledJcSenderTest()"
+    )
+    function_end = app.index(
+        "function renderControlledAllSendTestStatus(",
+        function_start,
+    )
+
+    jc_function = app[function_start:function_end]
+
+    assert '"/api/controlled-test/jc"' in jc_function
+    assert "/api/controlled-test/all" not in jc_function
+    assert "/api/sendgrid/controlled-test" not in jc_function
+    assert "/api/start/" not in jc_function
+    assert "/api/start-ready" not in jc_function
+    assert "exactly ONE real validation email" in jc_function
+
+    assert (
+        '@app.post("/api/controlled-test/jc")'
+        in backend
+    )
+    assert (
+        'execute_controlled_sender_test,\n'
+        '                "private_jc",'
+        in backend
+    )
+
+
+def test_jc_only_control_never_starts_production_workers():
+    app = APP.read_text(encoding="utf-8")
+
+    start = app.index(
+        "async function runControlledJcSenderTest()"
+    )
+    end = app.index(
+        "function renderControlledAllSendTestStatus(",
+        start,
+    )
+
+    segment = app[start:end]
+
+    assert "/api/start/" not in segment
+    assert "/api/start-ready" not in segment
+    assert "send_shard.py" not in segment

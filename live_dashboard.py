@@ -62,6 +62,7 @@ from controlled_all_sender_test import (
     ControlledAllSenderTestRefused,
     controlled_all_sender_public_config,
     execute_controlled_all_sender_test,
+    execute_controlled_sender_test,
 )
 from controlled_sendgrid_test import (
     ControlledSendGridTestRefused,
@@ -6510,6 +6511,49 @@ async def controlled_sendgrid_test_endpoint(payload: ControlledSendGridTestPaylo
         )
     return JSONResponse({"ok": True, "message": "Controlled SendGrid test accepted by the provider.", "result": result})
 
+
+
+@app.post("/api/controlled-test/jc")
+async def controlled_jc_sender_test_endpoint() -> JSONResponse:
+    live_action_block = _manual_live_action_block_response(
+        "private_jc"
+    )
+    if live_action_block is not None:
+        return live_action_block
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        result = await loop.run_in_executor(
+            _SENDER_START_EXECUTOR,
+            partial(
+                execute_controlled_sender_test,
+                "private_jc",
+                conflict_check=_controlled_sendgrid_test_conflicts,
+            ),
+        )
+    except ControlledAllSenderTestRefused as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": exc.code,
+                "message": str(exc),
+                "sender_profile": "private_jc",
+                "auto_started": False,
+            },
+            status_code=409,
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": (
+                "JC controlled PrivateEmail test accepted by the provider."
+            ),
+            "result": result,
+        }
+    )
 
 
 @app.get("/api/controlled-test/all")

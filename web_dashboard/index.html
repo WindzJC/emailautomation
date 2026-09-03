@@ -521,6 +521,51 @@
               ></div>
             </section>
 
+            <section class="panel panel-shell controlled-send-test-card" aria-labelledby="controlled-send-test-jc-title">
+              <div class="controlled-send-test-copy">
+                <p class="eyebrow">Manual validation · JC only</p>
+                <h2 id="controlled-send-test-jc-title">JC Controlled Send Test</h2>
+                <p>
+                  Sends exactly one isolated validation email from JC through
+                  PrivateEmail SMTP. Does not use or modify production recipient queues.
+                </p>
+              </div>
+
+              <div class="controlled-send-test-grid">
+                <div class="controlled-send-test-fixed">
+                  <span>Recipient</span>
+                  <strong id="controlled-send-test-jc-recipient">astraproductionsbyjc+allsendersv1@gmail.com</strong>
+                </div>
+
+                <div class="controlled-send-test-fixed">
+                  <span>From / Reply-To</span>
+                  <strong>jc@astraproductions.co</strong>
+                </div>
+
+                <div class="controlled-send-test-fixed">
+                  <span>Transport</span>
+                  <strong>PrivateEmail SMTP</strong>
+                </div>
+
+                <div class="controlled-send-test-fixed">
+                  <span>Signature</span>
+                  <strong>LOGO ASTRA bg.png</strong>
+                </div>
+
+                <button
+                  id="controlled-send-test-jc-btn"
+                  class="btn btn-primary"
+                  type="button"
+                >Send JC Controlled Test</button>
+              </div>
+
+              <div
+                id="controlled-send-test-jc-status"
+                class="controlled-send-test-status"
+                aria-live="polite"
+              ></div>
+            </section>
+
             <section class="panel panel-shell controlled-send-test-card" aria-labelledby="controlled-send-test-all-title">
               <div class="controlled-send-test-copy">
                 <p class="eyebrow">All 6 sender test</p>

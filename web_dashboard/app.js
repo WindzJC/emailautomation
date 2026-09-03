@@ -40,6 +40,8 @@ const els = {
   controlledSendTestProfile: document.getElementById("controlled-send-test-profile"),
   controlledSendTestFrom: document.getElementById("controlled-send-test-from"),
   controlledSendTestBtn: document.getElementById("controlled-send-test-btn"),
+  controlledSendTestJcBtn: document.getElementById("controlled-send-test-jc-btn"),
+  controlledSendTestJcStatus: document.getElementById("controlled-send-test-jc-status"),
   controlledSendTestAllBtn: document.getElementById("controlled-send-test-all-btn"),
   controlledSendTestAllStatus: document.getElementById("controlled-send-test-all-status"),
   controlledSendTestStatus: document.getElementById("controlled-send-test-status"),
@@ -10004,6 +10006,12 @@ async function runControlledSendTest() {
   controlledSendTestPending = true;
   els.controlledSendTestBtn.disabled = true;
   els.controlledSendTestProfile.disabled = true;
+  if (els.controlledSendTestJcBtn) {
+    els.controlledSendTestJcBtn.disabled = true;
+  }
+  if (els.controlledSendTestAllBtn) {
+    els.controlledSendTestAllBtn.disabled = true;
+  }
   els.controlledSendTestBtn.textContent = "Sending...";
   if (els.controlledSendTestStatus) {
     els.controlledSendTestStatus.className = "controlled-send-test-status status-pending";
@@ -10026,10 +10034,151 @@ async function runControlledSendTest() {
     controlledSendTestPending = false;
     els.controlledSendTestBtn.disabled = false;
     els.controlledSendTestProfile.disabled = false;
+    if (els.controlledSendTestJcBtn) {
+      els.controlledSendTestJcBtn.disabled = false;
+    }
+    if (els.controlledSendTestAllBtn) {
+      els.controlledSendTestAllBtn.disabled = false;
+    }
     els.controlledSendTestBtn.textContent = "Send 1 Controlled Test";
   }
 }
 
+
+
+function renderControlledJcSendTestStatus(data, ok) {
+  if (!els.controlledSendTestJcStatus) return;
+
+  const result = data?.result || {};
+  const messageId = String(result.provider_message_id || "").trim();
+  const timestamp = String(result.submitted_at_utc || "").trim();
+  const providerStatus = String(result.provider_status || "").trim();
+
+  els.controlledSendTestJcStatus.className =
+    `controlled-send-test-status status-${ok ? "success" : "error"}`;
+
+  if (!ok) {
+    els.controlledSendTestJcStatus.textContent =
+      data?.message || "JC controlled test failed safely.";
+    return;
+  }
+
+  els.controlledSendTestJcStatus.textContent = [
+    "JC accepted",
+    "jc@astraproductions.co → astraproductionsbyjc+allsendersv1@gmail.com",
+    providerStatus ? `Provider status: ${providerStatus}` : "",
+    messageId ? `Provider message ID: ${messageId}` : "",
+    timestamp,
+  ].filter(Boolean).join(" · ");
+}
+
+
+async function runControlledJcSenderTest() {
+  if (
+    controlledSendTestPending
+    || !els.controlledSendTestJcBtn
+  ) return;
+
+  const confirmed = window.confirm(
+    "CONTROLLED TEST — JC ONLY\n\n"
+    + "This sends exactly ONE real validation email:\n"
+    + "• From: jc@astraproductions.co\n"
+    + "• Transport: PrivateEmail SMTP\n"
+    + "• Recipient: astraproductionsbyjc+allsendersv1@gmail.com\n"
+    + "• Signature: LOGO ASTRA bg.png\n\n"
+    + "No production recipient queue is used or modified.\n"
+    + "There is no automatic retry after an ambiguous provider attempt.\n\n"
+    + "Send the JC controlled test now?",
+  );
+
+  if (!confirmed) {
+    renderControlledJcSendTestStatus(
+      {
+        message:
+          "JC controlled test cancelled. No request was submitted.",
+      },
+      false,
+    );
+    return;
+  }
+
+  controlledSendTestPending = true;
+
+  els.controlledSendTestJcBtn.disabled = true;
+  els.controlledSendTestJcBtn.textContent = "Sending JC test...";
+
+  if (els.controlledSendTestBtn) {
+    els.controlledSendTestBtn.disabled = true;
+  }
+
+  if (els.controlledSendTestProfile) {
+    els.controlledSendTestProfile.disabled = true;
+  }
+
+  if (els.controlledSendTestAllBtn) {
+    els.controlledSendTestAllBtn.disabled = true;
+  }
+
+  if (els.controlledSendTestJcStatus) {
+    els.controlledSendTestJcStatus.className =
+      "controlled-send-test-status status-pending";
+    els.controlledSendTestJcStatus.textContent =
+      "Submitting one isolated JC PrivateEmail validation...";
+  }
+
+  try {
+    const response = await fetch(
+      "/api/controlled-test/jc",
+      { method: "POST" },
+    );
+
+    const data = await response.json().catch(() => ({}));
+    const ok = response.ok && data.ok !== false;
+
+    renderControlledJcSendTestStatus(data, ok);
+
+    showMessage(
+      data.message
+      || (
+        ok
+          ? "JC controlled PrivateEmail test accepted."
+          : "JC controlled test failed safely."
+      ),
+      ok ? "success" : "error",
+    );
+  } catch (err) {
+    renderControlledJcSendTestStatus(
+      {
+        message:
+          `JC controlled test failed safely: ${err}`,
+      },
+      false,
+    );
+
+    showMessage(
+      `JC controlled test failed safely: ${err}`,
+      "error",
+    );
+  } finally {
+    controlledSendTestPending = false;
+
+    els.controlledSendTestJcBtn.disabled = false;
+    els.controlledSendTestJcBtn.textContent =
+      "Send JC Controlled Test";
+
+    if (els.controlledSendTestBtn) {
+      els.controlledSendTestBtn.disabled = false;
+    }
+
+    if (els.controlledSendTestProfile) {
+      els.controlledSendTestProfile.disabled = false;
+    }
+
+    if (els.controlledSendTestAllBtn) {
+      els.controlledSendTestAllBtn.disabled = false;
+    }
+  }
+}
 
 
 function renderControlledAllSendTestStatus(
@@ -10091,6 +10240,10 @@ async function runControlledAllSenderTest() {
   controlledSendTestPending = true;
 
   els.controlledSendTestAllBtn.disabled = true;
+
+  if (els.controlledSendTestJcBtn) {
+    els.controlledSendTestJcBtn.disabled = true;
+  }
 
   if (els.controlledSendTestBtn) {
     els.controlledSendTestBtn.disabled = true;
@@ -10195,6 +10348,10 @@ async function runControlledAllSenderTest() {
     els.controlledSendTestAllBtn.disabled = false;
     els.controlledSendTestAllBtn.textContent =
       "Send All 6 Controlled Tests";
+
+    if (els.controlledSendTestJcBtn) {
+      els.controlledSendTestJcBtn.disabled = false;
+    }
 
     if (els.controlledSendTestBtn) {
       els.controlledSendTestBtn.disabled = false;
@@ -10644,6 +10801,7 @@ if (els.controlledSendTestProfile) {
   syncControlledSendTestIdentity();
 }
 if (els.controlledSendTestBtn) els.controlledSendTestBtn.addEventListener("click", () => runControlledSendTest());
+if (els.controlledSendTestJcBtn) els.controlledSendTestJcBtn.addEventListener("click", () => runControlledJcSenderTest());
 if (els.controlledSendTestAllBtn) els.controlledSendTestAllBtn.addEventListener("click", () => runControlledAllSenderTest());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
 if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
