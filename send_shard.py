@@ -34,6 +34,12 @@ from urllib.parse import quote
 
 import runtime_audit
 import settings
+from protected_profile_env import (
+    DEFAULT_PROFILE_ENV_DIR,
+    JC_PROFILE_NAMES,
+    ProtectedProfileEnvError,
+    resolve_canonical_jc_credential,
+)
 from provider_pacing import (
     mark_recovery_started,
     provider_pacing_status,
@@ -780,6 +786,7 @@ def _log_row_is_authoritative_sent(row: dict[str, str]) -> bool:
 
 
 SENDER_FAMILY_PRIVATE_JC = "private_jc"
+PROTECTED_PROFILE_ENV_DIR = DEFAULT_PROFILE_ENV_DIR
 SENDER_FAMILY_SENDGRID = "sendgrid"
 SKIPPED_ALREADY_SENT_SAME_FAMILY = "SKIPPED_ALREADY_SENT_SAME_FAMILY"
 SKIPPED_ALREADY_SENT_OTHER_FAMILY_ALLOWED = "SKIPPED_ALREADY_SENT_OTHER_FAMILY_ALLOWED"
@@ -3821,6 +3828,39 @@ def smtp_login(host: str, port: int, user: str, pw: str) -> smtplib.SMTP:
     return s
 
 
+def resolve_private_sender_password(
+    args: argparse.Namespace,
+    *,
+    no_send_mode: bool,
+    profile_env_dir: Path | None = None,
+) -> str:
+    """Resolve private sender auth without exposing JC credentials to launchers."""
+
+    if no_send_mode or str(getattr(args, "provider", "") or "").strip().lower() == "sendgrid":
+        return ""
+
+    profile_name = str(getattr(args, "profile", "") or "").strip()
+    if profile_name in JC_PROFILE_NAMES:
+        try:
+            password, _source = resolve_canonical_jc_credential(
+                profile_name,
+                PROFILES.get(profile_name) or {},
+                PROFILES.get("private_jc") or {},
+                profile_env_dir=profile_env_dir or PROTECTED_PROFILE_ENV_DIR,
+            )
+        except ProtectedProfileEnvError as exc:
+            raise RuntimeError("Protected JC SMTP credential is unavailable or unsafe.") from exc
+        return password
+
+    password_env = str(getattr(args, "password_env", "") or "").strip()
+    password = os.environ.get(password_env, "").strip() if password_env else ""
+    if not password:
+        password = str(getattr(args, "password", "") or "").strip()
+    if not password:
+        password = getpass("Password (Gmail uses App Password): ").strip()
+    return password
+
+
 def smtp_close(s: smtplib.SMTP | None) -> None:
     if not s:
         return
@@ -5455,14 +5495,11 @@ def main() -> int | None:
         return
 
     from_user = norm_email(args.from_email) or norm_email(input("From (email address you are logging in as): "))
-    pw = ""
-    if not no_send_mode and args.provider != "sendgrid":
-        if args.password_env:
-            pw = os.environ.get(args.password_env, "").strip()
-        if not pw and args.password:
-            pw = args.password.strip()
-        if not pw:
-            pw = getpass("Password (Gmail uses App Password): ").strip()
+    try:
+        pw = resolve_private_sender_password(args, no_send_mode=no_send_mode)
+    except RuntimeError as exc:
+        print(f"REFUSED: {exc}")
+        return 1
     unsub_email = norm_email(args.unsub) or from_user
     sendgrid_unsub_group_id = int(getattr(args, "unsubscribe_group_id", 0) or 0)
     raw_groups = getattr(args, "groups_to_display", None) or []

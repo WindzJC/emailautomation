@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import dashboard_core
 import provider_pacing
@@ -2386,7 +2386,8 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertEqual(600, status["cap"])
 
-    def test_start_private_profile_requires_password_env_value(self) -> None:
+    def test_start_private_profile_refuses_unavailable_protected_credential(self) -> None:
+        fake_secret = "distinctive-refused-dashboard-secret"
         profiles = {
             "private_jc": {
                 "provider": "private",
@@ -2409,16 +2410,85 @@ class DashboardCoreTests(unittest.TestCase):
             START_ALL_PROFILES=[],
             active_or_locked_sender_profiles=lambda profile_names=None: set(),
             _load_env_value=lambda name: "",
+            resolve_canonical_jc_credential=Mock(
+                side_effect=dashboard_core.ProtectedProfileEnvError(
+                    "credential_unavailable",
+                    f"synthetic failure {fake_secret}",
+                )
+            ),
             load_dashboard_recovery_timer=lambda: {
                 "private_jc_recovery_start_at_utc": "",
                 "private_jc_recovery_note": "",
                 "updated_at_utc": "",
             },
-        ):
+        ), patch.object(dashboard_core.subprocess, "run") as run_mock:
             ok, message = dashboard_core.start_private_profile("private_jc", session="private_jc")
 
         self.assertFalse(ok)
-        self.assertEqual("PRIVATE_JC_PASSWORD is not available in the dashboard environment.", message)
+        self.assertEqual("Protected JC credential is unavailable or unsafe.", message)
+        self.assertNotIn(fake_secret, message)
+        run_mock.assert_not_called()
+
+    def test_start_private_profile_uses_protected_credential_without_env_or_secret_transport(self) -> None:
+        fake_secret = "distinctive-dashboard-jc-secret"
+        profiles = {
+            "private_jc": {
+                "provider": "private",
+                "csv": "recipients_private_jc.csv",
+                "log": "private_jc_log.csv",
+                "from_email": "jc@astraproductions.co",
+                "max_total": 5,
+                "password_env": "PRIVATE_JC_PASSWORD",
+                "dashboard_enabled": True,
+                "dashboard_manual_only": True,
+                "tmux_session": "private_jc",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            python_bin = Path(tmpdir) / "python"
+            python_bin.write_text("", encoding="utf-8")
+            run_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch.dict(os.environ, {}, clear=True), patch.multiple(
+                dashboard_core,
+                PROFILES=profiles,
+                SENDGRID_PROFILES=[],
+                DASHBOARD_PROFILES=["private_jc"],
+                START_ALL_PROFILES=[],
+                active_or_locked_sender_profiles=lambda profile_names=None: set(),
+                provider_pacing_status=lambda *args, **kwargs: {
+                    "cooldown_remaining_seconds": 0
+                },
+                load_dashboard_recovery_timer=lambda: {
+                    "private_jc_recovery_start_at_utc": "",
+                    "private_jc_recovery_note": "",
+                    "updated_at_utc": "",
+                },
+                resolve_canonical_jc_credential=Mock(
+                    return_value=(fake_secret, "private_jc.env")
+                ),
+                _python_runtime_bin=lambda: python_bin,
+                ensure_single_profile_session=lambda session: (True, "ready"),
+                profile_pane_index=lambda profile_name: 0,
+                tmux_pane_map=lambda session: {},
+            ), patch.object(
+                dashboard_core.subprocess,
+                "run",
+                return_value=run_result,
+            ) as run_mock:
+                ok, message = dashboard_core.start_private_profile(
+                    "private_jc",
+                    session="private_jc",
+                )
+
+        self.assertTrue(ok, message)
+        self.assertEqual(3, run_mock.call_count)
+        self.assertNotIn(fake_secret, repr(run_mock.call_args_list))
+        self.assertNotIn(
+            "PRIVATE_JC_PASSWORD",
+            run_mock.call_args_list[0].kwargs["env"],
+        )
+        self.assertNotIn(fake_secret, message)
 
     def test_start_private_profile_refuses_runtime_locked_profile(self) -> None:
         with patch.object(dashboard_core, "DASHBOARD_PROFILES", ["private_jc"]), patch.object(

@@ -9,6 +9,9 @@ from typing import Mapping
 
 
 DEFAULT_PROFILE_ENV_DIR = Path("/etc/astra-emailautomation/profiles")
+CANONICAL_JC_PROFILE = "private_jc"
+JC_PROFILE_NAMES = frozenset({"private_jc", "private_jc_warm"})
+JC_PASSWORD_ENV = "PRIVATE_JC_PASSWORD"
 _PROFILE_NAME_RE = re.compile(r"[a-z0-9_]+")
 
 
@@ -194,3 +197,44 @@ def resolve_protected_profile_credential(
             "Protected profile credential is missing or invalid.",
         )
     return secret, source
+
+
+def resolve_canonical_jc_credential(
+    profile: str,
+    profile_config: Mapping[str, object],
+    canonical_config: Mapping[str, object],
+    *,
+    profile_env_dir: Path = DEFAULT_PROFILE_ENV_DIR,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Resolve either JC lane through the canonical private_jc credential."""
+
+    profile_name = str(profile or "").strip()
+    provider = str(profile_config.get("provider") or "").strip().lower()
+    canonical_provider = str(canonical_config.get("provider") or "").strip().lower()
+    mailbox = str(profile_config.get("from_email") or "").strip().lower()
+    canonical_mailbox = str(canonical_config.get("from_email") or "").strip().lower()
+    configured_key = str(profile_config.get("password_env") or "").strip()
+    canonical_key = str(canonical_config.get("password_env") or "").strip()
+
+    if (
+        profile_name not in JC_PROFILE_NAMES
+        or provider != "private"
+        or canonical_provider != "private"
+        or not mailbox
+        or mailbox != canonical_mailbox
+        or configured_key != JC_PASSWORD_ENV
+        or canonical_key != JC_PASSWORD_ENV
+    ):
+        raise ProtectedProfileEnvError(
+            "credential_identity_mismatch",
+            "Protected JC credential mapping is invalid.",
+        )
+
+    return resolve_protected_profile_credential(
+        CANONICAL_JC_PROFILE,
+        configured_key,
+        JC_PASSWORD_ENV,
+        profile_env_dir=profile_env_dir,
+        environment=environment,
+    )

@@ -26,6 +26,12 @@ from zoneinfo import ZoneInfo
 
 import settings
 from private_bounce_hygiene import private_bounce_guard_status
+from protected_profile_env import (
+    DEFAULT_PROFILE_ENV_DIR,
+    JC_PROFILE_NAMES,
+    ProtectedProfileEnvError,
+    resolve_canonical_jc_credential,
+)
 from provider_pacing import provider_pacing_status
 from send_shard import (
     CONTROLLED_SENDGRID_PROFILE,
@@ -78,6 +84,7 @@ SENDGRID_WEBHOOK_RECEIVER_URL = settings.SENDGRID_WEBHOOK_RECEIVER_URL
 SENDGRID_WEBHOOK_RECEIVER_API_TOKEN = settings.SENDGRID_WEBHOOK_RECEIVER_API_TOKEN
 SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS = settings.SENDGRID_WEBHOOK_RECEIVER_TIMEOUT_SECONDS
 LOG_RESET_BACKUP_ROOT = settings.LOG_RESET_BACKUP_ROOT
+PROTECTED_PROFILE_ENV_DIR = DEFAULT_PROFILE_ENV_DIR
 TMUX_SESSION_NAME = os.environ.get("TMUX_SENDGRID_SESSION", "sendgrid").strip() or "sendgrid"
 DASHBOARD_TIMEZONE_NAME = os.environ.get("DASHBOARD_TIMEZONE", "America/Los_Angeles").strip() or "America/Los_Angeles"
 DASHBOARD_RUN_SETTINGS_PATH = settings.DASHBOARD_RUN_SETTINGS_PATH
@@ -1571,7 +1578,18 @@ def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
     if provider in {"private", "gmail"}:
         if not password_env:
             return False, f"{profile_name} is missing password_env for dashboard launches."
-        if not _load_env_value(password_env):
+        if profile_name in JC_PROFILE_NAMES:
+            try:
+                credential, _source = resolve_canonical_jc_credential(
+                    profile_name,
+                    cfg,
+                    PROFILES.get("private_jc") or {},
+                    profile_env_dir=PROTECTED_PROFILE_ENV_DIR,
+                )
+            except ProtectedProfileEnvError:
+                return False, "Protected JC credential is unavailable or unsafe."
+            del credential
+        elif not _load_env_value(password_env):
             return False, f"{password_env} is not available in the dashboard environment."
     python_bin = _python_runtime_bin()
     if not python_bin:

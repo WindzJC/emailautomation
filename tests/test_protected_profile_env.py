@@ -16,6 +16,7 @@ from private_bounce_hygiene import classify_private_bounce_error, sync_private_b
 from protected_profile_env import (
     ProtectedProfileEnvError,
     read_protected_profile_env,
+    resolve_canonical_jc_credential,
     resolve_protected_profile_credential,
 )
 
@@ -113,7 +114,7 @@ def test_wrong_password_mapping_fails_closed_before_imap(tmp_path: Path) -> None
     with (
         patch.object(private_bounce_hygiene, "PROFILES", wrong_profiles),
         patch("private_bounce_hygiene.imaplib.IMAP4_SSL") as imap_constructor,
-        pytest.raises(ValueError, match="mailbox credential mapping is invalid"),
+        pytest.raises(ValueError, match="mailbox credential is unavailable"),
     ):
         sync_private_bounces(profile_env_dir=env_dir)
     imap_constructor.assert_not_called()
@@ -163,6 +164,50 @@ def test_warm_profile_uses_canonical_jc_credential_not_separate_value(tmp_path: 
         )
     assert _EmptyFakeIMAP.login_password == FAKE_SECRET
     assert _EmptyFakeIMAP.login_password != "wrong-separate-secret"
+
+
+def test_canonical_jc_resolver_rejects_wrong_profile_identity(tmp_path: Path) -> None:
+    env_dir = _profile_dir(tmp_path)
+    canonical = {
+        "provider": "private",
+        "from_email": "jc@astraproductions.co",
+        "password_env": "PRIVATE_JC_PASSWORD",
+    }
+    wrong_identity = {
+        **canonical,
+        "from_email": "another-mailbox@example.test",
+    }
+
+    with pytest.raises(ProtectedProfileEnvError) as refusal:
+        resolve_canonical_jc_credential(
+            "private_jc_warm",
+            wrong_identity,
+            canonical,
+            profile_env_dir=env_dir,
+        )
+
+    assert refusal.value.code == "credential_identity_mismatch"
+    assert FAKE_SECRET not in str(refusal.value)
+
+
+def test_canonical_jc_resolver_rejects_non_jc_profile(tmp_path: Path) -> None:
+    env_dir = _profile_dir(tmp_path)
+    canonical = {
+        "provider": "private",
+        "from_email": "jc@astraproductions.co",
+        "password_env": "PRIVATE_JC_PASSWORD",
+    }
+
+    with pytest.raises(ProtectedProfileEnvError) as refusal:
+        resolve_canonical_jc_credential(
+            "private_alison",
+            canonical,
+            canonical,
+            profile_env_dir=env_dir,
+        )
+
+    assert refusal.value.code == "credential_identity_mismatch"
+    assert FAKE_SECRET not in str(refusal.value)
 
 
 def test_symlink_profile_file_is_rejected(tmp_path: Path) -> None:

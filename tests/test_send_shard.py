@@ -1962,6 +1962,12 @@ class SendShardTests(unittest.TestCase):
 
     def _run_synthetic_private(self, fixture, smtp_client) -> str:
         base, shards, logs, state, _old_csv, unsub, suppress, sg_suppress, counters, profile = fixture
+        profile_env_dir = base / "protected-profiles"
+        profile_env_dir.mkdir(exist_ok=True)
+        (profile_env_dir / "private_jc.env").write_text(
+            "PRIVATE_JC_PASSWORD=synthetic-secret\n",
+            encoding="utf-8",
+        )
         csv_path = shards / "recipients_private_jc.csv"
         log_path = logs / "private_jc_log.csv"
         profile.clear()
@@ -1997,15 +2003,177 @@ class SendShardTests(unittest.TestCase):
             stack.enter_context(patch.object(send_shard, "DEFAULT_SENDGRID_SUPPRESSION_CSV", sg_suppress))
             stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
             stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
-            stack.enter_context(patch.object(send_shard, "smtp_login", return_value=smtp_client))
+            smtp_login_mock = stack.enter_context(
+                patch.object(send_shard, "smtp_login", return_value=smtp_client)
+            )
+            self._last_synthetic_smtp_login = smtp_login_mock
+            stack.enter_context(
+                patch.object(send_shard, "PROTECTED_PROFILE_ENV_DIR", profile_env_dir)
+            )
+            stack.enter_context(
+                patch.object(
+                    send_shard,
+                    "getpass",
+                    side_effect=AssertionError("headless JC must not prompt"),
+                )
+            )
             stack.enter_context(patch.object(send_shard.time, "sleep", return_value=None))
             stack.enter_context(patch.object(send_shard, "sleep_with_jitter", return_value=None))
             stack.enter_context(patch.dict(send_shard.PROFILES, {"private_jc": profile}, clear=False))
-            stack.enter_context(patch.dict(send_shard.os.environ, {"PRIVATE_JC_PASSWORD": "synthetic-secret"}, clear=False))
+            stack.enter_context(
+                patch.dict(send_shard.os.environ, {}, clear=True)
+            )
             stack.enter_context(patch.object(sys, "argv", ["send_shard.py", "--profile", "private_jc"]))
             stack.enter_context(redirect_stdout(stdout))
             send_shard.main()
         return stdout.getvalue()
+
+    def test_private_jc_sender_self_resolves_protected_credential_without_env_or_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            (fixture[1] / "recipients_private_jc.csv").write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "credential-path@example.test,Ada,Book A,credential-path\n",
+                encoding="utf-8",
+            )
+            (fixture[2] / "private_jc_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            smtp = Mock()
+            smtp.send_message.return_value = {}
+            self._run_synthetic_private(fixture, smtp)
+
+        login = self._last_synthetic_smtp_login
+        self.assertGreaterEqual(login.call_count, 1)
+        self.assertEqual("synthetic-secret", login.call_args.args[3])
+
+    def test_private_jc_credential_failure_is_headless_secret_free_and_pre_smtp(self) -> None:
+        args = argparse.Namespace(
+            profile="private_jc",
+            provider="private",
+            password_env="PRIVATE_JC_PASSWORD",
+            password="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = Path(tmpdir) / "missing-profiles"
+            with patch.dict(send_shard.os.environ, {}, clear=True), patch.object(
+                send_shard,
+                "getpass",
+                side_effect=AssertionError("headless JC must not prompt"),
+            ), self.assertRaisesRegex(RuntimeError, "Protected JC SMTP credential") as refusal:
+                send_shard.resolve_private_sender_password(
+                    args,
+                    no_send_mode=False,
+                    profile_env_dir=missing,
+                )
+
+        self.assertNotIn("synthetic-secret", str(refusal.exception))
+
+    def test_private_jc_empty_protected_credential_fails_without_prompt(self) -> None:
+        args = argparse.Namespace(
+            profile="private_jc",
+            provider="private",
+            password_env="PRIVATE_JC_PASSWORD",
+            password="synthetic-argv-secret",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_dir = Path(tmpdir)
+            (env_dir / "private_jc.env").write_text(
+                "PRIVATE_JC_PASSWORD=\n",
+                encoding="utf-8",
+            )
+            with patch.dict(send_shard.os.environ, {}, clear=True), patch.object(
+                send_shard,
+                "getpass",
+                side_effect=AssertionError("headless JC must not prompt"),
+            ), self.assertRaisesRegex(RuntimeError, "Protected JC SMTP credential") as refusal:
+                send_shard.resolve_private_sender_password(
+                    args,
+                    no_send_mode=False,
+                    profile_env_dir=env_dir,
+                )
+
+        self.assertNotIn("synthetic-argv-secret", str(refusal.exception))
+
+    def test_private_jc_wrong_key_mapping_fails_closed_without_prompt(self) -> None:
+        args = argparse.Namespace(
+            profile="private_jc",
+            provider="private",
+            password_env="PRIVATE_WRONG_PASSWORD",
+            password="synthetic-argv-secret",
+        )
+        wrong = {
+            **send_shard.PROFILES["private_jc"],
+            "password_env": "PRIVATE_WRONG_PASSWORD",
+        }
+        with patch.dict(
+            send_shard.PROFILES,
+            {"private_jc": wrong},
+            clear=False,
+        ), patch.object(
+            send_shard,
+            "getpass",
+            side_effect=AssertionError("headless JC must not prompt"),
+        ), self.assertRaisesRegex(RuntimeError, "Protected JC SMTP credential"):
+            send_shard.resolve_private_sender_password(
+                args,
+                no_send_mode=False,
+                profile_env_dir=Path("/definitely/missing"),
+            )
+
+    def test_private_jc_warm_uses_canonical_cold_credential_file(self) -> None:
+        args = argparse.Namespace(
+            profile="private_jc_warm",
+            provider="private",
+            password_env="PRIVATE_JC_PASSWORD",
+            password="",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_dir = Path(tmpdir)
+            (env_dir / "private_jc.env").write_text(
+                "PRIVATE_JC_PASSWORD=canonical-jc-secret\n",
+                encoding="utf-8",
+            )
+            (env_dir / "private_jc_warm.env").write_text(
+                "PRIVATE_JC_PASSWORD=wrong-warm-secret\n",
+                encoding="utf-8",
+            )
+            with patch.dict(send_shard.os.environ, {}, clear=True), patch.object(
+                send_shard,
+                "getpass",
+                side_effect=AssertionError("headless JC must not prompt"),
+            ):
+                password = send_shard.resolve_private_sender_password(
+                    args,
+                    no_send_mode=False,
+                    profile_env_dir=env_dir,
+                )
+
+        self.assertEqual("canonical-jc-secret", password)
+        self.assertNotEqual("wrong-warm-secret", password)
+
+    def test_unrelated_private_profile_keeps_environment_credential_behavior(self) -> None:
+        args = argparse.Namespace(
+            profile="private_alison",
+            provider="private",
+            password_env="PRIVATE_ALISON_APP_PW",
+            password="",
+        )
+        with patch.dict(
+            send_shard.os.environ,
+            {"PRIVATE_ALISON_APP_PW": "legacy-private-secret"},
+            clear=False,
+        ), patch.object(
+            send_shard,
+            "getpass",
+            side_effect=AssertionError("environment credential should be used"),
+        ):
+            password = send_shard.resolve_private_sender_password(
+                args,
+                no_send_mode=False,
+            )
+        self.assertEqual("legacy-private-secret", password)
 
     def test_controlled_sendgrid_stops_after_one_provider_submission_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2196,10 +2364,10 @@ class SendShardTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(
-                    patch.dict(
-                        send_shard.os.environ,
-                        {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
-                        clear=False,
+                    patch.object(
+                        send_shard,
+                        "resolve_canonical_jc_credential",
+                        return_value=("synthetic-secret", "private_jc.env"),
                     )
                 )
                 stack.enter_context(
@@ -4935,10 +5103,10 @@ class SendShardTests(unittest.TestCase):
                     )
                 )
                 stack.enter_context(
-                    patch.dict(
-                        send_shard.os.environ,
-                        {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
-                        clear=False,
+                    patch.object(
+                        send_shard,
+                        "resolve_canonical_jc_credential",
+                        return_value=("synthetic-secret", "private_jc.env"),
                     )
                 )
                 stack.enter_context(
@@ -5086,10 +5254,10 @@ class SendShardTests(unittest.TestCase):
                             )
                         )
                         stack.enter_context(
-                            patch.dict(
-                                send_shard.os.environ,
-                                {"PRIVATE_JC_PASSWORD": "synthetic-secret"},
-                                clear=False,
+                            patch.object(
+                                send_shard,
+                                "resolve_canonical_jc_credential",
+                                return_value=("synthetic-secret", "private_jc.env"),
                             )
                         )
                         stack.enter_context(

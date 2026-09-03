@@ -19,7 +19,7 @@ import settings
 from protected_profile_env import (
     DEFAULT_PROFILE_ENV_DIR,
     ProtectedProfileEnvError,
-    resolve_protected_profile_credential,
+    resolve_canonical_jc_credential,
 )
 from send_shard import PROFILES
 from sendgrid_hygiene import norm_email
@@ -30,7 +30,6 @@ PRIVATE_IMAP_PORT = 993
 PRIVATE_BOUNCE_STATE_PATH = settings.STATE_DIR / "private_bounce_state.json"
 PRIVATE_BOUNCE_MONITOR_PATH = settings.STATE_DIR / "private_bounce_monitor.json"
 PRIVATE_BOUNCE_REPORT_PREFIX = "private_bounce_sync_"
-PRIVATE_JC_BOUNCE_PROFILES = frozenset({"private_jc", "private_jc_warm"})
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 FINAL_RECIPIENT_RE = re.compile(r"final-recipient:\s*(?:[^;]+;)?\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
@@ -430,22 +429,12 @@ def sync_private_bounces(
     mailbox_email = norm_email(str(profile.get("from_email") or ""))
     if not mailbox_email:
         raise ValueError(f"Profile {profile_name} is missing from_email.")
-    password_env = str(profile.get("password_env") or "").strip()
     canonical_profile = PROFILES.get("private_jc") or {}
-    canonical_mailbox = norm_email(str(canonical_profile.get("from_email") or ""))
-    canonical_password_env = str(canonical_profile.get("password_env") or "").strip()
-    if (
-        profile_name not in PRIVATE_JC_BOUNCE_PROFILES
-        or mailbox_email != canonical_mailbox
-        or password_env != canonical_password_env
-        or canonical_password_env != "PRIVATE_JC_PASSWORD"
-    ):
-        raise ValueError("Private JC mailbox credential mapping is invalid.")
     try:
-        password, _credential_source = resolve_protected_profile_credential(
-            "private_jc",
-            password_env,
-            "PRIVATE_JC_PASSWORD",
+        password, _credential_source = resolve_canonical_jc_credential(
+            profile_name,
+            profile,
+            canonical_profile,
             profile_env_dir=profile_env_dir,
         )
     except ProtectedProfileEnvError as exc:
