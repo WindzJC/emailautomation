@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 import settings
+from protected_profile_env import (
+    ProtectedProfileEnvError,
+    read_protected_profile_env,
+    resolve_protected_profile_credential,
+)
 from runtime_authority import AuthorityError, assert_send_authorized
 from send_shard import (
     GlobalBlockRefresher,
@@ -242,96 +247,14 @@ def _resolve_signature(
     return path
 
 
-def _profile_env_path(
-    profile: str,
-    profile_env_dir: Path,
-) -> Path:
-    path = Path(profile_env_dir) / f"{profile}.env"
-
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise ControlledAllSenderTestRefused(
-            "credential_unavailable",
-            f"{profile} credential file is unavailable.",
-        ) from exc
-
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ControlledAllSenderTestRefused(
-            "credential_file_unsafe",
-            f"{profile} credential file must be a regular non-symlink file.",
-        )
-
-    return path
-
-
-def _read_profile_env(path: Path) -> dict[str, str]:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-
-    if nofollow is None:
-        raise ControlledAllSenderTestRefused(
-            "credential_file_unsafe",
-            "Credential verification requires O_NOFOLLOW support.",
-        )
-
-    before = path.lstat()
-    descriptor = os.open(path, os.O_RDONLY | nofollow)
-
-    try:
-        opened = os.fstat(descriptor)
-
-        if (
-            before.st_dev,
-            before.st_ino,
-        ) != (
-            opened.st_dev,
-            opened.st_ino,
-        ):
-            raise ControlledAllSenderTestRefused(
-                "credential_file_unsafe",
-                "Credential file changed while opening.",
-            )
-
-        chunks: list[bytes] = []
-
-        while True:
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(descriptor)
-
-    values: dict[str, str] = {}
-
-    for raw_line in b"".join(chunks).decode("utf-8").splitlines():
-        line = raw_line.strip()
-
-        if not line or line.startswith("#") or "=" not in raw_line:
-            continue
-
-        name, value = raw_line.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-
-        if (
-            len(value) >= 2
-            and value[0] == value[-1]
-            and value[0] in {"'", '"'}
-        ):
-            value = value[1:-1]
-
-        values[name] = value
-
-    return values
-
-
 def _resolve_sendgrid_key(
     profile: str,
     profile_env_dir: Path,
 ) -> tuple[str, str]:
-    path = _profile_env_path(profile, profile_env_dir)
-    values = _read_profile_env(path)
+    try:
+        values, source = read_protected_profile_env(profile, profile_env_dir)
+    except ProtectedProfileEnvError as exc:
+        raise ControlledAllSenderTestRefused(exc.code, str(exc)) from exc
 
     resolution = resolve_sendgrid_api_key(
         env={"SENDGRID_API_KEY": values.get("SENDGRID_API_KEY", "")},
@@ -344,7 +267,7 @@ def _resolve_sendgrid_key(
             f"{profile} SendGrid credential is missing or invalid.",
         )
 
-    return resolution.key, path.name
+    return resolution.key, source
 
 
 def _resolve_private_password(
@@ -352,29 +275,16 @@ def _resolve_private_password(
     config: Mapping[str, object],
     profile_env_dir: Path,
 ) -> tuple[str, str]:
-    path = _profile_env_path(profile, profile_env_dir)
-    values = _read_profile_env(path)
-
     password_env = str(config.get("password_env") or "").strip()
-
-    if password_env != "PRIVATE_JC_PASSWORD":
-        raise ControlledAllSenderTestRefused(
-            "credential_identity_mismatch",
-            "JC password environment mapping is not the locked production mapping.",
+    try:
+        return resolve_protected_profile_credential(
+            profile,
+            password_env,
+            "PRIVATE_JC_PASSWORD",
+            profile_env_dir=profile_env_dir,
         )
-
-    password = (
-        str(values.get(password_env) or "").strip()
-        or str(os.environ.get(password_env) or "").strip()
-    )
-
-    if not password:
-        raise ControlledAllSenderTestRefused(
-            "credential_invalid",
-            "JC SMTP credential is missing.",
-        )
-
-    return password, path.name
+    except ProtectedProfileEnvError as exc:
+        raise ControlledAllSenderTestRefused(exc.code, str(exc)) from exc
 
 
 def _authoritative_log_paths_read_only() -> list[Path]:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import grp
 import re
 import sqlite3
 import stat
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 import settings
+from protected_profile_env import ProtectedProfileEnvError, read_protected_profile_env
 from runtime_authority import AuthorityError, assert_send_authorized
 from send_shard import (
     GlobalBlockRefresher,
@@ -139,66 +139,15 @@ def _resolve_controlled_signature(profile: str, from_email: str) -> Path:
     return signature_path
 
 
-def _profile_env_path(profile: str, profile_env_dir: Path) -> Path:
-    path = Path(profile_env_dir) / f"{profile}.env"
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise ControlledSendGridTestRefused("credential_unavailable", "Selected sender credential file is unavailable.") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ControlledSendGridTestRefused("credential_file_unsafe", "Selected sender credential must be a regular non-symlink file.")
-    if os.environ.get("ASTRA_MACHINE_ID", "").strip().lower() == "cloud":
-        try:
-            astra_gid = grp.getgrnam("astra").gr_gid
-        except KeyError as exc:
-            raise ControlledSendGridTestRefused("credential_file_unsafe", "The astra credential group is unavailable.") from exc
-        if metadata.st_uid != 0 or metadata.st_gid != astra_gid or stat.S_IMODE(metadata.st_mode) != 0o640:
-            raise ControlledSendGridTestRefused(
-                "credential_file_unsafe",
-                "Selected sender credential file has unsafe production ownership or permissions.",
-            )
-    return path
-
-
-def _read_profile_env(path: Path) -> dict[str, str]:
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise ControlledSendGridTestRefused("credential_file_unsafe", "Credential verification requires O_NOFOLLOW support.")
-    before = path.lstat()
-    descriptor = os.open(path, os.O_RDONLY | nofollow)
-    try:
-        opened = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
-            raise ControlledSendGridTestRefused("credential_file_unsafe", "Selected sender credential changed while opening.")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(descriptor)
-    values: dict[str, str] = {}
-    for raw_line in b"".join(chunks).decode("utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in raw_line:
-            continue
-        name, value = raw_line.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[name] = value
-    return values
-
-
 def _resolve_profile_key(profile: str, profile_env_dir: Path) -> tuple[str, str, str]:
-    path = _profile_env_path(profile, profile_env_dir)
-    values = _read_profile_env(path)
+    try:
+        values, source = read_protected_profile_env(profile, profile_env_dir)
+    except ProtectedProfileEnvError as exc:
+        raise ControlledSendGridTestRefused(exc.code, str(exc)) from exc
     resolution = resolve_sendgrid_api_key(env={"SENDGRID_API_KEY": values.get("SENDGRID_API_KEY", "")}, env_files=[])
     if not resolution.ok:
         raise ControlledSendGridTestRefused("credential_invalid", "Selected sender credential is missing or invalid.")
-    return resolution.key, path.name, str(values.get("ASTRA_EXPECTED_GIT_COMMIT") or "").strip()
+    return resolution.key, source, str(values.get("ASTRA_EXPECTED_GIT_COMMIT") or "").strip()
 
 
 def _authoritative_send_log_paths_read_only() -> list[Path]:

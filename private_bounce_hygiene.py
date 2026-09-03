@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import settings
+from protected_profile_env import (
+    DEFAULT_PROFILE_ENV_DIR,
+    ProtectedProfileEnvError,
+    resolve_protected_profile_credential,
+)
 from send_shard import PROFILES
 from sendgrid_hygiene import norm_email
 
@@ -25,6 +30,7 @@ PRIVATE_IMAP_PORT = 993
 PRIVATE_BOUNCE_STATE_PATH = settings.STATE_DIR / "private_bounce_state.json"
 PRIVATE_BOUNCE_MONITOR_PATH = settings.STATE_DIR / "private_bounce_monitor.json"
 PRIVATE_BOUNCE_REPORT_PREFIX = "private_bounce_sync_"
+PRIVATE_JC_BOUNCE_PROFILES = frozenset({"private_jc", "private_jc_warm"})
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 FINAL_RECIPIENT_RE = re.compile(r"final-recipient:\s*(?:[^;]+;)?\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
@@ -413,6 +419,7 @@ def sync_private_bounces(
     imap_port: int = PRIVATE_IMAP_PORT,
     imap_timeout_seconds: int = PRIVATE_BOUNCE_IMAP_TIMEOUT_SECONDS,
     persist_state: bool = True,
+    profile_env_dir: Path = DEFAULT_PROFILE_ENV_DIR,
 ) -> Dict[str, object]:
     profile = PROFILES.get(profile_name)
     if not profile:
@@ -424,9 +431,25 @@ def sync_private_bounces(
     if not mailbox_email:
         raise ValueError(f"Profile {profile_name} is missing from_email.")
     password_env = str(profile.get("password_env") or "").strip()
-    password = os.environ.get(password_env, "").strip()
-    if not password:
-        raise ValueError(f"{password_env or 'password env'} is not configured.")
+    canonical_profile = PROFILES.get("private_jc") or {}
+    canonical_mailbox = norm_email(str(canonical_profile.get("from_email") or ""))
+    canonical_password_env = str(canonical_profile.get("password_env") or "").strip()
+    if (
+        profile_name not in PRIVATE_JC_BOUNCE_PROFILES
+        or mailbox_email != canonical_mailbox
+        or password_env != canonical_password_env
+        or canonical_password_env != "PRIVATE_JC_PASSWORD"
+    ):
+        raise ValueError("Private JC mailbox credential mapping is invalid.")
+    try:
+        password, _credential_source = resolve_protected_profile_credential(
+            "private_jc",
+            password_env,
+            "PRIVATE_JC_PASSWORD",
+            profile_env_dir=profile_env_dir,
+        )
+    except ProtectedProfileEnvError as exc:
+        raise ValueError("Private JC mailbox credential is unavailable.") from exc
 
     state = load_private_bounce_state(state_path)
     profile_state = state.get(profile_name, {}) if isinstance(state.get(profile_name), dict) else {}

@@ -148,6 +148,11 @@ class PrivateBounceHygieneTests(unittest.TestCase):
             tmp = Path(tmpdir)
             state_path = tmp / "state.json"
             suppressed_path = tmp / "suppressed.csv"
+            profile_env_dir = tmp / "profiles"
+            profile_env_dir.mkdir()
+            (profile_env_dir / "private_jc.env").write_text(
+                "PRIVATE_JC_PASSWORD=secret\n", encoding="utf-8"
+            )
             with patch.dict(os.environ, {"PRIVATE_JC_PASSWORD": "secret"}, clear=False):
                 with patch("private_bounce_hygiene.imaplib.IMAP4_SSL", FakeIMAP):
                     report = sync_private_bounces(
@@ -155,6 +160,7 @@ class PrivateBounceHygieneTests(unittest.TestCase):
                         state_path=state_path,
                         suppressed_path=suppressed_path,
                         report_dir=tmp,
+                        profile_env_dir=profile_env_dir,
                     )
 
             self.assertEqual(["INBOX", "Spam"], report["folders"])
@@ -234,6 +240,11 @@ class PrivateBounceHygieneTests(unittest.TestCase):
             tmp = Path(tmpdir)
             state_path = tmp / "state.json"
             suppressed_path = tmp / "suppressed.csv"
+            profile_env_dir = tmp / "profiles"
+            profile_env_dir.mkdir()
+            (profile_env_dir / "private_jc.env").write_text(
+                "PRIVATE_JC_PASSWORD=secret\n", encoding="utf-8"
+            )
             with patch.dict(os.environ, {"PRIVATE_JC_PASSWORD": "secret"}, clear=False):
                 with patch("private_bounce_hygiene.imaplib.IMAP4_SSL", FakeIMAP):
                     report = sync_private_bounces(
@@ -242,6 +253,7 @@ class PrivateBounceHygieneTests(unittest.TestCase):
                         state_path=state_path,
                         suppressed_path=suppressed_path,
                         report_dir=tmp,
+                        profile_env_dir=profile_env_dir,
                     )
 
             self.assertEqual(["INBOX", "Spam", "Trash"], report["folders"])
