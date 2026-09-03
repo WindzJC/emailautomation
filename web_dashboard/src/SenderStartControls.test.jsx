@@ -123,7 +123,7 @@ function baseFetchMock(startHandler, startReadyHandler = null) {
 }
 
 function startReadyButton() {
-  return document.getElementById("start-ready-btn");
+  return document.getElementById("react-start-ready-btn");
 }
 
 function startReadyPosts(fetchMock) {
@@ -309,68 +309,50 @@ describe("Start Ready Senders controls", () => {
     ],
   };
 
-  it("shows the plan, requires explicit confirmation, and submits one bulk transaction", async () => {
+  it("loads the authoritative plan before exposing inline confirmation", async () => {
     const handler = (pathName, options) => {
-      if (pathName === "/api/start-ready" && options.method === "POST") {
-        return Promise.resolve(jsonResponse({
-          ok: true,
-          status: "PLANNING",
-          job: { job_id: "job-1", status: "PLANNING", results: [], message: "Recomputing." },
-        }, 202));
-      }
-      if (pathName === "/api/start-ready/status/job-1") {
-        return Promise.resolve(jsonResponse({
-          ok: true,
-          job: {
-            job_id: "job-1",
-            status: "COMPLETE",
-            message: "Completed without retries.",
-            results: [
-              { profile: "private_jc", label: "JC", status: "STARTED", pending_count: 8, reason: "Started." },
-              { profile: "sendgrid_annette", label: "Annette", status: "STARTING", pending_count: 12, reason: "Activating." },
-              ...plan.skipped_profiles,
-            ],
-          },
-        }));
-      }
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
     root = await bootController(fetchMock);
 
+    expect(document.getElementById("start-ready-btn")).not.toBeInTheDocument();
     expect(startReadyButton()).toHaveTextContent("Start Ready Senders");
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(16));
 
-    expect(window.confirm).toHaveBeenCalledTimes(1);
-    expect(window.confirm.mock.calls[0][0]).toContain("Start 2 ready operational sender(s), sequentially?");
-    expect(window.confirm.mock.calls[0][0]).toContain("Warm Outreach: Empty queue (SAFE_IDLE_EMPTY_QUEUE).");
-    expect(window.confirm.mock.calls[0][0]).not.toContain("sendgrid_controlled_test");
-    expect(startReadyPosts(fetchMock)).toHaveLength(1);
-    expect(document.getElementById("start-ready-status")).toHaveTextContent("STARTEDJC8 pending · Started.");
-    expect(document.getElementById("start-ready-status")).toHaveTextContent("STARTINGAnnette12 pending · Activating.");
+    expect(fetchMock.mock.calls.filter(([url, options = {}]) => (
+      String(url) === "/api/start-ready" && !options.method
+    ))).toHaveLength(1);
+    expect(startReadyPosts(fetchMock)).toHaveLength(0);
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(startReadyButton()).toHaveTextContent("Confirm Start 2 Senders");
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
+      "READYJC8 pending · Ready to start.",
+    );
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
+      "SKIPPEDWarm Outreach0 pending · Empty queue (SAFE_IDLE_EMPTY_QUEUE).",
+    );
     expect(startReadyButton()).not.toBeDisabled();
   });
 
-  it("cancellation submits zero Start transactions and leaves the dashboard usable", async () => {
+  it("cancel submits zero Start transactions", async () => {
     const fetchMock = baseFetchMock(
       () => Promise.resolve(jsonResponse({ ok: true })),
       () => Promise.resolve(jsonResponse(plan)),
     );
     root = await bootController(fetchMock);
-    window.confirm.mockReturnValue(false);
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
+    fireEvent.click(document.querySelector(".react-start-ready-control .btn-secondary"));
+    await act(async () => flushMicrotasks());
 
     expect(startReadyPosts(fetchMock)).toHaveLength(0);
     expect(startReadyButton()).not.toBeDisabled();
-    expect(document.getElementById("message-bar")).toHaveTextContent(
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
       "Start Ready Senders cancelled. No Start request was submitted.",
     );
-    fireEvent.click(document.getElementById("refresh-btn"));
-    await act(async () => flushMicrotasks());
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/snapshot")).length).toBeGreaterThan(1);
   });
 
   it("locks rapid duplicate clicks while readiness is pending", async () => {
@@ -394,5 +376,214 @@ describe("Start Ready Senders controls", () => {
     });
     expect(startReadyButton()).not.toBeDisabled();
     expect(startReadyPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it("submits exactly one POST across rapid repeated confirmation activations and rerenders", async () => {
+    const pendingPost = deferredResponse();
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return pendingPost.promise;
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    fireEvent.click(startReadyButton());
+    fireEvent.keyDown(startReadyButton(), { key: "Enter", code: "Enter" });
+
+    expect(startReadyButton()).toBeDisabled();
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      root.render(<DashboardApp />);
+      await flushMicrotasks();
+    });
+    fireEvent.click(startReadyButton());
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      pendingPost.resolve(jsonResponse({
+        ok: true,
+        job: { job_id: "job-double", status: "FAILED", results: [], message: "Stopped safely." },
+      }, 202));
+      await flushMicrotasks(12);
+    });
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+  });
+
+  it("treats a network-ambiguous POST as non-retryable", async () => {
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.reject(new Error("synthetic connection loss"));
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+    expect(startReadyButton()).toBeDisabled();
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
+      "Do not retry. Inspect the Start Ready job and sender runtime state.",
+    );
+    fireEvent.click(startReadyButton());
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+  });
+
+  it("captures the 202 job id, polls with GET, continues RUNNING, and stops on COMPLETE", async () => {
+    let statusCalls = 0;
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          job: { job_id: "job-202", status: "PLANNING", results: [], message: "Accepted." },
+        }, 202));
+      }
+      if (pathName === "/api/start-ready/status/job-202") {
+        statusCalls += 1;
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          job: statusCalls === 1
+            ? {
+              job_id: "job-202",
+              status: "RUNNING",
+              results: [{ profile: "private_jc", label: "JC", status: "STARTING", pending_count: 8, reason: "Activating." }],
+            }
+            : {
+              job_id: "job-202",
+              status: "COMPLETE",
+              message: "Complete.",
+              results: [
+                { profile: "private_jc", label: "JC", status: "STARTED", pending_count: 8, reason: "Started." },
+                { profile: "sendgrid_annette", label: "Annette", status: "REFUSED", pending_count: 12, reason: "Refused." },
+                { profile: "sendgrid_jodi", label: "Jodi", status: "FAILED", pending_count: 7, reason: "Failed." },
+                { profile: "sendgrid_jordan", label: "Jordan", status: "SKIPPED", pending_count: 6, reason: "Skipped." },
+              ],
+            },
+        }));
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(16));
+
+    expect(statusCalls).toBe(1);
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("STARTINGJC");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(750);
+      await flushMicrotasks(12);
+    });
+    expect(statusCalls).toBe(2);
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("STARTEDJC");
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("REFUSEDAnnette");
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("FAILEDJodi");
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("SKIPPEDJordan");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/api/start-ready/status/job-202").every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(statusCalls).toBe(2);
+  });
+
+  it("stops polling on FAILED", async () => {
+    let statusCalls = 0;
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.resolve(jsonResponse({ ok: true, job: { job_id: "job-failed", status: "PLANNING" } }, 202));
+      }
+      if (pathName === "/api/start-ready/status/job-failed") {
+        statusCalls += 1;
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          job: { job_id: "job-failed", status: "FAILED", results: [{ profile: "private_jc", label: "JC", status: "FAILED", reason: "Failed safely." }] },
+        }));
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(16));
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+
+    expect(statusCalls).toBe(1);
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("FAILEDJC");
+  });
+
+  it("handles an active-job 409 without another POST", async () => {
+    const pendingStatus = deferredResponse();
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.resolve(jsonResponse({
+          ok: false,
+          message: "Start Ready Senders is already running.",
+          job: { job_id: "job-active", status: "RUNNING", results: [] },
+        }, 409));
+      }
+      if (pathName === "/api/start-ready/status/job-active") return pendingStatus.promise;
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+    expect(startReadyButton()).toBeDisabled();
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
+      "Start Ready Senders is already running.",
+    );
+    fireEvent.click(startReadyButton());
+    expect(startReadyPosts(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      pendingStatus.resolve(jsonResponse({ ok: true, job: { job_id: "job-active", status: "COMPLETE", results: [] } }));
+      await flushMicrotasks(12);
+    });
+  });
+
+  it("cleans a nonterminal polling timer on unmount", async () => {
+    let statusCalls = 0;
+    const handler = (pathName, options) => {
+      if (pathName === "/api/start-ready" && options.method === "POST") {
+        return Promise.resolve(jsonResponse({ ok: true, job: { job_id: "job-unmount", status: "PLANNING" } }, 202));
+      }
+      if (pathName === "/api/start-ready/status/job-unmount") {
+        statusCalls += 1;
+        return Promise.resolve(jsonResponse({ ok: true, job: { job_id: "job-unmount", status: "RUNNING", results: [] } }));
+      }
+      return Promise.resolve(jsonResponse(plan));
+    };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
+    root = await bootController(fetchMock);
+
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(12));
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(16));
+    expect(statusCalls).toBe(1);
+
+    await act(async () => root.unmount());
+    root = null;
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(statusCalls).toBe(1);
   });
 });

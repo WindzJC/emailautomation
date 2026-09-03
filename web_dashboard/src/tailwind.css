@@ -367,6 +367,14 @@
   background: rgba(10, 19, 30, .92);
 }
 
+.react-start-ready-control {
+  display: contents;
+}
+
+.react-start-ready-status {
+  flex: 1 0 100%;
+}
+
 .start-ready-head {
   display: flex;
   align-items: baseline;
@@ -2945,7 +2953,7 @@
     flex: 1;
   }
 
-  #ops-view .workspace-status-row #start-ready-btn {
+  #ops-view .workspace-status-row #react-start-ready-btn {
     flex: 1 0 100%;
   }
 

@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import parse from "html-react-parser";
 import "./tailwind.css";
@@ -42,7 +42,255 @@ export function PageHeading({ eyebrow, title, description, aside = null }) {
   );
 }
 
+const START_READY_TERMINAL_STATES = new Set(["COMPLETE", "FAILED"]);
+
+function defaultFetch(...args) {
+  return fetch(...args);
+}
+
+function defaultDashboardRefresh() {
+  const refreshButton = document.getElementById("refresh-btn");
+  if (refreshButton instanceof HTMLButtonElement && !refreshButton.disabled) {
+    refreshButton.click();
+  }
+}
+
+function startReadyItems(payload = {}) {
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  if (results.length) return results;
+  const ready = Array.isArray(payload.ready_profiles) ? payload.ready_profiles : [];
+  const skipped = Array.isArray(payload.skipped_profiles) ? payload.skipped_profiles : [];
+  return [...ready, ...skipped];
+}
+
+function activeStartReadyJob(payload = {}) {
+  return payload.job || payload.active_job || null;
+}
+
+export function SenderStartControls({
+  fetchImpl = defaultFetch,
+  onDashboardRefresh = defaultDashboardRefresh,
+  pollIntervalMs = 750,
+}) {
+  const [phase, setPhase] = useState("idle");
+  const [payload, setPayload] = useState(null);
+  const [message, setMessage] = useState("");
+  const [jobId, setJobId] = useState("");
+  const planInFlightRef = useRef(false);
+  const postInFlightRef = useRef(false);
+  const postAttemptedRef = useRef(false);
+  const pollTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (phase !== "polling" || !jobId) return undefined;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const response = await fetchImpl(
+          `/api/start-ready/status/${encodeURIComponent(jobId)}`,
+        );
+        const data = await response.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!response.ok || data.ok === false || !data.job) {
+          setMessage(data.message || `Start Ready status failed (${response.status}). Do not retry Start; inspect job and runtime state.`);
+          setPhase("status_error");
+          return;
+        }
+        const job = data.job;
+        setPayload(job);
+        const status = String(job.status || "").toUpperCase();
+        setMessage(job.message || "Start Ready Senders is running.");
+        if (START_READY_TERMINAL_STATES.has(status)) {
+          setPhase("terminal");
+          onDashboardRefresh();
+          return;
+        }
+        pollTimerRef.current = window.setTimeout(poll, pollIntervalMs);
+      } catch (error) {
+        if (cancelled) return;
+        setMessage(`Start Ready status is unavailable: ${error}. Do not retry Start; inspect job and runtime state.`);
+        setPhase("status_error");
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [fetchImpl, jobId, onDashboardRefresh, phase, pollIntervalMs]);
+
+  const beginPollingActiveJob = (data, fallbackMessage) => {
+    const job = activeStartReadyJob(data);
+    setPayload(job || data);
+    setMessage(data.message || job?.message || fallbackMessage);
+    postAttemptedRef.current = true;
+    const activeJobId = String(job?.job_id || "").trim();
+    if (activeJobId) {
+      setJobId(activeJobId);
+      setPhase("polling");
+    } else {
+      setPhase("conflict");
+    }
+  };
+
+  const loadPlan = async () => {
+    if (planInFlightRef.current || postInFlightRef.current || ["posting", "polling", "ambiguous", "conflict", "status_error"].includes(phase)) return;
+    planInFlightRef.current = true;
+    postAttemptedRef.current = false;
+    setPhase("planning");
+    setMessage("");
+    try {
+      const response = await fetchImpl("/api/start-ready");
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        beginPollingActiveJob(data, "A Start Ready job is already active. No new Start request was submitted.");
+        return;
+      }
+      if (!response.ok || data.ok === false) {
+        setPayload(data);
+        setMessage(data.message || `Readiness request failed (${response.status}).`);
+        setPhase("error");
+        return;
+      }
+      setPayload(data);
+      const ready = Array.isArray(data.ready_profiles) ? data.ready_profiles : [];
+      if (!ready.length) {
+        setMessage(data.message || "No operational production senders are currently ready.");
+        setPhase("idle");
+        return;
+      }
+      setMessage(data.message || "Review the authoritative plan, then confirm the single Start Ready transaction.");
+      setPhase("confirm");
+    } catch (error) {
+      setMessage(`Unable to load Start Ready readiness: ${error}`);
+      setPhase("error");
+    } finally {
+      planInFlightRef.current = false;
+    }
+  };
+
+  const confirmStart = async () => {
+    if (phase !== "confirm" || postInFlightRef.current || postAttemptedRef.current) return;
+    postInFlightRef.current = true;
+    postAttemptedRef.current = true;
+    setPhase("posting");
+    setMessage("Submitting one Start Ready transaction...");
+    let response;
+    let data;
+    try {
+      response = await fetchImpl("/api/start-ready", { method: "POST" });
+      data = await response.json().catch(() => ({}));
+    } catch (error) {
+      setMessage(`Start request outcome is unknown: ${error}. Do not retry. Inspect the Start Ready job and sender runtime state.`);
+      setPhase("ambiguous");
+      postInFlightRef.current = false;
+      return;
+    }
+    postInFlightRef.current = false;
+    if (response.status === 409) {
+      beginPollingActiveJob(data, "A Start Ready job is already active. The Start request will not be retried.");
+      return;
+    }
+    if (response.status !== 202 || !response.ok || data.ok === false || !data.job?.job_id) {
+      setPayload(data.job || data);
+      setMessage(data.message || `Start request failed (${response.status}). No automatic retry was attempted.`);
+      setPhase("error");
+      return;
+    }
+    setPayload(data.job);
+    setJobId(String(data.job.job_id));
+    setMessage(data.job.message || "Start Ready job accepted.");
+    setPhase("polling");
+  };
+
+  const cancelConfirmation = () => {
+    if (phase !== "confirm" || postInFlightRef.current) return;
+    setPhase("idle");
+    setMessage("Start Ready Senders cancelled. No Start request was submitted.");
+  };
+
+  const readyCount = Array.isArray(payload?.ready_profiles)
+    ? payload.ready_profiles.length
+    : Number(payload?.ready_count || 0);
+  const disabled = ["planning", "posting", "polling", "ambiguous", "conflict", "status_error"].includes(phase);
+  const primaryLabel = phase === "planning"
+    ? "Checking readiness..."
+    : phase === "confirm"
+      ? `Confirm Start ${readyCount} Senders`
+      : phase === "posting"
+        ? "Submitting Start Ready..."
+        : phase === "polling"
+          ? "Start Ready in progress..."
+          : phase === "ambiguous"
+            ? "Start outcome unknown"
+            : phase === "conflict"
+              ? "Start Ready already active"
+              : phase === "status_error"
+                ? "Inspect active Start Ready job"
+                : "Start Ready Senders";
+  const items = startReadyItems(payload || {});
+
+  return (
+    <div className="react-start-ready-control">
+      <button
+        id="react-start-ready-btn"
+        className="btn btn-primary"
+        type="button"
+        disabled={disabled}
+        onClick={phase === "confirm" ? confirmStart : loadPlan}
+      >
+        {primaryLabel}
+      </button>
+      {phase === "confirm" ? (
+        <button className="btn btn-secondary" type="button" onClick={cancelConfirmation}>
+          Cancel
+        </button>
+      ) : null}
+      {(payload || message) ? (
+        <section id="react-start-ready-status" className="start-ready-status react-start-ready-status" aria-live="polite">
+          <div className="start-ready-head">
+            <strong>{phase === "confirm" ? "Start Ready Senders review" : "Start Ready Senders"}</strong>
+            {message ? <span>{message}</span> : null}
+          </div>
+          {items.length ? (
+            <ul className="start-ready-list">
+              {items.map((item, index) => {
+                const status = String(item?.status || "SKIPPED").toUpperCase();
+                const label = item?.label || item?.profile || "Sender";
+                const pending = Number(item?.pending_count || 0).toLocaleString();
+                return (
+                  <li className={`start-ready-item status-${status.toLowerCase()}`} key={`${item?.profile || label}-${index}`}>
+                    <span className="start-ready-item-state">{status}</span>
+                    <strong>{label}</strong>
+                    <span>{pending} pending{item?.reason ? ` · ${item.reason}` : ""}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 export function CommandBar({ html }) {
+  const controls = parse(html, {
+    replace(node) {
+      if (node?.attribs?.id === "start-ready-btn") {
+        return <SenderStartControls />;
+      }
+      if (node?.attribs?.id === "start-ready-status") {
+        return <React.Fragment />;
+      }
+      return undefined;
+    },
+  });
   return (
     <section className="react-command-bar react-global-controls" aria-label="Global sender controls">
       <div className="react-section-heading">
@@ -52,7 +300,7 @@ export function CommandBar({ html }) {
         </div>
         <span className="react-section-state">No bulk start</span>
       </div>
-      <LegacyNode html={html} />
+      {controls}
     </section>
   );
 }
