@@ -903,53 +903,274 @@ def _norm_authoritative_history_email(raw_email: object) -> str:
 def load_authoritative_history_email_sets(
     paths: Sequence[Path],
 ) -> dict[Path, dict[str, object]]:
+    """Load authoritative sender history from coherent locked snapshots.
+
+    Runtime writers use advisory exclusive flock locks while mutating shared
+    history files.  Readers coordinate with those writers using shared flock
+    locks.
+
+    A stable cached history does not need to be rescanned.  The cache fast
+    path therefore opens a read-only file descriptor, acquires LOCK_SH, and
+    validates the cached source signature while the writer is excluded.
+    Only a changed source is reopened through Path.open and parsed.
+
+    Replacement, disappearance, or non-cooperating mutation during a full
+    snapshot remains fail-closed.
+    """
+    import os
+
     loaded: dict[Path, dict[str, object]] = {}
-    for raw_path in paths:
-        path = Path(raw_path)
-        cache_key = path.resolve()
-        signature = _block_source_signature(path)
-        cached = _AUTHORITATIVE_HISTORY_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature:
+
+    def use_cached(
+        path: Path,
+        cache_key: Path,
+        cached: tuple[
+            tuple[object, ...],
+            frozenset[str],
+            frozenset[str],
+            int,
+        ],
+    ) -> bool:
+        """Return cached data only after locked source validation."""
+        fd: int | None = None
+
+        try:
+            fd = os.open(path, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_SH)
+
+            handle_stat = os.fstat(fd)
+
+            try:
+                path_stat = path.stat()
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "Authoritative sender history disappeared while "
+                    f"loading: {path.name}"
+                ) from exc
+
+            if (
+                handle_stat.st_dev,
+                handle_stat.st_ino,
+            ) != (
+                path_stat.st_dev,
+                path_stat.st_ino,
+            ):
+                raise RuntimeError(
+                    "Authoritative sender history was replaced while "
+                    f"loading: {path.name}"
+                )
+
+            signature = _block_source_signature(path)
+
+            if cached[0] != signature:
+                return False
+
             _AUTHORITATIVE_HISTORY_CACHE.move_to_end(cache_key)
+
             loaded[path] = {
                 "sent": set(cached[1]),
                 "invalid": set(cached[2]),
                 "row_count": cached[3],
             }
+
+            return True
+
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Authoritative sender history disappeared while "
+                f"loading: {path.name}"
+            ) from exc
+
+        finally:
+            if fd is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+
+    for raw_path in paths:
+        path = Path(raw_path)
+        cache_key = path.resolve()
+
+        if not path.exists():
+            # Do not cache an absent authoritative source.  It may be
+            # created immediately after this point; forcing the next lookup
+            # to inspect it prevents an empty snapshot from poisoning cache.
+            _AUTHORITATIVE_HISTORY_CACHE.pop(
+                cache_key,
+                None,
+            )
+
+            loaded[path] = {
+                "sent": set(),
+                "invalid": set(),
+                "row_count": 0,
+            }
+
             continue
+
+        cached = _AUTHORITATIVE_HISTORY_CACHE.get(cache_key)
+
+        if cached is not None:
+            if use_cached(
+                path,
+                cache_key,
+                cached,
+            ):
+                continue
+
+        try:
+            handle = path.open(
+                newline="",
+                encoding="utf-8-sig",
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Authoritative sender history disappeared while "
+                f"loading: {path.name}"
+            ) from exc
+
         sent: set[str] = set()
         invalid: set[str] = set()
         row_count = 0
-        if path.exists():
-            with path.open(newline="", encoding="utf-8-sig") as handle:
+
+        with handle:
+            fcntl.flock(
+                handle.fileno(),
+                fcntl.LOCK_SH,
+            )
+
+            try:
+                handle_stat = os.fstat(handle.fileno())
+
+                try:
+                    path_stat = path.stat()
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        "Authoritative sender history disappeared while "
+                        f"loading: {path.name}"
+                    ) from exc
+
+                if (
+                    handle_stat.st_dev,
+                    handle_stat.st_ino,
+                ) != (
+                    path_stat.st_dev,
+                    path_stat.st_ino,
+                ):
+                    raise RuntimeError(
+                        "Authoritative sender history was replaced while "
+                        f"loading: {path.name}"
+                    )
+
+                # Capture only after LOCK_SH is held.  This is the critical
+                # fix for the production race with legitimate LOCK_EX
+                # append/finalization writers.
+                signature = _block_source_signature(path)
+
+                # Another in-process reader may have populated the cache
+                # while this caller was waiting for LOCK_SH.
+                cached = _AUTHORITATIVE_HISTORY_CACHE.get(cache_key)
+
+                if (
+                    cached is not None
+                    and cached[0] == signature
+                ):
+                    _AUTHORITATIVE_HISTORY_CACHE.move_to_end(
+                        cache_key
+                    )
+
+                    loaded[path] = {
+                        "sent": set(cached[1]),
+                        "invalid": set(cached[2]),
+                        "row_count": cached[3],
+                    }
+
+                    continue
+
                 for row in csv.DictReader(handle):
                     row_count += 1
-                    email = _norm_authoritative_history_email(row.get("Email") or "")
+
+                    email = _norm_authoritative_history_email(
+                        row.get("Email") or ""
+                    )
+
                     if not email:
                         continue
+
                     if _log_row_is_authoritative_sent(row):
                         sent.add(email)
-                    if str(row.get("Status") or "").strip().upper() == "INVALID":
+
+                    if (
+                        str(row.get("Status") or "")
+                        .strip()
+                        .upper()
+                        == "INVALID"
+                    ):
                         invalid.add(email)
-        final_signature = _block_source_signature(path)
-        if final_signature != signature:
-            raise RuntimeError(
-                f"Authoritative sender history changed while loading: {path.name}"
-            )
-        _AUTHORITATIVE_HISTORY_CACHE[cache_key] = (
-            final_signature,
-            frozenset(sent),
-            frozenset(invalid),
-            row_count,
-        )
-        _AUTHORITATIVE_HISTORY_CACHE.move_to_end(cache_key)
-        while len(_AUTHORITATIVE_HISTORY_CACHE) > _AUTHORITATIVE_HISTORY_CACHE_MAX:
-            _AUTHORITATIVE_HISTORY_CACHE.popitem(last=False)
-        loaded[path] = {
-            "sent": sent,
-            "invalid": invalid,
-            "row_count": row_count,
-        }
+
+                final_signature = _block_source_signature(path)
+
+                try:
+                    final_path_stat = path.stat()
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        "Authoritative sender history disappeared while "
+                        f"loading: {path.name}"
+                    ) from exc
+
+                if (
+                    handle_stat.st_dev,
+                    handle_stat.st_ino,
+                ) != (
+                    final_path_stat.st_dev,
+                    final_path_stat.st_ino,
+                ):
+                    raise RuntimeError(
+                        "Authoritative sender history was replaced while "
+                        f"loading: {path.name}"
+                    )
+
+                if final_signature != signature:
+                    raise RuntimeError(
+                        "Authoritative sender history changed while "
+                        f"loading: {path.name}"
+                    )
+
+                # Commit the coherent snapshot to the process-local cache
+                # while LOCK_SH is still held.  If this happened after
+                # unlock, a writer could acquire LOCK_EX, mutate the file,
+                # and then have this reader install the now-stale snapshot.
+                _AUTHORITATIVE_HISTORY_CACHE[cache_key] = (
+                    final_signature,
+                    frozenset(sent),
+                    frozenset(invalid),
+                    row_count,
+                )
+                _AUTHORITATIVE_HISTORY_CACHE.move_to_end(
+                    cache_key
+                )
+
+                while (
+                    len(_AUTHORITATIVE_HISTORY_CACHE)
+                    > _AUTHORITATIVE_HISTORY_CACHE_MAX
+                ):
+                    _AUTHORITATIVE_HISTORY_CACHE.popitem(
+                        last=False
+                    )
+
+                loaded[path] = {
+                    "sent": sent,
+                    "invalid": invalid,
+                    "row_count": row_count,
+                }
+
+            finally:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_UN,
+                )
+
     return loaded
 
 
@@ -3102,18 +3323,65 @@ def rolling_24h_stats(log_path: Path, my_domains: set[str], now: datetime) -> di
 
 
 def log_row(sent_log: Path, email: str, status: str, info: str = "") -> None:
-    new_file = not sent_log.exists()
+    """Append one authoritative sender-history row under an exclusive lock.
+
+    Authoritative-history readers use LOCK_SH.  All normal sender-history
+    writes therefore use LOCK_EX so readers observe either the complete
+    state before this row or the complete state after it, never a
+    mid-write snapshot.
+    """
     sent_log.parent.mkdir(parents=True, exist_ok=True)
-    with sent_log.open("a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
-        if new_file:
-            w.writeheader()
-        w.writerow({
-            "TimestampUTC": datetime.now(timezone.utc).isoformat(),
-            "Email": email,
-            "Status": status,
-            "Info": (info or "")[:300],
-        })
+
+    with sent_log.open("a+", newline="", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+        try:
+            # Determine header state while holding the writer lock.  The
+            # previous exists()-before-open check allowed two first writers
+            # to race and both emit a CSV header.
+            f.seek(0, 2)
+            new_file = f.tell() == 0
+
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "TimestampUTC",
+                    "Email",
+                    "Status",
+                    "Info",
+                ],
+            )
+
+            if new_file:
+                w.writeheader()
+
+            w.writerow({
+                "TimestampUTC": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "Email": email,
+                "Status": status,
+                "Info": (info or "")[:300],
+            })
+
+            # Flush while LOCK_EX is still owned so another cooperating
+            # reader/writer cannot observe userspace-buffered partial state.
+            f.flush()
+
+            # This cache is process-local.  A writer in this same process
+            # knows its previous authoritative snapshot is now obsolete,
+            # so evict it before releasing LOCK_EX.  Readers in other
+            # processes independently detect the changed source signature.
+            _AUTHORITATIVE_HISTORY_CACHE.pop(
+                sent_log.resolve(),
+                None,
+            )
+
+        finally:
+            fcntl.flock(
+                f.fileno(),
+                fcntl.LOCK_UN,
+            )
 
 
 def campaign_log_info(info: str = "", campaign_type: str = CAMPAIGN_TYPE_COLD) -> str:

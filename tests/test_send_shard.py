@@ -997,6 +997,817 @@ class SendShardTests(unittest.TestCase):
             self.assertEqual({"invalid@example.test"}, loaded[log_path]["invalid"])
             self.assertEqual(3, loaded[log_path]["row_count"])
 
+    def test_authoritative_history_loader_coordinates_with_domain_finalize(self) -> None:
+        """A cooperating domain-log writer must not cause a false mutation failure."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            domain_log = Path(tmpdir) / "private_domain_log.csv"
+
+            reservation_token = send_shard.domain_wait_for_slot(
+                domain_log,
+                5,
+                jitter_sec=0,
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            first_signature_seen = threading.Event()
+            writer_done = threading.Event()
+            writer_errors: list[BaseException] = []
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def coordinated_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == domain_log:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        first_signature_seen.set()
+
+                        # Under the fixed implementation the loader owns a
+                        # shared lock here, so the exclusive writer must wait.
+                        # Under the old implementation the writer completed
+                        # here and changed the signature before the CSV read.
+                        writer_done.wait(0.20)
+
+                return signature
+
+            def finalize_writer() -> None:
+                if not first_signature_seen.wait(2.0):
+                    writer_errors.append(
+                        RuntimeError(
+                            "reader never reached first locked signature"
+                        )
+                    )
+                    writer_done.set()
+                    return
+
+                try:
+                    send_shard.domain_finalize_attempt(
+                        domain_log,
+                        reservation_token,
+                        "reader@example.test",
+                        "temporary_auth_failure",
+                        "synthetic regression",
+                    )
+                except BaseException as exc:
+                    writer_errors.append(exc)
+                finally:
+                    writer_done.set()
+
+            writer = threading.Thread(
+                target=finalize_writer,
+                daemon=True,
+            )
+            writer.start()
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=coordinated_signature,
+            ):
+                loaded = (
+                    send_shard
+                    .load_authoritative_history_email_sets(
+                        [domain_log]
+                    )
+                )
+
+            writer.join(timeout=2.0)
+
+            self.assertFalse(writer.is_alive())
+            self.assertEqual([], writer_errors)
+            self.assertGreaterEqual(signature_calls, 2)
+            self.assertEqual(set(), loaded[domain_log]["sent"])
+
+            # The writer completed after the coherent reader snapshot.
+            # A subsequent load must observe the finalized stable file.
+            refreshed = (
+                send_shard
+                .load_authoritative_history_email_sets(
+                    [domain_log]
+                )
+            )
+            self.assertEqual(
+                1,
+                refreshed[domain_log]["row_count"],
+            )
+
+    def test_authoritative_history_loader_still_refuses_unlocked_midread_mutation(self) -> None:
+        """Advisory-lock bypass must remain fail-closed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_annette_log.csv"
+
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {
+                        "Email": "known@example.test",
+                        "Status": "SENT",
+                        "Info": "",
+                    }
+                ],
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def mutate_after_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == log_path:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        # Deliberately bypass flock to model an unsafe or
+                        # non-cooperating writer.  Advisory LOCK_SH must not
+                        # cause this mutation to be silently accepted.
+                        with log_path.open(
+                            "a",
+                            encoding="utf-8",
+                        ) as handle:
+                            handle.write(
+                                "unsafe@example.test,INVALID,"
+                                "synthetic unlocked mutation\\n"
+                            )
+
+                return signature
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=mutate_after_signature,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed while loading",
+                ):
+                    (
+                        send_shard
+                        .load_authoritative_history_email_sets(
+                            [log_path]
+                        )
+                    )
+
+    def test_authoritative_profile_log_writer_coordinates_with_locked_reader(self) -> None:
+        """Normal log_row writes must wait for an authoritative LOCK_SH reader."""
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_alison_log.csv"
+
+            self._write_csv(
+                log_path,
+                [
+                    "TimestampUTC",
+                    "Email",
+                    "Status",
+                    "Info",
+                ],
+                [
+                    {
+                        "TimestampUTC": (
+                            "2026-09-03T00:00:00+00:00"
+                        ),
+                        "Email": "known@example.test",
+                        "Status": "SENT",
+                        "Info": "",
+                    }
+                ],
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            first_signature_seen = threading.Event()
+            writer_started = threading.Event()
+            writer_done = threading.Event()
+            writer_errors: list[BaseException] = []
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def coordinated_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == log_path:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        first_signature_seen.set()
+
+                        self.assertTrue(
+                            writer_started.wait(2.0)
+                        )
+
+                        # log_row owns LOCK_EX, so while this reader
+                        # holds LOCK_SH the writer must still be blocked.
+                        self.assertFalse(
+                            writer_done.wait(0.20)
+                        )
+
+                return signature
+
+            def writer() -> None:
+                if not first_signature_seen.wait(2.0):
+                    writer_errors.append(
+                        RuntimeError(
+                            "reader never reached locked signature"
+                        )
+                    )
+                    writer_done.set()
+                    return
+
+                writer_started.set()
+
+                try:
+                    send_shard.log_row(
+                        log_path,
+                        "new@example.test",
+                        "SENT",
+                        "synthetic concurrent writer",
+                    )
+                except BaseException as exc:
+                    writer_errors.append(exc)
+                finally:
+                    writer_done.set()
+
+            thread = threading.Thread(
+                target=writer,
+                daemon=True,
+            )
+            thread.start()
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=coordinated_signature,
+            ):
+                loaded = (
+                    send_shard
+                    .load_authoritative_history_email_sets(
+                        [log_path]
+                    )
+                )
+
+            thread.join(timeout=2.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual([], writer_errors)
+            self.assertEqual(
+                {"known@example.test"},
+                loaded[log_path]["sent"],
+            )
+
+            # Prove the writer committed the complete physical CSV row
+            # before testing cache/snapshot visibility.
+            with log_path.open(
+                newline="",
+                encoding="utf-8-sig",
+            ) as handle:
+                physical_rows = list(csv.DictReader(handle))
+
+            self.assertEqual(
+                {
+                    "known@example.test",
+                    "new@example.test",
+                },
+                {
+                    row["Email"]
+                    for row in physical_rows
+                },
+            )
+
+            # After the reader releases LOCK_SH, the complete writer row
+            # must also become visible through the authoritative cache.
+            refreshed = (
+                send_shard
+                .load_authoritative_history_email_sets(
+                    [log_path]
+                )
+            )
+
+            self.assertEqual(
+                {
+                    "known@example.test",
+                    "new@example.test",
+                },
+                refreshed[log_path]["sent"],
+            )
+
+    def test_log_row_first_writer_emits_exactly_one_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_jodi_log.csv"
+
+            send_shard.log_row(
+                log_path,
+                "first@example.test",
+                "SENT",
+            )
+            send_shard.log_row(
+                log_path,
+                "second@example.test",
+                "SENT",
+            )
+
+            lines = log_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+
+            self.assertEqual(
+                1,
+                sum(
+                    line.startswith(
+                        "TimestampUTC,Email,Status,Info"
+                    )
+                    for line in lines
+                ),
+            )
+
+            with log_path.open(
+                newline="",
+                encoding="utf-8-sig",
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(2, len(rows))
+
+    def test_authoritative_history_loader_refuses_file_replacement_midread(self) -> None:
+        """Replacing the pathname while a snapshot is active must fail closed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_jordan_log.csv"
+
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {
+                        "Email": "known@example.test",
+                        "Status": "SENT",
+                        "Info": "",
+                    }
+                ],
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def replace_after_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == log_path:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        replacement = log_path.with_suffix(
+                            ".replacement"
+                        )
+
+                        replacement.write_text(
+                            "Email,Status,Info\n"
+                            "replacement@example.test,SENT,\n",
+                            encoding="utf-8",
+                        )
+
+                        replacement.replace(log_path)
+
+                return signature
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=replace_after_signature,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "replaced while loading|changed while loading",
+                ):
+                    (
+                        send_shard
+                        .load_authoritative_history_email_sets(
+                            [log_path]
+                        )
+                    )
+
+    def test_authoritative_history_loader_refuses_truncation_midread(self) -> None:
+        """A non-cooperating truncation must remain fail-closed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_fiorela_log.csv"
+
+            self._write_csv(
+                log_path,
+                ["Email", "Status", "Info"],
+                [
+                    {
+                        "Email": "known@example.test",
+                        "Status": "SENT",
+                        "Info": "",
+                    },
+                    {
+                        "Email": "second@example.test",
+                        "Status": "INVALID",
+                        "Info": "",
+                    },
+                ],
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def truncate_after_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == log_path:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        # Deliberately bypass flock: unsafe writer model.
+                        with open(log_path, "w", encoding="utf-8") as handle:
+                            handle.write(
+                                "Email,Status,Info\n"
+                            )
+
+                return signature
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=truncate_after_signature,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed while loading",
+                ):
+                    (
+                        send_shard
+                        .load_authoritative_history_email_sets(
+                            [log_path]
+                        )
+                    )
+
+    def test_authoritative_history_loader_refuses_existing_content_rewrite_midread(self) -> None:
+        """Same-size historical-byte rewrite must not evade source validation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_jodi_log.csv"
+
+            original = (
+                "Email,Status,Info\n"
+                "aaaa@example.test,SENT,\n"
+            )
+
+            rewritten = (
+                "Email,Status,Info\n"
+                "bbbb@example.test,SENT,\n"
+            )
+
+            self.assertEqual(
+                len(original.encode("utf-8")),
+                len(rewritten.encode("utf-8")),
+            )
+
+            log_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            original_signature = send_shard._block_source_signature
+            signature_calls = 0
+
+            def rewrite_after_signature(path: Path):
+                nonlocal signature_calls
+
+                signature = original_signature(path)
+
+                if Path(path) == log_path:
+                    signature_calls += 1
+
+                    if signature_calls == 1:
+                        log_path.write_text(
+                            rewritten,
+                            encoding="utf-8",
+                        )
+
+                        # Ensure mtime differs even on coarse filesystems.
+                        stat = log_path.stat()
+                        os.utime(
+                            log_path,
+                            ns=(
+                                stat.st_atime_ns,
+                                stat.st_mtime_ns + 1_000_000,
+                            ),
+                        )
+
+                return signature
+
+            with patch.object(
+                send_shard,
+                "_block_source_signature",
+                side_effect=rewrite_after_signature,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed while loading",
+                ):
+                    (
+                        send_shard
+                        .load_authoritative_history_email_sets(
+                            [log_path]
+                        )
+                    )
+
+    def test_authoritative_history_missing_source_is_not_cached(self) -> None:
+        """Creation racing an absent-source lookup must not poison cache."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "sendgrid_new_log.csv"
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            original_exists = Path.exists
+            first_target_check = True
+
+            def exists_then_create(path: Path) -> bool:
+                nonlocal first_target_check
+
+                if (
+                    path == log_path
+                    and first_target_check
+                ):
+                    first_target_check = False
+
+                    # Model creation immediately after the reader observed
+                    # the source as absent.
+                    log_path.write_text(
+                        "TimestampUTC,Email,Status,Info\n"
+                        "2026-09-03T00:00:00+00:00,"
+                        "late@example.test,SENT,\n",
+                        encoding="utf-8",
+                    )
+
+                    return False
+
+                return original_exists(path)
+
+            with patch.object(
+                Path,
+                "exists",
+                autospec=True,
+                side_effect=exists_then_create,
+            ):
+                first = (
+                    send_shard
+                    .load_authoritative_history_email_sets(
+                        [log_path]
+                    )
+                )
+
+            self.assertEqual(
+                set(),
+                first[log_path]["sent"],
+            )
+
+            self.assertNotIn(
+                log_path.resolve(),
+                send_shard._AUTHORITATIVE_HISTORY_CACHE,
+            )
+
+            second = (
+                send_shard
+                .load_authoritative_history_email_sets(
+                    [log_path]
+                )
+            )
+
+            self.assertEqual(
+                {"late@example.test"},
+                second[log_path]["sent"],
+            )
+
+    def test_authoritative_profile_log_writer_blocks_across_processes(self) -> None:
+        """LOCK_SH/LOCK_EX must coordinate independent Python processes."""
+        import fcntl
+        import subprocess
+        import sys
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            log_path = tmp / "sendgrid_process_log.csv"
+            started_path = tmp / "writer.started"
+            finished_path = tmp / "writer.finished"
+
+            self._write_csv(
+                log_path,
+                [
+                    "TimestampUTC",
+                    "Email",
+                    "Status",
+                    "Info",
+                ],
+                [
+                    {
+                        "TimestampUTC": (
+                            "2026-09-03T00:00:00+00:00"
+                        ),
+                        "Email": "existing@example.test",
+                        "Status": "SENT",
+                        "Info": "",
+                    }
+                ],
+            )
+
+            child_code = r"""
+import sys
+from pathlib import Path
+import send_shard
+
+log_path = Path(sys.argv[1])
+started_path = Path(sys.argv[2])
+finished_path = Path(sys.argv[3])
+
+started_path.write_text(
+    "started",
+    encoding="utf-8",
+)
+
+send_shard.log_row(
+    log_path,
+    "writer@example.test",
+    "SENT",
+    "cross_process_lock_test",
+)
+
+finished_path.write_text(
+    "finished",
+    encoding="utf-8",
+)
+"""
+
+            repo_root = (
+                Path(send_shard.__file__)
+                .resolve()
+                .parent
+            )
+
+            with log_path.open(
+                newline="",
+                encoding="utf-8-sig",
+            ) as reader:
+                fcntl.flock(
+                    reader.fileno(),
+                    fcntl.LOCK_SH,
+                )
+
+                proc = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-u",
+                        "-c",
+                        child_code,
+                        str(log_path),
+                        str(started_path),
+                        str(finished_path),
+                    ],
+                    cwd=str(repo_root),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                deadline = time.monotonic() + 5.0
+
+                while (
+                    not started_path.exists()
+                    and proc.poll() is None
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+
+                started_while_locked = (
+                    started_path.exists()
+                )
+
+                # Give the independent writer enough time to attempt
+                # LOCK_EX.  It must remain blocked by this LOCK_SH.
+                time.sleep(0.30)
+
+                blocked_while_locked = (
+                    proc.poll() is None
+                    and not finished_path.exists()
+                )
+
+                fcntl.flock(
+                    reader.fileno(),
+                    fcntl.LOCK_UN,
+                )
+
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=5.0
+                )
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+
+                try:
+                    stdout, stderr = proc.communicate(
+                        timeout=2.0
+                    )
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+
+                self.fail(
+                    "cross-process writer did not finish after "
+                    "LOCK_SH release; "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                )
+
+            self.assertTrue(
+                started_while_locked,
+                msg=(
+                    "independent writer never reached log_row; "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                ),
+            )
+
+            self.assertTrue(
+                blocked_while_locked,
+                msg=(
+                    "independent writer bypassed LOCK_SH; "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                ),
+            )
+
+            self.assertEqual(
+                0,
+                proc.returncode,
+                msg=(
+                    "independent writer failed; "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                ),
+            )
+
+            self.assertTrue(
+                finished_path.exists()
+            )
+
+            with log_path.open(
+                newline="",
+                encoding="utf-8-sig",
+            ) as handle:
+                physical_rows = list(
+                    csv.DictReader(handle)
+                )
+
+            self.assertEqual(
+                {
+                    "existing@example.test",
+                    "writer@example.test",
+                },
+                {
+                    row["Email"]
+                    for row in physical_rows
+                },
+            )
+
+            send_shard._AUTHORITATIVE_HISTORY_CACHE.clear()
+
+            history = (
+                send_shard
+                .load_authoritative_history_email_sets(
+                    [log_path]
+                )
+            )
+
+            self.assertEqual(
+                {
+                    "existing@example.test",
+                    "writer@example.test",
+                },
+                history[log_path]["sent"],
+            )
+
     def test_authoritative_history_cache_invalidates_when_log_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir) / "sendgrid_annette_log.csv"
