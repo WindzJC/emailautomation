@@ -1469,13 +1469,15 @@ Best regards,
 # Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.
 
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle}, and it made me think about a bigger opportunity around the book—"
-    "giving readers one place to discover you as the author and continue into the rest of your work."
+    "I came across {BookTitle} and noticed a straightforward opportunity: "
+    "using it as the starting point for one clear author platform that brings your books together "
+    "and gives readers one place to discover your work."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your author profile, and it made me think about a bigger opportunity around your work—"
-    "bringing your books together under one clear author platform instead of letting each title stand on its own."
+    "I came across your author profile and noticed a straightforward opportunity: "
+    "bringing your books together under one clear author platform that complements your retailer pages "
+    "and gives readers one place to discover your work."
 )
 
 PITCH_JC_SUBJECT = "An idea for {BookTitle}"
@@ -1485,15 +1487,15 @@ PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-Retailer pages are useful for discovering or buying a single title, but an author website can do something bigger: bring your books, story, reviews, trailers, purchase links, future releases, and ways for readers to stay connected into one place built around your name.
+Retailer pages are useful for discovery and purchase. An author website does a different job: it can bring your books, story, reviews, trailers, purchase links, future releases, and ways for readers to stay connected into one place built around your name.
 
-The advantage is that each new release strengthens the same author platform instead of starting from zero every time.
+That way, each new release strengthens the same author presence instead of starting from zero every time.
 
 That’s what we build at Astra Productions.
 
-If you’re open to it, I can create a draft website concept using {{BookTitle}} as the starting point, so you can actually see how your author brand and books could come together before deciding whether you want to turn it into a complete website.
+If you’re open to it, I can put together a draft website concept using {{BookTitle}} as the starting point so you can see what that could look like before deciding whether you want to take it any further.
 
-If you’d like me to put one together, just reply “yes.” No meeting or commitment is needed—I can send the draft directly by email.
+If you’d like me to make one, just reply “yes.” No meeting is needed—I can send the draft directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
@@ -1506,15 +1508,15 @@ PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-Retailer pages are useful for discovering or buying individual titles, but an author website can do something bigger: bring your books, story, reviews, trailers, purchase links, future releases, and ways for readers to stay connected into one place built around your name.
+Retailer pages are useful for discovery and purchase. An author website does a different job: it can bring your books, story, reviews, trailers, purchase links, future releases, and ways for readers to stay connected into one place built around your name.
 
-The advantage is that each new release strengthens the same author platform instead of starting from zero every time.
+That way, each new release strengthens the same author presence instead of starting from zero every time.
 
 That’s what we build at Astra Productions.
 
-If you’re open to it, I can create a draft website concept so you can actually see how your author brand and books could come together before deciding whether you want to turn it into a complete website.
+If you’re open to it, I can put together a draft website concept so you can see what that could look like before deciding whether you want to take it any further.
 
-If you’d like me to put one together, just reply “yes.” No meeting or commitment is needed—I can send the draft directly by email.
+If you’d like me to make one, just reply “yes.” No meeting is needed—I can send the draft directly by email.
 
 Windelle JC
 Founder & CEO, Astra Productions
