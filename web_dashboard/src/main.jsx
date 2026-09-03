@@ -312,7 +312,9 @@ function readDashboardTemplate() {
       metrics: outer(senders, ".queue-health-section"),
       progress: outer(senders, ".ops-progress-strip"),
       progressDetails: outer(senders, "#ops-progress-details"),
-      controlledTest: outer(senders, ".controlled-send-test-card"),
+      controlledTest: Array.from(
+        senders.querySelectorAll(".controlled-send-test-card"),
+      ).map((node) => node.outerHTML).join(""),
       profileDetail: outer(senders, ".workspace-primary"),
       history: outer(senders, ".campaign-history-panel"),
     },

@@ -173,3 +173,26 @@ def test_jc_only_control_never_starts_production_workers():
     assert "/api/start/" not in segment
     assert "/api/start-ready" not in segment
     assert "send_shard.py" not in segment
+
+def test_react_template_preserves_all_controlled_test_cards():
+    source_root = ROOT / "web_dashboard" / "src"
+
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in source_root.rglob("*")
+        if path.suffix in {".js", ".jsx", ".ts", ".tsx"}
+    )
+
+    assert (
+        'querySelectorAll(".controlled-send-test-card")'
+        in sources
+    )
+    assert (
+        '.map((node) => node.outerHTML).join("")'
+        in sources
+    )
+    assert (
+        'controlledTest: outer('
+        'senders, ".controlled-send-test-card")'
+        not in sources
+    )

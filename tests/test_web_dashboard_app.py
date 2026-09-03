@@ -119,7 +119,18 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("No production recipient queue will be used", source)
         self.assertIn('@app.post("/api/sendgrid/controlled-test")', backend)
         self.assertIn("model_config = ConfigDict(extra=\"forbid\")", backend)
-        self.assertIn("controlledTest: outer(senders, \".controlled-send-test-card\")", react_source)
+        self.assertIn(
+            'querySelectorAll(".controlled-send-test-card")',
+            react_source,
+        )
+        self.assertIn(
+            '.map((node) => node.outerHTML).join("")',
+            react_source,
+        )
+        self.assertNotIn(
+            'controlledTest: outer(senders, ".controlled-send-test-card")',
+            react_source,
+        )
 
     def test_lead_ops_routes_are_separate_and_upload_type_is_not_user_selectable(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
