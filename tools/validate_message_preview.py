@@ -31,7 +31,7 @@ CONSIGNMENT_SUBJECT_FALLBACKS = {
     "Regarding your book",
     "Independent author review",
 }
-ASTRA_VISUAL_SUBJECT_FALLBACK = "A trailer idea for independent authors"
+ASTRA_VISUAL_SUBJECT_FALLBACK = "An idea for your author platform"
 BOOK_TITLE_PERSONALIZED_OPENINGS = (
     "My team came across",
 )
@@ -72,8 +72,18 @@ BAD_BOOK_VALUES = BAD_AUTHOR_NAMES | {
     "untitled",
     "your book",
 }
-ASTRA_SERVICE_TERMS = ("author website", "book trailer", "launch visuals", "online presentation")
-ASTRA_LANGUAGE_TERMS = ("astra productions", "cinematic book trailer", "launch visuals")
+ASTRA_SERVICE_TERMS = (
+    "author website",
+    "author platform",
+    "draft website concept",
+    "astra productions",
+)
+ASTRA_LANGUAGE_TERMS = (
+    "astra productions",
+    "draft website concept",
+    "cinematic book trailer",
+    "launch visuals",
+)
 CONSIGNMENT_LANGUAGE_TERMS = (
     "consignment",
     "stocking any book",
@@ -228,23 +238,49 @@ def validate_consignment_subject(subject: str, book_title: str, book_failures: S
     return []
 
 
-def validate_book_title_fallback_rendering(subject: str, body: str, mode: PreviewMode) -> List[str]:
+def validate_book_title_fallback_rendering(
+    subject: str,
+    body: str,
+    mode: PreviewMode,
+) -> List[str]:
     failures: List[str] = []
+
     if mode == "astra_visual":
         expected_subjects = {ASTRA_VISUAL_SUBJECT_FALLBACK}
+
+        # JC/Astra has its own generic author-platform fallback.
+        # Keep this separate from the legacy book-title/consignment
+        # fallback contract so changing JC copy cannot weaken or alter
+        # SendGrid validation.
+        generic_opening = "I came across your author profile"
     else:
         expected_subjects = CONSIGNMENT_SUBJECT_FALLBACKS
+        generic_opening = BOOK_TITLE_GENERIC_OPENING
+
     if subject not in expected_subjects:
         failures.append("book_title_subject_fallback_required")
-    if BOOK_TITLE_GENERIC_OPENING not in body:
-        failures.append("book_title_generic_opening_missing")
+
     body_lower = body.lower()
-    if any(opening.lower() in body_lower for opening in BOOK_TITLE_PERSONALIZED_OPENINGS):
-        failures.append("book_title_personalized_opening_not_removed")
+
+    if generic_opening.lower() not in body_lower:
+        failures.append("book_title_generic_opening_missing")
+
+    if any(
+        opening.lower() in body_lower
+        for opening in BOOK_TITLE_PERSONALIZED_OPENINGS
+    ):
+        failures.append(
+            "book_title_personalized_opening_not_removed"
+        )
+
     if "{BookTitle}" in body:
-        failures.append("body_unrendered_placeholder:{BookTitle}")
+        failures.append(
+            "body_unrendered_placeholder:{BookTitle}"
+        )
+
     if re.search(r"\bcame across your book\b", body_lower):
         failures.append("body_generic_your_book")
+
     return failures
 
 
