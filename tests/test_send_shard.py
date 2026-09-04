@@ -3452,11 +3452,13 @@ finished_path.write_text(
                     csv_reads["count"] += 1
                     if csv_reads["count"] == 1:
                         return original_read_rows(path)
-                    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-                        writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
-                        writer.writeheader()
-                        writer.writerows(refreshed_rows)
-                    return refreshed_rows
+                    if csv_reads["count"] == 2:
+                        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                            writer = csv.DictWriter(handle, fieldnames=["Email", "FirstName", "BookTitle"])
+                            writer.writeheader()
+                            writer.writerows(refreshed_rows)
+                        return refreshed_rows
+                    return original_read_rows(path)
                 return original_read_rows(path)
 
             stdout = io.StringIO()
@@ -3465,6 +3467,20 @@ finished_path.write_text(
                 stack.enter_context(patch.object(settings, "SHARDS_DIR", shards))
                 stack.enter_context(patch.object(settings, "LOGS_DIR", logs))
                 stack.enter_context(patch.object(settings, "STATE_DIR", state))
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "WEBHOOK_EVENTS_PATH",
+                        state / "sendgrid_events.jsonl",
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        settings,
+                        "LEAD_LEDGER_DB_PATH",
+                        state / "lead_ledger.sqlite3",
+                    )
+                )
                 stack.enter_context(patch.object(send_shard, "SHARDS_DIR", shards))
                 stack.enter_context(patch.object(send_shard, "LOGS_DIR", logs))
                 stack.enter_context(patch.object(send_shard, "STATE_DIR", state))
@@ -3475,6 +3491,7 @@ finished_path.write_text(
                 stack.enter_context(patch.object(send_shard, "SENDGRID_COUNTERS_PATH", counters))
                 stack.enter_context(patch.object(send_shard, "SENDGRID_SKIP_PRUNE_ON_STARTUP", True))
                 stack.enter_context(patch.object(send_shard, "read_rows", side_effect=fake_read_rows))
+                stack.enter_context(patch.object(send_shard.os, "fsync", return_value=None))
                 stack.enter_context(
                     patch.object(
                         send_shard,

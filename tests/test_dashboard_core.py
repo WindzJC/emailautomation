@@ -2277,6 +2277,10 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 "_wait_for_started_profiles",
                 return_value={"sendgrid_annette", "sendgrid_jordan"},
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2440,6 +2444,10 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 "_wait_for_started_profiles",
                 return_value=set(profiles),
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2476,6 +2484,10 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 "_wait_for_started_profiles",
                 return_value=set(profiles) - {"sendgrid_fiorela"},
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2513,6 +2525,10 @@ class DashboardCoreTests(unittest.TestCase):
                 DASHBOARD_PROFILES=profiles + ["private_jc"],
                 START_ALL_PROFILES=profiles,
                 PYTHON_BIN=python_bin,
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2594,6 +2610,10 @@ class DashboardCoreTests(unittest.TestCase):
                 dashboard_core,
                 "_wait_for_started_profiles",
                 return_value=set(profiles),
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run):
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
@@ -2619,6 +2639,10 @@ class DashboardCoreTests(unittest.TestCase):
                 SENDGRID_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
                 START_ALL_PROFILES=["sendgrid_annette", "sendgrid_jordan"],
                 PYTHON_BIN=python_bin,
+            ), patch.object(
+                dashboard_core,
+                "active_or_locked_sender_profiles",
+                return_value=set(),
             ), patch.object(dashboard_core.subprocess, "run", side_effect=fake_run) as run_mock:
                 ok, message = dashboard_core.run_sendgrid_launcher()
 
