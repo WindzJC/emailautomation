@@ -14,7 +14,11 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 import settings
-from send_shard import BOOK_TITLE_GENERIC_OPENING
+from send_shard import (
+    BOOK_TITLE_GENERIC_OPENING,
+    PITCH_JC_SUBJECT_FALLBACK,
+    PRIVATE_JC_GENERIC_OPENING,
+)
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -31,7 +35,7 @@ CONSIGNMENT_SUBJECT_FALLBACKS = {
     "Regarding your book",
     "Independent author review",
 }
-ASTRA_VISUAL_SUBJECT_FALLBACK = "An idea for your author platform"
+ASTRA_VISUAL_SUBJECT_FALLBACK = PITCH_JC_SUBJECT_FALLBACK
 BOOK_TITLE_PERSONALIZED_OPENINGS = (
     "My team came across",
 )
@@ -72,11 +76,16 @@ BAD_BOOK_VALUES = BAD_AUTHOR_NAMES | {
     "untitled",
     "your book",
 }
-ASTRA_SERVICE_TERMS = (
-    "author website",
-    "author platform",
-    "draft website concept",
+ASTRA_VISUAL_REQUIRED_TERMS = (
     "astra productions",
+    "reader journey",
+    "author presence",
+    "three improvements",
+    "no meeting is needed",
+    "windelle jc",
+    "founder & ceo, astra productions",
+    "astraproductions.co",
+    "reply “unsubscribe.”",
 )
 ASTRA_LANGUAGE_TERMS = (
     "astra productions",
@@ -252,7 +261,7 @@ def validate_book_title_fallback_rendering(
         # Keep this separate from the legacy book-title/consignment
         # fallback contract so changing JC copy cannot weaken or alter
         # SendGrid validation.
-        generic_opening = "I came across your author profile"
+        generic_opening = PRIVATE_JC_GENERIC_OPENING
     else:
         expected_subjects = CONSIGNMENT_SUBJECT_FALLBACKS
         generic_opening = BOOK_TITLE_GENERIC_OPENING
@@ -344,7 +353,7 @@ def validate_row(row: Dict[str, str], mode: PreviewMode) -> List[str]:
             failures.extend(validate_book_title_fallback_rendering(subject, body, mode))
         if any(term in combined_text for term in CONSIGNMENT_LANGUAGE_TERMS):
             failures.append("astra_visual_contains_consignment_language")
-        for term in ASTRA_SERVICE_TERMS:
+        for term in ASTRA_VISUAL_REQUIRED_TERMS:
             if term not in body.lower():
                 failures.append(f"astra_visual_missing_service_term:{term}")
 

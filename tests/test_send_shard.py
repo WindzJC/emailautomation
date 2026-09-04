@@ -5180,8 +5180,8 @@ finished_path.write_text(
             body_fallback=pitch["body_fallback"],
         )
 
-        self.assertEqual("An idea for your author platform", subject_text)
-        self.assertIn("I came across your author profile", body_text)
+        self.assertEqual("One idea for your author platform", subject_text)
+        self.assertIn("I came across your work", body_text)
         self.assertNotIn("My team came across", body_text)
         self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
@@ -5220,11 +5220,11 @@ finished_path.write_text(
         )
 
         self.assertEqual(
-            "An idea for your author platform",
+            "One idea for your author platform",
             subject_text,
         )
         self.assertIn(
-            "I came across your author profile",
+            "I came across your work",
             body_text,
         )
         self.assertNotIn("{BookTitle}", body_text)
@@ -5244,11 +5244,11 @@ finished_path.write_text(
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("An idea for The Quiet Harbor", subject_text)
+        self.assertEqual("One idea for The Quiet Harbor", subject_text)
         self.assertIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
-        self.assertNotIn("I came across your author profile", body_text)
+        self.assertNotIn("I came across your work", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
     def test_generated_pitch_jc_message_passes_astra_visual_validation(self) -> None:
@@ -5278,6 +5278,43 @@ finished_path.write_text(
         )
 
         self.assertEqual([], failures)
+
+        body_lower = body_text.lower()
+        for required_term in (
+            "astra productions",
+            "reader journey",
+            "author presence",
+            "three improvements",
+            "no meeting is needed",
+            "windelle jc",
+            "founder & ceo, astra productions",
+            "astraproductions.co",
+            "reply “unsubscribe.”",
+        ):
+            self.assertIn(required_term, body_lower)
+        self.assertNotIn("{FirstName}", body_text)
+        self.assertNotIn("{BookTitle}", body_text)
+
+    def test_astra_visual_validation_requires_consultative_identity_and_footer_contract(self) -> None:
+        failures = validate_row(
+            {
+                "Email": "reader@example.test",
+                "AuthorName": "Jamie Example",
+                "FirstName": "Jamie",
+                "BookTitle": "The Quiet Harbor",
+                "Subject": "One idea for The Quiet Harbor",
+                "Body": (
+                    "Hi Jamie,\n\n"
+                    "I came across The Quiet Harbor and noticed an opportunity.\n\n"
+                    "Astra Productions can help."
+                ),
+            },
+            "astra_visual",
+        )
+
+        self.assertIn("astra_visual_missing_service_term:reader journey", failures)
+        self.assertIn("astra_visual_missing_service_term:three improvements", failures)
+        self.assertIn("astra_visual_missing_service_term:reply “unsubscribe.”", failures)
 
     def test_non_astra_consignment_message_fails_astra_visual_validation(self) -> None:
         pitch = send_shard.PITCHES["pitch1"]
