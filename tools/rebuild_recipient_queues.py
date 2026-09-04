@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import hashlib
 import json
 import re
@@ -281,13 +282,55 @@ class QueueSafetyScanCache:
             int(stat.st_mtime_ns),
         )
 
+    @staticmethod
+    def _is_runtime_recipient_queue(path: Path) -> bool:
+        name = path.name.lower()
+        return name.startswith("recipients_") and name.endswith(".csv")
+
+    @staticmethod
+    def _is_runtime_history_csv(path: Path) -> bool:
+        return path.name.lower().endswith("_log.csv")
+
     def _stable_read_csv(self, path: Path) -> Tuple[List[str], List[Dict[str, str]], Tuple[object, ...]]:
-        before = self._signature(path)
-        headers, rows = read_csv(path)
-        after = self._signature(path)
-        if before != after:
-            raise RuntimeError(f"Queue-safety source changed during scan: {path}")
-        return headers, rows, after
+        """Read one coherent CSV generation while preserving fail-closed safety.
+
+        Runtime recipient queues are replaced atomically while writers hold
+        LOCK_EX on a stable sidecar ``<queue>.lock`` file.  Queue-safety readers
+        therefore acquire LOCK_SH on that same sidecar before resolving and
+        reading the live queue generation.
+
+        Runtime sender/domain history files are mutated in place while writers
+        hold LOCK_EX on the history file itself.  Readers acquire LOCK_SH on the
+        same file.
+
+        The before/after signature check remains mandatory.  It detects
+        non-cooperating writers or unexpected replacement/mutation instead of
+        silently accepting mixed-version evidence.
+        """
+        lock_handle = None
+        try:
+            if self._is_runtime_recipient_queue(path):
+                resolved = path.resolve()
+                lock_path = resolved.with_name(f"{resolved.name}.lock")
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_handle = lock_path.open("a+", encoding="utf-8")
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+            elif self._is_runtime_history_csv(path) and path.exists():
+                lock_handle = path.open("r", encoding="utf-8")
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+
+            before = self._signature(path)
+            headers, rows = read_csv(path)
+            after = self._signature(path)
+            if before != after:
+                raise RuntimeError(f"Queue-safety source changed during scan: {path}")
+            return headers, rows, after
+        finally:
+            if lock_handle is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_handle.close()
 
     def queue_summary(self, path: Path) -> Dict[str, object]:
         marker = str(path)
@@ -307,7 +350,9 @@ class QueueSafetyScanCache:
             "headers": tuple(headers),
             "row_count": len(rows),
             "emails": emails,
-            "missing_or_empty": stable_signature == ("missing",) or (path.exists() and path.stat().st_size <= 0),
+            "missing_or_empty": stable_signature == ("missing",) or (
+                len(stable_signature) == 4 and int(stable_signature[2]) <= 0
+            ),
         }
         self._queue_summaries[marker] = (stable_signature, summary)
         self._email_sets[marker] = (stable_signature, emails)

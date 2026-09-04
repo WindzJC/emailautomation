@@ -525,6 +525,211 @@ class DashboardCoreTests(unittest.TestCase):
         collect_attempts.assert_not_called()
         load_events.assert_not_called()
 
+    def test_queue_safety_scan_waits_for_live_queue_sidecar_writer(self) -> None:
+        import threading
+
+        import send_shard
+        from recipient_file_lock import lock_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            path.write_text("Email\nbefore@example.test\n", encoding="utf-8")
+
+            writer_locked = threading.Event()
+            allow_writer = threading.Event()
+            reader_entered_csv = threading.Event()
+            reader_done = threading.Event()
+            result = {}
+            error = {}
+
+            original_read_csv = rebuild_recipient_queues.read_csv
+
+            def observed_read_csv(read_path):
+                reader_entered_csv.set()
+                return original_read_csv(read_path)
+
+            def writer():
+                with lock_files([path]):
+                    writer_locked.set()
+                    if not allow_writer.wait(5):
+                        raise RuntimeError("test writer release timed out")
+                    send_shard.rewrite_csv_rows(
+                        path,
+                        ["Email"],
+                        [{"Email": "after@example.test"}],
+                    )
+
+            def reader():
+                try:
+                    cache = rebuild_recipient_queues.QueueSafetyScanCache()
+                    result["emails"] = cache.email_set(path)
+                except BaseException as exc:
+                    error["exc"] = exc
+                finally:
+                    reader_done.set()
+
+            writer_thread = threading.Thread(target=writer, daemon=True)
+            writer_thread.start()
+            self.assertTrue(writer_locked.wait(2))
+
+            with patch.object(
+                rebuild_recipient_queues,
+                "read_csv",
+                side_effect=observed_read_csv,
+            ):
+                reader_thread = threading.Thread(target=reader, daemon=True)
+                reader_thread.start()
+
+                # A synchronized reader must not enter the CSV while the
+                # production sidecar writer owns LOCK_EX.
+                self.assertFalse(reader_entered_csv.wait(0.15))
+
+                allow_writer.set()
+                writer_thread.join(2)
+                reader_thread.join(2)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(reader_thread.is_alive())
+            self.assertTrue(reader_done.is_set())
+            self.assertNotIn("exc", error)
+            self.assertEqual({"after@example.test"}, result.get("emails"))
+
+    def test_queue_safety_scan_waits_for_runtime_history_writer(self) -> None:
+        import fcntl
+        import os
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sendgrid_domain_log.csv"
+            path.write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-09-04T00:00:00Z,before@example.test,SENT,old\n",
+                encoding="utf-8",
+            )
+
+            writer_locked = threading.Event()
+            allow_writer = threading.Event()
+            reader_entered_csv = threading.Event()
+            result = {}
+            error = {}
+
+            original_read_csv = rebuild_recipient_queues.read_csv
+
+            def observed_read_csv(read_path):
+                reader_entered_csv.set()
+                return original_read_csv(read_path)
+
+            def writer():
+                with path.open("r+", newline="", encoding="utf-8") as handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    writer_locked.set()
+                    if not allow_writer.wait(5):
+                        raise RuntimeError("test writer release timed out")
+                    handle.seek(0)
+                    handle.write(
+                        "TimestampUTC,Email,Status,Info\n"
+                        "2026-09-04T00:00:01Z,after@example.test,SENT,new\n"
+                    )
+                    handle.truncate()
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+            def reader():
+                try:
+                    cache = rebuild_recipient_queues.QueueSafetyScanCache()
+                    result["emails"] = cache.sent_email_set(path)
+                except BaseException as exc:
+                    error["exc"] = exc
+
+            writer_thread = threading.Thread(target=writer, daemon=True)
+            writer_thread.start()
+            self.assertTrue(writer_locked.wait(2))
+
+            with patch.object(
+                rebuild_recipient_queues,
+                "read_csv",
+                side_effect=observed_read_csv,
+            ):
+                reader_thread = threading.Thread(target=reader, daemon=True)
+                reader_thread.start()
+
+                # Runtime history readers must respect the writer's LOCK_EX.
+                self.assertFalse(reader_entered_csv.wait(0.15))
+
+                allow_writer.set()
+                writer_thread.join(2)
+                reader_thread.join(2)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(reader_thread.is_alive())
+            self.assertNotIn("exc", error)
+            self.assertEqual({"after@example.test"}, result.get("emails"))
+
+    def test_queue_safety_scan_still_rejects_noncooperating_queue_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            path.write_text("Email\nbefore@example.test\n", encoding="utf-8")
+
+            original_read_csv = rebuild_recipient_queues.read_csv
+
+            def unsafe_read_csv(read_path):
+                headers, rows = original_read_csv(read_path)
+                # Deliberately bypass the production sidecar lock.  This models
+                # an unsafe/non-cooperating mutation and must still fail closed.
+                read_path.write_text(
+                    "Email\nafter@example.test\nextra@example.test\n",
+                    encoding="utf-8",
+                )
+                return headers, rows
+
+            cache = rebuild_recipient_queues.QueueSafetyScanCache()
+
+            with patch.object(
+                rebuild_recipient_queues,
+                "read_csv",
+                side_effect=unsafe_read_csv,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Queue-safety source changed during scan",
+                ):
+                    cache.email_set(path)
+
+    def test_queue_safety_queue_summary_uses_same_snapshot_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "recipients_sendgrid_1.csv"
+            path.write_text(
+                "Email\nbefore@example.test\n",
+                encoding="utf-8",
+            )
+
+            cache = rebuild_recipient_queues.QueueSafetyScanCache()
+            original_stable_read = cache._stable_read_csv
+
+            def stable_read_then_advance_generation(read_path):
+                result = original_stable_read(read_path)
+
+                # Change the live queue only AFTER the coherent locked read
+                # completed. queue_summary must describe the captured
+                # generation, not combine it with this newer file's metadata.
+                read_path.write_text("", encoding="utf-8")
+                return result
+
+            with patch.object(
+                cache,
+                "_stable_read_csv",
+                side_effect=stable_read_then_advance_generation,
+            ):
+                summary = cache.queue_summary(path)
+
+            self.assertEqual(1, summary["row_count"])
+            self.assertEqual(
+                {"before@example.test"},
+                summary["emails"],
+            )
+            self.assertFalse(summary["missing_or_empty"])
+
     def test_dashboard_queue_safety_fails_closed_if_preview_evidence_changes(self) -> None:
         with patch.object(
             dashboard_core,
