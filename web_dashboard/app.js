@@ -3244,6 +3244,17 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
       buttonTitle: reason,
     };
   }
+  if (Number(preview.total_rows_would_write) <= 0) {
+    return {
+      state: "empty",
+      tone: "good",
+      ready: false,
+      title: "Nothing to confirm",
+      message: "No new eligible recipients will be queued.",
+      buttonLabel: "Nothing to confirm",
+      buttonTitle: "No new eligible recipients will be queued.",
+    };
+  }
   const queueLabel = selectedQueueLabel(preview, dispatchSource);
   const title = queueLabel === "Fresh Cold"
     ? "Ready to confirm Fresh Cold queue"
@@ -4742,7 +4753,7 @@ function renderImportantDispatch(result) {
         : "Locked until Check/Triage completes.");
   const previewRouteSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
   const confirmSafety = dispatchConfirmSafetyState(dispatchSource, dispatchPreview);
-  const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) === 0;
+  const previewZeroAdd = Boolean(dispatchPreview) && Number(dispatchPreview?.total_rows_would_write || 0) <= 0;
   const previewZeroAddReasons = dispatchSkipReasonSummary(dispatchPreview || {});
   const confirmFeedbackState = String(lastImportantDispatchConfirmFeedback?.state || "");
   const confirmFeedbackMessage = String(lastImportantDispatchConfirmFeedback?.message || "");
@@ -4773,7 +4784,9 @@ function renderImportantDispatch(result) {
     if (dispatchPreview && !result?.generated_at_utc) {
       setNodeText(
         els.leadsImportantDispatchMeta,
-        dispatchBlockReason
+        confirmSafety.state === "empty"
+          ? "Nothing to confirm. No new eligible recipients will be queued."
+          : dispatchBlockReason
           ? `Preview ready. ${escapeHtml(displaySourceName)}. Dispatch actions are blocked: ${dispatchBlockReason}`
           : `Preview ready. ${escapeHtml(displaySourceName)}. Confirm Dispatch will write exactly this previewed set if nothing changed.`,
       );
@@ -4818,7 +4831,7 @@ function renderImportantDispatch(result) {
               <div>
                 <p class="muted">Preview is read-only and writes no queues.</p>
               </div>
-              <span class="mini-pill mini-pill-${escapeHtml(confirmSafety.tone === "good" ? "good" : confirmSafety.tone === "bad" ? "bad" : "warn")}">${escapeHtml(dispatchPreview ? (confirmSafety.ready ? "Ready to confirm" : "Review required") : "Preview needed")}</span>
+              <span class="mini-pill mini-pill-${escapeHtml(confirmSafety.tone === "good" ? "good" : confirmSafety.tone === "bad" ? "bad" : "warn")}">${escapeHtml(dispatchPreview ? (confirmSafety.state === "empty" ? "Nothing to confirm" : confirmSafety.ready ? "Ready to confirm" : "Review required") : "Preview needed")}</span>
             </div>
             <section class="dispatch-status-banner dispatch-status-banner-${escapeHtml(confirmSafety.tone === "neutral" ? "warn" : confirmSafety.tone)}">
               <strong>${escapeHtml(confirmSafety.title)}</strong>
@@ -6900,6 +6913,11 @@ async function previewImportantLeadDispatch() {
 }
 
 async function confirmImportantLeadDispatch() {
+  if (dispatchPreviewMatchesCurrentSelection() && Number(lastImportantDispatchPreview?.total_rows_would_write) <= 0) {
+    renderImportantDispatch(lastImportantDispatch);
+    showMessage("Nothing to confirm. No new eligible recipients will be queued.", "success");
+    return;
+  }
   const blockReason = dispatchActionBlockReason();
   if (blockReason) {
     lastImportantDispatchConfirmFeedback = { state: "blocked", message: blockReason };

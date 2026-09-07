@@ -374,7 +374,28 @@ describe("Start Ready Senders controls", () => {
       pending.resolve(jsonResponse({ ok: true, ready_profiles: [], skipped_profiles: plan.skipped_profiles }));
       await flushMicrotasks();
     });
+    expect(startReadyButton()).toBeDisabled();
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("No pending sender work");
+    expect(document.getElementById("react-start-ready-status")).toHaveTextContent("SAFE_IDLE_EMPTY_QUEUE");
+    expect(startReadyButton()).not.toHaveTextContent("Confirm Start");
+    expect(startReadyPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it("can refresh an empty plan into a positive plan without posting automatically", async () => {
+    let responsePlan = { ok: true, ready_profiles: [], skipped_profiles: plan.skipped_profiles };
+    const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })),
+      () => Promise.resolve(jsonResponse(responsePlan)));
+    root = await bootController(fetchMock);
+    fireEvent.click(startReadyButton());
+    await act(async () => flushMicrotasks(16));
+    expect(startReadyButton()).toBeDisabled();
+    fireEvent.click(startReadyButton());
+    expect(startReadyPosts(fetchMock)).toHaveLength(0);
+    responsePlan = plan;
+    fireEvent.click([...document.querySelectorAll("button")].find((button) => button.textContent === "Refresh readiness"));
+    await act(async () => flushMicrotasks(16));
     expect(startReadyButton()).not.toBeDisabled();
+    expect(startReadyButton()).toHaveTextContent("Confirm Start 2 Senders");
     expect(startReadyPosts(fetchMock)).toHaveLength(0);
   });
 

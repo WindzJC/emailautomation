@@ -630,6 +630,31 @@ describe("source-scoped Recontact readiness", () => {
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
+  it("shows a safe zero preview and refuses confirmation even if the DOM is activated", async () => {
+    const status = restartedStagedRecontactStatus();
+    status.latest_auto_dispatch_preview = currentRecontactPreview(status, {
+      total_rows_would_write: 0,
+      total_planned_unique_count: 0,
+      skipped_rows: 15342,
+      exclusion_reason_counts: { idempotency_protected_removed: 15342 },
+      sendgrid_zero_reason: "No eligible recipients",
+    });
+    status.latest_auto_dispatch_preview_current = true;
+    const boot = await bootController(status);
+    root = boot.root;
+    expect(document.body).toHaveTextContent("Nothing to confirm");
+    expect(document.body).toHaveTextContent("No new eligible recipients will be queued.");
+    expect(document.getElementById("leads-important-dispatch-results")).not.toHaveTextContent("Ready to confirm");
+    expect(document.getElementById("leads-important-dispatch-results")).toHaveTextContent("15,342");
+    expect(confirmButton()).toBeDisabled();
+    fireEvent.click(confirmButton());
+    confirmButton().disabled = false;
+    fireEvent.click(confirmButton());
+    await act(async () => flushMicrotasks());
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+    expect(confirmButton()).toBeDisabled();
+  });
+
   it("keeps Not started when no authoritative Lead Check run exists", async () => {
     const status = leadsStatus({ checkState: "success" });
     status.lead_check_status = {};

@@ -160,8 +160,8 @@ export function SenderStartControls({
       setPayload(data);
       const ready = Array.isArray(data.ready_profiles) ? data.ready_profiles : [];
       if (!ready.length) {
-        setMessage(data.message || "No operational production senders are currently ready.");
-        setPhase("idle");
+        setMessage("No pending sender work. Review the skipped-profile reasons below.");
+        setPhase("empty");
         return;
       }
       setMessage(data.message || "Review the authoritative plan, then confirm the single Start Ready transaction.");
@@ -217,7 +217,7 @@ export function SenderStartControls({
   const readyCount = Array.isArray(payload?.ready_profiles)
     ? payload.ready_profiles.length
     : Number(payload?.ready_count || 0);
-  const disabled = ["planning", "posting", "polling", "ambiguous", "conflict", "status_error"].includes(phase);
+  const disabled = ["empty", "planning", "posting", "polling", "ambiguous", "conflict", "status_error"].includes(phase);
   const primaryLabel = phase === "planning"
     ? "Checking readiness..."
     : phase === "confirm"
@@ -249,6 +249,11 @@ export function SenderStartControls({
       {phase === "confirm" ? (
         <button className="btn btn-secondary" type="button" onClick={cancelConfirmation}>
           Cancel
+        </button>
+      ) : null}
+      {phase === "empty" ? (
+        <button className="btn btn-secondary" type="button" onClick={loadPlan}>
+          Refresh readiness
         </button>
       ) : null}
       {(payload || message) ? (
