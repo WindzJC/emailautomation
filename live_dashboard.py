@@ -3810,7 +3810,10 @@ def _build_current_send_safety_status(status: dict[str, object]) -> dict[str, ob
 
         sendgrid_paths = [settings.SHARDS_DIR / f"recipients_sendgrid_{index}.csv" for index in range(1, 6)]
         private_paths = [settings.SHARDS_DIR / "recipients_private_jc.csv"]
-        queue_safety = scoped_queue_safety("all", None)
+        queue_safety = scoped_queue_safety(
+            "all",
+            [*private_paths, *sendgrid_paths],
+        )
         sendgrid_queue_safety = scoped_queue_safety("sendgrid", sendgrid_paths)
         private_queue_safety = scoped_queue_safety("private_jc", private_paths)
     else:

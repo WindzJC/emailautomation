@@ -858,6 +858,137 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(50.0, summary["current_live"]["pass_through_rate"]["value"])
         self.assertEqual(50.0, summary["next_batch"]["pass_through_rate"]["value"])
 
+    def test_current_send_safety_uses_canonical_shard_paths_for_latest_staged_run(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=live_dashboard.settings.APP_ROOT
+        ) as tmpdir:
+            tmp = Path(tmpdir)
+            shards = tmp / "data" / "shards"
+            shards.mkdir(parents=True)
+
+            required_headers = [
+                "Email",
+                "FirstName",
+                "AuthorEmail",
+                "AuthorName",
+                "BookTitle",
+            ]
+
+            status = {
+                "dispatch_source": {
+                    "source_resolution": "latest_completed_staged_run",
+                },
+                "important_output_label": str(tmp / "leads.csv"),
+                "important_triage_keep_label": str(
+                    tmp / "leads_triaged_keep.csv"
+                ),
+                "important_triage_rejected_label": str(
+                    tmp / "leads_triaged_reject.csv"
+                ),
+                "jc_queue": {
+                    "profile": "private_jc",
+                    "fieldnames": required_headers,
+                },
+                "sendgrid_queues": [
+                    {
+                        "profile": f"sendgrid_{index}",
+                        "fieldnames": required_headers,
+                    }
+                    for index in range(1, 6)
+                ],
+            }
+
+            calls = []
+
+            def fake_build_queue_safety_report(
+                *,
+                shard_paths=None,
+                **kwargs,
+            ):
+                paths = [
+                    Path(path)
+                    for path in list(shard_paths or [])
+                ]
+                calls.append(paths)
+                return {
+                    "safe": True,
+                    "unsafe_reasons": [],
+                    "shards": [
+                        {
+                            "path": str(path),
+                        }
+                        for path in paths
+                    ],
+                }
+
+            with patch.object(
+                live_dashboard.settings,
+                "SHARDS_DIR",
+                shards,
+            ), patch.object(
+                live_dashboard,
+                "build_queue_safety_report",
+                side_effect=fake_build_queue_safety_report,
+            ):
+                current = (
+                    live_dashboard._build_current_send_safety_status(
+                        status
+                    )
+                )
+
+            private_path = (
+                shards / "recipients_private_jc.csv"
+            )
+
+            sendgrid_paths = [
+                shards / f"recipients_sendgrid_{index}.csv"
+                for index in range(1, 6)
+            ]
+
+            expected_all = [
+                private_path,
+                *sendgrid_paths,
+            ]
+
+            self.assertEqual(
+                [
+                    expected_all,
+                    sendgrid_paths,
+                    [private_path],
+                ],
+                calls,
+            )
+
+            self.assertEqual(
+                [str(path) for path in expected_all],
+                current["combined_queue_safety"][
+                    "validated_shard_paths"
+                ],
+            )
+
+            self.assertEqual(
+                [str(path) for path in sendgrid_paths],
+                current["sendgrid_queue_safety"][
+                    "validated_shard_paths"
+                ],
+            )
+
+            self.assertEqual(
+                [str(private_path)],
+                current["private_queue_safety"][
+                    "validated_shard_paths"
+                ],
+            )
+
+            self.assertEqual(
+                "READY",
+                current["status"],
+            )
+
+            self.assertFalse(
+                current["blocked"],
+            )
+
     def test_check_leads_running_is_next_batch_status_not_current_send_blocker(self) -> None:
         status = {
             "active_important_check_job": {
