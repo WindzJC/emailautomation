@@ -4425,6 +4425,7 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const commandLeft = document.querySelector("#leads-view .leads-command-column-left");
   const commandCenter = document.querySelector("#leads-view .leads-command-center");
   leadsView?.classList.toggle("warm-research-mode", active);
+  if (!active) leadsView?.classList.remove("warm-awaiting-validation");
   appShell?.classList.toggle("warm-research-shell", active);
   if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Warm Outreach" : "Prepare Dispatch");
   if (els.leadsPipelineMeta) {
@@ -5503,6 +5504,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     const workflow = currentWarmWorkflowState(status);
     const report = workflow.report;
     const checked = workflow.valid;
+    document.getElementById("leads-view")?.classList.toggle("warm-awaiting-validation", !checked);
     const lane = currentWarmPrivateJcStatus(status, lastSnapshot);
     const warmRunning = Boolean(lane.running);
     const laneConfirmed = Boolean(lane.confirmed);
@@ -5516,7 +5518,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
       ? "Current Warm Outreach · Re-upload required"
       : checked
         ? "Current Warm Outreach · Ready for review"
-        : "Current Warm Outreach · Upload required";
+        : "No warm batch loaded";
     const warmTimeline = Array.isArray(lane.timeline) ? lane.timeline : [];
     const warmStartAction = warmRunning ? "stop_warm_private_jc" : "start_warm_private_jc";
     const warmStartLabel = warmRunning
@@ -5549,14 +5551,22 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             <div>
               <p class="eyebrow">Warm Outreach</p>
               <h3>${escapeHtml(warmStateHeadline)}</h3>
-              <p class="current-run-subtitle warm-status-summary">${checked ? "Current upload outputs are valid." : "Historical sender activity below does not unlock this upload workflow."}</p>
+              <p class="current-run-subtitle warm-status-summary">${checked ? "Current upload outputs are valid." : "Upload a CSV or XLSX to begin validation. Choose a file above, then use Upload & Check."}</p>
             </div>
             <div class="warm-command-badges">
               <span class="mini-pill">Explicit confirmation</span>
               ${warmCap > 0 ? `<span class="mini-pill">Cap ${warmCap.toLocaleString()}</span>` : ""}
             </div>
           </div>
-          <section class="warm-private-lane-group warm-review-panel">
+          ${!checked ? `
+            <dl class="warm-locked-stages" aria-label="Warm workflow gates">
+              <div><dt>Validate</dt><dd>${workflow.reuploadRequired ? "Waiting for re-upload" : "Waiting for upload"}</dd></div>
+              <div><dt>Review</dt><dd>Locked until validation</dd></div>
+              <div><dt>Preview</dt><dd>Locked until review</dd></div>
+              <div><dt>Confirm</dt><dd>Locked until preview</dd></div>
+            </dl>
+          ` : ""}
+          <section class="warm-private-lane-group warm-review-panel" ${!checked ? "hidden" : ""}>
             <div class="warm-panel-heading">
               <div>
                 <p class="eyebrow">Step 3 · Review</p>
@@ -5585,7 +5595,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             </div>
           </section>
 
-          <section class="warm-private-action-panel">
+          <section class="warm-private-action-panel" ${!checked && !warmRunning ? "hidden" : ""}>
             <div class="warm-panel-heading">
               <div>
                 <p class="eyebrow">Warm actions</p>
@@ -5622,6 +5632,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 </button>
               </div>
             </section>
+          </section>
             <details class="warm-operations-details">
               <summary>Warm sender details</summary>
               <section class="warm-private-lane-group">
@@ -5656,7 +5667,6 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
                 </div>
               </section>
             </details>
-          </section>
         </article>
       `,
     );
