@@ -5259,13 +5259,14 @@ def important_leads_status() -> Dict[str, object]:
     jc_headers, jc_rows = _read_queue_rows(jc_path)
     sendgrid_status = []
     for profile_name, path in zip(_enabled_sendgrid_dispatch_profiles(), sendgrid_paths):
-        _, rows = _read_queue_rows(path)
+        headers, rows = _read_queue_rows(path)
         sendgrid_status.append(
             {
                 "name": _sendgrid_profile_label(profile_name),
                 "profile": profile_name,
                 "path": str(path),
                 "count": len(rows),
+                "fieldnames": headers,
             }
         )
 

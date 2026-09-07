@@ -5212,3 +5212,113 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_important_leads_status_exposes_sendgrid_queue_fieldnames(tmp_path) -> None:
+    from unittest.mock import patch
+
+    import important_leads_workflow as iw
+
+    profiles = list(iw._enabled_sendgrid_dispatch_profiles())
+    assert profiles
+
+    jc_path = tmp_path / "recipients_private_jc.csv"
+    sendgrid_paths = [
+        tmp_path / f"recipients_sendgrid_{index}.csv"
+        for index in range(1, len(profiles) + 1)
+    ]
+
+    headers = [
+        "Email",
+        "FirstName",
+        "AuthorEmail",
+        "AuthorName",
+        "BookTitle",
+    ]
+
+    def fake_read_queue_rows(path):
+        candidate = Path(path)
+
+        if candidate == jc_path or candidate in sendgrid_paths:
+            return list(headers), []
+
+        raise AssertionError(f"unexpected queue path: {candidate}")
+
+    source_snapshot = {
+        "dispatch_source_mode": iw.DISPATCH_SOURCE_TRIAGED_KEEP,
+        "dispatch_source_label": str(tmp_path / "leads_triaged_keep.csv"),
+        "dispatch_source_exists": True,
+        "dispatch_source_row_count": 0,
+        "dispatch_eligible_row_count": 0,
+        "dispatch_block_reason": "",
+        "verification_required": False,
+        "verification_file_mtime": "",
+        "dispatch_source_preview_rows": [],
+    }
+
+    with patch.object(
+        iw,
+        "load_state",
+        return_value={},
+    ), patch.object(
+        iw,
+        "important_leads_path_state",
+        return_value={
+            "input_path": str(tmp_path / "leadschecker.csv"),
+            "output_path": str(tmp_path / "leads.csv"),
+            "rejected_path": str(tmp_path / "leads_rejected.csv"),
+        },
+    ), patch.object(
+        iw,
+        "important_leads_verify_path_state",
+        return_value={
+            "verified_path": str(tmp_path / "leads_verified.csv"),
+        },
+    ), patch.object(
+        iw,
+        "important_leads_triage_path_state",
+        return_value={
+            "keep_path": str(tmp_path / "leads_triaged_keep.csv"),
+        },
+    ), patch.object(
+        iw,
+        "important_leads_dispatch_source_state",
+        return_value={
+            "dispatch_source_mode": iw.DISPATCH_SOURCE_TRIAGED_KEEP,
+        },
+    ), patch.object(
+        iw,
+        "_dispatch_profile_paths",
+        return_value=(
+            jc_path,
+            sendgrid_paths,
+            None,
+            None,
+        ),
+    ), patch.object(
+        iw,
+        "_read_queue_rows",
+        side_effect=fake_read_queue_rows,
+    ), patch.object(
+        iw,
+        "_workspace_path_from_label",
+        side_effect=lambda label, default: Path(str(label)),
+    ), patch.object(
+        iw,
+        "_dispatch_source_snapshot",
+        return_value=source_snapshot,
+    ):
+        status = iw.important_leads_status()
+
+    queues = status["sendgrid_queues"]
+
+    assert len(queues) == len(profiles)
+
+    assert [queue["profile"] for queue in queues] == profiles
+
+    for queue, expected_path in zip(queues, sendgrid_paths):
+        assert queue["path"] == str(expected_path)
+        assert queue["count"] == 0
+        assert queue["fieldnames"] == headers
+        assert "BookTitle" in queue["fieldnames"]
+
+    assert status["jc_queue"]["fieldnames"] == headers
