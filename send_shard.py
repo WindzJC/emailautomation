@@ -5229,6 +5229,7 @@ def main() -> int | None:
     last_recipient_for_audit = ""
     runtime_lock_context = None
     provider_submission_active = False
+    pre_submit_transition_active = False
     delivery_phase = DELIVERY_PRE_SUBMIT
     deferred_stop_requested = False
 
@@ -5283,16 +5284,34 @@ def main() -> int | None:
         # Signal handlers must avoid file I/O and lock acquisition.
         # Once provider submission begins, interruption must wait until
         # the attempt has reached a safe durable bookkeeping boundary.
-        if provider_submission_active:
+        if provider_submission_active or pre_submit_transition_active:
             deferred_stop_requested = True
             return
         # The KeyboardInterrupt cleanup block records the final stop.
         raise KeyboardInterrupt
 
     def honor_deferred_stop() -> None:
-        nonlocal deferred_stop_requested
+        nonlocal deferred_stop_requested, pre_submit_transition_active, idempotency_reserved
         if not deferred_stop_requested:
             return
+        if pre_submit_transition_active and delivery_phase == DELIVERY_PRE_SUBMIT:
+            settled, restored, released, domain_ok = settle_retryable_attempt(
+                reservation_token=attempt_slot_token,
+                email=to_email,
+                campaign_id=row_campaign_id,
+                queue_claim_receipt=queue_claim_receipt,
+                idempotency_reserved=idempotency_reserved,
+                outcome="definitely_not_submitted",
+                info="deferred_stop_before_submission",
+            )
+            if released:
+                idempotency_reserved = False
+            emit_worker_event(
+                "STOP" if settled else "ERROR",
+                "definitely_not_submitted_deferred_stop" if settled else "pre_submit_stop_settlement_failed",
+                restored=restored, released=released, domain_finalized=domain_ok,
+            )
+            pre_submit_transition_active = False
         deferred_stop_requested = False
         raise KeyboardInterrupt
 
@@ -6094,10 +6113,12 @@ def main() -> int | None:
         return result
 
     def set_delivery_phase(phase: str) -> None:
-        nonlocal delivery_phase, provider_submission_active
-        delivery_phase = phase
+        nonlocal delivery_phase, provider_submission_active, pre_submit_transition_active
         if phase == DELIVERY_PROVIDER_CALL_STARTED:
+            honor_deferred_stop()
             provider_submission_active = True
+            pre_submit_transition_active = False
+        delivery_phase = phase
 
     def finalize_accepted_send(
         *,
@@ -6147,6 +6168,7 @@ def main() -> int | None:
         domain_finalized: bool | None = None,
     ) -> tuple[bool, bool, bool, bool]:
         """Settle a definitely retryable attempt; every durable step must pass."""
+        nonlocal pre_submit_transition_active
         result = settle_retryable_provider_attempt(
             finalize_callback=(
                 lambda: bool(domain_finalized)
@@ -6173,6 +6195,8 @@ def main() -> int | None:
                 else True
             ),
         )
+        if result["settled"]:
+            pre_submit_transition_active = False
         return (
             result["settled"],
             result["restored"],
@@ -6354,6 +6378,26 @@ def main() -> int | None:
         max_total=int(args.max_total or 0),
     )
     stop_reason = ""
+    unresolved_idempotency_keys: set[tuple[str, str, str]] = set()
+
+    def pending_idempotency_key(row: dict[str, str]) -> tuple[str, str, str]:
+        row_email = resolve_recipient_email(row)
+        row_campaign_type_for_key = normalize_campaign_type(
+            get_row_value_ci(
+                row,
+                ["campaign_type", "CampaignType", "campaign type"],
+            )
+            or args.campaign_type
+        )
+        row_campaign_id_for_key = campaign_id_for_row(
+            row,
+            row_campaign_type_for_key,
+        )
+        return (
+            str(row_campaign_id_for_key or "").strip() or CAMPAIGN_TYPE_COLD,
+            str(args.provider or "").strip().lower() or "unknown",
+            norm_email(row_email),
+        )
     try:
         if args.profile and not no_send_mode:
             runtime_lock_context = acquire_profile_runtime_lock(str(args.profile), enabled=True)
@@ -6433,6 +6477,7 @@ def main() -> int | None:
                 row_campaign_id = campaign_id_for_row(r, row_campaign_type)
                 idempotency_reserved = False
                 queue_claim_receipt: dict[str, object] | None = None
+                attempt_slot_token = ""
                 delivery_phase = DELIVERY_PRE_SUBMIT
                 accepted_send_bookkeeping_failed = False
                 last_recipient_for_audit = to_email
@@ -6620,8 +6665,11 @@ def main() -> int | None:
                         continue
 
                 if not no_send_mode and args.provider in {"private", "sendgrid"}:
+                    pre_submit_transition_active = True
                     queue_claim_receipt = claim_queue_row_with_receipt(csv_path, to_email)
+                    honor_deferred_stop()
                     if queue_claim_receipt is None:
+                        pre_submit_transition_active = False
                         log_row(
                             log_path,
                             to_email,
@@ -6639,6 +6687,9 @@ def main() -> int | None:
                     )
                     if not reserved:
                         restored = restore_claimed_queue_row(csv_path, queue_claim_receipt)
+                        if restored:
+                            pre_submit_transition_active = False
+                            honor_deferred_stop()
                         if str(reserve_reason or "").startswith("database_"):
                             log_row(
                                 log_path,
@@ -6672,9 +6723,19 @@ def main() -> int | None:
                             "SKIP",
                             campaign_log_info(f"event_type=SKIPPED_IDEMPOTENCY_DUPLICATE reason={reserve_reason}", row_campaign_type),
                         )
+                        # Keep the historical reservation and restored row protected.
+                        # Do not revisit this exact refused reservation in a later
+                        # repeat-mode refresh.
+                        if not restored:
+                            stop_reason = "idempotency_duplicate_restore_failed"
+                            break
+                        unresolved_idempotency_keys.add(
+                            pending_idempotency_key(r)
+                        )
                         next_index = idx + 1
                         continue
                     idempotency_reserved = True
+                    honor_deferred_stop()
 
                 next_index = idx + 1
                 attempt_slot_token = ""
@@ -7729,22 +7790,47 @@ def main() -> int | None:
                 )
 
                 if not stop_reason and pending_index >= len(pending):
-                    refreshed_pending, _, refreshed_row_count, refreshed_eligible_count = build_pending_snapshot(
+                    refreshed_pending, _, refreshed_row_count, _ = build_pending_snapshot(
                         emit_suppressed_logs=False,
                         allow_missing_always_send_rows=False,
                         exclude_logged_always_send=True,
                     )
-                    if refreshed_eligible_count > 0:
-                        pending = refreshed_pending
+
+                    blocked_unresolved_count = 0
+                    sendable_refreshed_pending: list[dict[str, str]] = []
+
+                    for refreshed_row in refreshed_pending:
+                        if (
+                            pending_idempotency_key(refreshed_row)
+                            in unresolved_idempotency_keys
+                        ):
+                            blocked_unresolved_count += 1
+                            continue
+                        sendable_refreshed_pending.append(refreshed_row)
+
+                    if sendable_refreshed_pending:
+                        pending = sendable_refreshed_pending
                         pending_index = 0
                         source_row_count = refreshed_row_count
-                        eligible_pending_count = refreshed_eligible_count
+                        eligible_pending_count = len(pending)
                         emit_worker_event(
                             "REFRESH",
                             "queue_refreshed_after_batch_exhaustion",
                             pending_count=len(pending),
                             source_rows=source_row_count,
                             sent_this_run=sent_this_run,
+                        )
+                    elif (
+                        unresolved_idempotency_keys
+                        and blocked_unresolved_count > 0
+                    ):
+                        stop_reason = (
+                            "unresolved_idempotency_no_sendable_work"
+                        )
+                        print(
+                            "STOP: unresolved idempotency reservations "
+                            "require manual review; no sendable work "
+                            "remains after repeat refresh."
                         )
 
                 if (

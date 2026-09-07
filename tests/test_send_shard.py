@@ -2664,6 +2664,7 @@ finished_path.write_text(
         expect_keyboard_interrupt: bool = False,
         preflight: bool = False,
         protected_key: str | None = "SG.synthetic.protected-key",
+        repeat: bool = False,
     ) -> tuple[str, object]:
         (
             base,
@@ -2689,7 +2690,7 @@ finished_path.write_text(
             )
         profile.update(
             {
-                "repeat": False,
+                "repeat": repeat,
                 "interval": 0,
                 "cooldown_seconds": 0,
                 "max_messages_1h": 0,
@@ -3788,6 +3789,89 @@ finished_path.write_text(
                 self.assertEqual([], list(csv.DictReader(handle)))
             self.assertIn("accepted-send bookkeeping failed", output)
 
+    def test_deferred_stop_during_queue_reservation_transition(self) -> None:
+        for stage in ("claim", "reservation", "duplicate", "restore_failure", "release_failure"):
+            for signum in (send_shard.signal.SIGINT, send_shard.signal.SIGTERM):
+                with self.subTest(stage=stage, signal=signum), tempfile.TemporaryDirectory() as tmpdir:
+                    fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+                    queue, state = fixture[4], fixture[3]
+                    log_path = fixture[2] / fixture[-1]["log"]
+                    queue.write_text(
+                        "Email,FirstName,BookTitle,campaign_id\n"
+                        "transition@example.test,Ada,Book A,transition-campaign\n", encoding="utf-8",
+                    )
+                    log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+                    db_path = state / "send_idempotency.sqlite3"
+                    key = dict(campaign_id="transition-campaign", provider="sendgrid", email="transition@example.test")
+                    real_reserve = send_shard.reserve_send_idempotency
+                    real_claim = send_shard.claim_queue_row_with_receipt
+                    real_restore = send_shard.restore_claimed_queue_row
+                    if stage == "duplicate":
+                        self.assertTrue(real_reserve(
+                            **key, profile="sendgrid_jordan", queue_file="other.csv", db_path=db_path,
+                        )[0])
+                        with send_shard.sqlite3.connect(db_path) as conn:
+                            historical = conn.execute("SELECT * FROM send_reservations").fetchall()
+                    deferred = []
+
+                    def request_signal():
+                        send_shard.signal.getsignal(signum)(signum, None)
+                        deferred.append(True)  # handler returned without interrupting the transition
+
+                    def claim_then_signal(*args, **kwargs):
+                        receipt = real_claim(*args, **kwargs)
+                        self.assertIsNotNone(receipt)
+                        if stage in {"claim", "restore_failure"}:
+                            request_signal()
+                        return receipt
+
+                    def reserve_then_signal(**kwargs):
+                        result = real_reserve(**kwargs)
+                        if stage in {"reservation", "duplicate", "release_failure"}:
+                            request_signal()
+                        return result
+
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(send_shard, "claim_queue_row_with_receipt", side_effect=claim_then_signal))
+                        reserve = stack.enter_context(patch.object(send_shard, "reserve_send_idempotency", side_effect=reserve_then_signal))
+                        restore = stack.enter_context(patch.object(
+                            send_shard, "restore_claimed_queue_row",
+                            side_effect=(lambda *_a, **_k: False) if stage == "restore_failure" else real_restore,
+                        ))
+                        release = stack.enter_context(patch.object(
+                            send_shard, "release_send_idempotency_reservation",
+                            wraps=send_shard.release_send_idempotency_reservation,
+                        ))
+                        if stage == "release_failure":
+                            release.side_effect = lambda **_kwargs: False
+                        _output, provider = self._run_synthetic_sendgrid(
+                            fixture, repeat=True, expect_keyboard_interrupt=True,
+                        )
+                    provider.assert_not_called()
+                    self.assertEqual([True], deferred)
+                    self.assertEqual(1, restore.call_count)
+                    self.assertEqual(0 if stage in {"claim", "restore_failure"} else 1, reserve.call_count)
+                    with queue.open(newline="") as handle:
+                        emails = [row["Email"] for row in csv.DictReader(handle)]
+                    self.assertEqual([] if stage == "restore_failure" else [key["email"]], emails)
+                    if db_path.exists():
+                        with send_shard.sqlite3.connect(db_path) as conn:
+                            rows = conn.execute("SELECT * FROM send_reservations").fetchall()
+                        if stage == "duplicate":
+                            self.assertEqual(historical, rows)
+                            release.assert_not_called()
+                        elif stage == "release_failure":
+                            self.assertEqual(1, len(rows))
+                        else:
+                            self.assertEqual([], rows)
+                    events = [json.loads(line) for line in send_shard.worker_log_path(log_path).read_text().splitlines()]
+                    if stage in {"restore_failure", "release_failure"}:
+                        failure = next(e for e in events if e.get("reason") == "pre_submit_stop_settlement_failed")
+                        self.assertEqual("ERROR", failure["event_type"])
+                        self.assertFalse(failure["restored" if stage == "restore_failure" else "released"])
+                    else:
+                        self.assertFalse(any(e.get("reason") == "pre_submit_stop_settlement_failed" for e in events))
+
     def test_deferred_sigint_after_sendgrid_rejection_settles_before_interrupt(self) -> None:
         class Rejected(RuntimeError):
             status_code = 429
@@ -4132,6 +4216,221 @@ finished_path.write_text(
                 ["late-block@example.test"],
                 [row["Email"] for row in queued],
             )
+
+    def test_repeat_unresolved_idempotency_converges_and_preserves_reservation(self) -> None:
+        for outcome in (None, "ambiguous"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmpdir:
+                fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+                csv_path, state = fixture[4], fixture[3]
+                log_path = fixture[2] / fixture[-1]["log"]
+                csv_path.write_text(
+                    "Email,FirstName,BookTitle,campaign_id\n"
+                    "held@example.test,Held,Book A,held-campaign\n", encoding="utf-8",
+                )
+                log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+                original_queue = list(csv.DictReader(io.StringIO(csv_path.read_text())))
+                db_path = state / "send_idempotency.sqlite3"
+                key = dict(campaign_id="held-campaign", provider="sendgrid", email="held@example.test")
+                self.assertTrue(send_shard.reserve_send_idempotency(
+                    **key, profile="sendgrid_jordan", queue_file="other.csv", db_path=db_path,
+                )[0])
+                if outcome:
+                    self.assertTrue(send_shard.record_send_idempotency_outcome(
+                        **key, outcome=outcome, db_path=db_path,
+                    ))
+                with send_shard.sqlite3.connect(db_path) as conn:
+                    before = conn.execute("SELECT * FROM send_reservations").fetchall()
+                real_reserve = send_shard.reserve_send_idempotency
+                calls = []
+
+                def bounded_reserve(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) > 1:
+                        raise AssertionError("Repeat worker revisited the unresolved reservation")
+                    return real_reserve(**kwargs)
+
+                with patch.object(send_shard, "reserve_send_idempotency", side_effect=bounded_reserve), patch.object(
+                    send_shard, "release_send_idempotency_reservation", wraps=send_shard.release_send_idempotency_reservation,
+                ) as release, patch.object(
+                    send_shard, "record_send_idempotency_outcome", wraps=send_shard.record_send_idempotency_outcome,
+                ) as record:
+                    output, provider = self._run_synthetic_sendgrid(fixture, repeat=True)
+
+                provider.assert_not_called()
+                release.assert_not_called()
+                record.assert_not_called()
+                self.assertEqual(1, len(calls))
+                with csv_path.open(newline="") as handle:
+                    self.assertEqual(original_queue, list(csv.DictReader(handle)))
+                with send_shard.sqlite3.connect(db_path) as conn:
+                    self.assertEqual(before, conn.execute("SELECT * FROM send_reservations").fetchall())
+                events = [json.loads(line) for line in send_shard.worker_log_path(log_path).read_text().splitlines()]
+                self.assertTrue(any(e.get("event_type") == "STOP" and e.get("reason") == "unresolved_idempotency_no_sendable_work" for e in events))
+                self.assertFalse(any(e.get("reason") == "queue_refreshed_after_batch_exhaustion" for e in events))
+                self.assertIn("total_sent_attempted=0", output)
+                with log_path.open(newline="") as handle:
+                    logged = list(csv.DictReader(handle))
+                self.assertEqual(1, sum("SKIPPED_IDEMPOTENCY_DUPLICATE" in row["Info"] for row in logged))
+
+    def test_repeat_unresolved_reservation_finishes_other_pending_rows_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            fixture[-1]["batch_size"] = 1
+            csv_path, state = fixture[4], fixture[3]
+            log_path = fixture[2] / fixture[-1]["log"]
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "held@example.test,Held,Book A,held-campaign\n"
+                "fresh@example.test,Fresh,Book B,held-campaign\n", encoding="utf-8",
+            )
+            log_path.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+            db_path = state / "send_idempotency.sqlite3"
+            self.assertTrue(send_shard.reserve_send_idempotency(
+                campaign_id="held-campaign", provider="sendgrid", email="held@example.test",
+                profile="sendgrid_jordan", queue_file="other.csv", db_path=db_path,
+            )[0])
+            real_reserve = send_shard.reserve_send_idempotency
+            attempted = []
+
+            def bounded_reserve(**kwargs):
+                self.assertNotIn(kwargs["email"], attempted, "Unresolved row revisited")
+                attempted.append(kwargs["email"])
+                return real_reserve(**kwargs)
+
+            with patch.object(send_shard, "reserve_send_idempotency", side_effect=bounded_reserve):
+                output, provider = self._run_synthetic_sendgrid(fixture, repeat=True)
+            self.assertEqual(["held@example.test", "fresh@example.test"], attempted)
+            self.assertEqual(1, provider.call_count)
+            self.assertIn("fresh@example.test", str(provider.call_args))
+            self.assertNotIn("held@example.test", str(provider.call_args))
+            with csv_path.open(newline="") as handle:
+                self.assertEqual(["held@example.test"], [row["Email"] for row in csv.DictReader(handle)])
+            with send_shard.sqlite3.connect(db_path) as conn:
+                self.assertEqual(("reserved", ""), conn.execute(
+                    "SELECT status, outcome FROM send_reservations WHERE email = ?", ("held@example.test",),
+                ).fetchone())
+            self.assertIn("unresolved idempotency reservations require manual review", output)
+
+    def test_repeat_refresh_processes_new_row_after_unresolved_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            csv_path, state = fixture[4], fixture[3]
+            log_path = fixture[2] / fixture[-1]["log"]
+
+            csv_path.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "held@example.test,Held,Book A,held-campaign\n",
+                encoding="utf-8",
+            )
+            log_path.write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+
+            db_path = state / "send_idempotency.sqlite3"
+
+            self.assertTrue(
+                send_shard.reserve_send_idempotency(
+                    campaign_id="held-campaign",
+                    provider="sendgrid",
+                    email="held@example.test",
+                    profile="sendgrid_jordan",
+                    queue_file="other.csv",
+                    db_path=db_path,
+                )[0]
+            )
+
+            real_reserve = send_shard.reserve_send_idempotency
+            real_restore = send_shard.restore_claimed_queue_row
+            reserve_calls: list[str] = []
+            injected = False
+
+            def bounded_reserve(**kwargs):
+                email = kwargs["email"]
+                reserve_calls.append(email)
+                if reserve_calls.count("held@example.test") > 1:
+                    raise AssertionError(
+                        "Repeat worker revisited unresolved reservation"
+                    )
+                return real_reserve(**kwargs)
+
+            def restore_then_inject(path, receipt):
+                nonlocal injected
+                restored = real_restore(path, receipt)
+
+                if restored and not injected:
+                    injected = True
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            "fresh@example.test,Fresh,Book B,"
+                            "held-campaign\n"
+                        )
+
+                return restored
+
+            with patch.object(
+                send_shard,
+                "reserve_send_idempotency",
+                side_effect=bounded_reserve,
+            ), patch.object(
+                send_shard,
+                "restore_claimed_queue_row",
+                side_effect=restore_then_inject,
+            ):
+                output, provider = self._run_synthetic_sendgrid(
+                    fixture,
+                    repeat=True,
+                )
+
+            self.assertEqual(
+                ["held@example.test", "fresh@example.test"],
+                reserve_calls,
+            )
+
+            self.assertEqual(1, provider.call_count)
+            self.assertIn(
+                "fresh@example.test",
+                str(provider.call_args),
+            )
+            self.assertNotIn(
+                "held@example.test",
+                str(provider.call_args),
+            )
+
+            with csv_path.open(newline="", encoding="utf-8") as handle:
+                remaining = [
+                    row["Email"]
+                    for row in csv.DictReader(handle)
+                ]
+
+            self.assertEqual(
+                ["held@example.test"],
+                remaining,
+            )
+
+            with send_shard.sqlite3.connect(db_path) as conn:
+                held_state = conn.execute(
+                    """
+                    SELECT status, outcome
+                    FROM send_reservations
+                    WHERE campaign_id = ?
+                      AND provider = ?
+                      AND email = ?
+                    """,
+                    (
+                        "held-campaign",
+                        "sendgrid",
+                        "held@example.test",
+                    ),
+                ).fetchone()
+
+            self.assertEqual(("reserved", ""), held_state)
+
+            self.assertIn(
+                "unresolved idempotency reservations require manual review",
+                output,
+            )
+
 
     def test_idempotency_database_busy_restores_claim_and_never_submits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
