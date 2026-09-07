@@ -181,6 +181,91 @@ def build_dynamic_dispatch_fixture(
 
 
 class ImportantLeadsWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Dispatch now requires readable reservation state, including in fixtures.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.idempotency_db = Path(temporary.name) / "send_idempotency.sqlite3"
+        with send_shard.sqlite3.connect(self.idempotency_db) as conn:
+            send_shard._init_send_idempotency_db(conn)
+        db_path = patch.object(important_leads_workflow, "send_idempotency_db_path", return_value=self.idempotency_db)
+        db_path.start()
+        self.addCleanup(db_path.stop)
+
+    def _seed_unresolved_dispatch_reservation(self, email="lead-1@example.com", provider="sendgrid", outcome=""):
+        with send_shard.sqlite3.connect(self.idempotency_db) as conn:
+            conn.execute(
+                "INSERT INTO send_reservations (campaign_id, provider, email, profile, queue_file, status, reserved_at_utc, updated_at_utc, outcome) "
+                "VALUES ('old-campaign', ?, ?, 'historical', 'old.csv', 'reserved', 'old', 'old', ?)",
+                (provider, email, outcome),
+            )
+
+    def test_unresolved_dispatch_preview_is_email_global_and_read_only(self):
+        for provider in ("sendgrid", "private"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as tmpdir, patch.object(
+                important_leads_workflow, "send_idempotency_db_path", side_effect=lambda: self.idempotency_db,
+            ):
+                self.idempotency_db = Path(tmpdir) / "reservations.sqlite3"
+                with send_shard.sqlite3.connect(self.idempotency_db) as conn:
+                    send_shard._init_send_idempotency_db(conn)
+                self._seed_unresolved_dispatch_reservation(email=" LEAD-1@EXAMPLE.COM ", provider=provider)
+                before = self.idempotency_db.read_bytes()
+                fixture = build_dynamic_dispatch_fixture(Path(tmpdir), preview_name="preview", lead_count=3, campaign_type="recontact_cold")
+                preview = fixture["preview"]
+                emails = {row["Email"] for rows in preview["plan_rows_by_queue"].values() for row in rows}
+                self.assertNotIn("lead-1@example.com", emails)
+                self.assertEqual(2, len(emails))
+                self.assertEqual(1, preview["idempotency_protected_removed"])
+                self.assertNotEqual("old-campaign", preview["campaign_id"])
+                self.assertEqual(before, self.idempotency_db.read_bytes())
+                self.assertTrue(preview["plan_rows_by_queue"]["private_jc"])
+
+    def test_unresolved_dispatch_resolved_outcome_is_not_quarantined(self):
+        self._seed_unresolved_dispatch_reservation(outcome="sent")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview = build_dynamic_dispatch_fixture(Path(tmpdir), preview_name="preview", lead_count=2, campaign_type="recontact_cold")["preview"]
+            self.assertEqual(0, preview["idempotency_protected_removed"])
+            self.assertEqual(2, preview["total_planned_unique_count"])
+
+    def test_unresolved_dispatch_confirm_reloads_before_queue_write(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fixture = build_dynamic_dispatch_fixture(tmp, preview_name="preview", lead_count=3, campaign_type="recontact_cold")
+            preview = fixture["preview"]
+            self._seed_unresolved_dispatch_reservation()
+            before = self.idempotency_db.read_bytes()
+            report = confirm_dispatch_preview(
+                preview["preview_id"], preview_dir=fixture["preview_dir"], require_stopped=False,
+                persist_state=False, backup_root=tmp / "backups", report_dir=tmp / "reports",
+            )
+            emails = {row["Email"] for path in preview["queue_paths"].values() for row in read_csv_rows(Path(path))}
+            self.assertEqual({"lead-2@example.com", "lead-3@example.com"}, emails)
+            self.assertEqual(1, report["confirm_idempotency_protected_removed"])
+            self.assertEqual(1, report["exclusion_reason_counts"]["idempotency_protected_removed"])
+            self.assertEqual(before, self.idempotency_db.read_bytes())
+
+    def test_unresolved_dispatch_corrupt_or_wrong_schema_fails_closed(self):
+        for contents in (b"not SQLite", b""):
+            with self.subTest(contents=contents):
+                self.idempotency_db.write_bytes(contents)
+                with self.assertRaisesRegex(RuntimeError, "unresolved idempotency state"):
+                    important_leads_workflow._unresolved_idempotency_emails()
+                self.assertEqual(contents, self.idempotency_db.read_bytes())
+
+    def test_unresolved_dispatch_read_failure_blocks_preview_and_confirm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fixture = build_dynamic_dispatch_fixture(tmp, preview_name="preview", lead_count=2)
+            preview = fixture["preview"]
+            before = {path: Path(path).read_bytes() for path in preview["queue_paths"].values()}
+            with patch.object(important_leads_workflow, "send_idempotency_db_path", return_value=tmp / "missing.sqlite3"):
+                with self.assertRaisesRegex(RuntimeError, "unresolved idempotency state"):
+                    confirm_dispatch_preview(preview["preview_id"], preview_dir=fixture["preview_dir"], require_stopped=False, persist_state=False, backup_root=tmp / "backups", report_dir=tmp / "reports")
+                with self.assertRaisesRegex(RuntimeError, "unresolved idempotency state"):
+                    important_leads_workflow._build_dispatch_plan(master_path=tmp / "leads.csv", rejected_path=tmp / "reject.csv", verified_path=tmp / "verified.csv", triaged_keep_path=tmp / "leads_triaged_keep.csv", dispatch_source_mode="triaged_keep")
+            self.assertEqual(before, {path: Path(path).read_bytes() for path in before})
+            self.assertFalse((tmp / "missing.sqlite3").exists())
+
     def test_full_recontact_caps_private_jc_then_uses_enabled_sendgrid_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = build_dynamic_dispatch_fixture(

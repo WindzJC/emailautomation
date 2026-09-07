@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import time
 import unicodedata
@@ -43,6 +44,7 @@ from send_shard import (
     normalize_warm_personalization_line,
     normalized_warm_confirmation_payload,
     render_warm_email_copy,
+    send_idempotency_db_path,
     warm_email_copy_rejection_reason,
     validate_warm_confirmed_queue,
     warm_confirmation_payload_hash,
@@ -3377,6 +3379,25 @@ def _record_dispatch_history_from_preview(
         conn.close()
 
 
+def _unresolved_idempotency_emails() -> set[str]:
+    """Read global quarantine without creating, migrating, or settling reservations."""
+    conn = None
+    try:
+        path = send_idempotency_db_path().resolve()
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA query_only = ON")
+        rows = conn.execute(
+            "SELECT email FROM send_reservations "
+            "WHERE status = 'reserved' AND COALESCE(outcome, '') = ''"
+        )
+        return {email for row in rows if (email := norm_email(row[0]))}
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise RuntimeError("Dispatch blocked: unresolved idempotency state could not be safely read.") from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _build_dispatch_plan(
     *,
     master_path: Path,
@@ -3413,6 +3434,7 @@ def _build_dispatch_plan(
         )
 
     emit_progress("prepare")
+    idempotency_protected = _unresolved_idempotency_emails()
     if not master_path.exists():
         raise FileNotFoundError(f"Master leads file not found: {master_path}")
 
@@ -3627,6 +3649,10 @@ def _build_dispatch_plan(
                 exclusion_reason_counts["duplicate_source_row"] += 1
                 continue
             master_seen.add(email)
+
+            if email in idempotency_protected:
+                exclusion_reason_counts["idempotency_protected_removed"] += 1
+                continue
 
             lead_id = deterministic_lead_id(email)
             if email in blocked_emails:
@@ -3943,6 +3969,7 @@ def _build_dispatch_plan(
             "skipped_bad_sendgrid_event": bad_event_skipped,
             "bad_sendgrid_event_skipped": bad_event_skipped,
             "skipped_suppressed": suppressed_skipped,
+            "idempotency_protected_removed": int(exclusion_reason_counts["idempotency_protected_removed"]),
             "suppressed_skipped": suppressed_skipped,
             "bad_suppressed_removed_count": bad_event_skipped + suppressed_skipped,
             "skipped_already_contacted": already_contacted_skipped,
@@ -4344,6 +4371,9 @@ def _confirm_dispatch_preview_impl(
     if not queue_headers:
         raise RuntimeError("Dispatch preview is missing queue headers. Re-run Preview Dispatch.")
     queue_lock_paths = _confirmation_queue_lock_paths(preview, queue_paths)
+    _lock_stack.enter_context(lock_files(queue_lock_paths))
+    preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
+    idempotency_protected = _unresolved_idempotency_emails()
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue") or {}
     if not isinstance(plan_rows_by_queue, dict):
@@ -4379,6 +4409,11 @@ def _confirm_dispatch_preview_impl(
         sendgrid_sent_emails=authoritative_sent_emails,
         allow_sendgrid_already_sent=allow_previously_sent,
     )
+    confirm_idempotency_removed = 0
+    for key, rows in effective_plan_rows_by_queue.items():
+        safe_rows = [row for row in rows if norm_email(row.get("Email", "")) not in idempotency_protected]
+        confirm_idempotency_removed += len(rows) - len(safe_rows)
+        effective_plan_rows_by_queue[key] = safe_rows
     effective_rows_written_per_queue = {
         key: len(effective_plan_rows_by_queue.get(key) or [])
         for key in queue_keys
@@ -4393,6 +4428,8 @@ def _confirm_dispatch_preview_impl(
                 if not isinstance(event, dict):
                     continue
                 email = norm_email(event.get("email", ""))
+                if email in idempotency_protected:
+                    continue
                 if email and email in authoritative_sent_emails and not allow_previously_sent:
                     continue
                 events.append(dict(event))
@@ -4442,7 +4479,6 @@ def _confirm_dispatch_preview_impl(
     backup_dir = backup_root / f"dispatch_{timestamp_slug()}"
     if backup_dir.exists():
         backup_dir = backup_root / f"{backup_dir.name}_{uuid.uuid4().hex[:8]}"
-    _lock_stack.enter_context(lock_files(queue_lock_paths))
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
@@ -4509,6 +4545,7 @@ def _confirm_dispatch_preview_impl(
         if key.startswith("sendgrid_")
     )
     exclusion_reason_counts = dict(preview.get("exclusion_reason_counts") or {})
+    exclusion_reason_counts["idempotency_protected_removed"] = int(exclusion_reason_counts.get("idempotency_protected_removed") or 0) + confirm_idempotency_removed
     if confirm_filtered_sendgrid_already_sent_count:
         exclusion_reason_counts["already_sent"] = int(exclusion_reason_counts.get("already_sent") or 0) + confirm_filtered_sendgrid_already_sent_count
     report = {
@@ -4554,6 +4591,8 @@ def _confirm_dispatch_preview_impl(
         "skipped_sendgrid_already_sent": int(preview.get("skipped_sendgrid_already_sent") or 0) + confirm_filtered_sendgrid_already_sent_count,
         "skipped_sendgrid_already_queued": int(preview.get("skipped_sendgrid_already_queued") or 0),
         "confirm_filtered_sendgrid_already_sent": confirm_filtered_sendgrid_already_sent_count,
+        "confirm_idempotency_protected_removed": confirm_idempotency_removed,
+        "idempotency_protected_removed": int(preview.get("idempotency_protected_removed") or 0) + confirm_idempotency_removed,
         "confirm_filtered_sendgrid_already_sent_by_queue": dict(confirm_filtered_sendgrid_already_sent),
         "skipped_already_sent": int(preview.get("skipped_already_sent") or 0) + confirm_filtered_sendgrid_already_sent_count,
         "skipped_already_sent_same_family": int(preview.get("skipped_already_sent_same_family") or 0) + confirm_filtered_sendgrid_already_sent_count,
