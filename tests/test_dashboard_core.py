@@ -3760,6 +3760,7 @@ class DashboardCoreTests(unittest.TestCase):
             )
 
         self.assertEqual("stale", health["state"])
+        self.assertTrue(health["event_stale"])
         self.assertTrue(health["warning"])
         self.assertTrue(health["webhook_route_exists"])
         self.assertTrue(health["sendgrid_event_public_key_configured"])
@@ -3791,10 +3792,36 @@ class DashboardCoreTests(unittest.TestCase):
             )
 
         self.assertEqual("healthy", health["state"])
+        self.assertFalse(health["event_stale"])
         self.assertFalse(health["warning"])
         self.assertTrue(health["sendgrid_webhook_receiver_url_configured"])
         self.assertTrue(health["sendgrid_event_public_key_configured"])
         self.assertEqual("", health["warning_text"])
+
+    def test_sendgrid_outcome_health_exposes_stale_feed_without_backlog_warning(self) -> None:
+        with patch.object(dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {"last_received_iso": "2000-01-01T00:00:00+00:00", "last_received_age": "years ago"},
+                total_awaiting_outcome=0,
+            )
+
+        self.assertTrue(health["event_stale"])
+        # Preserve the operational state contract; freshness is a separate fact.
+        self.assertEqual("healthy", health["state"])
+        self.assertFalse(health["warning"])
+        self.assertEqual("", health["warning_text"])
+        self.assertEqual(0, health["awaiting_outcome"])
+        self.assertEqual("2000-01-01T00:00:00+00:00", health["latest_sendgrid_event_timestamp"])
+
+    def test_sendgrid_outcome_health_preserves_no_events_without_backlog_warning(self) -> None:
+        with patch.object(dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"):
+            health = dashboard_core.build_sendgrid_outcome_health({}, total_awaiting_outcome=0)
+
+        self.assertEqual("no_events", health["state"])
+        self.assertTrue(health["event_stale"])
+        self.assertFalse(health["warning"])
+        self.assertEqual("", health["warning_text"])
+        self.assertEqual("", health["latest_sendgrid_event_timestamp"])
 
     def test_sendgrid_outcome_health_reports_missing_receiver_url_without_stale_warning(self) -> None:
         fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)

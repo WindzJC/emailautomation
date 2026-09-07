@@ -2447,6 +2447,7 @@ def build_sendgrid_outcome_health(
     return {
         "state": state,
         "warning": warning,
+        "event_stale": event_stale,
         "message": message,
         "webhook_route_exists": True,
         "sendgrid_event_public_key_configured": WEBHOOK_SIGNATURE_ENABLED,

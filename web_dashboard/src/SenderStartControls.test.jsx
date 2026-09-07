@@ -165,6 +165,44 @@ describe("individual sender Start controls", () => {
     document.body.innerHTML = "";
   });
 
+  it.each([
+    { event_stale: true, awaiting_outcome: 0, state: "healthy", warning: false, feed: "STALE" },
+    { event_stale: true, awaiting_outcome: 3, state: "stale", warning: true, feed: "STALE" },
+    { event_stale: false, awaiting_outcome: 0, state: "healthy", warning: false, feed: "CURRENT" },
+    { event_stale: true, awaiting_outcome: 0, state: "no_events", warning: false, feed: "NO EVENTS" },
+  ])("renders $feed independently of Complete and backlog=$awaiting_outcome", async (health) => {
+    const latest = health.state === "no_events" ? "" : "2026-08-12T12:00:00Z";
+    const fallback = baseFetchMock(() => { throw new Error("Unexpected Start"); });
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (String(url).startsWith("/api/snapshot")) {
+        return Promise.resolve(jsonResponse({
+          ...READY_SNAPSHOT,
+          sendgrid_outcome_health: {
+            ...health,
+            latest_sendgrid_event_timestamp: latest,
+            warning_text: health.warning ? "SendGrid outcome feed is stale." : "",
+            webhook_route_exists: true,
+            sendgrid_event_public_key_configured: true,
+            sendgrid_webhook_receiver_url_configured: true,
+          },
+        }));
+      }
+      return fallback(url, options);
+    });
+    root = await bootController(fetchMock);
+
+    const card = document.querySelector(".summary-card-sendgrid");
+    const feed = card.querySelector(".sendgrid-outcome-health");
+    expect(card.querySelector(".summary-value").textContent).toBe("Complete");
+    expect(feed.textContent).toContain(`Event feed: ${health.feed}`);
+    expect(feed.textContent.includes("No outcomes currently awaiting")).toBe(health.awaiting_outcome === 0);
+    expect(feed.querySelector("strong") !== null).toBe(health.warning);
+    expect(feed.textContent).toContain("Latest outcome event:");
+    expect(feed.textContent).toContain(latest ? "2026" : "No SendGrid events");
+    expect(document.querySelector(".summary-card-alerts .summary-value").textContent).toBe("0 warnings");
+    expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
+  });
+
   it("posts the sender-row Start exactly once and locks duplicate interaction while pending", async () => {
     const pending = deferredResponse();
     const fetchMock = baseFetchMock(() => pending.promise);

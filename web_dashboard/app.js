@@ -3117,11 +3117,18 @@ function sendgridOutcomeHealthSummaryHtml(snapshot = lastSnapshot) {
   const latest = health.latest_sendgrid_event_timestamp
     ? formatGeneratedAt(health.latest_sendgrid_event_timestamp)
     : "No SendGrid events";
+  const feedStatus = !health.latest_sendgrid_event_timestamp
+    ? "NO EVENTS"
+    : health.event_stale === true || health.state === "stale"
+      ? "STALE"
+      : health.event_stale === false ? "CURRENT" : "UNKNOWN";
   const warning = health.warning_text || (health.warning ? (health.message || SENDGRID_OUTCOME_STALE_WARNING) : "");
   return `
     <div class="summary-small-note sendgrid-outcome-health sendgrid-outcome-health-${escapeHtml(health.state || "unknown")}">
       <span>${escapeHtml(route)} · ${escapeHtml(key)} · ${escapeHtml(receiver)}</span>
+      <span>Event feed: ${feedStatus}</span>
       <span>Latest outcome event: ${escapeHtml(latest)}</span>
+      ${health.awaiting_outcome === 0 ? "<span>No outcomes currently awaiting</span>" : ""}
       ${warning ? `<strong>${escapeHtml(warning)}</strong>` : ""}
     </div>
   `;

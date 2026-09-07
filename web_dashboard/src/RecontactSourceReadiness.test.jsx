@@ -535,6 +535,29 @@ describe("source-scoped Recontact readiness", () => {
     expect(previewButton()).toHaveAttribute("title", expect.stringContaining("Active senders are running"));
   });
 
+  it("labels retained confirmed state as Last confirmed dispatch, not Active campaign", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.active_campaign_snapshot = {
+      campaign_type: "cold",
+      intended_source_path: FRESH_SOURCE.dispatch_source_path,
+      intended_source_row_count: 20,
+    };
+    status.latest_dispatch = {
+      status: "confirmed",
+      generated_at_utc: "2026-08-28T01:00:00Z",
+      campaign_type: "cold",
+      dispatch_source_path: FRESH_SOURCE.dispatch_source_path,
+      total_rows_would_write: 20,
+      sendgrid_added: 20,
+    };
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("leads-important-dispatch-results")).toHaveTextContent("Last confirmed dispatch");
+    expect(document.body.textContent).not.toMatch(/Active campaign/i);
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
   it("blocks both source modes while a conflicting dispatch operation is active", async () => {
     const activeDispatch = {
       job_id: "dispatch-job",
