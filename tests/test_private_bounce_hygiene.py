@@ -439,3 +439,40 @@ class PrivateBounceHygieneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_private_bounce_report_retention_is_bounded_and_scoped() -> None:
+    from private_bounce_hygiene import (
+        PRIVATE_BOUNCE_REPORT_DIRNAME,
+        PRIVATE_BOUNCE_REPORT_PREFIX,
+        _prune_private_bounce_reports,
+        _report_path,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        report_root = root / PRIVATE_BOUNCE_REPORT_DIRNAME
+        report_root.mkdir()
+        for second in range(8):
+            path = report_root / f"{PRIVATE_BOUNCE_REPORT_PREFIX}20260101_0000{second:02d}.json"
+            path.write_text("{}\n", encoding="utf-8")
+        unrelated = report_root / "unrelated.json"
+        unrelated.write_text("{}\n", encoding="utf-8")
+        legacy = root / f"{PRIVATE_BOUNCE_REPORT_PREFIX}20251231_235959.json"
+        legacy.write_text("{}\n", encoding="utf-8")
+
+        removed = _prune_private_bounce_reports(root, keep=3)
+
+        remaining = sorted(
+            path.name
+            for path in report_root.glob(f"{PRIVATE_BOUNCE_REPORT_PREFIX}*.json")
+        )
+        assert removed == 5
+        assert remaining == [
+            f"{PRIVATE_BOUNCE_REPORT_PREFIX}20260101_000005.json",
+            f"{PRIVATE_BOUNCE_REPORT_PREFIX}20260101_000006.json",
+            f"{PRIVATE_BOUNCE_REPORT_PREFIX}20260101_000007.json",
+        ]
+        assert unrelated.exists()
+        assert legacy.exists()
+        assert _report_path(root).parent == report_root

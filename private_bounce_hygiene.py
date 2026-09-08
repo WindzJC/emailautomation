@@ -30,6 +30,7 @@ PRIVATE_IMAP_PORT = 993
 PRIVATE_BOUNCE_STATE_PATH = settings.STATE_DIR / "private_bounce_state.json"
 PRIVATE_BOUNCE_MONITOR_PATH = settings.STATE_DIR / "private_bounce_monitor.json"
 PRIVATE_BOUNCE_REPORT_PREFIX = "private_bounce_sync_"
+PRIVATE_BOUNCE_REPORT_DIRNAME = "private_bounce_reports"
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 FINAL_RECIPIENT_RE = re.compile(r"final-recipient:\s*(?:[^;]+;)?\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", re.IGNORECASE)
@@ -84,6 +85,7 @@ def _env_csv(name: str, default: Sequence[str]) -> Tuple[str, ...]:
 
 PRIVATE_BOUNCE_MONITOR_ENABLED = _env_bool("PRIVATE_BOUNCE_MONITOR_ENABLED", True)
 PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS = _env_int("PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS", 120)
+PRIVATE_BOUNCE_REPORT_HISTORY_LIMIT = _env_int("PRIVATE_BOUNCE_REPORT_HISTORY_LIMIT", 50)
 PRIVATE_BOUNCE_CLUSTER_WINDOW_MINUTES = _env_int("PRIVATE_BOUNCE_CLUSTER_WINDOW_MINUTES", 15)
 PRIVATE_BOUNCE_CLUSTER_THRESHOLD = _env_int("PRIVATE_BOUNCE_CLUSTER_THRESHOLD", 3)
 PRIVATE_BOUNCE_COOLDOWN_MINUTES = _env_int("PRIVATE_BOUNCE_COOLDOWN_MINUTES", 15)
@@ -359,9 +361,41 @@ def append_unique_suppressed_emails(path: Path, emails: Iterable[str]) -> Dict[s
     }
 
 
+def _report_directory(report_dir: Path) -> Path:
+    return report_dir / PRIVATE_BOUNCE_REPORT_DIRNAME
+
+
 def _report_path(report_dir: Path) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    return report_dir / f"{PRIVATE_BOUNCE_REPORT_PREFIX}{ts}.json"
+    return _report_directory(report_dir) / f"{PRIVATE_BOUNCE_REPORT_PREFIX}{ts}.json"
+
+
+def _prune_private_bounce_reports(
+    report_dir: Path,
+    keep: int = PRIVATE_BOUNCE_REPORT_HISTORY_LIMIT,
+) -> int:
+    report_root = _report_directory(report_dir)
+    if not report_root.exists():
+        return 0
+    reports = sorted(
+        (
+            path
+            for path in report_root.glob(f"{PRIVATE_BOUNCE_REPORT_PREFIX}*.json")
+            if path.is_file()
+        ),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    removed = 0
+    for stale in reports[max(1, int(keep or 1)) :]:
+        try:
+            stale.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+    return removed
 
 
 def normalize_private_bounce_folders(folders: Optional[Sequence[str]] = None) -> List[str]:
@@ -536,9 +570,10 @@ def sync_private_bounces(
     }
 
     report_path = _report_path(report_dir)
-    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report["report_path"] = str(report_path)
     _write_json_atomic(report_path, report)
+    _prune_private_bounce_reports(report_dir)
 
     if persist_state:
         state[profile_name] = {
