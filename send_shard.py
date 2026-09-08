@@ -1230,6 +1230,23 @@ def _init_send_idempotency_db(conn: sqlite3.Connection) -> None:
     )
 
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS queue_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            email TEXT NOT NULL,
+            profile TEXT NOT NULL DEFAULT '',
+            queue_file TEXT NOT NULL,
+            row_index INTEGER NOT NULL,
+            fieldnames_json TEXT NOT NULL,
+            row_json TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            UNIQUE(campaign_id, provider, email)
+        )
+    """)
+
+
 def _send_idempotency_connection(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(
         path,
@@ -1517,9 +1534,120 @@ def validate_recontact_queue_campaign_identity(
     return next(iter(campaign_ids), "")
 
 
+def _queue_claim_transaction(path: Path, operation):
+    """Use the existing bounded SQLite policy; uncertainty never permits a claim."""
+    ok, reason = _ensure_send_idempotency_schema(path)
+    if not ok:
+        raise RuntimeError(f"queue_claim_schema_{reason}")
+    for attempt in range(SEND_IDEMPOTENCY_BUSY_RETRIES + 1):
+        conn = None
+        try:
+            conn = _send_idempotency_connection(path)
+            conn.execute("PRAGMA synchronous = FULL")
+            conn.execute("BEGIN IMMEDIATE")
+            result = operation(conn)
+            conn.commit()
+            return result
+        except sqlite3.DatabaseError as exc:
+            if _idempotency_database_busy(exc) and attempt < SEND_IDEMPOTENCY_BUSY_RETRIES:
+                _idempotency_retry_sleep(attempt)
+                continue
+            raise RuntimeError("queue_claim_database_unavailable") from exc
+        finally:
+            if conn is not None:
+                conn.close()  # rolls back any uncommitted transaction
+
+
+def persist_queue_claim(csv_path: Path, receipt: dict[str, object], *,
+                        campaign_id: str, provider: str, profile: str,
+                        db_path: Path | None = None) -> None:
+    path = db_path or send_idempotency_db_path()
+    def insert(conn):
+        # A collision is not ownership. Never overwrite another claim's evidence.
+        return conn.execute("""
+            INSERT INTO queue_claims
+            (campaign_id, provider, email, profile, queue_file, row_index,
+             fieldnames_json, row_json, created_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (str(campaign_id).strip() or CAMPAIGN_TYPE_COLD,
+              str(provider).strip().lower() or "unknown", receipt["email"],
+              str(profile or "").strip(), str(csv_path.resolve()), receipt["index"],
+              json.dumps(receipt["fieldnames"]), json.dumps(receipt["row"]),
+              datetime.now(timezone.utc).isoformat())).lastrowid
+    receipt["queue_claim_id"] = _queue_claim_transaction(path, insert)
+    receipt["queue_claim_db"] = path
+
+
+def clear_queue_claim(receipt: dict[str, object] | None) -> bool:
+    if not receipt or not receipt.get("queue_claim_id"):
+        return True
+    try:
+        _queue_claim_transaction(Path(receipt["queue_claim_db"]), lambda conn: conn.execute(
+            "DELETE FROM queue_claims WHERE id = ?", (receipt["queue_claim_id"],)))
+        return True
+    except Exception:
+        # Cleanup is best effort, never a reason to retry a provider submission.
+        return False
+
+
+def reconcile_queue_claims(csv_path: Path, *, provider: str, profile: str,
+                           db_path: Path | None = None) -> dict[str, int]:
+    """Queue lock -> DB transaction, matching the claim writer's lock order."""
+    path = db_path or send_idempotency_db_path()
+    queue_file = str(csv_path.resolve())
+    def reconcile(conn):
+        claims = conn.execute("""
+            SELECT id, campaign_id, provider, email, profile, queue_file,
+                   row_index, fieldnames_json, row_json
+            FROM queue_claims WHERE queue_file = ? OR (profile = ? AND provider = ?)
+            ORDER BY id DESC
+        """, (queue_file, str(profile or "").strip(), provider)).fetchall()
+        validated = []
+        for claim in claims:
+            ident, campaign, stored_provider, email, stored_profile, stored_queue, index, fields, row = claim
+            fields, row = json.loads(fields), json.loads(row)
+            if (stored_queue != queue_file or stored_provider != provider
+                    or stored_profile != str(profile or "").strip()
+                    or not isinstance(index, int) or index < 0
+                    or not isinstance(fields, list) or not fields
+                    or any(not isinstance(field, str) for field in fields)
+                    or len(set(fields)) != len(fields)
+                    or not isinstance(row, dict) or set(row) != set(fields)
+                    or any(not isinstance(value, str) for value in row.values())
+                    or not email or norm_email(resolve_recipient_email(row) or row.get("Email") or "") != email):
+                raise RuntimeError("queue_claim_invalid_identity_or_payload")
+            reservation = conn.execute(
+                "SELECT status, outcome FROM send_reservations WHERE campaign_id = ? AND provider = ? AND email = ?",
+                (campaign, stored_provider, email),
+            ).fetchone()
+            if reservation not in (None, ("sent", "sent"), ("reserved", ""), ("ambiguous", "ambiguous")):
+                raise RuntimeError("queue_claim_inconsistent_reservation_manual_review")
+            validated.append((ident, reservation, dict(email=email, row=row, index=index, fieldnames=fields)))
+        result = {"restored": 0, "sent": 0, "protected": 0}
+        for ident, reservation, receipt in validated:
+            if reservation is None:
+                if not _restore_claimed_queue_row_locked(csv_path, receipt):
+                    raise RuntimeError("queue_claim_restore_failed")
+                result["restored"] += 1
+            elif reservation == ("sent", "sent"):
+                result["sent"] += 1
+            else:
+                result["protected"] += 1
+                continue
+            conn.execute("DELETE FROM queue_claims WHERE id = ?", (ident,))
+        return result
+    with lock_files([csv_path]):
+        return _queue_claim_transaction(path, reconcile)
+
+
 def claim_queue_row_with_receipt(
     csv_path: Path,
     email_addr: str,
+    *,
+    campaign_id: str | None = None,
+    provider: str = "",
+    profile: str = "",
+    db_path: Path | None = None,
 ) -> dict[str, object] | None:
     target = norm_email(email_addr)
     if not target or not csv_path.exists():
@@ -1547,13 +1675,17 @@ def claim_queue_row_with_receipt(
                     continue
                 kept_rows.append(clean_row)
         if claimed_row is not None:
-            rewrite_csv_rows(csv_path, fieldnames, kept_rows)
-            return {
+            receipt = {
                 "email": target,
                 "row": claimed_row,
                 "index": claimed_index,
                 "fieldnames": list(fieldnames),
             }
+            if campaign_id is not None:
+                persist_queue_claim(csv_path, receipt, campaign_id=campaign_id,
+                                    provider=provider, profile=profile, db_path=db_path)
+            rewrite_csv_rows(csv_path, fieldnames, kept_rows)
+            return receipt
     return None
 
 
@@ -1566,6 +1698,11 @@ def restore_claimed_queue_row(
     receipt: dict[str, object] | None,
 ) -> bool:
     """Restore one exact claimed row at its prior position without duplicating it."""
+    with lock_files([csv_path]):
+        return _restore_claimed_queue_row_locked(csv_path, receipt)
+
+
+def _restore_claimed_queue_row_locked(csv_path: Path, receipt: dict[str, object] | None) -> bool:
     if not receipt or not csv_path.exists():
         return False
     if bool(receipt.get("restored")):
@@ -1576,21 +1713,25 @@ def restore_claimed_queue_row(
     target = norm_email(str(receipt.get("email") or ""))
     if not target:
         return False
-    with lock_files([csv_path]):
-        with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            fieldnames = list(reader.fieldnames or receipt.get("fieldnames") or claimed_row.keys())
-            rows = [
-                {key: value for key, value in row.items() if key is not None}
-                for row in reader
-            ]
-        try:
-            index = max(0, min(int(receipt.get("index") or 0), len(rows)))
-        except (TypeError, ValueError):
-            index = len(rows)
-        rows.insert(index, {str(key): str(value or "") for key, value in claimed_row.items()})
-        rewrite_csv_rows(csv_path, fieldnames, rows)
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or receipt.get("fieldnames") or claimed_row.keys())
+        rows = [
+            {key: value for key, value in row.items() if key is not None}
+            for row in reader
+        ]
+    if any(norm_email(resolve_recipient_email(row) or row.get("Email") or "") == target for row in rows):
         receipt["restored"] = True
+        return True
+    if receipt.get("fieldnames") and fieldnames != receipt["fieldnames"]:
+        return False
+    try:
+        index = max(0, min(int(receipt.get("index") or 0), len(rows)))
+    except (TypeError, ValueError):
+        index = len(rows)
+    rows.insert(index, {str(key): str(value or "") for key, value in claimed_row.items()})
+    rewrite_csv_rows(csv_path, fieldnames, rows)
+    receipt["restored"] = True
     return True
 
 
@@ -5326,6 +5467,20 @@ def main() -> int | None:
         print("ERROR missing:", csv_path)
         return
 
+    if should_log_worker and not no_send_mode and args.provider in {"private", "sendgrid"}:
+        try:
+            # Never reconcile a claim belonging to a still-running worker.
+            with acquire_profile_runtime_lock(str(args.profile), enabled=True):
+                recovery = reconcile_queue_claims(
+                    csv_path, provider=args.provider, profile=str(args.profile or ""),
+                )
+            if any(recovery.values()):
+                emit_worker_event("RECOVERY", "queue_claim_reconciliation", **recovery)
+        except Exception as exc:
+            emit_worker_event("ERROR", "queue_claim_reconciliation_failed", error_type=type(exc).__name__)
+            print("ERROR queue_claim_reconciliation_failed; manual review required")
+            return
+
     my_domains: set[str] = {d.strip().lower() for d in (args.my_domains or "").split(",") if d.strip()}
     if not my_domains:
         my_domains = {DEFAULT_DOMAIN}
@@ -6140,8 +6295,9 @@ def main() -> int | None:
         )
         global_block_refresher.acknowledge_nonblocking_append(log_path)
 
+        idempotency_ok = not idempotency_reserved
         if idempotency_reserved:
-            record_send_idempotency_outcome(
+            idempotency_ok = record_send_idempotency_outcome(
                 campaign_id=campaign_id,
                 provider=args.provider,
                 email=email,
@@ -6149,12 +6305,15 @@ def main() -> int | None:
                 info=send_info,
             )
 
-        return finalize_domain_attempt_slot(
+        domain_ok = finalize_domain_attempt_slot(
             reservation_token,
             email,
             "sent",
             send_info,
         )
+        if idempotency_ok and domain_ok:
+            clear_queue_claim(queue_claim_receipt)
+        return domain_ok
 
     def settle_retryable_attempt(
         *,
@@ -6196,6 +6355,7 @@ def main() -> int | None:
             ),
         )
         if result["settled"]:
+            clear_queue_claim(queue_claim_receipt)
             pre_submit_transition_active = False
         return (
             result["settled"],
@@ -6666,7 +6826,10 @@ def main() -> int | None:
 
                 if not no_send_mode and args.provider in {"private", "sendgrid"}:
                     pre_submit_transition_active = True
-                    queue_claim_receipt = claim_queue_row_with_receipt(csv_path, to_email)
+                    queue_claim_receipt = claim_queue_row_with_receipt(
+                        csv_path, to_email, campaign_id=row_campaign_id,
+                        provider=args.provider, profile=str(args.profile or ""),
+                    )
                     honor_deferred_stop()
                     if queue_claim_receipt is None:
                         pre_submit_transition_active = False
@@ -6688,6 +6851,7 @@ def main() -> int | None:
                     if not reserved:
                         restored = restore_claimed_queue_row(csv_path, queue_claim_receipt)
                         if restored:
+                            clear_queue_claim(queue_claim_receipt)
                             pre_submit_transition_active = False
                             honor_deferred_stop()
                         if str(reserve_reason or "").startswith("database_"):

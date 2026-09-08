@@ -2134,6 +2134,167 @@ finished_path.write_text(
             self.assertFalse(send_shard.claim_queue_row(queue_path, "author@example.test"))
             self.assertNotIn("author@example.test", queue_path.read_text(encoding="utf-8"))
 
+    def _patch6_queue(self, base):
+        queue = Path(base) / "queue.csv"
+        db = Path(base) / "idempotency.sqlite3"
+        fields = ["AuthorEmail", "BookTitle", "Notes", "Empty"]
+        rows = [dict(zip(fields, values)) for values in (
+            ("first@example.test", "First", "", ""),
+            ("target@example.test", "A, Book", "line one\nline two", ""),
+            ("last@example.test", "Last", "", ""),
+        )]
+        with queue.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        metadata = dict(campaign_id="patch6", provider="sendgrid", profile="fixture", db_path=db)
+        return queue, db, fields, rows, metadata
+
+    def test_patch6_hard_crash_before_reservation_restores_exact_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue, db, fields, rows, metadata = self._patch6_queue(tmpdir)
+            send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+            # Discard the receipt: only durable evidence survives the simulated crash.
+            result = send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+            self.assertEqual(1, result["restored"])
+            with queue.open(newline="") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(rows, list(reader))
+                self.assertEqual(fields, reader.fieldnames)
+            with send_shard.sqlite3.connect(db) as conn:
+                self.assertEqual([], conn.execute("SELECT * FROM queue_claims").fetchall())
+                self.assertEqual([], conn.execute("SELECT * FROM send_reservations").fetchall())
+
+    def test_patch6_reserved_ambiguous_sent_and_unknown_reconciliation(self):
+        for outcome in (None, "ambiguous", "sent", "error"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmpdir:
+                queue, db, _, _, metadata = self._patch6_queue(tmpdir)
+                send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+                key = dict(campaign_id="patch6", provider="sendgrid", email="target@example.test", db_path=db)
+                self.assertTrue(send_shard.reserve_send_idempotency(**key, profile="fixture", queue_file=queue.name)[0])
+                if outcome:
+                    self.assertTrue(send_shard.record_send_idempotency_outcome(**key, outcome=outcome))
+                before = queue.read_bytes()
+                with send_shard.sqlite3.connect(db) as conn:
+                    reservation = conn.execute("SELECT * FROM send_reservations").fetchall()
+                if outcome == "error":
+                    with self.assertRaisesRegex(RuntimeError, "inconsistent_reservation"):
+                        send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+                else:
+                    result = send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+                    self.assertEqual(1, result["sent" if outcome == "sent" else "protected"])
+                self.assertEqual(before, queue.read_bytes())
+                with send_shard.sqlite3.connect(db) as conn:
+                    self.assertEqual(reservation, conn.execute("SELECT * FROM send_reservations").fetchall())
+                    self.assertEqual(0 if outcome == "sent" else 1, conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
+
+    def test_patch6_already_restored_row_not_duplicated_after_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue, db, _, rows, metadata = self._patch6_queue(tmpdir)
+            receipt = send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+            self.assertTrue(send_shard.restore_claimed_queue_row(queue, receipt))
+            with patch.object(send_shard, "_queue_claim_transaction", side_effect=RuntimeError("busy")):
+                self.assertFalse(send_shard.clear_queue_claim(receipt))
+            send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+            with queue.open(newline="") as handle:
+                self.assertEqual(rows, list(csv.DictReader(handle)))
+            with send_shard.sqlite3.connect(db) as conn:
+                self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
+
+    def test_patch6_journal_failure_and_collision_never_remove_row(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue, db, _, _, metadata = self._patch6_queue(tmpdir)
+            before = queue.read_bytes()
+            with patch.object(send_shard, "persist_queue_claim", side_effect=RuntimeError("disk failure")):
+                with self.assertRaises(RuntimeError):
+                    send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+            self.assertEqual(before, queue.read_bytes())
+            self.assertFalse(db.exists())
+            send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+            other = Path(tmpdir) / "other.csv"
+            other.write_bytes(before)
+            with send_shard.sqlite3.connect(db) as conn:
+                original = conn.execute("SELECT * FROM queue_claims").fetchall()
+            with self.assertRaises(RuntimeError):
+                send_shard.claim_queue_row_with_receipt(other, "target@example.test", **metadata)
+            self.assertEqual(before, other.read_bytes())
+            with send_shard.sqlite3.connect(db) as conn:
+                self.assertEqual(original, conn.execute("SELECT * FROM queue_claims").fetchall())
+                self.assertEqual([], conn.execute("SELECT * FROM send_reservations").fetchall())
+
+    def test_patch6_journal_committed_before_queue_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue, db, _, _, metadata = self._patch6_queue(tmpdir)
+            original = queue.read_bytes()
+            def crash_before_rewrite(*_args, **_kwargs):
+                with send_shard.sqlite3.connect(db) as conn:
+                    self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
+                raise RuntimeError("simulated crash")
+            with patch.object(send_shard, "rewrite_csv_rows", side_effect=crash_before_rewrite):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+            self.assertEqual(original, queue.read_bytes())
+            send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+            self.assertEqual(original, queue.read_bytes())
+
+    def test_patch6_uncertain_recovery_preserves_evidence(self):
+        for failure in ("json", "identity", "restore", "busy"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
+                queue, db, _, _, metadata = self._patch6_queue(tmpdir)
+                send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+                if failure in {"json", "identity"}:
+                    with send_shard.sqlite3.connect(db) as conn:
+                        conn.execute("UPDATE queue_claims SET " + ("row_json = 'invalid'" if failure == "json" else "queue_file = 'other.csv'"))
+                        conn.commit()
+                before = queue.read_bytes()
+                with ExitStack() as stack:
+                    if failure == "restore":
+                        stack.enter_context(patch.object(send_shard, "_restore_claimed_queue_row_locked", return_value=False))
+                    if failure == "busy":
+                        stack.enter_context(patch.object(send_shard, "_send_idempotency_connection", side_effect=send_shard.sqlite3.OperationalError("database is locked")))
+                        stack.enter_context(patch.object(send_shard, "_idempotency_retry_sleep"))
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        send_shard.reconcile_queue_claims(queue, provider="sendgrid", profile="fixture", db_path=db)
+                self.assertEqual(before, queue.read_bytes())
+                with send_shard.sqlite3.connect(db) as conn:
+                    self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
+                    self.assertEqual(0, conn.execute("SELECT COUNT(*) FROM send_reservations").fetchone()[0])
+
+    def test_patch6_schema_upgrade_preserves_reservations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Path(tmpdir) / "old.sqlite3"
+            with send_shard.sqlite3.connect(db) as conn:
+                conn.execute("""CREATE TABLE send_reservations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT NOT NULL,
+                    provider TEXT NOT NULL, email TEXT NOT NULL, profile TEXT NOT NULL DEFAULT '',
+                    queue_file TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'reserved',
+                    reserved_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+                    outcome TEXT NOT NULL DEFAULT '', info TEXT NOT NULL DEFAULT '',
+                    UNIQUE(campaign_id, provider, email))""")
+                conn.execute("INSERT INTO send_reservations (campaign_id, provider, email, reserved_at_utc, updated_at_utc) VALUES ('old', 'sendgrid', 'old@example.test', 'then', 'then')")
+                original = conn.execute("SELECT * FROM send_reservations").fetchall()
+                conn.commit()
+            self.assertTrue(send_shard._ensure_send_idempotency_schema(db)[0])
+            with send_shard.sqlite3.connect(db) as conn:
+                self.assertEqual(original, conn.execute("SELECT * FROM send_reservations").fetchall())
+                self.assertEqual([], conn.execute("SELECT * FROM queue_claims").fetchall())
+
+    def test_patch6_real_flow_accepted_clears_ambiguous_retains_journal(self):
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous), tempfile.TemporaryDirectory() as tmpdir:
+                fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+                queue, state = fixture[4], fixture[3]
+                queue.write_text("Email,FirstName,BookTitle,campaign_id\npatch6@example.test,Ada,Book,patch6\n", encoding="utf-8")
+                (fixture[2] / fixture[-1]["log"]).write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+                _, provider = self._run_synthetic_sendgrid(fixture, send_side_effect=TimeoutError("lost response") if ambiguous else None)
+                self.assertEqual(1, provider.call_count)
+                with queue.open(newline="") as handle:
+                    self.assertEqual([], list(csv.DictReader(handle)))
+                with send_shard.sqlite3.connect(state / "send_idempotency.sqlite3") as conn:
+                    self.assertEqual(int(ambiguous), conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
+                    expected = "ambiguous" if ambiguous else "sent"
+                    self.assertEqual((expected, expected), conn.execute("SELECT status, outcome FROM send_reservations").fetchone())
+
     def test_claim_receipt_restores_order_and_multiline_fields_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             queue_path = Path(tmpdir) / "recipients_sendgrid_1.csv"
