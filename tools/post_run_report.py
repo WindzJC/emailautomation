@@ -29,6 +29,7 @@ from dashboard_core import (  # noqa: E402
     unique_send_profile_by_email,
 )
 from send_shard import PROFILES  # noqa: E402
+from recipient_file_lock import lock_files  # noqa: E402
 from sendgrid_hygiene import (  # noqa: E402
     compute_webhook_dedupe_key,
     domain_from_email,
@@ -892,25 +893,26 @@ def write_csv(path: Path, rows: Sequence[Dict[str, str]]) -> None:
 
 
 def apply_suppressions(suppression_path: Path, rows: Sequence[Dict[str, str]]) -> int:
-    records = load_suppression_records(suppression_path)
-    added = 0
-    for row in rows:
-        email = (row.get("email") or "").strip().lower()
-        if not email or email in records:
-            continue
-        records[email] = {
-            "email": email,
-            "status": row.get("outcome", "bounce"),
-            "code": "",
-            "reason": row.get("reason", ""),
-            "last_seen_utc": row.get("accepted_at_utc", ""),
-            "is_permanent": "true",
-            "ttl_until_utc": "",
-        }
-        added += 1
-    if added:
-        write_suppression_records(suppression_path, records)
-    return added
+    with lock_files([suppression_path]):
+        records = load_suppression_records(suppression_path)
+        added = 0
+        for row in rows:
+            email = (row.get("email") or "").strip().lower()
+            if not email or email in records:
+                continue
+            records[email] = {
+                "email": email,
+                "status": row.get("outcome", "bounce"),
+                "code": "",
+                "reason": row.get("reason", ""),
+                "last_seen_utc": row.get("accepted_at_utc", ""),
+                "is_permanent": "true",
+                "ttl_until_utc": "",
+            }
+            added += 1
+        if added:
+            write_suppression_records(suppression_path, records)
+        return added
 
 
 def default_out_dir(root: Path, label: str) -> Path:

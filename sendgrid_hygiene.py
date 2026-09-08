@@ -3,14 +3,18 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
+
+from recipient_file_lock import lock_files
 
 
 TIMESTAMP_RE = re.compile(r"^[A-Za-z]+ \d{1,2}, \d{4} \d{2}:\d{2}:\d{2} [AP]M$")
@@ -900,39 +904,56 @@ def update_suppressions_from_events(
     reference_utc: Optional[datetime] = None,
 ) -> Dict[str, object]:
     reference = reference_utc or now_utc()
-    records = load_suppression_records(suppression_csv)
-    updated = 0
-    for event in events:
-        suppression = classify_suppression_event(
-            event,
-            ttl_blocked_days=ttl_blocked_days,
-            ttl_default_days=ttl_default_days,
-            reference_utc=reference,
-        )
-        if not suppression:
-            continue
-        email = suppression["email"]
-        if not email:
-            continue
-        records[email] = _merge_record(records.get(email), suppression)
-        updated += 1
-    write_suppression_records(suppression_csv, records)
-    summary = suppression_summary(records, reference)
-    summary["updated_events"] = updated
-    summary["records_total"] = len(records)
-    return summary
+    with lock_files([suppression_csv]):
+        records = load_suppression_records(suppression_csv)
+        updated = 0
+        for event in events:
+            suppression = classify_suppression_event(
+                event,
+                ttl_blocked_days=ttl_blocked_days,
+                ttl_default_days=ttl_default_days,
+                reference_utc=reference,
+            )
+            if not suppression:
+                continue
+            email = suppression["email"]
+            if not email:
+                continue
+            records[email] = _merge_record(records.get(email), suppression)
+            updated += 1
+        write_suppression_records(suppression_csv, records)
+        summary = suppression_summary(records, reference)
+        summary["updated_events"] = updated
+        summary["records_total"] = len(records)
+        return summary
 
 
 def write_suppression_records(path: Path, records: Dict[str, Dict[str, str]]) -> None:
+    """Atomically replace a complete snapshot; merging callers own the file lock."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SUPPRESSION_HEADERS)
-        writer.writeheader()
-        for email in sorted(records.keys()):
-            record = dict(records[email])
-            row = {field: record.get(field, "") for field in SUPPRESSION_HEADERS}
-            row["email"] = email
-            writer.writerow(row)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", newline="", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            writer = csv.DictWriter(handle, fieldnames=SUPPRESSION_HEADERS)
+            writer.writeheader()
+            for email in sorted(records.keys()):
+                record = dict(records[email])
+                row = {field: record.get(field, "") for field in SUPPRESSION_HEADERS}
+                row["email"] = email
+                writer.writerow(row)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # Do not mask the original write/replace failure.
 
 
 def _detect_email_column(fieldnames: Sequence[str]) -> Optional[str]:

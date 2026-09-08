@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import settings
+from recipient_file_lock import lock_files
 from protected_profile_env import (
     DEFAULT_PROFILE_ENV_DIR,
     ProtectedProfileEnvError,
@@ -175,6 +176,8 @@ def _write_simple_email_rows(path: Path, header: str, emails: Sequence[str]) -> 
         field = header or "Email"
         for email_addr in emails:
             writer.writerow({field: email_addr})
+        handle.flush()
+        os.fsync(handle.fileno())
     tmp_path.replace(path)
 
 
@@ -341,24 +344,25 @@ def load_simple_email_set(path: Path) -> Set[str]:
 
 def append_unique_suppressed_emails(path: Path, emails: Iterable[str]) -> Dict[str, int]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    header, existing_rows = _read_simple_email_rows(path)
-    existing = {norm_email(email) for email in existing_rows if norm_email(email)}
-    to_add: List[str] = []
-    seen_new: Set[str] = set()
-    for email in emails:
-        email_addr = norm_email(email)
-        if not email_addr or email_addr in existing or email_addr in seen_new:
-            continue
-        seen_new.add(email_addr)
-        to_add.append(email_addr)
-    if to_add or not path.exists():
-        _write_simple_email_rows(path, header, existing_rows + to_add)
-    return {
-        "existing_before": len(existing),
-        "added": len(to_add),
-        "added_addresses": list(to_add),
-        "existing_after": len(existing) + len(to_add),
-    }
+    with lock_files([path]):
+        header, existing_rows = _read_simple_email_rows(path)
+        existing = {norm_email(email) for email in existing_rows if norm_email(email)}
+        to_add: List[str] = []
+        seen_new: Set[str] = set()
+        for email in emails:
+            email_addr = norm_email(email)
+            if not email_addr or email_addr in existing or email_addr in seen_new:
+                continue
+            seen_new.add(email_addr)
+            to_add.append(email_addr)
+        if to_add or not path.exists():
+            _write_simple_email_rows(path, header, existing_rows + to_add)
+        return {
+            "existing_before": len(existing),
+            "added": len(to_add),
+            "added_addresses": list(to_add),
+            "existing_after": len(existing) + len(to_add),
+        }
 
 
 def _report_directory(report_dir: Path) -> Path:

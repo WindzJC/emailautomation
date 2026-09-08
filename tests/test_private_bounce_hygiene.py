@@ -6,10 +6,16 @@ import os
 import tempfile
 import unittest
 import imaplib
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
+
+import private_bounce_hygiene
+from recipient_file_lock import lock_files
 
 from private_bounce_hygiene import (
     append_unique_suppressed_emails,
@@ -22,6 +28,72 @@ from private_bounce_hygiene import (
 
 
 class PrivateBounceHygieneTests(unittest.TestCase):
+    def test_patch7_concurrent_private_writers_merge_and_dedupe(self):
+        for overlap in (False, True):
+            with self.subTest(overlap=overlap), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "suppressed.csv"
+                path.write_text("Email\noriginal@example.test\n", encoding="utf-8")
+                first_read, second_attempt, release_first = threading.Event(), threading.Event(), threading.Event()
+                second_read = threading.Event()
+                identity = threading.local()
+                original_read = private_bounce_hygiene._read_simple_email_rows
+
+                @contextmanager
+                def observed_lock(paths):
+                    if identity.writer == "b":
+                        second_attempt.set()
+                    with lock_files(paths):
+                        yield
+
+                def observed_read(target):
+                    result = original_read(target)
+                    if identity.writer == "a":
+                        first_read.set()
+                        if not release_first.wait(5):
+                            raise AssertionError("first writer was not released")
+                    else:
+                        second_read.set()
+                    return result
+
+                def write(name, addresses):
+                    identity.writer = name
+                    return append_unique_suppressed_emails(path, addresses)
+
+                with patch.object(private_bounce_hygiene, "lock_files", observed_lock), patch.object(
+                    private_bounce_hygiene, "_read_simple_email_rows", observed_read,
+                ), ThreadPoolExecutor(max_workers=2) as pool:
+                    a = pool.submit(write, "a", ["a@example.test", "A@example.test"])
+                    try:
+                        self.assertTrue(first_read.wait(5))
+                        b = pool.submit(write, "b", ["a@example.test"] if overlap else ["b@example.test"])
+                        self.assertTrue(second_attempt.wait(5))
+                        self.assertFalse(second_read.is_set(), "second read bypassed transaction lock")
+                    finally:
+                        release_first.set()
+                    results = [a.result(timeout=5), b.result(timeout=5)]
+                with path.open(newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    emails = [row["Email"] for row in reader]
+                    self.assertEqual(["Email"], reader.fieldnames)
+                expected = ["original@example.test", "a@example.test"] + ([] if overlap else ["b@example.test"])
+                self.assertEqual(expected, emails)
+                self.assertEqual(1, results[0]["added"])
+                self.assertEqual(["a@example.test"], results[0]["added_addresses"])
+                self.assertEqual(1, results[0]["existing_before"])
+                self.assertEqual(2, results[1]["existing_before"])
+                self.assertEqual(0 if overlap else 1, results[1]["added"])
+                self.assertEqual(len(expected), results[1]["existing_after"])
+
+    def test_patch7_private_write_failure_does_not_report_addition(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "suppressed.csv"
+            path.write_text("Email\noriginal@example.test\n", encoding="utf-8")
+            original = path.read_bytes()
+            with patch.object(private_bounce_hygiene.os, "fsync", side_effect=OSError("disk failure")):
+                with self.assertRaises(OSError):
+                    append_unique_suppressed_emails(path, ["new@example.test"])
+            self.assertEqual(original, path.read_bytes())
+
     def test_classifies_imap_auth_failure_without_raw_provider_error(self) -> None:
         kind, message = classify_private_bounce_error(
             imaplib.IMAP4.error(b"[AUTHENTICATIONFAILED] Authentication failed.")

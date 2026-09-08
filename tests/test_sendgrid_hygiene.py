@@ -4,8 +4,16 @@ import csv
 import json
 import tempfile
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
+
+import sendgrid_hygiene
+from recipient_file_lock import lock_files
+from tools import post_run_report
 
 from sendgrid_hygiene import (
     clean_recipient_shards,
@@ -22,6 +30,97 @@ from sendgrid_hygiene import (
 
 
 class SendgridHygieneTests(unittest.TestCase):
+    def test_patch7_event_and_post_run_writers_share_transaction_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "suppressions.csv"
+            write_suppression_records(path, {"original@example.test": {"status": "spamreport", "is_permanent": "true"}})
+            first_read, second_attempt, release_first = threading.Event(), threading.Event(), threading.Event()
+            second_read = threading.Event()
+            identity = threading.local()
+            original_read = sendgrid_hygiene.load_suppression_records
+
+            @contextmanager
+            def observed_lock(paths):
+                if identity.writer == "report":
+                    second_attempt.set()
+                with lock_files(paths):
+                    yield
+
+            def observed_read(target):
+                result = original_read(target)
+                if identity.writer == "events":
+                    first_read.set()
+                    if not release_first.wait(5):
+                        raise AssertionError("first writer was not released")
+                else:
+                    second_read.set()
+                return result
+
+            def events():
+                identity.writer = "events"
+                return sendgrid_hygiene.update_suppressions_from_events(
+                    [{"email": "event@example.test", "status": "spamreport"}], path,
+                )
+
+            def report():
+                identity.writer = "report"
+                return post_run_report.apply_suppressions(path, [{"email": "report@example.test", "outcome": "bounce"}])
+
+            with patch.object(sendgrid_hygiene, "lock_files", observed_lock), patch.object(
+                post_run_report, "lock_files", observed_lock,
+            ), patch.object(sendgrid_hygiene, "load_suppression_records", observed_read), patch.object(
+                post_run_report, "load_suppression_records", observed_read,
+            ), ThreadPoolExecutor(max_workers=2) as pool:
+                a = pool.submit(events)
+                try:
+                    self.assertTrue(first_read.wait(5))
+                    b = pool.submit(report)
+                    self.assertTrue(second_attempt.wait(5))
+                    self.assertFalse(second_read.is_set(), "report read bypassed event writer's lock")
+                finally:
+                    release_first.set()
+                self.assertEqual(2, a.result(timeout=5)["records_total"])
+                self.assertEqual(1, b.result(timeout=5))
+            self.assertEqual({"original@example.test", "event@example.test", "report@example.test"}, set(original_read(path)))
+
+    def test_patch7_atomic_sibling_replacement_and_fsync(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "suppressions.csv"
+            path.write_text("email\noriginal@example.test\n", encoding="utf-8")
+            original = path.read_bytes()
+            real_replace, real_fsync = Path.replace, sendgrid_hygiene.os.fsync
+            replacements = []
+            def replace(source, target):
+                self.assertEqual(path, target)
+                self.assertNotEqual(path, source)
+                self.assertEqual(path.parent, source.parent)
+                self.assertEqual(original, path.read_bytes())
+                with source.open(newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    self.assertEqual(["a@example.test", "z@example.test"], [row["email"] for row in reader])
+                    self.assertEqual(sendgrid_hygiene.SUPPRESSION_HEADERS, reader.fieldnames)
+                replacements.append(source)
+                return real_replace(source, target)
+            with patch.object(Path, "replace", replace), patch.object(sendgrid_hygiene.os, "fsync", wraps=real_fsync) as sync:
+                write_suppression_records(path, {"z@example.test": {}, "a@example.test": {}})
+                sync.assert_called_once()
+            self.assertEqual(1, len(replacements))
+            self.assertFalse(replacements[0].exists())
+            self.assertEqual({"a@example.test", "z@example.test"}, set(sendgrid_hygiene.load_suppression_records(path)))
+
+    def test_patch7_failed_atomic_write_preserves_original_and_cleans_temp(self):
+        for boundary in ("fsync", "replace"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "suppressions.csv"
+                path.write_text("email\noriginal@example.test\n", encoding="utf-8")
+                original = path.read_bytes()
+                target, name = (sendgrid_hygiene.os, "fsync") if boundary == "fsync" else (Path, "replace")
+                with patch.object(target, name, side_effect=OSError("disk failure")):
+                    with self.assertRaises(OSError):
+                        write_suppression_records(path, {"new@example.test": {}})
+                self.assertEqual(original, path.read_bytes())
+                self.assertEqual([path], list(Path(tmpdir).iterdir()))
+
     def test_parse_multiline_activity_log(self) -> None:
         text = """Processed At
 February 28, 2026 02:54:47 PM
