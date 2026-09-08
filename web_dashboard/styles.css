@@ -11202,7 +11202,7 @@ body {
 }
 
 /* This is the separate React Review rail, not the relocated intake/sender panel. */
-#leads-view.warm-research-mode.warm-awaiting-validation .react-lead-workspace[hidden] {
+#leads-view.warm-research-mode.warm-awaiting-validation .react-lead-workspace {
   display: none !important;
 }
 
