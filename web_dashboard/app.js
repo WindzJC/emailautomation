@@ -4426,6 +4426,10 @@ function applyWarmResearchLayoutState(active = warmResearchUploadMode()) {
   const commandCenter = document.querySelector("#leads-view .leads-command-center");
   leadsView?.classList.toggle("warm-research-mode", active);
   if (!active) leadsView?.classList.remove("warm-awaiting-validation");
+  if (!active) {
+    const warmReviewWorkspace = leadsView?.querySelector(".react-lead-workspace");
+    if (warmReviewWorkspace) warmReviewWorkspace.hidden = false;
+  }
   appShell?.classList.toggle("warm-research-shell", active);
   if (els.leadsCommandHeading) setNodeText(els.leadsCommandHeading, active ? "Warm Outreach" : "Prepare Dispatch");
   if (els.leadsPipelineMeta) {
@@ -5505,6 +5509,8 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     const report = workflow.report;
     const checked = workflow.valid;
     document.getElementById("leads-view")?.classList.toggle("warm-awaiting-validation", !checked);
+    const warmReviewWorkspace = document.querySelector("#leads-view .react-lead-workspace");
+    if (warmReviewWorkspace) warmReviewWorkspace.hidden = !checked;
     const lane = currentWarmPrivateJcStatus(status, lastSnapshot);
     const warmRunning = Boolean(lane.running);
     const laneConfirmed = Boolean(lane.confirmed);
@@ -5607,7 +5613,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
               <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Outreach Confirmed" : "Confirm Warm Outreach"}</button>
             </div>
             ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
-            <div class="warm-live-summary" aria-label="Warm sender status">
+            <div class="warm-live-summary ${warmRunning ? "warm-live-summary-running" : ""}" aria-label="Warm sender status">
               <span>Sent <strong>${warmSent.toLocaleString()}</strong></span>
               <span>Remaining <strong>${warmRemaining.toLocaleString()}</strong></span>
               <span>Running <strong>${warmRunning ? "Yes" : "No"}</strong></span>

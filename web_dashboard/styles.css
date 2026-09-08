@@ -11181,13 +11181,41 @@ body {
 
 /* The unchecked upload is one compact workflow, not a full review workspace. */
 #leads-view.warm-research-mode.warm-awaiting-validation .leads-control-bar {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
+  /* Override the React source/status/actions !important template, not just columns. */
+  grid-template-areas: "source actions" "status status" !important;
   grid-template-rows: auto;
+  gap: 12px;
 }
 
 #leads-view.warm-research-mode.warm-awaiting-validation .leads-current-run-panel {
-  grid-column: 1;
-  grid-row: auto;
+  grid-area: status !important;
+  min-height: 0;
+  padding: 0 !important;
+  border: 0 !important;
+}
+
+#leads-view.warm-research-mode.warm-awaiting-validation .leads-control-actions {
+  grid-area: actions !important;
+  align-self: center;
+  padding: 0;
+}
+
+/* This is the separate React Review rail, not the relocated intake/sender panel. */
+#leads-view.warm-research-mode.warm-awaiting-validation .react-lead-workspace[hidden] {
+  display: none !important;
+}
+
+/* React hides wait-card summaries; an actually running lane must remain visible. */
+#leads-view.warm-research-mode.warm-awaiting-validation .current-run-card-wait .warm-private-action-panel > .warm-live-summary.warm-live-summary-running {
+  display: flex !important;
+}
+
+@media (max-width: 700px) {
+  #leads-view.warm-research-mode.warm-awaiting-validation .leads-control-bar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "source" "actions" "status" !important;
+  }
 }
 
 #leads-view.warm-research-mode.warm-awaiting-validation .leads-control-results {

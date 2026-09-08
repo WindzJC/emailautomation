@@ -72,7 +72,7 @@ describe("Warm Outreach controller layout", () => {
     document.body.innerHTML = "";
   });
 
-  async function boot({ checked = false, drafts = 0, historical = false } = {}) {
+  async function boot({ checked = false, drafts = 0, historical = false, running = false } = {}) {
     vi.useFakeTimers();
     const html = fs.readFileSync(path.resolve(process.cwd(), "web_dashboard/index.html"), "utf8");
     const parsed = new DOMParser().parseFromString(html, "text/html");
@@ -91,8 +91,8 @@ describe("Warm Outreach controller layout", () => {
         input_exists: true, job_record_exists: true, output_exists: true, rejected_exists: true,
         latest_master_check_matches_current_run: true,
       } : {} },
-      warm_private_jc_status: historical ? {
-        confirmed: true, queued_remaining_count: 9, sent_count: 50, running: false,
+      warm_private_jc_status: historical || running ? {
+        confirmed: true, queued_remaining_count: 9, sent_count: 50, running,
       } : {},
     };
     const fetchMock = vi.fn(async (url, options = {}) => {
@@ -132,6 +132,8 @@ describe("Warm Outreach controller layout", () => {
     expect(panel.querySelector(".warm-review-panel")).not.toBeVisible();
     expect(panel.querySelector(".warm-private-action-panel")).not.toBeVisible();
     expect(panel.querySelector(".warm-operations-details")).not.toHaveAttribute("open");
+    expect(document.querySelector(".react-lead-workspace")).not.toBeVisible();
+    expect(document.querySelector(".leads-control-bar")).toContainElement(panel);
     for (const selector of ['[data-warm-review-action="load"]', '[data-leads-next-action="generate_warm_preview"]', '[data-leads-next-action="confirm_warm_private_jc"]', '[data-leads-next-action="start_warm_private_jc"]']) {
       expect(panel.querySelector(selector)).toBeDisabled();
     }
@@ -142,6 +144,7 @@ describe("Warm Outreach controller layout", () => {
     const fetchMock = await boot({ checked: true, drafts });
     const panel = document.getElementById("leads-current-run-panel");
     expect(panel).toHaveTextContent("Ready for review");
+    expect(document.querySelector(".react-lead-workspace")).toBeVisible();
     expect(document.getElementById("leads-control-check-result")).toHaveTextContent("Email ready 7");
     expect(panel.querySelector(".warm-locked-stages")).toBeNull();
     expect(panel.querySelector('[data-warm-review-action="load"]')).toBeEnabled();
@@ -149,6 +152,24 @@ describe("Warm Outreach controller layout", () => {
     const confirm = panel.querySelector('[data-leads-next-action="confirm_warm_private_jc"]');
     if (drafts) expect(confirm).toBeEnabled(); else expect(confirm).toBeDisabled();
     expect(panel.querySelector('[data-leads-next-action="start_warm_private_jc"]')).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
+  });
+
+  it("keeps Stop accessible for a running sender with an unchecked upload", async () => {
+    const fetchMock = await boot({ running: true });
+    const panel = document.getElementById("leads-current-run-panel");
+    const stop = panel.querySelector('[data-leads-next-action="stop_warm_private_jc"]');
+    expect(stop).toBeVisible();
+    expect(stop).toBeEnabled();
+    expect(stop).toHaveTextContent("Stop Warm Private JC");
+    expect(panel.querySelector(".warm-live-summary")).toBeVisible();
+    expect(panel.querySelector(".warm-live-summary")).toHaveClass("warm-live-summary-running");
+    expect(panel.querySelector(".warm-live-summary")).toHaveTextContent("Running Yes");
+    expect(document.querySelector(".react-lead-workspace")).not.toBeVisible();
+    for (const selector of ['[data-warm-review-action="load"]', '[data-leads-next-action="generate_warm_preview"]', '[data-leads-next-action="confirm_warm_private_jc"]']) {
+      expect(panel.querySelector(selector)).toBeDisabled();
+    }
+    expect(panel.querySelector('[data-leads-next-action="start_warm_private_jc"]')).toBeNull();
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 });
