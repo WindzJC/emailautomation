@@ -11206,6 +11206,10 @@ body {
   display: none !important;
 }
 
+#leads-view.warm-research-mode.warm-awaiting-validation #leads-workflow-status-banner {
+  display: none !important;
+}
+
 /* React hides wait-card summaries; an actually running lane must remain visible. */
 #leads-view.warm-research-mode.warm-awaiting-validation .current-run-card-wait .warm-private-action-panel > .warm-live-summary.warm-live-summary-running {
   display: flex !important;
