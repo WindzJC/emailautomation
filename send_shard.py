@@ -7134,6 +7134,57 @@ def main() -> int | None:
                             stop_reason = "temporary_auth_failure"
                             break
                         except Exception as retry_exc:
+                            if delivery_phase == DELIVERY_ACCEPTED:
+                                finalize_domain_attempt_slot(
+                                    retry_slot_token,
+                                    to_email,
+                                    "sent",
+                                    "accepted_send_bookkeeping_failed",
+                                )
+                                provider_submission_active = False
+                                error_count += 1
+                                print(
+                                    "STOP: accepted-send bookkeeping failed after auth retry "
+                                    "provider submission; recipient will not be retried"
+                                )
+                                stop_reason = "accepted_send_bookkeeping_failed"
+                                break
+                            if delivery_phase == DELIVERY_PROVIDER_CALL_STARTED:
+                                retry_info = str(retry_exc)
+                                finalize_domain_attempt_slot(
+                                    retry_slot_token,
+                                    to_email,
+                                    "ambiguous",
+                                    retry_info,
+                                )
+                                log_row(
+                                    log_path,
+                                    to_email,
+                                    "ERROR",
+                                    campaign_log_info(
+                                        "event_type=AMBIGUOUS_PROVIDER_RESULT "
+                                        f"phase={delivery_phase.lower()} retry_context=auth "
+                                        f"error={single_line(retry_info)}",
+                                        row_campaign_type,
+                                    ),
+                                )
+                                if idempotency_reserved:
+                                    record_send_idempotency_outcome(
+                                        campaign_id=row_campaign_id,
+                                        provider=args.provider,
+                                        email=to_email,
+                                        outcome="ambiguous",
+                                        info=retry_info,
+                                    )
+                                provider_submission_active = False
+                                error_count += 1
+                                print(
+                                    f"[{i}/{len(pending)}] AMBIGUOUS {to_email} :: "
+                                    f"{single_line(retry_info)}; manual review required"
+                                )
+                                stop_reason = "ambiguous_provider_result"
+                                honor_deferred_stop()
+                                break
                             retry_code, retry_text = extract_code_text_from_exception(retry_exc)
                             finalize_domain_attempt_slot(
                                 retry_slot_token,
@@ -7297,6 +7348,57 @@ def main() -> int | None:
                             stop_reason = "max_total"
 
                     except Exception as e2:
+                        if delivery_phase == DELIVERY_ACCEPTED:
+                            finalize_domain_attempt_slot(
+                                retry_slot_token,
+                                to_email,
+                                "sent",
+                                "accepted_send_bookkeeping_failed",
+                            )
+                            provider_submission_active = False
+                            error_count += 1
+                            print(
+                                "STOP: accepted-send bookkeeping failed after reconnect retry "
+                                "provider submission; recipient will not be retried"
+                            )
+                            stop_reason = "accepted_send_bookkeeping_failed"
+                            break
+                        if delivery_phase == DELIVERY_PROVIDER_CALL_STARTED:
+                            retry_info = str(e2)
+                            finalize_domain_attempt_slot(
+                                retry_slot_token,
+                                to_email,
+                                "ambiguous",
+                                retry_info,
+                            )
+                            log_row(
+                                log_path,
+                                to_email,
+                                "ERROR",
+                                campaign_log_info(
+                                    "event_type=AMBIGUOUS_PROVIDER_RESULT "
+                                    f"phase={delivery_phase.lower()} retry_context=reconnect "
+                                    f"error={single_line(retry_info)}",
+                                    row_campaign_type,
+                                ),
+                            )
+                            if idempotency_reserved:
+                                record_send_idempotency_outcome(
+                                    campaign_id=row_campaign_id,
+                                    provider=args.provider,
+                                    email=to_email,
+                                    outcome="ambiguous",
+                                    info=retry_info,
+                                )
+                            provider_submission_active = False
+                            error_count += 1
+                            print(
+                                f"[{i}/{len(pending)}] AMBIGUOUS {to_email} :: "
+                                f"{single_line(retry_info)}; manual review required"
+                            )
+                            stop_reason = "ambiguous_provider_result"
+                            honor_deferred_stop()
+                            break
                         code2, text2 = extract_code_text_from_exception(e2)
                         finalize_domain_attempt_slot(retry_slot_token, to_email, "reconnect_failed", f"{code2} {text2}")
                         log_row(log_path, to_email, "ERROR", campaign_log_info(f"reconnect_failed: {code2} {text2}", row_campaign_type))

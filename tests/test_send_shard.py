@@ -2856,7 +2856,7 @@ finished_path.write_text(
         self.assertNotIn(fake_secret, output)
         send_mock.assert_not_called()
 
-    def _run_synthetic_private(self, fixture, smtp_client) -> str:
+    def _run_synthetic_private(self, fixture, smtp_client, *, smtp_login_side_effect=None) -> str:
         base, shards, logs, state, _old_csv, unsub, suppress, sg_suppress, counters, profile = fixture
         profile_env_dir = base / "protected-profiles"
         profile_env_dir.mkdir(exist_ok=True)
@@ -2902,6 +2902,8 @@ finished_path.write_text(
             smtp_login_mock = stack.enter_context(
                 patch.object(send_shard, "smtp_login", return_value=smtp_client)
             )
+            if smtp_login_side_effect is not None:
+                smtp_login_mock.side_effect = smtp_login_side_effect
             self._last_synthetic_smtp_login = smtp_login_mock
             stack.enter_context(
                 patch.object(send_shard, "PROTECTED_PROFILE_ENV_DIR", profile_env_dir)
@@ -3982,6 +3984,80 @@ finished_path.write_text(
                     ).fetchone(),
                 )
             self.assertIn("AMBIGUOUS", output)
+
+    def test_private_retry_response_loss_is_ambiguous_for_auth_and_reconnect(self) -> None:
+        cases = (
+            (
+                "auth",
+                smtplib.SMTPAuthenticationError(
+                    454,
+                    b"4.7.0 Temporary authentication failure",
+                ),
+            ),
+            (
+                "reconnect",
+                smtplib.SMTPServerDisconnected("synthetic pre-submit disconnect"),
+            ),
+        )
+        for label, first_failure in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmpdir:
+                fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+                shards, logs, state = fixture[1], fixture[2], fixture[3]
+                queue = shards / "recipients_private_jc.csv"
+                email = f"{label}-retry-ambiguous@example.test"
+                campaign_id = f"private-{label}-retry-ambiguous"
+                queue.write_text(
+                    "Email,FirstName,BookTitle,campaign_id\n"
+                    f"{email},Ada,Book A,{campaign_id}\n",
+                    encoding="utf-8",
+                )
+                (logs / "private_jc_log.csv").write_text(
+                    "TimestampUTC,Email,Status,Info\n",
+                    encoding="utf-8",
+                )
+
+                smtp = Mock()
+                smtp.send_message.side_effect = smtplib.SMTPServerDisconnected(
+                    "synthetic response lost after submission started"
+                )
+
+                login_results = [first_failure, smtp]
+
+                def login_side_effect(*_args, **_kwargs):
+                    if login_results:
+                        value = login_results.pop(0)
+                        if isinstance(value, BaseException):
+                            raise value
+                        return value
+                    return smtp
+
+                output = self._run_synthetic_private(
+                    fixture,
+                    smtp,
+                    smtp_login_side_effect=login_side_effect,
+                )
+
+                self.assertEqual(2, self._last_synthetic_smtp_login.call_count)
+                self.assertEqual(1, smtp.send_message.call_count)
+                with send_shard.sqlite3.connect(
+                    state / "send_idempotency.sqlite3"
+                ) as conn:
+                    reservation = conn.execute(
+                        "SELECT status FROM send_reservations WHERE email = ?",
+                        (email,),
+                    ).fetchone()
+                self.assertEqual(("ambiguous",), reservation)
+                self.assertFalse(
+                    send_shard.reserve_send_idempotency(
+                        campaign_id=campaign_id,
+                        provider="private",
+                        email=email,
+                        profile="private_jc",
+                        queue_file=queue.name,
+                        db_path=state / "send_idempotency.sqlite3",
+                    )[0]
+                )
+                self.assertIn("AMBIGUOUS", output)
 
     def test_private_smtp_451_retries_once_then_succeeds(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
