@@ -31,15 +31,22 @@ def test_patch8a2_frontend_route_identity_and_payload_contract():
 
 
 def test_patch8a2_recontact_selector_is_two_route_only():
-    assert APP.count('>SendGrid Cold</option>') == 1
-    assert APP.count('>Private JC Cold</option>') == 1
-    selector_start = APP.index('<select data-recontact-route aria-label="Recontact Route">')
-    selector_end = APP.index('</select>', selector_start)
-    selector = APP[selector_start:selector_end]
-    assert 'value="sendgrid"' in selector
-    assert 'value="private_jc"' in selector
-    assert "Warm Outreach" not in selector
+    import re
 
+    match = re.search(
+        r'<select data-recontact-route[^>]*>(.*?)</select>',
+        APP,
+        re.S,
+    )
+    assert match is not None
+    selector = match.group(1)
+
+    assert selector.count('>SendGrid Cold</option>') == 1
+    assert selector.count('>Private JC Cold</option>') == 1
+    assert '>Both — Split</option>' not in selector
+
+    option_values = re.findall(r'<option value="([^"]+)"', selector)
+    assert option_values == ["sendgrid", "private_jc"]
 
 def test_patch8a2_controlled_test_hidden_only_from_main_sender_table():
     assert 'profile["controlled_test"] = bool(' in LIVE

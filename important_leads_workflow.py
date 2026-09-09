@@ -2759,6 +2759,11 @@ def _archive_assigned_dispatch_preview(
             "recontact_route": preview["recontact_route"],
             "recontact_route_binding": preview.get("recontact_route_binding"),
         } if preview.get("full_recontact_sendgrid_only") else {}),
+        **({
+            "fresh_cold_route": preview["fresh_cold_route"],
+            "fresh_cold_route_explicit": bool(preview.get("fresh_cold_route_explicit")),
+            "fresh_cold_route_binding": preview.get("fresh_cold_route_binding"),
+        } if normalize_campaign_type(preview.get("campaign_type")) == CAMPAIGN_TYPE_COLD else {}),
         "preview_id": str(preview.get("preview_id") or ""),
         "status": str(preview.get("status") or ""),
         "campaign_type": str(preview.get("campaign_type") or ""),
@@ -2946,6 +2951,36 @@ def _validate_recontact_route_request(preview: Dict[str, object], route: str | N
         raise RuntimeError("Recontact route is missing or mismatched. Re-run Preview Dispatch.")
 
 
+def _fresh_cold_route_binding(preview: Dict[str, object]) -> str:
+    authority = {
+        key: preview.get(key)
+        for key in (
+            "preview_id",
+            "fresh_cold_route",
+            "fresh_cold_route_explicit",
+            "dispatch_source_path",
+            "queue_paths",
+            "plan_rows_by_queue",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_fresh_cold_route_request(preview: Dict[str, object], route: str | None) -> None:
+    if normalize_campaign_type(preview.get("campaign_type")) != CAMPAIGN_TYPE_COLD:
+        return
+    preview_route = str(preview.get("fresh_cold_route") or "").strip()
+    if preview_route not in {"sendgrid", "private_jc", "both"}:
+        raise RuntimeError("Fresh Cold route authority is missing or invalid. Re-run Preview Dispatch.")
+    explicit = bool(preview.get("fresh_cold_route_explicit"))
+    if route is None and not explicit and preview_route == "both":
+        return
+    if route not in {"sendgrid", "private_jc", "both"} or route != preview_route:
+        raise RuntimeError("Fresh Cold route is missing or mismatched. Re-run Preview Dispatch.")
+
+
 def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
     if not is_recontact_cold_campaign(preview.get("campaign_type")):
         return
@@ -3068,6 +3103,8 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
             raise RuntimeError(
                 "Fresh Cold dispatch preview has an ambiguous prior-success policy. Re-run Preview Dispatch."
             )
+        route = str(preview.get("fresh_cold_route") or "").strip()
+        _validate_fresh_cold_route_request(preview, route)
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue")
     if not isinstance(plan_rows_by_queue, dict):
@@ -3087,7 +3124,32 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
         raise RuntimeError("Dispatch preview unique planned recipient count does not match stored queue rows. Re-run Preview Dispatch.")
     if expected_total != int(planned_summary["total_planned_queue_rows"]):
         raise RuntimeError("Dispatch preview total planned count does not match stored queue rows. Re-run Preview Dispatch.")
+    if campaign_type == CAMPAIGN_TYPE_COLD:
+        if preview.get("fresh_cold_route_binding") != _fresh_cold_route_binding(preview):
+            raise RuntimeError("Fresh Cold route/plan binding changed. Re-run Preview Dispatch.")
     planned_rows_by_queue = preview.get("plan_rows_by_queue") if isinstance(preview.get("plan_rows_by_queue"), dict) else {}
+    if campaign_type == CAMPAIGN_TYPE_COLD:
+        fresh_route = str(preview.get("fresh_cold_route") or "").strip()
+        allowed_sendgrid_keys = set(_enabled_sendgrid_dispatch_profiles()) | {
+            f"sendgrid_{index}" for index in range(1, 6)
+        }
+        controlled_queue_names = {
+            Path(str(cfg.get("csv") or "")).name
+            for cfg in PROFILES.values()
+            if cfg.get("controlled_test")
+        }
+        queue_paths = preview.get("queue_paths") if isinstance(preview.get("queue_paths"), dict) else {}
+        for queue_name, planned_rows in planned_rows_by_queue.items():
+            if not isinstance(planned_rows, list) or not planned_rows:
+                continue
+            if Path(str(queue_paths.get(queue_name) or "")).name in controlled_queue_names:
+                raise RuntimeError("Fresh Cold plan contains a Controlled Test destination.")
+            if fresh_route == "sendgrid" and queue_name not in allowed_sendgrid_keys:
+                raise RuntimeError("Fresh Cold plan contains rows outside the selected SendGrid route.")
+            if fresh_route == "private_jc" and queue_name != "private_jc":
+                raise RuntimeError("Fresh Cold plan contains rows outside the selected Private JC route.")
+            if fresh_route == "both" and queue_name != "private_jc" and queue_name not in allowed_sendgrid_keys:
+                raise RuntimeError("Fresh Cold plan contains rows outside the selected production routes.")
     for queue_name, planned_rows in planned_rows_by_queue.items():
         if not isinstance(planned_rows, list):
             continue
@@ -3465,6 +3527,7 @@ def _build_dispatch_plan(
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
     recontact_route: str | None = None,
+    fresh_cold_route: str | None = None,
     progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     build_started = time.monotonic()
@@ -3590,14 +3653,24 @@ def _build_dispatch_plan(
         )
         dispatch_source_name = "Safer Recontact Pool" if safer_recontact_source else str(source_state["dispatch_source_name"])
         selected_route = None
+        selected_fresh_cold_route = None
+        controlled_queue_names = {
+            Path(str(cfg.get("csv") or "")).name
+            for cfg in PROFILES.values()
+            if cfg.get("controlled_test")
+        }
+        fresh_cold_route_explicit = False
+        if normalized_campaign_type == CAMPAIGN_TYPE_COLD:
+            fresh_cold_route_explicit = fresh_cold_route is not None
+            selected_fresh_cold_route = "both" if fresh_cold_route is None else str(fresh_cold_route).strip()
+            if selected_fresh_cold_route not in {"sendgrid", "private_jc", "both"}:
+                raise ValueError("Fresh Cold route must be sendgrid, private_jc, or both.")
+            if any(path.name in controlled_queue_names for path in queue_paths):
+                raise ValueError("Controlled Test queues cannot be used for Fresh Cold.")
         if full_recontact_sendgrid_only:
             selected_route = "sendgrid" if recontact_route is None else recontact_route
             if selected_route not in {"sendgrid", "private_jc"}:
                 raise ValueError("Recontact route must be sendgrid or private_jc.")
-            controlled_queue_names = {
-                Path(str(cfg.get("csv") or "")).name
-                for cfg in PROFILES.values() if cfg.get("controlled_test")
-            }
             if any(path.name in controlled_queue_names for path in queue_paths):
                 raise ValueError("Controlled Test queues cannot be used for Full Recontact.")
         dispatch_source_detail = "Safer recontact CSV — not found in active history" if safer_recontact_source else dispatch_source_name
@@ -3827,6 +3900,19 @@ def _build_dispatch_plan(
                     added_to_astra = add_to_astra()
                 elif selected_route == "sendgrid":
                     added_to_sendgrid = add_to_sendgrid()
+            elif normalized_campaign_type == CAMPAIGN_TYPE_COLD:
+                if selected_fresh_cold_route == "private_jc":
+                    added_to_astra = add_to_astra()
+                elif selected_fresh_cold_route == "sendgrid":
+                    added_to_sendgrid = add_to_sendgrid()
+                elif prefer_sendgrid:
+                    added_to_sendgrid = add_to_sendgrid()
+                    if not added_to_sendgrid:
+                        added_to_astra = add_to_astra()
+                else:
+                    added_to_astra = add_to_astra()
+                    if not added_to_astra:
+                        added_to_sendgrid = add_to_sendgrid()
             elif prefer_sendgrid:
                 added_to_sendgrid = add_to_sendgrid()
                 if not added_to_sendgrid:
@@ -3966,6 +4052,10 @@ def _build_dispatch_plan(
             "dispatch_source_kind": "safer_recontact" if safer_recontact_source else source_mode,
             "full_recontact_sendgrid_only": full_recontact_sendgrid_only,
             **({"recontact_route": selected_route} if full_recontact_sendgrid_only else {}),
+            **({
+                "fresh_cold_route": selected_fresh_cold_route,
+                "fresh_cold_route_explicit": fresh_cold_route_explicit,
+            } if normalized_campaign_type == CAMPAIGN_TYPE_COLD else {}),
             "full_recontact_private_jc_cap": (
                 FULL_RECONTACT_PRIVATE_JC_CAP if full_recontact_sendgrid_only else 0
             ),
@@ -4119,6 +4209,7 @@ def preview_dispatch_master_leads(
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
     recontact_route: str | None = None,
+    fresh_cold_route: str | None = None,
     preview_dir: Path = DISPATCH_PREVIEWS_DIR,
     progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
@@ -4154,6 +4245,7 @@ def preview_dispatch_master_leads(
         sendgrid_events_path=sendgrid_events_path,
         campaign_type=campaign_type,
         recontact_route=recontact_route,
+        fresh_cold_route=fresh_cold_route,
         progress_callback=progress_callback,
     )
     preview_id = f"dispatch_preview_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
@@ -4208,6 +4300,8 @@ def preview_dispatch_master_leads(
         "preview_path": str(_dispatch_preview_path(preview_id, preview_dir)),
         "lead_ledger_db_path": str(_lead_ledger_db_path(lead_ledger_db_path)),
     }
+    if normalize_campaign_type(preview.get("campaign_type")) == CAMPAIGN_TYPE_COLD:
+        preview["fresh_cold_route_binding"] = _fresh_cold_route_binding(preview)
     if preview.get("full_recontact_sendgrid_only"):
         preview["recontact_route_binding"] = _recontact_route_binding(preview)
     emit_progress(
@@ -4255,6 +4349,26 @@ def validate_dispatch_preview(
     if status not in {"previewed", "ready"}:
         raise RuntimeError("Dispatch preview was already used or is no longer valid. Re-run Preview Dispatch.")
     _validate_dispatch_preview_contract(preview)
+    if normalize_campaign_type(preview.get("campaign_type")) == CAMPAIGN_TYPE_COLD:
+        try:
+            archive_path = Path(str(preview.get("assigned_preview_archive_path") or ""))
+            archive = json.loads(archive_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "Fresh Cold archived route authority is unavailable. Re-run Preview Dispatch."
+            ) from exc
+        if not isinstance(archive, dict) or any(
+            archive.get(key) != preview.get(key)
+            for key in (
+                "preview_id",
+                "fresh_cold_route",
+                "fresh_cold_route_explicit",
+                "fresh_cold_route_binding",
+            )
+        ):
+            raise RuntimeError(
+                "Fresh Cold route authority does not match its archived preview. Re-run Preview Dispatch."
+            )
     if preview.get("full_recontact_sendgrid_only"):
         try:
             archive_path = Path(str(preview.get("assigned_preview_archive_path") or ""))
@@ -4377,6 +4491,7 @@ def confirm_dispatch_preview(
     *,
     require_stopped: bool = True,
     recontact_route: str | None = None,
+    fresh_cold_route: str | None = None,
     allow_high_risk_recontact: bool = False,
     backup_root: Path = BACKUP_ROOT,
     report_dir: Path = STATE_DIR,
@@ -4394,6 +4509,7 @@ def confirm_dispatch_preview(
                 preview_id,
                 require_stopped=require_stopped,
                 recontact_route=recontact_route,
+                fresh_cold_route=fresh_cold_route,
                 allow_high_risk_recontact=allow_high_risk_recontact,
                 backup_root=backup_root,
                 report_dir=report_dir,
@@ -4425,6 +4541,7 @@ def _confirm_dispatch_preview_impl(
     *,
     require_stopped: bool,
     recontact_route: str | None,
+    fresh_cold_route: str | None,
     allow_high_risk_recontact: bool,
     backup_root: Path,
     report_dir: Path,
@@ -4439,6 +4556,7 @@ def _confirm_dispatch_preview_impl(
 ) -> Dict[str, object]:
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
     _validate_recontact_route_request(preview, recontact_route)
+    _validate_fresh_cold_route_request(preview, fresh_cold_route)
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
         raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
@@ -4457,6 +4575,7 @@ def _confirm_dispatch_preview_impl(
     _lock_stack.enter_context(lock_files(queue_lock_paths))
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
     _validate_recontact_route_request(preview, recontact_route)
+    _validate_fresh_cold_route_request(preview, fresh_cold_route)
     idempotency_protected = _unresolved_idempotency_emails()
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue") or {}
@@ -4525,6 +4644,8 @@ def _confirm_dispatch_preview_impl(
     effective_preview["plan_dispatch_events_by_queue"] = effective_dispatch_events_by_queue
     # The original binding was checked under lock. Existing safety filtering
     # only removes rows, so validate this internal reduced plan on the same route.
+    if normalize_campaign_type(effective_preview.get("campaign_type")) == CAMPAIGN_TYPE_COLD:
+        effective_preview["fresh_cold_route_binding"] = _fresh_cold_route_binding(effective_preview)
     if effective_preview.get("full_recontact_sendgrid_only"):
         effective_preview["recontact_route_binding"] = _recontact_route_binding(effective_preview)
     _validate_recontact_campaign_identity(effective_preview)
@@ -5287,6 +5408,7 @@ def dispatch_master_leads(
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
     recontact_route: str | None = None,
+    fresh_cold_route: str | None = None,
     dispatch_cap: str = DISPATCH_CAP_ALL,
     backup_root: Path = BACKUP_ROOT,
     report_dir: Path = STATE_DIR,
@@ -5312,6 +5434,7 @@ def dispatch_master_leads(
         campaign_type=campaign_type,
         preview_dir=report_dir / "_dispatch_previews_legacy",
         recontact_route=recontact_route,
+        fresh_cold_route=fresh_cold_route,
     )
     total_rows = int(preview.get("dispatch_selected_row_count") or 0)
     if progress_callback:
@@ -5334,6 +5457,7 @@ def dispatch_master_leads(
     return confirm_dispatch_preview(
         str(preview.get("preview_id") or ""),
         recontact_route=preview.get("recontact_route"),
+        fresh_cold_route=preview.get("fresh_cold_route"),
         require_stopped=require_stopped,
         backup_root=backup_root,
         report_dir=report_dir,

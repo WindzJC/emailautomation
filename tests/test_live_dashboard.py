@@ -9575,6 +9575,9 @@ class LiveDashboardTests(unittest.TestCase):
                 "preview_path": str(preview_path),
                 "dispatch_source_path": str(keep_path),
                 "dispatch_source_mode": "triaged_keep",
+                "campaign_type": "cold",
+                "dispatch_cap": "all",
+                "fresh_cold_route": "sendgrid",
             }
             preview_path.write_text(json.dumps(existing_preview), encoding="utf-8")
             job = {
@@ -9603,6 +9606,9 @@ class LiveDashboardTests(unittest.TestCase):
                     output_path=str(output_path),
                     rejected_path=str(rejected_path),
                     dispatch_source_mode="triaged_keep",
+                    campaign_type="cold",
+                    dispatch_cap="all",
+                    fresh_cold_route="sendgrid",
                     job_id=job["job_id"],
                     current_run_id=job["job_id"],
                     preview_recovery_binding=binding,

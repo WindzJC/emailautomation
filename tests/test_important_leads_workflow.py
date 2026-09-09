@@ -4676,6 +4676,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             },
         }
 
+        preview["fresh_cold_route"] = "both"
+        preview["fresh_cold_route_explicit"] = False
+        preview["fresh_cold_route_binding"] = important_leads_workflow._fresh_cold_route_binding(preview)
         _validate_dispatch_preview_contract(preview)
 
     def test_default_sendgrid_routing_uses_only_enabled_profiles_deterministically(self) -> None:
@@ -5108,6 +5111,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             },
         }
 
+        preview["fresh_cold_route"] = "both"
+        preview["fresh_cold_route_explicit"] = False
+        preview["fresh_cold_route_binding"] = important_leads_workflow._fresh_cold_route_binding(preview)
         with self.assertRaisesRegex(RuntimeError, "skipped row count does not match skipped reasons"):
             _validate_dispatch_preview_contract(preview)
 

@@ -370,6 +370,7 @@ class ImportantLeadDispatchPayload(BaseModel):
     preview_id: str = ""
     recontact_recency_override: bool = False
     recontact_route: str = ""
+    fresh_cold_route: str = ""
     job_id: str = ""
     current_run_id: str = ""
     preview_recovery_binding: dict[str, object] = Field(default_factory=dict)
@@ -2601,6 +2602,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
         report = confirm_dispatch_preview(
             str(job.get("preview_id") or ""),
             recontact_route=(str(job.get("recontact_route") or "").strip() or None),
+            fresh_cold_route=(str(job.get("fresh_cold_route") or "").strip() or None),
             require_stopped=True,
             allow_high_risk_recontact=bool(job.get("recontact_recency_override")),
             backup_root=settings.BACKUPS_DIR,
@@ -2696,6 +2698,7 @@ def _start_important_dispatch_job(
     total_rows_would_write: int,
     recontact_recency_override: bool = False,
     recontact_route: str = "",
+    fresh_cold_route: str = "",
 ) -> dict[str, object]:
     job_id = f"dispatch_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     job = {
@@ -2713,6 +2716,7 @@ def _start_important_dispatch_job(
         "dispatch_cap": dispatch_cap,
         "recontact_recency_override": bool(recontact_recency_override),
         "recontact_route": str(recontact_route or "").strip(),
+        "fresh_cold_route": str(fresh_cold_route or "").strip(),
         "total_source_rows": max(0, int(total_source_rows or 0)),
         "eligible_rows": max(0, int(eligible_rows or 0)),
         "selected_rows": max(0, int(selected_rows or 0)),
@@ -7632,6 +7636,7 @@ def _run_claimed_manual_dispatch_preview_background(
     preview_dir: Path,
     expected_recovery_binding: dict[str, object] | None = None,
     recontact_route: str | None = None,
+    fresh_cold_route: str | None = None,
 ) -> None:
     try:
         job = _load_important_check_job(check_job_id)
@@ -7652,6 +7657,7 @@ def _run_claimed_manual_dispatch_preview_background(
             preview_dir=preview_dir,
             progress_callback=_preview_progress_callback(check_job_id),
             recontact_route=recontact_route,
+            fresh_cold_route=fresh_cold_route,
         )
         if expected_recovery_binding:
             post_build_job = _load_important_check_job(check_job_id)
@@ -7887,6 +7893,7 @@ def _dispatch_preview_matches_request(
     dispatch_source_mode: str,
     dispatch_cap: str,
     source_path: Path,
+    fresh_cold_route: str = "",
 ) -> bool:
     """Return True only when a persisted Preview belongs to this exact selection."""
     if not isinstance(preview, dict) or not preview:
@@ -7902,6 +7909,10 @@ def _dispatch_preview_matches_request(
     # fingerprint, so they must generate a fresh read-only Preview instead of
     # reusing a previous Preview solely because the path/cap still match.
     if requested_source_mode != DISPATCH_SOURCE_TRIAGED_KEEP:
+        return False
+
+    requested_fresh_route = str(fresh_cold_route or "").strip()
+    if requested_fresh_route not in {"sendgrid", "private_jc", "both"}:
         return False
 
     preview_campaign_type = normalize_campaign_type(
@@ -7929,6 +7940,7 @@ def _dispatch_preview_matches_request(
 
     return (
         preview_campaign_type == normalize_campaign_type(campaign_type)
+        and str(preview.get("fresh_cold_route") or "").strip() == requested_fresh_route
         and preview_source_mode == requested_source_mode
         and preview_cap == (
             str(dispatch_cap or DISPATCH_CAP_ALL).strip().lower()
@@ -7944,6 +7956,9 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
     progress_job: dict[str, object] | None = None
     requested_recontact_route = str(
         getattr(payload, "recontact_route", "") if payload else ""
+    ).strip()
+    requested_fresh_cold_route = str(
+        getattr(payload, "fresh_cold_route", "") if payload else ""
     ).strip()
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
@@ -8063,6 +8078,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     campaign_type=campaign_type,
                     preview_dir=preview_dir,
                     recontact_route=requested_recontact_route or None,
+                    fresh_cold_route=requested_fresh_cold_route or None,
                 )
             finally:
                 _release_dispatch_preview_claim(preview_claim)
@@ -8096,6 +8112,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                 dispatch_source_mode=dispatch_source_mode,
                 dispatch_cap=dispatch_cap,
                 source_path=source_path_for_mode,
+                fresh_cold_route=requested_fresh_cold_route,
             )
         )
         if persisted_preview_matches_request:
@@ -8205,6 +8222,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "preview_dir": preview_dir,
                     "expected_recovery_binding": expected_recovery_binding,
                     "recontact_route": requested_recontact_route or None,
+                    "fresh_cold_route": requested_fresh_cold_route or None,
                 },
                 daemon=True,
             )
@@ -8339,6 +8357,21 @@ def _validate_dashboard_recontact_route(
     return route
 
 
+def _validate_dashboard_fresh_cold_route(
+    preview: dict[str, object],
+    requested_route: object,
+) -> str:
+    if normalize_campaign_type(preview.get("campaign_type")) != CAMPAIGN_TYPE_COLD:
+        return ""
+    route = str(requested_route or "").strip()
+    preview_route = str(preview.get("fresh_cold_route") or "").strip()
+    if route not in {"sendgrid", "private_jc", "both"} or route != preview_route:
+        raise RuntimeError(
+            "Fresh Cold route is missing or mismatched. Re-run Preview Dispatch."
+        )
+    return route
+
+
 def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
@@ -8351,6 +8384,10 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         requested_recontact_route = _validate_dashboard_recontact_route(
             preview,
             getattr(payload, "recontact_route", "") if payload else "",
+        )
+        requested_fresh_cold_route = _validate_dashboard_fresh_cold_route(
+            preview,
+            getattr(payload, "fresh_cold_route", "") if payload else "",
         )
         if not str(preview.get("campaign_type") or "").strip():
             raise RuntimeError("Dispatch preview is missing campaign type. Re-run Preview Dispatch.")
@@ -8436,6 +8473,7 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
             total_rows_would_write=int(preview.get("total_rows_would_write") or 0),
             recontact_recency_override=False,
             recontact_route=requested_recontact_route,
+            fresh_cold_route=requested_fresh_cold_route,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)

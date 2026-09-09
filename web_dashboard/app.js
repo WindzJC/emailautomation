@@ -1894,8 +1894,22 @@ function normalizeDispatchPlanPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
 }
 
+let selectedFreshColdRoute = "sendgrid";
 let selectedRecontactRoute = "sendgrid";
+const invalidatedFreshColdPreviewIds = new Set();
 const invalidatedRecontactPreviewIds = new Set();
+
+function normalizeFreshColdRoute(value) {
+  const route = String(value || "").trim();
+  return ["sendgrid", "private_jc", "both"].includes(route) ? route : "";
+}
+
+function freshColdRouteLabel(value = selectedFreshColdRoute) {
+  const route = normalizeFreshColdRoute(value);
+  if (route === "private_jc") return "Private JC Cold";
+  if (route === "both") return "Both — Split";
+  return "SendGrid Cold";
+}
 
 function normalizeRecontactRoute(value) {
   const route = String(value || "").trim();
@@ -1927,6 +1941,7 @@ function currentDispatchPlanKey() {
     selectedImportantDispatchCap(),
     selectedImportantDispatchCampaignType(),
   ];
+  if (selectedImportantDispatchCampaignType() === "cold") key.push(selectedFreshColdRoute);
   if (normalFullRecontactSelectionActive(source)) key.push(selectedRecontactRoute);
   return key.join("|");
 }
@@ -1934,6 +1949,7 @@ function currentDispatchPlanKey() {
 function dispatchPreviewMatchesCurrentSelection() {
   return Boolean(
     lastImportantDispatchPreview
+    && !invalidatedFreshColdPreviewIds.has(lastImportantDispatchPreview.preview_id)
     && !invalidatedRecontactPreviewIds.has(lastImportantDispatchPreview.preview_id)
     && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey()
   );
@@ -1953,6 +1969,11 @@ function persistedImportantDispatchPreviewKey(preview) {
     String(preview.dispatch_cap || "all"),
     String(preview.campaign_type || "cold"),
   ];
+  if (String(preview.campaign_type || "") === "cold") {
+    const route = normalizeFreshColdRoute(preview.fresh_cold_route);
+    if (!route) return "";
+    key.push(route);
+  }
   if (preview.full_recontact_sendgrid_only === true) {
     const route = normalizeRecontactRoute(preview.recontact_route);
     if (!route) return "";
@@ -1977,6 +1998,7 @@ function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
   if (
     status?.latest_auto_dispatch_preview_current !== true
     || persistedKey !== currentKey
+    || invalidatedFreshColdPreviewIds.has(preview.preview_id)
     || invalidatedRecontactPreviewIds.has(preview.preview_id)
   ) {
     lastImportantDispatchPreview._preview_key = "";
@@ -2036,6 +2058,9 @@ function importantLeadDispatchPayload(includePreviewId = false) {
     dispatch_source_mode: selectedImportantDispatchSourceMode(campaignType),
     dispatch_cap: selectedImportantDispatchCap(),
     campaign_type: campaignType,
+    ...(campaignType === "cold"
+      ? { fresh_cold_route: selectedFreshColdRoute }
+      : {}),
     ...(normalFullRecontactSelectionActive(selectedSource)
       ? { recontact_route: selectedRecontactRoute }
       : {}),
@@ -3373,6 +3398,16 @@ function renderDispatchModeCards(preview = null) {
         <small>${escapeHtml(recontactMetrics)}</small>
         <em>Eligible after mandatory safety: ${escapeHtml(eligibleAfterSafety)}</em>
       </button>
+      ${selectedCampaign === "cold" ? `
+        <label class="dispatch-recontact-route">
+          <span>Fresh Cold Route</span>
+          <select data-fresh-cold-route aria-label="Fresh Cold Route">
+            <option value="sendgrid" ${selectedFreshColdRoute === "sendgrid" ? "selected" : ""}>SendGrid Cold</option>
+            <option value="private_jc" ${selectedFreshColdRoute === "private_jc" ? "selected" : ""}>Private JC Cold</option>
+            <option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — Split</option>
+          </select>
+          <small>${escapeHtml(freshColdRouteLabel())} selected · route changes require a new Preview Dispatch.</small>
+        </label>` : ""}
       ${normalFullRecontactSelectionActive(recontactSource) ? `
         <label class="dispatch-recontact-route">
           <span>Recontact Route</span>
@@ -10977,6 +11012,27 @@ if (els.leadsImportantDispatchPreviewTopBtn) els.leadsImportantDispatchPreviewTo
 if (els.leadsImportantDispatchConfirmBtn) els.leadsImportantDispatchConfirmBtn.addEventListener("click", () => confirmImportantLeadDispatch());
 if (els.leadsDispatchModeCards) {
   els.leadsDispatchModeCards.addEventListener("change", (event) => {
+    const freshRouteSelect = event.target.closest("[data-fresh-cold-route]");
+    if (freshRouteSelect && selectedImportantDispatchCampaignType() === "cold") {
+      const nextRoute = normalizeFreshColdRoute(freshRouteSelect.value);
+      if (!nextRoute || nextRoute === selectedFreshColdRoute) return;
+      selectedFreshColdRoute = nextRoute;
+      if (
+        lastImportantDispatchPreview?.preview_id
+        && String(lastImportantDispatchPreview?.campaign_type || "") === "cold"
+      ) {
+        invalidatedFreshColdPreviewIds.add(lastImportantDispatchPreview.preview_id);
+        lastImportantDispatchPreview._preview_key = "";
+      }
+      lastImportantDispatchPreviewState = "stale";
+      lastImportantDispatchPreviewFeedback = {
+        state: "stale",
+        message: `Route changed to ${freshColdRouteLabel()} — Preview Dispatch required.`,
+      };
+      renderSelectedDispatchWorkflowState();
+      return;
+    }
+
     const routeSelect = event.target.closest("[data-recontact-route]");
     if (!routeSelect || !normalFullRecontactSelectionActive()) return;
     const nextRoute = normalizeRecontactRoute(routeSelect.value);
