@@ -2755,6 +2755,10 @@ def _archive_assigned_dispatch_preview(
     sendgrid_queue_keys = [key for key in queue_keys if key.startswith("sendgrid_")]
     payload = {
         "archived_at_utc": iso_utc(),
+        **({
+            "recontact_route": preview["recontact_route"],
+            "recontact_route_binding": preview.get("recontact_route_binding"),
+        } if preview.get("full_recontact_sendgrid_only") else {}),
         "preview_id": str(preview.get("preview_id") or ""),
         "status": str(preview.get("status") or ""),
         "campaign_type": str(preview.get("campaign_type") or ""),
@@ -2921,6 +2925,27 @@ def _validate_recontact_source_classification(preview: Dict[str, object]) -> boo
     return safer_recontact
 
 
+def _recontact_route_binding(preview: Dict[str, object]) -> str:
+    """SHA-256 of the exact route-bound preview, without runtime/status fields."""
+    authority = {
+        key: preview.get(key)
+        for key in (
+            "preview_id", "campaign_id", "recontact_route", "dispatch_source_path",
+            "queue_paths", "plan_rows_by_queue",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_recontact_route_request(preview: Dict[str, object], route: str | None) -> None:
+    if not preview.get("full_recontact_sendgrid_only"):
+        return
+    if route not in {"sendgrid", "private_jc"} or route != preview.get("recontact_route"):
+        raise RuntimeError("Recontact route is missing or mismatched. Re-run Preview Dispatch.")
+
+
 def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
     if not is_recontact_cold_campaign(preview.get("campaign_type")):
         return
@@ -2992,6 +3017,29 @@ def _validate_recontact_campaign_identity(preview: Dict[str, object]) -> None:
                     f"Full Recontact preview planned row {index} in {queue_name} has a {reason} campaign ID. "
                     "Re-run Preview Dispatch."
                 )
+
+
+    route = preview.get("recontact_route")
+    _validate_recontact_route_request(preview, route)
+    if preview.get("recontact_route_binding") != _recontact_route_binding(preview):
+        raise RuntimeError("Recontact route/plan binding changed. Re-run Preview Dispatch.")
+    # Retain positional queue keys for the existing explicit-path API; named
+    # lanes must be registered production profiles, never Controlled Test.
+    allowed_sendgrid_keys = set(_enabled_sendgrid_dispatch_profiles()) | {
+        f"sendgrid_{index}" for index in range(1, 6)
+    }
+    controlled_queue_names = {
+        Path(str(cfg.get("csv") or "")).name
+        for cfg in PROFILES.values() if cfg.get("controlled_test")
+    }
+    queue_paths = preview.get("queue_paths") or {}
+    for queue_key, rows in plan_rows_by_queue.items():
+        if not rows:
+            continue
+        if (route == "sendgrid" and queue_key not in allowed_sendgrid_keys) or (
+            route == "private_jc" and queue_key != "private_jc"
+        ) or Path(str(queue_paths.get(queue_key) or "")).name in controlled_queue_names:
+            raise RuntimeError("Recontact plan contains rows outside the selected production route.")
 
 
 def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
@@ -3416,6 +3464,7 @@ def _build_dispatch_plan(
     lead_ledger_db_path: Path | None = None,
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
+    recontact_route: str | None = None,
     progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     build_started = time.monotonic()
@@ -3540,6 +3589,17 @@ def _build_dispatch_plan(
             and not safer_recontact_source
         )
         dispatch_source_name = "Safer Recontact Pool" if safer_recontact_source else str(source_state["dispatch_source_name"])
+        selected_route = None
+        if full_recontact_sendgrid_only:
+            selected_route = "sendgrid" if recontact_route is None else recontact_route
+            if selected_route not in {"sendgrid", "private_jc"}:
+                raise ValueError("Recontact route must be sendgrid or private_jc.")
+            controlled_queue_names = {
+                Path(str(cfg.get("csv") or "")).name
+                for cfg in PROFILES.values() if cfg.get("controlled_test")
+            }
+            if any(path.name in controlled_queue_names for path in queue_paths):
+                raise ValueError("Controlled Test queues cannot be used for Full Recontact.")
         dispatch_source_detail = "Safer recontact CSV — not found in active history" if safer_recontact_source else dispatch_source_name
 
         queue_load_started = time.monotonic()
@@ -3713,9 +3773,8 @@ def _build_dispatch_plan(
             if email in (jc_sent | sendgrid_sent) and allow_previously_sent:
                 previously_sent_allowed += 1
 
-            # Full Recontact reserves a small deterministic Private JC lane,
-            # then uses the existing SendGrid round-robin order. Fresh Cold
-            # and Safer Recontact retain their existing balanced routing.
+            # Full Recontact has one explicit route with no spillover. Fresh
+            # Cold and Safer Recontact retain their existing balanced routing.
             prefer_sendgrid = added_astra > added_sendgrid
 
             def add_to_astra() -> bool:
@@ -3764,9 +3823,9 @@ def _build_dispatch_plan(
                 return True
 
             if full_recontact_sendgrid_only:
-                if added_astra < FULL_RECONTACT_PRIVATE_JC_CAP:
+                if selected_route == "private_jc" and added_astra < FULL_RECONTACT_PRIVATE_JC_CAP:
                     added_to_astra = add_to_astra()
-                else:
+                elif selected_route == "sendgrid":
                     added_to_sendgrid = add_to_sendgrid()
             elif prefer_sendgrid:
                 added_to_sendgrid = add_to_sendgrid()
@@ -3906,6 +3965,7 @@ def _build_dispatch_plan(
             "dispatch_source_mode": source_mode,
             "dispatch_source_kind": "safer_recontact" if safer_recontact_source else source_mode,
             "full_recontact_sendgrid_only": full_recontact_sendgrid_only,
+            **({"recontact_route": selected_route} if full_recontact_sendgrid_only else {}),
             "full_recontact_private_jc_cap": (
                 FULL_RECONTACT_PRIVATE_JC_CAP if full_recontact_sendgrid_only else 0
             ),
@@ -4058,6 +4118,7 @@ def preview_dispatch_master_leads(
     lead_ledger_db_path: Path | None = None,
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
+    recontact_route: str | None = None,
     preview_dir: Path = DISPATCH_PREVIEWS_DIR,
     progress_callback: Callable[[str, Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
@@ -4092,6 +4153,7 @@ def preview_dispatch_master_leads(
         lead_ledger_db_path=lead_ledger_db_path,
         sendgrid_events_path=sendgrid_events_path,
         campaign_type=campaign_type,
+        recontact_route=recontact_route,
         progress_callback=progress_callback,
     )
     preview_id = f"dispatch_preview_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
@@ -4146,6 +4208,8 @@ def preview_dispatch_master_leads(
         "preview_path": str(_dispatch_preview_path(preview_id, preview_dir)),
         "lead_ledger_db_path": str(_lead_ledger_db_path(lead_ledger_db_path)),
     }
+    if preview.get("full_recontact_sendgrid_only"):
+        preview["recontact_route_binding"] = _recontact_route_binding(preview)
     emit_progress(
         "archive",
         performance_timings_seconds=dict(preview.get("performance_timings_seconds") or {}),
@@ -4191,6 +4255,21 @@ def validate_dispatch_preview(
     if status not in {"previewed", "ready"}:
         raise RuntimeError("Dispatch preview was already used or is no longer valid. Re-run Preview Dispatch.")
     _validate_dispatch_preview_contract(preview)
+    if preview.get("full_recontact_sendgrid_only"):
+        try:
+            archive_path = Path(str(preview.get("assigned_preview_archive_path") or ""))
+            archive = json.loads(archive_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "Recontact archived route authority is unavailable. Re-run Preview Dispatch."
+            ) from exc
+        if not isinstance(archive, dict) or any(
+            archive.get(key) != preview.get(key)
+            for key in ("preview_id", "recontact_route", "recontact_route_binding")
+        ):
+            raise RuntimeError(
+                "Recontact route authority does not match its archived preview. Re-run Preview Dispatch."
+            )
     _assert_active_staged_batch(preview)
 
     dependency_paths = preview.get("dependency_fingerprints") or {}
@@ -4297,6 +4376,7 @@ def confirm_dispatch_preview(
     preview_id: str,
     *,
     require_stopped: bool = True,
+    recontact_route: str | None = None,
     allow_high_risk_recontact: bool = False,
     backup_root: Path = BACKUP_ROOT,
     report_dir: Path = STATE_DIR,
@@ -4313,6 +4393,7 @@ def confirm_dispatch_preview(
             return _confirm_dispatch_preview_impl(
                 preview_id,
                 require_stopped=require_stopped,
+                recontact_route=recontact_route,
                 allow_high_risk_recontact=allow_high_risk_recontact,
                 backup_root=backup_root,
                 report_dir=report_dir,
@@ -4343,6 +4424,7 @@ def _confirm_dispatch_preview_impl(
     preview_id: str,
     *,
     require_stopped: bool,
+    recontact_route: str | None,
     allow_high_risk_recontact: bool,
     backup_root: Path,
     report_dir: Path,
@@ -4356,6 +4438,7 @@ def _confirm_dispatch_preview_impl(
     _temporary_dirs: List[Path],
 ) -> Dict[str, object]:
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
+    _validate_recontact_route_request(preview, recontact_route)
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
         raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
@@ -4373,6 +4456,7 @@ def _confirm_dispatch_preview_impl(
     queue_lock_paths = _confirmation_queue_lock_paths(preview, queue_paths)
     _lock_stack.enter_context(lock_files(queue_lock_paths))
     preview = validate_dispatch_preview(preview_id, preview_dir=preview_dir)
+    _validate_recontact_route_request(preview, recontact_route)
     idempotency_protected = _unresolved_idempotency_emails()
 
     plan_rows_by_queue = preview.get("plan_rows_by_queue") or {}
@@ -4439,6 +4523,10 @@ def _confirm_dispatch_preview_impl(
     effective_preview = dict(preview)
     effective_preview["plan_rows_by_queue"] = effective_plan_rows_by_queue
     effective_preview["plan_dispatch_events_by_queue"] = effective_dispatch_events_by_queue
+    # The original binding was checked under lock. Existing safety filtering
+    # only removes rows, so validate this internal reduced plan on the same route.
+    if effective_preview.get("full_recontact_sendgrid_only"):
+        effective_preview["recontact_route_binding"] = _recontact_route_binding(effective_preview)
     _validate_recontact_campaign_identity(effective_preview)
     full_recontact_checked_source = (
         is_recontact_campaign
@@ -4558,6 +4646,7 @@ def _confirm_dispatch_preview_impl(
         "generated_at_utc": completed_at_utc,
         "preview_id": preview_id,
         "campaign_id": str(preview.get("campaign_id") or ""),
+        **({"recontact_route": preview["recontact_route"]} if preview.get("full_recontact_sendgrid_only") else {}),
         "preview_path": str(preview.get("preview_path") or _dispatch_preview_path(preview_id, preview_dir)),
         "campaign_type": campaign_type,
         "allow_previously_sent": allow_previously_sent,
@@ -4687,6 +4776,7 @@ def _confirm_dispatch_preview_impl(
             "run_id": run_id,
             "preview_id": preview_id,
             "campaign_id": str(preview.get("campaign_id") or ""),
+            **({"recontact_route": preview["recontact_route"]} if preview.get("full_recontact_sendgrid_only") else {}),
             "campaign_type": campaign_type,
             "dispatch_source_mode": str(preview.get("dispatch_source_mode") or ""),
             "dispatch_source_kind": (
@@ -5196,6 +5286,7 @@ def dispatch_master_leads(
     lead_ledger_db_path: Path | None = None,
     sendgrid_events_path: Path = settings.WEBHOOK_EVENTS_PATH,
     campaign_type: str = CAMPAIGN_TYPE_COLD,
+    recontact_route: str | None = None,
     dispatch_cap: str = DISPATCH_CAP_ALL,
     backup_root: Path = BACKUP_ROOT,
     report_dir: Path = STATE_DIR,
@@ -5220,6 +5311,7 @@ def dispatch_master_leads(
         sendgrid_events_path=sendgrid_events_path,
         campaign_type=campaign_type,
         preview_dir=report_dir / "_dispatch_previews_legacy",
+        recontact_route=recontact_route,
     )
     total_rows = int(preview.get("dispatch_selected_row_count") or 0)
     if progress_callback:
@@ -5241,6 +5333,7 @@ def dispatch_master_leads(
             pass
     return confirm_dispatch_preview(
         str(preview.get("preview_id") or ""),
+        recontact_route=preview.get("recontact_route"),
         require_stopped=require_stopped,
         backup_root=backup_root,
         report_dir=report_dir,

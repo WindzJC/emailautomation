@@ -233,12 +233,12 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                3,
+                0,
                 preview["rows_to_add_private_jc"],
             )
 
             self.assertEqual(
-                0,
+                3,
                 preview["rows_to_add_sendgrid"],
             )
 
@@ -352,6 +352,7 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
 
             confirmed = workflow.confirm_dispatch_preview(
                 preview["preview_id"],
+                recontact_route=preview["recontact_route"],
                 require_stopped=False,
                 backup_root=tmp / "backups",
                 report_dir=tmp / "reports",
@@ -367,7 +368,7 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
             final_private_rows = read_csv(fixture["jc_queue"])
 
             self.assertEqual(
-                2,
+                0,
                 len(final_private_rows),
             )
 
@@ -378,7 +379,7 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
             ]
 
             self.assertEqual(
-                0,
+                2,
                 len(final_sendgrid_rows),
             )
 
@@ -389,7 +390,7 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
                 },
                 {
                     row["Email"]
-                    for row in final_private_rows
+                    for row in final_sendgrid_rows
                 },
             )
 
@@ -397,7 +398,7 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
                 {preview["campaign_id"]},
                 {
                     row["campaign_id"]
-                    for row in final_private_rows
+                    for row in final_sendgrid_rows
                 },
             )
 

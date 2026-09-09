@@ -114,6 +114,7 @@ def build_dynamic_dispatch_fixture(
     lead_count: int = 8,
     campaign_type: str = "cold",
     active_queue_email: str = "",
+    recontact_route: str | None = None,
 ) -> dict[str, object]:
     master_path = tmp / "leads.csv"
     triaged_keep_path = tmp / "leads_triaged_keep.csv"
@@ -170,6 +171,7 @@ def build_dynamic_dispatch_fixture(
             unsubscribed_path=tmp / "unsubscribed.csv",
             lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
             campaign_type=campaign_type,
+            recontact_route=recontact_route,
             preview_dir=preview_dir,
         )
     return {
@@ -218,7 +220,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, preview["idempotency_protected_removed"])
                 self.assertNotEqual("old-campaign", preview["campaign_id"])
                 self.assertEqual(before, self.idempotency_db.read_bytes())
-                self.assertTrue(preview["plan_rows_by_queue"]["private_jc"])
+                self.assertFalse(preview["plan_rows_by_queue"]["private_jc"])
+                self.assertEqual(2, preview["rows_to_add_sendgrid"])
 
     def test_unresolved_dispatch_resolved_outcome_is_not_quarantined(self):
         self._seed_unresolved_dispatch_reservation(outcome="sent")
@@ -236,6 +239,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             before = self.idempotency_db.read_bytes()
             report = confirm_dispatch_preview(
                 preview["preview_id"], preview_dir=fixture["preview_dir"], require_stopped=False,
+                recontact_route="sendgrid",
                 persist_state=False, backup_root=tmp / "backups", report_dir=tmp / "reports",
             )
             emails = {row["Email"] for path in preview["queue_paths"].values() for row in read_csv_rows(Path(path))}
@@ -266,7 +270,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(before, {path: Path(path).read_bytes() for path in before})
             self.assertFalse((tmp / "missing.sqlite3").exists())
 
-    def test_full_recontact_caps_private_jc_then_uses_enabled_sendgrid_profiles(self) -> None:
+    def test_full_recontact_defaults_to_sendgrid_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = build_dynamic_dispatch_fixture(
                 Path(tmpdir),
@@ -283,12 +287,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(expected_profiles, preview["sendgrid_profile_order"])
             self.assertIn("sendgrid_annette", preview["sendgrid_profile_order"])
             self.assertIn("sendgrid_fiorela", preview["sendgrid_profile_order"])
-            self.assertEqual(500, preview["rows_to_add_private_jc"])
-            self.assertEqual(8, preview["rows_to_add_sendgrid"])
+            self.assertEqual("sendgrid", preview["recontact_route"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(508, preview["rows_to_add_sendgrid"])
             self.assertEqual(508, preview["total_planned_unique_count"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
             self.assertEqual(500, preview["full_recontact_private_jc_cap"])
-            self.assertEqual([2, 2, 2, 1, 1], list(preview["sendgrid_profile_planned_counts"].values()))
+            self.assertEqual([102, 102, 102, 101, 101], list(preview["sendgrid_profile_planned_counts"].values()))
             self.assertTrue(preview["full_recontact_sendgrid_only"])
             self.assertNotIn("private_jc_warm", preview["plan_rows_by_queue"])
             self.assertNotIn("sendgrid_controlled_test", preview["plan_rows_by_queue"])
@@ -306,13 +311,147 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 },
             )
             private_rows = preview["plan_rows_by_queue"]["private_jc"]
-            self.assertEqual(500, len(private_rows))
+            self.assertEqual(0, len(private_rows))
             for row in private_rows:
                 self.assertEqual("recontact_cold", row["campaign_type"])
                 self.assertEqual("full_recontact", row["dispatch_source_kind"])
                 self.assertEqual(preview["campaign_id"], row["campaign_id"])
             for path in preview["queue_paths"].values():
                 self.assertEqual([], read_csv_rows(Path(path)))
+
+    def test_full_recontact_private_jc_route_caps_without_sendgrid_spill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = build_dynamic_dispatch_fixture(
+                Path(tmpdir),
+                preview_name="recontact_private_jc",
+                lead_count=508,
+                campaign_type="recontact_cold",
+                recontact_route="private_jc",
+            )
+            preview = fixture["preview"]
+
+            self.assertEqual("private_jc", preview["recontact_route"])
+            self.assertEqual(500, preview["rows_to_add_private_jc"])
+            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(500, preview["total_planned_unique_count"])
+            self.assertEqual(500, len(preview["plan_rows_by_queue"]["private_jc"]))
+            self.assertTrue(
+                all(
+                    not rows
+                    for key, rows in preview["plan_rows_by_queue"].items()
+                    if key.startswith("sendgrid_")
+                )
+            )
+
+    def test_full_recontact_rejects_invalid_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "sendgrid or private_jc"):
+                build_dynamic_dispatch_fixture(
+                    Path(tmpdir),
+                    preview_name="recontact_invalid_route",
+                    lead_count=2,
+                    campaign_type="recontact_cold",
+                    recontact_route="warm",
+                )
+
+    def test_full_recontact_confirm_requires_matching_route_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fixture = build_dynamic_dispatch_fixture(
+                tmp,
+                preview_name="recontact_route_confirm",
+                lead_count=3,
+                campaign_type="recontact_cold",
+            )
+            preview = fixture["preview"]
+            queue_paths = [Path(path) for path in preview["queue_paths"].values()]
+            before = {path: path.read_bytes() for path in queue_paths}
+
+            for route in (None, "private_jc"):
+                with self.subTest(route=route):
+                    with self.assertRaisesRegex(RuntimeError, "missing or mismatched"):
+                        confirm_dispatch_preview(
+                            preview["preview_id"],
+                            recontact_route=route,
+                            preview_dir=fixture["preview_dir"],
+                            require_stopped=False,
+                            persist_state=False,
+                            backup_root=tmp / "backups",
+                            report_dir=tmp / "reports",
+                        )
+                    self.assertEqual(before, {path: path.read_bytes() for path in queue_paths})
+
+    def test_full_recontact_archive_pins_route_authority_and_rejects_rebound_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = build_dynamic_dispatch_fixture(
+                Path(tmpdir),
+                preview_name="recontact_archive_authority",
+                lead_count=8,
+                campaign_type="recontact_cold",
+            )
+            preview = fixture["preview"]
+
+            archive = json.loads(
+                Path(preview["assigned_preview_archive_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(preview["recontact_route"], archive["recontact_route"])
+            self.assertEqual(
+                preview["recontact_route_binding"],
+                archive["recontact_route_binding"],
+            )
+
+            preview_path = Path(preview["preview_path"])
+            stored = json.loads(preview_path.read_text(encoding="utf-8"))
+            queue_key = next(
+                key
+                for key, rows in stored["plan_rows_by_queue"].items()
+                if key.startswith("sendgrid_") and len(rows) > 1
+            )
+            stored["plan_rows_by_queue"][queue_key] = list(
+                reversed(stored["plan_rows_by_queue"][queue_key])
+            )
+            stored["recontact_route_binding"] = (
+                important_leads_workflow._recontact_route_binding(stored)
+            )
+            preview_path.write_text(
+                json.dumps(stored, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "archived preview"):
+                important_leads_workflow.validate_dispatch_preview(
+                    preview["preview_id"],
+                    preview_dir=fixture["preview_dir"],
+                )
+
+    def test_full_recontact_rejects_controlled_test_queue_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = build_dynamic_dispatch_fixture(
+                Path(tmpdir),
+                preview_name="recontact_controlled_test",
+                lead_count=3,
+                campaign_type="recontact_cold",
+            )
+            preview = json.loads(json.dumps(fixture["preview"]))
+
+            queue_key = next(
+                key
+                for key, rows in preview["plan_rows_by_queue"].items()
+                if key.startswith("sendgrid_") and rows
+            )
+            controlled_cfg = next(
+                cfg for cfg in send_shard.PROFILES.values()
+                if cfg.get("controlled_test")
+            )
+            preview["queue_paths"][queue_key] = str(
+                Path(tmpdir) / Path(str(controlled_cfg["csv"])).name
+            )
+            preview["recontact_route_binding"] = (
+                important_leads_workflow._recontact_route_binding(preview)
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "outside the selected production route"):
+                _validate_dispatch_preview_contract(preview)
 
     def test_full_recontact_globally_blocks_active_queue_membership(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -326,11 +465,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             preview = fixture["preview"]
 
             self.assertEqual(1, preview["skipped_already_queued"])
-            self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
             self.assertEqual(
                 ["lead-2@example.com"],
-                [row["Email"] for row in preview["plan_rows_by_queue"]["private_jc"]],
+                [row["Email"] for rows in preview["plan_rows_by_queue"].values() for row in rows],
             )
 
     def test_full_recontact_fails_when_no_sendgrid_lane_is_enabled(self) -> None:
@@ -3123,13 +3262,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(2, preview["invalid_malformed_skipped"])
             self.assertEqual(1, preview["exclusion_reason_counts"]["missing_required_dispatch_field"])
             self.assertEqual(9, preview["bad_suppressed_removed_count"])
-            self.assertEqual(2, preview["rows_to_add_private_jc"])
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
             self.assertEqual(2, preview["total_rows_would_write"])
             self.assertIn("campaign_type", preview["queue_headers"])
             self.assertIn("campaign_id", preview["queue_headers"])
             self.assertEqual(preview["preview_id"], preview["campaign_id"])
-            self.assertEqual(2, len(preview["plan_rows_by_queue"]["private_jc"]))
+            self.assertEqual(0, len(preview["plan_rows_by_queue"]["private_jc"]))
             planned_emails = [
                 row["Email"]
                 for rows_by_queue in preview["plan_rows_by_queue"].values()
@@ -3221,6 +3360,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
             confirmed = confirm_dispatch_preview(
                 preview["preview_id"],
+                recontact_route="sendgrid",
                 require_stopped=False,
                 backup_root=tmp / "backups",
                 report_dir=tmp / "reports",
@@ -3230,11 +3370,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("recontact_cold", confirmed["campaign_type"])
             self.assertEqual(preview["campaign_id"], confirmed["campaign_id"])
             self.assertEqual(3, confirmed["total_rows_would_write"])
-            self.assertEqual(3, confirmed["rows_written_private_jc"])
-            final_rows = read_csv_rows(jc_queue)
+            self.assertEqual(0, confirmed["rows_written_private_jc"])
+            final_rows = [row for path in sg_queues for row in read_csv_rows(path)]
             self.assertEqual(3, len(final_rows))
             self.assertEqual({preview["campaign_id"]}, {row["campaign_id"] for row in final_rows})
-            self.assertEqual([], [row for path in sg_queues for row in read_csv_rows(path)])
+            self.assertEqual([], read_csv_rows(jc_queue))
 
     def test_safer_recontact_pool_writes_separate_csv_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3395,13 +3535,14 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 campaign_type="recontact_cold",
                 preview_dir=preview_dir,
             )
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
+            self.assertEqual(0, preview["rows_to_add_private_jc"])
 
             report = confirm_dispatch_preview(
                 preview["preview_id"],
                 require_stopped=False,
                 backup_root=backup_root,
+                recontact_route=preview.get("recontact_route"),
                 report_dir=report_dir,
                 persist_state=False,
                 preview_dir=preview_dir,
@@ -3410,16 +3551,17 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("completed", report["status"])
             self.assertEqual("recontact_cold", report["campaign_type"])
             self.assertEqual(0, report["confirm_filtered_sendgrid_already_sent"])
-            self.assertEqual(0, sum(report["rows_written_sendgrid_shards"].values()))
-            self.assertEqual(2, report["rows_written_private_jc"])
+            self.assertEqual(2, sum(report["rows_written_sendgrid_shards"].values()))
+            self.assertEqual(0, report["rows_written_private_jc"])
             self.assertEqual(2, report["total_rows_would_write"])
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 private_rows = list(csv.DictReader(handle))
-            self.assertEqual(["alpha@example.com", "beta@example.com"], [row["Email"] for row in private_rows])
-            self.assertEqual({preview["campaign_id"]}, {row["campaign_id"] for row in private_rows})
+            self.assertEqual([], private_rows)
             active_manifest = json.loads((report_dir / "active_campaign_snapshot.json").read_text(encoding="utf-8"))
             self.assertEqual("recontact_cold", active_manifest["campaign_type"])
             self.assertEqual("full_recontact", active_manifest["dispatch_source_kind"])
+            self.assertEqual("sendgrid", active_manifest["recontact_route"])
+            self.assertEqual("sendgrid", report["recontact_route"])
             self.assertEqual(active_manifest["checked_path"], active_manifest["intended_source_path"])
             sendgrid_emails: list[str] = []
             sendgrid_campaign_ids: set[str] = set()
@@ -3428,8 +3570,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     rows_from_queue = list(csv.DictReader(handle))
                     sendgrid_emails.extend(row["Email"] for row in rows_from_queue)
                     sendgrid_campaign_ids.update(row["campaign_id"] for row in rows_from_queue)
-            self.assertEqual([], sendgrid_emails)
-            self.assertEqual(set(), sendgrid_campaign_ids)
+            self.assertEqual(["alpha@example.com", "beta@example.com"], sendgrid_emails)
+            self.assertEqual({preview["campaign_id"]}, sendgrid_campaign_ids)
 
     def test_confirm_fresh_cold_still_blocks_triaged_reject_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4853,6 +4995,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             },
         }
 
+        preview["plan_rows_by_queue"]["sendgrid_1"].extend(preview["plan_rows_by_queue"]["private_jc"])
+        preview["plan_rows_by_queue"]["private_jc"] = []
+        preview["private_jc_planned_count"] = 0
+        preview["sendgrid_planned_count"] = 2
+        preview["recontact_route"] = "sendgrid"
+        preview["recontact_route_binding"] = important_leads_workflow._recontact_route_binding(preview)
         _validate_dispatch_preview_contract(preview)
 
     def test_recontact_preview_contract_rejects_missing_or_mixed_campaign_ids(self) -> None:
