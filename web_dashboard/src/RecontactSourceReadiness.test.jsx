@@ -228,6 +228,8 @@ function currentRecontactPreview(status, overrides = {}) {
     preview_id: "dispatch_preview_20260902_004950_8c591597",
     status: "previewed",
     campaign_type: "recontact_cold",
+    full_recontact_sendgrid_only: true,
+    recontact_route: "sendgrid",
     dispatch_source_mode: "cleaned",
     dispatch_source_kind: "cleaned",
     dispatch_source_path: status.dispatch_source_options.cleaned.dispatch_source_path,
@@ -501,6 +503,8 @@ describe("source-scoped Recontact readiness", () => {
     const preview = {
       preview_id: "recontact-preview",
       campaign_type: "recontact_cold",
+      full_recontact_sendgrid_only: true,
+      recontact_route: "sendgrid",
       dispatch_source_mode: "cleaned",
       dispatch_source_path: RECONTACT_SOURCE.dispatch_source_path,
       dispatch_source_exists: true,
@@ -693,6 +697,8 @@ describe("source-scoped Recontact readiness", () => {
 
   it.each([
     ["server marks the Preview stale", {}, false],
+    ["recontact route is missing", { recontact_route: "" }, true],
+    ["recontact route differs", { recontact_route: "private_jc" }, true],
     ["source path differs", { dispatch_source_path: "/synthetic/other/leads.csv" }, true],
     ["source row count differs", { dispatch_source_row_count: 15341 }, true],
     ["campaign differs", { campaign_type: "cold" }, true],

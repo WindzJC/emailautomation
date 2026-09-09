@@ -1894,11 +1894,29 @@ function normalizeDispatchPlanPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
 }
 
+let selectedRecontactRoute = "sendgrid";
+const invalidatedRecontactPreviewIds = new Set();
+
+function normalizeRecontactRoute(value) {
+  const route = String(value || "").trim();
+  return ["sendgrid", "private_jc"].includes(route) ? route : "";
+}
+
+function recontactRouteLabel(value = selectedRecontactRoute) {
+  return normalizeRecontactRoute(value) === "private_jc" ? "Private JC Cold" : "SendGrid Cold";
+}
+
+function normalFullRecontactSelectionActive(source = null) {
+  if (selectedImportantDispatchCampaignType() !== "recontact_cold") return false;
+  const selectedSource = source || dispatchSourceForSelectedMode().source || {};
+  return !isSaferRecontactSource(selectedSource) && !selectedSaferRecontactPoolIsActive();
+}
+
 function currentDispatchPlanKey() {
   const selected = dispatchSourceForSelectedMode();
   const source = selected.source || {};
   const verificationRequired = source.verification_required === true;
-  return [
+  const key = [
     selectedImportantDispatchSourceMode(),
     normalizeDispatchPlanPath(source.dispatch_source_path),
     String(source.dispatch_source_exists ?? ""),
@@ -1908,17 +1926,23 @@ function currentDispatchPlanKey() {
     verificationRequired ? String(source.verification_file_mtime || "") : "",
     selectedImportantDispatchCap(),
     selectedImportantDispatchCampaignType(),
-  ].join("|");
+  ];
+  if (normalFullRecontactSelectionActive(source)) key.push(selectedRecontactRoute);
+  return key.join("|");
 }
 
 function dispatchPreviewMatchesCurrentSelection() {
-  return Boolean(lastImportantDispatchPreview && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey());
+  return Boolean(
+    lastImportantDispatchPreview
+    && !invalidatedRecontactPreviewIds.has(lastImportantDispatchPreview.preview_id)
+    && lastImportantDispatchPreview._preview_key === currentDispatchPlanKey()
+  );
 }
 
 function persistedImportantDispatchPreviewKey(preview) {
   if (!preview?.preview_id) return "";
   const verificationRequired = preview.verification_required === true;
-  return [
+  const key = [
     String(preview.dispatch_source_mode || ""),
     normalizeDispatchPlanPath(preview.dispatch_source_path),
     String(preview.dispatch_source_exists ?? ""),
@@ -1928,7 +1952,13 @@ function persistedImportantDispatchPreviewKey(preview) {
     verificationRequired ? String(preview.verification_file_mtime || "") : "",
     String(preview.dispatch_cap || "all"),
     String(preview.campaign_type || "cold"),
-  ].join("|");
+  ];
+  if (preview.full_recontact_sendgrid_only === true) {
+    const route = normalizeRecontactRoute(preview.recontact_route);
+    if (!route) return "";
+    key.push(route);
+  }
+  return key.join("|");
 }
 
 function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
@@ -1944,7 +1974,11 @@ function hydrateImportantDispatchPreviewFromStatus(status = lastLeadsStatus) {
   }
 
   lastImportantDispatchPreview = { ...(preview || {}), _preview_key: persistedKey };
-  if (status?.latest_auto_dispatch_preview_current !== true || persistedKey !== currentKey) {
+  if (
+    status?.latest_auto_dispatch_preview_current !== true
+    || persistedKey !== currentKey
+    || invalidatedRecontactPreviewIds.has(preview.preview_id)
+  ) {
     lastImportantDispatchPreview._preview_key = "";
     return false;
   }
@@ -2002,6 +2036,9 @@ function importantLeadDispatchPayload(includePreviewId = false) {
     dispatch_source_mode: selectedImportantDispatchSourceMode(campaignType),
     dispatch_cap: selectedImportantDispatchCap(),
     campaign_type: campaignType,
+    ...(normalFullRecontactSelectionActive(selectedSource)
+      ? { recontact_route: selectedRecontactRoute }
+      : {}),
   };
   const progress = currentLeadOpsProgress(lastLeadsStatus, "cold");
   const activeJob = currentImportantCheckJob(lastLeadsStatus, "cold");
@@ -3336,6 +3373,15 @@ function renderDispatchModeCards(preview = null) {
         <small>${escapeHtml(recontactMetrics)}</small>
         <em>Eligible after mandatory safety: ${escapeHtml(eligibleAfterSafety)}</em>
       </button>
+      ${normalFullRecontactSelectionActive(recontactSource) ? `
+        <label class="dispatch-recontact-route">
+          <span>Recontact Route</span>
+          <select data-recontact-route aria-label="Recontact Route">
+            <option value="sendgrid" ${selectedRecontactRoute === "sendgrid" ? "selected" : ""}>SendGrid Cold</option>
+            <option value="private_jc" ${selectedRecontactRoute === "private_jc" ? "selected" : ""}>Private JC Cold</option>
+          </select>
+          <small>${escapeHtml(recontactRouteLabel())} selected · route changes require a new Preview Dispatch.</small>
+        </label>` : ""}
     `,
   );
 }
@@ -6875,18 +6921,32 @@ async function previewImportantLeadDispatch() {
     }
 
     if (data.preview?.preview_id) {
+      const persistedPreviewKey = persistedImportantDispatchPreviewKey(data.preview);
+      const currentPreviewKey = currentDispatchPlanKey();
+      const previewIsCurrent = Boolean(
+        persistedPreviewKey
+        && persistedPreviewKey === currentPreviewKey
+      );
+      invalidatedRecontactPreviewIds.delete(data.preview.preview_id);
       lastImportantDispatchPreview = {
         ...(data.preview || {}),
-        _preview_key: currentDispatchPlanKey(),
+        _preview_key: previewIsCurrent ? currentPreviewKey : "",
       };
-      lastImportantDispatchPreviewState = "ready";
-      lastImportantDispatchPreviewFeedback = { state: "ready", message: "Preview ready." };
+      lastImportantDispatchPreviewState = previewIsCurrent ? "ready" : "stale";
+      lastImportantDispatchPreviewFeedback = previewIsCurrent
+        ? { state: "ready", message: "Preview ready." }
+        : { state: "stale", message: "Preview route/source mismatch — run Preview Dispatch again." };
       if (data.status) {
         renderLeadsStatus(data.status || {});
       } else {
         renderImportantDispatch(lastImportantDispatch);
       }
-      showMessage(data.message || "Dispatch preview ready.", "success");
+      showMessage(
+        previewIsCurrent
+          ? (data.message || "Dispatch preview ready.")
+          : "Preview returned for a different route/source. Run Preview Dispatch again.",
+        previewIsCurrent ? "success" : "error",
+      );
     } else {
       lastImportantDispatchPreviewState = "failed";
       lastImportantDispatchPreviewFeedback = { state: "failed", message: "Preview did not save. Please retry." };
@@ -7617,7 +7677,8 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
   const tbody = panel.querySelector("tbody");
   const profiles = Array.isArray(snapshot?.profiles)
     ? snapshot.profiles.filter((profile, index, allProfiles) => (
-      allProfiles.findIndex((candidate) => candidate?.name === profile?.name) === index
+      !profile?.controlled_test
+      && allProfiles.findIndex((candidate) => candidate?.name === profile?.name) === index
     ))
     : [];
   if (!profiles.length) {
@@ -10915,6 +10976,27 @@ if (els.leadsImportantDispatchPreviewBtn) els.leadsImportantDispatchPreviewBtn.a
 if (els.leadsImportantDispatchPreviewTopBtn) els.leadsImportantDispatchPreviewTopBtn.addEventListener("click", () => previewImportantLeadDispatch());
 if (els.leadsImportantDispatchConfirmBtn) els.leadsImportantDispatchConfirmBtn.addEventListener("click", () => confirmImportantLeadDispatch());
 if (els.leadsDispatchModeCards) {
+  els.leadsDispatchModeCards.addEventListener("change", (event) => {
+    const routeSelect = event.target.closest("[data-recontact-route]");
+    if (!routeSelect || !normalFullRecontactSelectionActive()) return;
+    const nextRoute = normalizeRecontactRoute(routeSelect.value);
+    if (!nextRoute || nextRoute === selectedRecontactRoute) return;
+    selectedRecontactRoute = nextRoute;
+    if (
+      lastImportantDispatchPreview?.preview_id
+      && lastImportantDispatchPreview?.full_recontact_sendgrid_only === true
+    ) {
+      invalidatedRecontactPreviewIds.add(lastImportantDispatchPreview.preview_id);
+      lastImportantDispatchPreview._preview_key = "";
+    }
+    lastImportantDispatchPreviewState = "stale";
+    lastImportantDispatchPreviewFeedback = {
+      state: "stale",
+      message: `Route changed to ${recontactRouteLabel()} — Preview Dispatch required.`,
+    };
+    renderSelectedDispatchWorkflowState();
+  });
+
   els.leadsDispatchModeCards.addEventListener("click", (event) => {
     const card = event.target.closest("[data-dispatch-mode-card]");
     if (!card) return;

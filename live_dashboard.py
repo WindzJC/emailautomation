@@ -369,6 +369,7 @@ class ImportantLeadDispatchPayload(BaseModel):
     campaign_type: str = CAMPAIGN_TYPE_COLD
     preview_id: str = ""
     recontact_recency_override: bool = False
+    recontact_route: str = ""
     job_id: str = ""
     current_run_id: str = ""
     preview_recovery_binding: dict[str, object] = Field(default_factory=dict)
@@ -2599,6 +2600,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
         _save_important_dispatch_job(job)
         report = confirm_dispatch_preview(
             str(job.get("preview_id") or ""),
+            recontact_route=(str(job.get("recontact_route") or "").strip() or None),
             require_stopped=True,
             allow_high_risk_recontact=bool(job.get("recontact_recency_override")),
             backup_root=settings.BACKUPS_DIR,
@@ -2693,6 +2695,7 @@ def _start_important_dispatch_job(
     selected_rows: int,
     total_rows_would_write: int,
     recontact_recency_override: bool = False,
+    recontact_route: str = "",
 ) -> dict[str, object]:
     job_id = f"dispatch_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
     job = {
@@ -2709,6 +2712,7 @@ def _start_important_dispatch_job(
         "dispatch_source_path": dispatch_source_path,
         "dispatch_cap": dispatch_cap,
         "recontact_recency_override": bool(recontact_recency_override),
+        "recontact_route": str(recontact_route or "").strip(),
         "total_source_rows": max(0, int(total_source_rows or 0)),
         "eligible_rows": max(0, int(eligible_rows or 0)),
         "selected_rows": max(0, int(selected_rows or 0)),
@@ -4368,7 +4372,11 @@ def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict
     snapshot["warm_private_jc_status"] = warm_status
     snapshot["warm_private_jc_lane"] = warm_status
     for profile in snapshot.get("profiles", []):
-        if str(profile.get("name") or "") != "private_jc_warm":
+        profile_name = str(profile.get("name") or "")
+        profile["controlled_test"] = bool(
+            PROFILES.get(profile_name, {}).get("controlled_test")
+        )
+        if profile_name != "private_jc_warm":
             continue
         profile["pending_count"] = int(warm_status["queued_remaining_count"])
         profile["pending"] = int(warm_status["queued_remaining_count"])
@@ -7623,6 +7631,7 @@ def _run_claimed_manual_dispatch_preview_background(
     campaign_type: str,
     preview_dir: Path,
     expected_recovery_binding: dict[str, object] | None = None,
+    recontact_route: str | None = None,
 ) -> None:
     try:
         job = _load_important_check_job(check_job_id)
@@ -7642,6 +7651,7 @@ def _run_claimed_manual_dispatch_preview_background(
             campaign_type=campaign_type,
             preview_dir=preview_dir,
             progress_callback=_preview_progress_callback(check_job_id),
+            recontact_route=recontact_route,
         )
         if expected_recovery_binding:
             post_build_job = _load_important_check_job(check_job_id)
@@ -7932,6 +7942,9 @@ def _dispatch_preview_matches_request(
 @app.post("/api/leads/dispatch-important/preview")
 def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     progress_job: dict[str, object] | None = None
+    requested_recontact_route = str(
+        getattr(payload, "recontact_route", "") if payload else ""
+    ).strip()
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
         if preflight_block is not None:
@@ -8049,6 +8062,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     dispatch_cap=dispatch_cap,
                     campaign_type=campaign_type,
                     preview_dir=preview_dir,
+                    recontact_route=requested_recontact_route or None,
                 )
             finally:
                 _release_dispatch_preview_claim(preview_claim)
@@ -8190,6 +8204,7 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
                     "campaign_type": campaign_type,
                     "preview_dir": preview_dir,
                     "expected_recovery_binding": expected_recovery_binding,
+                    "recontact_route": requested_recontact_route or None,
                 },
                 daemon=True,
             )
@@ -8308,6 +8323,22 @@ def _dispatch_preflight_block_response(*, snapshot: dict[str, object] | None = N
     )
 
 
+def _validate_dashboard_recontact_route(
+    preview: dict[str, object],
+    requested_route: object,
+) -> str:
+    # Fail closed when confirming a route-bound Full Recontact preview.
+    if not bool(preview.get("full_recontact_sendgrid_only")):
+        return ""
+    route = str(requested_route or "").strip()
+    preview_route = str(preview.get("recontact_route") or "").strip()
+    if route not in {"sendgrid", "private_jc"} or route != preview_route:
+        raise RuntimeError(
+            "Recontact route is missing or mismatched. Re-run Preview Dispatch."
+        )
+    return route
+
+
 def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
@@ -8317,6 +8348,10 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         if not preview_id:
             raise ValueError("Run Preview Dispatch first.")
         preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+        requested_recontact_route = _validate_dashboard_recontact_route(
+            preview,
+            getattr(payload, "recontact_route", "") if payload else "",
+        )
         if not str(preview.get("campaign_type") or "").strip():
             raise RuntimeError("Dispatch preview is missing campaign type. Re-run Preview Dispatch.")
         if not str(preview.get("dispatch_source_mode") or "").strip():
@@ -8400,6 +8435,7 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
             selected_rows=int(preview.get("dispatch_selected_row_count") or 0),
             total_rows_would_write=int(preview.get("total_rows_would_write") or 0),
             recontact_recency_override=False,
+            recontact_route=requested_recontact_route,
         )
     except FileNotFoundError as exc:
         return JSONResponse({"ok": False, "error": "missing_source", "message": str(exc)}, status_code=404)
