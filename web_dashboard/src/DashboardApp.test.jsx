@@ -11,7 +11,6 @@ const template = {
   sidebar: {
     brand: '<div class="app-rail-top">Email Automation</div>',
     navigation: `<div class="app-rail-tabs">
-      <button id="ops-tab-btn" aria-controls="ops-view">Overview</button>
       <button id="leads-tab-btn" aria-controls="leads-view">Leads</button>
       <button id="senders-tab-btn" aria-controls="senders-view">Senders</button>
     </div>`,
@@ -22,7 +21,7 @@ const template = {
     metrics: '<section class="queue-health-section"><div id="summary-grid"></div></section>',
     progress: '<section class="ops-progress-strip"><span id="ops-progress-summary"></span></section>',
     progressDetails: '<details id="ops-progress-details"></details>',
-    controlledTest: '<section class="controlled-send-test-card"><button id="controlled-send-test-btn">Controlled test</button></section>',
+    controlledTest: '<section class="controlled-send-test-card"><button id="controlled-send-test-btn">Controlled test</button></section><section class="controlled-send-test-card"><button id="controlled-send-test-jc-btn">JC controlled test</button></section><section class="controlled-send-test-card"><button id="controlled-send-test-all-btn">All sender controlled test</button></section>',
     profileDetail: '<section class="workspace-primary"><div id="profile-detail"></div></section>',
     history: '<details class="campaign-history-panel"><div id="campaign-run-history"></div></details>',
   },
@@ -47,8 +46,7 @@ describe("DashboardApp", () => {
     expect(screen.getByText("Refresh")).toBeInTheDocument();
     expect(screen.getByText("Checking dashboard mode...")).toBeInTheDocument();
     expect(screen.getByText("Manual Start/Resume can launch real workers and consume queues.")).toBeInTheDocument();
-    expect(screen.getByText("Current run")).toBeInTheDocument();
-    expect(screen.getByText("Queue and delivery state")).toBeInTheDocument();
+    expect(document.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
     expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=leads&workflow=cold");
     expect(document.querySelector('[data-leads-workflow="warm"]')).toHaveAttribute("href", "/?tab=leads&workflow=warm");
@@ -63,36 +61,38 @@ describe("DashboardApp", () => {
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();
   });
 
-  it("shows only the three migrated canonical destinations", () => {
+  it("shows only Leads and Senders as canonical destinations", () => {
     render(<DashboardApp template={template} />);
     const navigation = document.querySelector(".react-sidebar-nav");
-    const labels = ["Overview", "Leads", "Senders"];
+    const labels = ["Leads", "Senders"];
     expect(Array.from(navigation.querySelectorAll("button"), (button) => button.textContent.trim())).toEqual(labels);
     for (const label of labels) {
       expect(screen.getAllByText(label, { selector: ".react-sidebar-nav button" })).toHaveLength(1);
     }
-    expect(document.getElementById("ops-tab-btn")).toHaveAttribute("aria-controls", "ops-view");
     expect(document.getElementById("leads-tab-btn")).toHaveAttribute("aria-controls", "leads-view");
     expect(document.getElementById("senders-tab-btn")).toHaveAttribute("aria-controls", "senders-view");
-    expect(document.getElementById("ops-view")).toBeInTheDocument();
     expect(document.getElementById("leads-view")).toBeInTheDocument();
     expect(document.getElementById("senders-view")).toBeInTheDocument();
-    for (const label of ["Campaigns", "Sending", "Suppressions", "Recovery", "Activity", "Settings"]) {
+    for (const label of ["Overview", "Campaigns", "Sending", "Suppressions", "Recovery", "Activity", "Settings", "Replies"]) {
       expect(screen.queryByText(label, { selector: ".react-sidebar-nav button" })).not.toBeInTheDocument();
     }
   });
 
-  it("places the sole sender authority on Senders and keeps Overview summary-only", () => {
+  it("keeps summary, fleet authority, details, and validation tools together on Senders", () => {
     render(<DashboardApp template={template} />);
-    const overview = document.getElementById("ops-view");
     const senders = document.getElementById("senders-view");
-    expect(overview).toHaveTextContent("Email operations overview");
+    expect(document.getElementById("ops-view")).not.toBeInTheDocument();
     expect(senders).toHaveTextContent("Senders");
-    expect(overview.querySelector("#start-ready-btn, #stop-btn, #controlled-send-test-btn, #profile-detail")).toBeNull();
+    expect(senders.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
     expect(senders.querySelector("#start-ready-btn")).toBeInTheDocument();
     expect(senders.querySelector("#stop-btn")).toBeInTheDocument();
     expect(senders.querySelector("#controlled-send-test-btn")).toBeInTheDocument();
     expect(senders.querySelector("#profile-detail")).toBeInTheDocument();
+    const validationTools = senders.querySelector("details.react-validation-tools");
+    expect(validationTools).not.toHaveAttribute("open");
+    expect(validationTools).toHaveTextContent("Validation Tools");
+    expect(validationTools).toHaveTextContent("no production recipient queues");
+    expect(validationTools.querySelectorAll(".controlled-send-test-card")).toHaveLength(3);
     for (const id of [
       "start-ready-btn",
       "stop-btn",
@@ -226,22 +226,22 @@ describe("Warm Outreach controller layout", () => {
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 
-  it("preserves Overview and Leads URLs and adds client-side Senders navigation", async () => {
+  it("keeps Leads and Senders navigation while resolving legacy ops links to Senders", async () => {
     const fetchMock = await boot();
-    const expectedLabels = ["Overview", "Leads", "Senders"];
+    const expectedLabels = ["Leads", "Senders"];
     expect(Array.from(document.querySelectorAll(".react-sidebar-nav button"), (button) => button.textContent.trim())).toEqual(expectedLabels);
 
-    fireEvent.click(document.getElementById("ops-tab-btn"));
+    fireEvent.click(document.getElementById("senders-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
-    expect(window.location.search).not.toContain("tab=");
-    expect(document.getElementById("ops-view")).toBeInTheDocument();
+    expect(window.location.search).toContain("tab=senders");
+    expect(document.getElementById("senders-view")).toBeInTheDocument();
     expect(document.getElementById("leads-view")).not.toBeInTheDocument();
 
     fireEvent.click(document.getElementById("leads-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(window.location.search).toContain("tab=leads");
     expect(document.getElementById("leads-view")).toBeInTheDocument();
-    expect(document.getElementById("ops-view")).not.toBeInTheDocument();
+    expect(document.getElementById("senders-view")).not.toBeInTheDocument();
 
     fireEvent.click(document.getElementById("senders-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
@@ -263,14 +263,14 @@ describe("Warm Outreach controller layout", () => {
     window.history.replaceState({}, "", "/?tab=ops");
     window.dispatchEvent(new PopStateEvent("popstate"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
-    expect(document.getElementById("ops-view")).toBeInTheDocument();
-    expect(document.getElementById("senders-view")).not.toBeInTheDocument();
+    expect(document.getElementById("senders-view")).toBeInTheDocument();
+    expect(document.getElementById("ops-view")).not.toBeInTheDocument();
 
     window.history.replaceState({}, "", "/?tab=leads&workflow=warm");
     window.dispatchEvent(new PopStateEvent("popstate"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(document.getElementById("leads-view")).toBeInTheDocument();
-    expect(document.getElementById("ops-view")).not.toBeInTheDocument();
+    expect(document.getElementById("senders-view")).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 });

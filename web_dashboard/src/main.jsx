@@ -310,16 +310,9 @@ export function CommandBar({ html }) {
   );
 }
 
-export function MetricCard({ children }) {
+export function FleetSummary({ children }) {
   return (
-    <section className="react-metric-region" aria-label="Current run summary">
-      <header className="react-section-heading">
-        <div>
-          <p className="react-section-label">Current run</p>
-          <span>Queue and delivery state</span>
-        </div>
-        <span className="react-section-state">Live snapshot</span>
-      </header>
+    <section className="react-metric-region react-fleet-summary" aria-label="Fleet operations summary">
       {children}
     </section>
   );
@@ -363,46 +356,46 @@ export function EnvironmentBanner() {
   );
 }
 
-export function OverviewDashboard({ view }) {
+export function ValidationTools({ html }) {
   return (
-    <section id="ops-view" className="dashboard-view workspace-view react-workspace react-overview-page" role="tabpanel" aria-labelledby="ops-tab-btn">
-      <PageHeading
-        eyebrow="Operations control plane"
-        title="Email operations overview"
-        description="Monitor system health, queued work, run progress, and items that need attention."
-        aside={<StatusPill tone="live">Live summary</StatusPill>}
-      />
-
-      <MetricCard>
-        <LegacyNode html={view.metrics} />
-      </MetricCard>
-
-      <section className="react-overview-progress" aria-label="Run progress and alerts">
-        <LegacyNode html={view.progress} />
-        <LegacyNode html={view.progressDetails} />
-      </section>
-
-      <LegacyNode html={view.history} />
-    </section>
+    <details className="react-validation-tools">
+      <summary>
+        <span>Validation Tools</span>
+        <span>Controlled sender tests — no production recipient queues</span>
+      </summary>
+      <div className="react-validation-tools-body">
+        <LegacyNode html={html} />
+      </div>
+    </details>
   );
 }
 
 export function SendersDashboard({ view }) {
   return (
-    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page hidden" role="tabpanel" aria-labelledby="senders-tab-btn" hidden>
+    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="senders-tab-btn">
       <PageHeading
         eyebrow="Delivery authority"
         title="Senders"
-        description="Review sender readiness and use the existing gated controls for the intended profile."
-        aside={<StatusPill tone="safe">Manual authority</StatusPill>}
+        description="Fleet status, readiness, and gated sender controls in one operational workspace."
+        aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
+
+      <FleetSummary>
+        <LegacyNode html={view.metrics} />
+      </FleetSummary>
 
       <SenderTable controls={view.commandBar} />
 
-      {view.controlledTest ? <LegacyNode html={view.controlledTest} /> : null}
+      <section className="react-senders-progress" aria-label="Run progress and alerts">
+        <LegacyNode html={view.progress} />
+        <LegacyNode html={view.progressDetails} />
+      </section>
+
+      {view.controlledTest ? <ValidationTools html={view.controlledTest} /> : null}
 
       <section className="react-supporting-panels">
         <LegacyNode html={view.profileDetail} />
+        <LegacyNode html={view.history} />
       </section>
     </section>
   );
@@ -532,7 +525,6 @@ export function AppShell({ template }) {
       <div className="app-shell react-app-shell">
         <Sidebar {...template.sidebar} />
         <main className="app-main react-main">
-          <OverviewDashboard view={template.senders} />
           <SendersDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
         </main>

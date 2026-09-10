@@ -205,11 +205,10 @@ let wallboardMode = false;
 let startReadyBusy = false;
 let startReadyJobId = "";
 let startReadyPollTimer = null;
-let activeDashboardTab = "ops";
+let activeDashboardTab = "senders";
 let activeLeadWorkflow = "cold";
 const tabPanelMounts = {
   initialized: false,
-  opsAnchor: null,
   leadsAnchor: null,
   sendersAnchor: null,
 };
@@ -481,7 +480,7 @@ function readWallboardModeFromLocation() {
 function readDashboardTabFromLocation() {
   const params = new URLSearchParams(window.location.search);
   const tab = params.get("tab");
-  return tab === "leads" || tab === "senders" ? tab : "ops";
+  return tab === "leads" ? "leads" : "senders";
 }
 
 function readLeadWorkflowFromLocation() {
@@ -504,7 +503,7 @@ function syncLocationState(historyMode = "replace") {
   } else {
     url.searchParams.delete("view");
   }
-  if (["leads", "senders"].includes(activeDashboardTab) && !wallboardMode) {
+  if (!wallboardMode) {
     url.searchParams.set("tab", activeDashboardTab);
   } else {
     url.searchParams.delete("tab");
@@ -526,10 +525,6 @@ function insertAfterAnchor(anchor, node) {
 
 function ensureTabPanelMountAnchors() {
   if (tabPanelMounts.initialized) return;
-  if (els.opsView?.parentNode) {
-    tabPanelMounts.opsAnchor = document.createComment("ops-view-mount");
-    els.opsView.parentNode.insertBefore(tabPanelMounts.opsAnchor, els.opsView);
-  }
   if (els.leadsView?.parentNode) {
     tabPanelMounts.leadsAnchor = document.createComment("leads-view-mount");
     els.leadsView.parentNode.insertBefore(tabPanelMounts.leadsAnchor, els.leadsView);
@@ -543,32 +538,20 @@ function ensureTabPanelMountAnchors() {
 
 function mountExclusiveDashboardPanel(activeTab) {
   ensureTabPanelMountAnchors();
-  if (els.opsView?.isConnected) els.opsView.remove();
   if (els.leadsView?.isConnected) els.leadsView.remove();
   if (els.sendersView?.isConnected) els.sendersView.remove();
   if (activeTab === "leads") insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);
-  else if (activeTab === "senders") insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);
-  else insertAfterAnchor(tabPanelMounts.opsAnchor, els.opsView);
+  else insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);
 }
 
 function applyDashboardTab() {
-  const selectedTab = wallboardMode ? "ops" : activeDashboardTab;
+  const selectedTab = wallboardMode ? "senders" : activeDashboardTab;
   const leadsActive = selectedTab === "leads";
   const sendersActive = selectedTab === "senders";
   mountExclusiveDashboardPanel(selectedTab);
 
-  if (els.opsTabBtn) setNodeText(els.opsTabBtn, "Overview");
   if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Leads");
   if (els.sendersTabBtn) setNodeText(els.sendersTabBtn, "Senders");
-
-  if (els.opsView) {
-    const hidden = selectedTab !== "ops";
-    els.opsView.classList.toggle("hidden", hidden);
-    els.opsView.hidden = hidden;
-    els.opsView.setAttribute("aria-hidden", String(hidden));
-    if (hidden) els.opsView.setAttribute("inert", "");
-    else els.opsView.removeAttribute("inert");
-  }
 
   if (els.leadsView) {
     els.leadsView.classList.toggle("hidden", !leadsActive);
@@ -586,14 +569,6 @@ function applyDashboardTab() {
     if (hidden) els.sendersView.setAttribute("inert", "");
     else els.sendersView.removeAttribute("inert");
   }
-
-  if (els.opsTabBtn) {
-    const active = selectedTab === "ops";
-    els.opsTabBtn.classList.toggle("is-active", active);
-    els.opsTabBtn.setAttribute("aria-selected", String(active));
-    els.opsTabBtn.tabIndex = active ? 0 : -1;
-  }
-
 
   if (els.sendersTabBtn) {
     els.sendersTabBtn.classList.toggle("is-active", sendersActive);
@@ -614,15 +589,15 @@ function applyDashboardTab() {
 }
 
 function isOpsTabVisible() {
-  return activeDashboardTab === "ops" || wallboardMode;
+  return isSendersTabVisible();
 }
 
 function isSendersTabVisible() {
-  return activeDashboardTab === "senders" && !wallboardMode;
+  return activeDashboardTab === "senders" || wallboardMode;
 }
 
 function isSnapshotTabVisible() {
-  return isOpsTabVisible() || isSendersTabVisible();
+  return isSendersTabVisible();
 }
 
 function isLeadsTabVisible() {
@@ -737,7 +712,7 @@ function applyWallboardMode() {
     setNodeText(els.wallboardBtn, wallboardMode ? "Exit Wallboard" : "Wallboard");
   }
   if (wallboardMode) {
-    activeDashboardTab = "ops";
+    activeDashboardTab = "senders";
   }
   applyDashboardTab();
   document.title = wallboardMode ? "Email Automation Wallboard" : "Email Automation Live Dashboard";
@@ -755,8 +730,8 @@ function toggleWallboardMode() {
 }
 
 function setDashboardTab(nextTab) {
-  activeDashboardTab = ["leads", "senders"].includes(nextTab) ? nextTab : "ops";
-  if (wallboardMode && activeDashboardTab !== "ops") {
+  activeDashboardTab = nextTab === "leads" ? "leads" : "senders";
+  if (wallboardMode && activeDashboardTab === "leads") {
     wallboardMode = false;
     applyWallboardMode();
   } else {
@@ -10990,7 +10965,6 @@ if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
 if (els.opsProgressDetails) {
   els.opsProgressDetails.addEventListener("toggle", () => syncProgressDetailsToggle());
 }
-if (els.opsTabBtn) els.opsTabBtn.addEventListener("click", () => setDashboardTab("ops"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
 if (els.sendersTabBtn) els.sendersTabBtn.addEventListener("click", () => setDashboardTab("senders"));
 document.querySelectorAll("[data-leads-workflow]").forEach((link) => {

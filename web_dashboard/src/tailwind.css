@@ -1785,8 +1785,8 @@
   display: none;
 }
 
-#ops-view .workspace-summary-strip.summary-grid,
-#ops-view #summary-grid.workspace-summary-strip.summary-grid {
+#senders-view .workspace-summary-strip.summary-grid,
+#senders-view #summary-grid.workspace-summary-strip.summary-grid {
   display: grid !important;
   grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
   gap: 0 !important;
@@ -1796,11 +1796,11 @@
   background: transparent !important;
 }
 
-#ops-view .summary-card,
-#ops-view .workspace-summary-strip .summary-card {
+#senders-view .summary-card,
+#senders-view .workspace-summary-strip .summary-card {
   min-width: 0;
-  min-height: 72px !important;
-  padding: 10px 12px !important;
+  min-height: 58px !important;
+  padding: 7px 10px !important;
   border: 0 !important;
   border-right: 1px solid var(--console-line) !important;
   border-radius: 0 !important;
@@ -1808,38 +1808,42 @@
   box-shadow: none !important;
 }
 
-#ops-view .summary-card:last-child {
+#senders-view .summary-card:last-child {
   border-right: 0 !important;
 }
 
-#ops-view .summary-label {
+#senders-view .summary-label {
   margin-bottom: 5px;
   color: #a7b4c5;
   font-size: .66rem;
 }
 
-#ops-view .summary-value,
-#ops-view .summary-card-total_pending .summary-value {
+#senders-view .summary-value,
+#senders-view .summary-card-total_pending .summary-value {
   margin: 0;
   font-size: 1.05rem;
   line-height: 1.1;
 }
 
-#ops-view .summary-meta,
-#ops-view .summary-subline {
+#senders-view .summary-meta,
+#senders-view .summary-subline {
   margin-top: 5px;
   color: #9aa8ba;
   font-size: .67rem;
   line-height: 1.3;
 }
 
-#ops-view .summary-card-private_jc,
-#ops-view .summary-card-sendgrid {
+#senders-view .summary-card-private_jc,
+#senders-view .summary-card-sendgrid {
   border-left: 2px solid rgba(88,212,154,.65) !important;
 }
 
-#ops-view .summary-card-alerts {
+#senders-view .summary-card-alerts {
   color: #f5d488;
+}
+
+#senders-view .react-fleet-summary .summary-details-slot {
+  display: none;
 }
 
 .react-sender-console {
@@ -1981,7 +1985,7 @@
   display: none;
 }
 
-#ops-view .ops-progress-strip {
+#senders-view .ops-progress-strip {
   order: 3;
   min-height: 34px;
   margin: 0;
@@ -1993,11 +1997,83 @@
   box-shadow: none;
 }
 
-#ops-view .ops-progress-strip > * {
+#senders-view .ops-progress-strip > * {
   margin: 0;
 }
 
-#ops-view #ops-progress-details {
+#senders-view .ops-progress-summary-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0;
+}
+
+#senders-view .ops-progress-summary-title {
+  display: flex;
+  align-items: center;
+  padding-right: 11px;
+  border-right: 1px solid var(--console-line-soft);
+  color: #a7b4c5;
+  font-size: .63rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+#senders-view .ops-progress-summary {
+  display: grid;
+  grid-template-columns: minmax(130px, .8fr) minmax(250px, 1.6fr) minmax(125px, .8fr) minmax(105px, .6fr);
+  min-width: 0;
+}
+
+#senders-view .ops-progress-summary-item {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 0 11px;
+  border-right: 1px solid var(--console-line-soft);
+}
+
+#senders-view .ops-progress-summary-item strong {
+  color: #94a4b8;
+  font-size: .58rem;
+  font-weight: 700;
+  letter-spacing: .035em;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+#senders-view .ops-progress-summary-item span {
+  overflow: hidden;
+  color: #d7e2ee;
+  font-size: .67rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#senders-view .ops-progress-summary-action {
+  align-self: center;
+  margin-left: 9px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #91baf3;
+  font-size: .64rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#senders-view .ops-progress-summary-action:hover,
+#senders-view .ops-progress-summary-action:focus-visible {
+  background: rgba(129,174,242,.09);
+  color: #c9dfff;
+}
+
+#senders-view #ops-progress-details {
   order: 4;
 }
 
@@ -2008,9 +2084,9 @@
   margin-top: 7px;
 }
 
-#ops-view #ops-progress-details,
+#senders-view #ops-progress-details,
 #senders-view .react-supporting-panels > *,
-#ops-view .campaign-history-panel,
+#senders-view .campaign-history-panel,
 #senders-view .profile-detail-panel,
 #senders-view .diagnostics-panel {
   min-height: 34px;
@@ -2022,12 +2098,48 @@
   box-shadow: none !important;
 }
 
-#ops-view details > summary,
 #senders-view details > summary {
   min-height: 34px;
   padding: 7px 10px;
   color: #c8d3df;
   font-size: .69rem;
+}
+
+.react-validation-tools {
+  margin-top: 7px;
+  overflow: hidden;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: #0a121c;
+}
+
+.react-validation-tools > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.react-validation-tools > summary > span:first-child {
+  color: #d7e2ee;
+  font-weight: 700;
+}
+
+.react-validation-tools > summary > span:last-child {
+  color: #8392a6;
+  font-size: .64rem;
+  font-weight: 500;
+}
+
+.react-validation-tools-body {
+  display: grid;
+  gap: 7px;
+  padding: 0 7px 7px;
+}
+
+.react-validation-tools-body .controlled-send-test-card {
+  margin: 0;
 }
 
 /* Lead Ops: tabs and thin stepper */
@@ -2781,10 +2893,10 @@
     padding: 13px 12px 16px !important;
   }
 
-  #ops-view .workspace-summary-strip.summary-grid,
-  #ops-view #summary-grid.workspace-summary-strip.summary-grid {
-    grid-template-columns: repeat(5, minmax(130px, 1fr)) !important;
-    overflow-x: auto;
+  #senders-view .workspace-summary-strip.summary-grid,
+  #senders-view #summary-grid.workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    overflow: hidden;
   }
 
   .operator-step-source .leads-control-bar,
@@ -2885,16 +2997,48 @@
     font-size: .56rem;
   }
 
-  #ops-view .workspace-summary-strip.summary-grid,
-  #ops-view #summary-grid.workspace-summary-strip.summary-grid {
-    grid-template-columns: 1fr !important;
+  #senders-view .workspace-summary-strip.summary-grid,
+  #senders-view #summary-grid.workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
     overflow: hidden;
   }
 
-  #ops-view .summary-card,
-  #ops-view .workspace-summary-strip .summary-card {
+  #senders-view .ops-progress-summary-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  #senders-view .ops-progress-summary-title {
+    grid-column: 1 / -1;
+    padding: 0 0 5px;
+    border-right: 0;
+    border-bottom: 1px solid var(--console-line-soft);
+  }
+
+  #senders-view .ops-progress-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-top: 4px;
+  }
+
+  #senders-view .ops-progress-summary-item {
+    padding: 3px 8px;
+  }
+
+  #senders-view .ops-progress-summary-item:nth-child(2) {
+    border-right: 0;
+  }
+
+  #senders-view .ops-progress-summary-item:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--console-line-soft);
+  }
+
+  #senders-view .ops-progress-summary-action {
+    margin: 4px 0 0 7px;
+  }
+
+  #senders-view .summary-card,
+  #senders-view .workspace-summary-strip .summary-card {
     display: grid;
-    grid-template-columns: minmax(90px, 1fr) auto;
+    grid-template-columns: 1fr;
     align-items: center;
     min-height: 39px !important;
     padding: 6px 9px !important;
@@ -2902,26 +3046,26 @@
     border-bottom: 1px solid var(--console-line-soft) !important;
   }
 
-  #ops-view .summary-card:last-child {
+  #senders-view .summary-card:last-child {
     border-bottom: 0 !important;
   }
 
-  #ops-view .summary-label,
-  #ops-view .summary-value {
+  #senders-view .summary-label,
+  #senders-view .summary-value {
     margin: 0;
     font-size: .68rem !important;
   }
 
-  #ops-view .summary-meta,
-  #ops-view .summary-subline {
-    grid-column: 2;
+  #senders-view .summary-meta,
+  #senders-view .summary-subline {
+    grid-column: 1;
     margin: 0;
-    text-align: right;
+    text-align: left;
     font-size: .6rem;
   }
 
-  #ops-view .summary-card-private_jc,
-  #ops-view .summary-card-sendgrid {
+  #senders-view .summary-card-private_jc,
+  #senders-view .summary-card-sendgrid {
     border-left: 2px solid rgba(88,212,154,.65) !important;
   }
 
@@ -2934,7 +3078,7 @@
   }
 
   .react-command-bar,
-  #ops-view .ops-progress-strip,
+  #senders-view .ops-progress-strip,
   .react-supporting-panels {
     font-size: .65rem;
   }
@@ -3188,7 +3332,7 @@
 
 /* ASTRA_OPERATOR_CONSOLE_20260812_END */
 
-/* Phase 1 control-plane shell: operational authority remains in Overview and Leads. */
+/* Canonical operations shell: authority remains in Senders and Leads. */
 .react-app-shell.app-shell,
 .react-app-shell.app-shell.warm-research-shell {
   display: grid !important;
