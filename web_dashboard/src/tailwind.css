@@ -1886,10 +1886,19 @@
 
 #senders-view .sender-status-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 940px;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: .7rem;
 }
+
+#senders-view .sender-status-table th:nth-child(1) { width: 19%; }
+#senders-view .sender-status-table th:nth-child(2) { width: 12%; }
+#senders-view .sender-status-table th:nth-child(3) { width: 7%; }
+#senders-view .sender-status-table th:nth-child(4) { width: 8%; }
+#senders-view .sender-status-table th:nth-child(5) { width: 8%; }
+#senders-view .sender-status-table th:nth-child(6) { width: 22%; }
+#senders-view .sender-status-table th:nth-child(7) { width: 24%; }
 
 #senders-view .sender-status-table th {
   height: 28px;
@@ -1919,6 +1928,23 @@
   min-height: 24px;
   padding: 3px 8px;
   font-size: .61rem;
+}
+
+#senders-view .sender-status-table td:nth-child(6) {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#senders-view .sender-status-table th:last-child,
+#senders-view .sender-status-table td:last-child {
+  padding-inline: 6px;
+}
+
+#senders-view .sender-status-table .sender-status-action-btn {
+  max-width: 100%;
+  white-space: nowrap;
 }
 
 .react-command-bar {
