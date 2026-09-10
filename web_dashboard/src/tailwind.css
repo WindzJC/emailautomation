@@ -3182,3 +3182,211 @@
 }
 
 /* ASTRA_OPERATOR_CONSOLE_20260812_END */
+
+/* Phase 1 control-plane shell: operational authority remains in Overview and Leads. */
+.react-app-shell.app-shell,
+.react-app-shell.app-shell.warm-research-shell {
+  display: grid !important;
+  grid-template-columns: 224px minmax(0, 1fr) !important;
+  width: 100% !important;
+  max-width: 1920px !important;
+  min-height: 100vh;
+  margin: 0 auto !important;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+}
+
+.react-sidebar.app-rail {
+  position: sticky !important;
+  top: 0;
+  display: flex !important;
+  flex-direction: column;
+  align-items: stretch;
+  width: 224px !important;
+  height: 100vh;
+  min-height: 100vh;
+  padding: 22px 14px 16px;
+  overflow-y: auto;
+  border-right: 1px solid var(--console-line);
+  border-bottom: 0;
+  background: #0b1521;
+}
+
+.react-sidebar-brand {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  padding: 0 5px 21px;
+}
+
+.react-sidebar-brand .app-rail-top {
+  display: grid;
+  gap: 4px;
+}
+
+.react-sidebar-brand .app-rail-top .eyebrow {
+  display: block;
+}
+
+.react-sidebar-brand .app-rail-title {
+  font-size: .92rem !important;
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.react-sidebar-nav {
+  align-self: stretch;
+  padding: 15px 0 0;
+  border-top: 1px solid var(--console-line-soft);
+}
+
+.react-sidebar-nav .app-rail-tabs {
+  display: grid;
+  height: auto;
+  gap: 3px;
+}
+
+.react-sidebar-nav .tab-btn {
+  justify-content: flex-start !important;
+  width: 100%;
+  min-width: 0 !important;
+  min-height: 38px;
+  height: 38px;
+  padding: 0 11px !important;
+  text-align: left;
+  border-radius: 5px !important;
+}
+
+.react-sidebar-nav .tab-btn.is-active {
+  color: var(--console-text) !important;
+  background: rgba(86, 163, 255, .09) !important;
+  box-shadow: inset 2px 0 0 var(--console-blue) !important;
+}
+
+.react-sidebar-nav .tab-btn.is-active::after {
+  display: none;
+}
+
+.react-sidebar-nav .control-plane-placeholder-nav:disabled {
+  color: #637084;
+  cursor: not-allowed;
+  opacity: .62;
+}
+
+.react-sidebar-context {
+  display: grid;
+  justify-content: stretch;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: auto;
+  padding: 18px 3px 0;
+  border-top: 1px solid var(--console-line-soft);
+}
+
+.react-sidebar-context > .app-rail-status {
+  display: grid;
+  width: 100%;
+  gap: 7px;
+}
+
+.react-sidebar-context .auth-chip {
+  width: 100%;
+}
+
+.react-sidebar-context .react-environment-flags {
+  flex-wrap: wrap;
+}
+
+.react-main.app-main {
+  min-width: 0;
+  padding: 20px clamp(18px, 2.4vw, 38px) 34px !important;
+}
+
+.control-plane-placeholder-views[aria-hidden="true"] {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .react-sidebar.app-rail {
+    position: static !important;
+    display: grid !important;
+    grid-template-columns: minmax(160px, auto) minmax(0, 1fr);
+    width: 100% !important;
+    height: auto;
+    min-height: 0;
+    padding: 10px 12px;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--console-line);
+  }
+
+  .react-sidebar-brand {
+    padding: 0 10px 0 0;
+  }
+
+  .react-sidebar-brand .app-rail-top .eyebrow {
+    display: none;
+  }
+
+  .react-sidebar-nav {
+    min-width: 0;
+    padding: 0;
+    overflow-x: auto;
+    border: 0;
+  }
+
+  .react-sidebar-nav .app-rail-tabs {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+  }
+
+  .react-sidebar-nav .tab-btn {
+    width: auto;
+    min-width: max-content !important;
+    padding-inline: 10px !important;
+    text-align: center;
+  }
+
+  .react-sidebar-context {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    margin-top: 8px;
+    padding: 8px 0 0;
+  }
+
+  .react-sidebar-context > .app-rail-status,
+  .react-sidebar-context .react-environment-banner {
+    width: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .react-sidebar.app-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .react-sidebar-brand {
+    display: none;
+  }
+
+  .react-sidebar-nav {
+    grid-column: 1;
+  }
+
+  .react-sidebar-context {
+    grid-column: 1;
+  }
+
+  .react-main.app-main {
+    padding: 16px 10px 28px !important;
+  }
+}

@@ -512,6 +512,35 @@ export function LeadOpsDashboard({ view }) {
   );
 }
 
+const PHASE_ONE_PLACEHOLDER_SECTIONS = [
+  "campaigns",
+  "sending",
+  "senders",
+  "suppressions",
+  "recovery",
+  "activity",
+  "settings",
+];
+
+export function ControlPlanePlaceholders() {
+  return (
+    <div className="control-plane-placeholder-views" aria-hidden="true">
+      {PHASE_ONE_PLACEHOLDER_SECTIONS.map((section) => (
+        <section
+          id={`${section}-placeholder-view`}
+          key={section}
+          className="control-plane-placeholder-view"
+          data-control-plane-placeholder={section}
+          aria-labelledby={`${section}-section-btn`}
+          hidden
+        >
+          <p>Authority has not been migrated to this section.</p>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export function AppShell({ template }) {
   return (
     <div className="page booting react-dashboard min-h-screen bg-canvas text-ink" data-dashboard-ui="react-tailwind-components">
@@ -520,6 +549,7 @@ export function AppShell({ template }) {
         <main className="app-main react-main">
           <SendersDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
+          <ControlPlanePlaceholders />
         </main>
       </div>
     </div>

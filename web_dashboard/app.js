@@ -545,8 +545,8 @@ function applyDashboardTab() {
   const leadsActive = activeDashboardTab === "leads" && !wallboardMode;
   mountExclusiveDashboardPanel(leadsActive);
 
-  if (els.opsTabBtn) setNodeText(els.opsTabBtn, "Senders");
-  if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Lead Ops");
+  if (els.opsTabBtn) setNodeText(els.opsTabBtn, "Overview");
+  if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Leads");
 
   if (els.opsView) {
     els.opsView.classList.toggle("hidden", leadsActive);

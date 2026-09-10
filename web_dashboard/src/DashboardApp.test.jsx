@@ -1,7 +1,7 @@
 import React from "react";
 import fs from "node:fs";
 import path from "node:path";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,12 +10,22 @@ import { DashboardApp } from "./main.jsx";
 const template = {
   sidebar: {
     brand: '<div class="app-rail-top">Email Automation</div>',
-    navigation: '<div class="app-rail-tabs"><button id="ops-tab-btn">Senders</button><button id="leads-tab-btn">Lead Ops</button></div>',
+    navigation: `<div class="app-rail-tabs">
+      <button id="ops-tab-btn" aria-controls="ops-view">Overview</button>
+      <button id="leads-tab-btn" aria-controls="leads-view">Leads</button>
+      <button id="campaigns-section-btn" disabled>Campaigns</button>
+      <button id="sending-section-btn" disabled>Sending</button>
+      <button id="senders-section-btn" disabled>Senders</button>
+      <button id="suppressions-section-btn" disabled>Suppressions</button>
+      <button id="recovery-section-btn" disabled>Recovery</button>
+      <button id="activity-section-btn" disabled>Activity</button>
+      <button id="settings-section-btn" disabled>Settings</button>
+    </div>`,
     status: '<div class="app-rail-status"><span id="auth-status-label">Local dev</span></div>',
   },
   senders: {
-    commandBar: '<section class="workspace-status-row"><button id="refresh-btn">Refresh</button></section>',
-    metrics: '<section class="queue-health-section"><div id="summary-grid"></div></section>',
+    commandBar: '<section class="workspace-status-row"><button id="start-ready-btn">Start Ready Senders</button><button id="stop-btn">Stop All</button><button id="refresh-btn">Refresh</button></section>',
+    metrics: '<section class="queue-health-section"><div id="summary-grid"></div><div id="senders-table-panel"></div></section>',
     progress: '<section class="ops-progress-strip"><span id="ops-progress-summary"></span></section>',
     progressDetails: '<details id="ops-progress-details"></details>',
     profileDetail: '<section class="workspace-primary"><div id="profile-detail"></div></section>',
@@ -23,17 +33,19 @@ const template = {
   },
   leadOps: {
     heading: '<div class="panel-header"><h2 id="leads-command-heading">Prepare Dispatch</h2></div>',
-    source: '<section class="leads-control-bar"><input id="leads-important-upload-type" type="hidden" value="cold" /></section>',
+    source: '<section class="leads-control-bar"><input id="leads-important-upload-type" type="hidden" value="cold" /><input id="leads-important-upload-file" type="file" /><span id="leads-important-upload-note"></span><button id="leads-important-upload-check-btn">Upload &amp; Check</button></section>',
     workflowStatus: '<div id="leads-workflow-status-banner" class="leads-workflow-status-banner"></div>',
     workflowSteps: '<div id="leads-workflow-task-list" class="leads-workflow-task-list"></div>',
-    commandLeft: '<div class="leads-command-column-left"><div id="leads-current-run-panel"></div></div>',
-    commandRight: '<div id="leads-dispatch-command-column" class="leads-command-column-right"><button id="leads-important-dispatch-preview-btn">Preview Dispatch</button></div>',
+    commandLeft: '<div class="leads-command-column-left"><div id="leads-current-run-panel"></div><select data-fresh-cold-route></select><select data-recontact-route></select></div>',
+    commandRight: '<div id="leads-dispatch-command-column" class="leads-command-column-right"><button id="leads-important-dispatch-preview-btn">Preview Dispatch</button><button id="leads-important-dispatch-confirm-btn">Confirm Dispatch</button></div>',
     diagnostics: '<details class="leads-advanced-diagnostics"></details>',
   },
   auth: '<div id="auth-overlay" hidden></div>',
 };
 
 describe("DashboardApp", () => {
+  afterEach(() => cleanup());
+
   it("mounts sender and Lead Ops controller contracts", () => {
     render(<DashboardApp template={template} />);
     expect(screen.queryByText("Start All")).not.toBeInTheDocument();
@@ -54,6 +66,47 @@ describe("DashboardApp", () => {
     expect(document.querySelector('select#leads-important-upload-type')).not.toBeInTheDocument();
     expect(document.getElementById("auth-overlay")).toBeInTheDocument();
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();
+  });
+
+  it("establishes the canonical Phase 1 navigation without duplicating authority", () => {
+    render(<DashboardApp template={template} />);
+    const navigation = document.querySelector(".react-sidebar-nav");
+    const labels = ["Overview", "Leads", "Campaigns", "Sending", "Senders", "Suppressions", "Recovery", "Activity", "Settings"];
+    expect(Array.from(navigation.querySelectorAll("button"), (button) => button.textContent.trim())).toEqual(labels);
+    for (const label of labels) {
+      expect(screen.getAllByText(label, { selector: ".react-sidebar-nav button" })).toHaveLength(1);
+    }
+    expect(document.getElementById("ops-tab-btn")).toHaveAttribute("aria-controls", "ops-view");
+    expect(document.getElementById("leads-tab-btn")).toHaveAttribute("aria-controls", "leads-view");
+    expect(document.getElementById("ops-view")).toBeInTheDocument();
+    expect(document.getElementById("leads-view")).toBeInTheDocument();
+  });
+
+  it("keeps future authority shells inert and every critical operational contract unique", () => {
+    render(<DashboardApp template={template} />);
+    const placeholders = document.querySelectorAll("[data-control-plane-placeholder]");
+    expect(placeholders).toHaveLength(7);
+    for (const placeholder of placeholders) {
+      expect(placeholder).toHaveAttribute("hidden");
+      expect(placeholder).toHaveTextContent("Authority has not been migrated to this section.");
+      expect(placeholder.querySelector("button, select, input, form, [data-action]")).toBeNull();
+    }
+    for (const id of [
+      "stop-btn",
+      "leads-important-dispatch-preview-btn",
+      "leads-important-dispatch-confirm-btn",
+      "leads-important-upload-type",
+      "leads-important-upload-file",
+      "leads-important-upload-note",
+      "leads-important-upload-check-btn",
+      "senders-table-panel",
+    ]) {
+      expect(document.querySelectorAll(`#${id}`)).toHaveLength(1);
+    }
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(0);
+    expect(document.querySelectorAll("#react-start-ready-btn")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-fresh-cold-route]")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-recontact-route]")).toHaveLength(1);
   });
 });
 
@@ -170,6 +223,25 @@ describe("Warm Outreach controller layout", () => {
       expect(panel.querySelector(selector)).toBeDisabled();
     }
     expect(panel.querySelector('[data-leads-next-action="start_warm_private_jc"]')).toBeNull();
+    expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
+  });
+
+  it("preserves Overview and Leads URL navigation through the legacy controller", async () => {
+    const fetchMock = await boot();
+    const expectedLabels = ["Overview", "Leads", "Campaigns", "Sending", "Senders", "Suppressions", "Recovery", "Activity", "Settings"];
+    expect(Array.from(document.querySelectorAll(".react-sidebar-nav button"), (button) => button.textContent.trim())).toEqual(expectedLabels);
+
+    fireEvent.click(document.getElementById("ops-tab-btn"));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(window.location.search).not.toContain("tab=");
+    expect(document.getElementById("ops-view")).toBeInTheDocument();
+    expect(document.getElementById("leads-view")).not.toBeInTheDocument();
+
+    fireEvent.click(document.getElementById("leads-tab-btn"));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(window.location.search).toContain("tab=leads");
+    expect(document.getElementById("leads-view")).toBeInTheDocument();
+    expect(document.getElementById("ops-view")).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 });
