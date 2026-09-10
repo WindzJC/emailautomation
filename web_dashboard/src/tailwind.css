@@ -1764,8 +1764,12 @@
 
 /* Senders: one strip, compact table, inline controls */
 
-.react-senders-page {
+.react-senders-page:not([hidden]) {
   display: block;
+}
+
+.react-senders-page[hidden] {
+  display: none !important;
 }
 
 .react-metric-region {
@@ -1845,7 +1849,7 @@
   margin-top: 9px;
 }
 
-#ops-view .sender-status-panel {
+#senders-view .sender-status-panel {
   order: 1;
   margin: 0;
   overflow: hidden;
@@ -1855,35 +1859,35 @@
   box-shadow: none;
 }
 
-#ops-view .sender-status-head {
+#senders-view .sender-status-head {
   min-height: 42px;
   padding: 9px 12px 7px;
   border-bottom: 1px solid var(--console-line-soft);
 }
 
-#ops-view .sender-status-head .eyebrow {
+#senders-view .sender-status-head .eyebrow {
   color: #c4ceda;
 }
 
-#ops-view .sender-status-head p:last-child {
+#senders-view .sender-status-head p:last-child {
   color: #8392a6;
   font-size: .68rem;
 }
 
-#ops-view .sender-status-table-wrap {
+#senders-view .sender-status-table-wrap {
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
 }
 
-#ops-view .sender-status-table {
+#senders-view .sender-status-table {
   width: 100%;
   min-width: 760px;
   border-collapse: collapse;
   font-size: .7rem;
 }
 
-#ops-view .sender-status-table th {
+#senders-view .sender-status-table th {
   height: 28px;
   padding: 5px 10px;
   color: #8999ae;
@@ -1891,23 +1895,23 @@
   font-size: .61rem;
 }
 
-#ops-view .sender-status-table td {
+#senders-view .sender-status-table td {
   height: 36px;
   padding: 6px 10px;
   border-top: 1px solid var(--console-line-soft);
 }
 
-#ops-view .sender-status-table tr {
+#senders-view .sender-status-table tr {
   background: transparent;
 }
 
-#ops-view .sender-status-table tr.is-jc {
+#senders-view .sender-status-table tr.is-jc {
   background: rgba(88,212,154,.025);
   box-shadow: inset 2px 0 var(--console-green);
 }
 
-#ops-view .sender-status-table .mini-pill,
-#ops-view .sender-status-table .sender-status-action-btn {
+#senders-view .sender-status-table .mini-pill,
+#senders-view .sender-status-table .sender-status-action-btn {
   min-height: 24px;
   padding: 3px 8px;
   font-size: .61rem;
@@ -1927,7 +1931,7 @@
   display: none;
 }
 
-#ops-view .workspace-status-row {
+#senders-view .workspace-status-row {
   display: block !important;
   min-height: 0;
   padding: 0 !important;
@@ -1935,7 +1939,7 @@
   background: transparent !important;
 }
 
-#ops-view .workspace-status-row .workspace-header {
+#senders-view .workspace-status-row .workspace-header {
   min-height: 0;
   padding: 0 !important;
   border: 0 !important;
@@ -1943,7 +1947,7 @@
   box-shadow: none !important;
 }
 
-#ops-view .workspace-status-row .workspace-controls.toolbar {
+#senders-view .workspace-status-row .workspace-controls.toolbar {
   display: grid !important;
   grid-template-columns: 1fr;
   align-items: end;
@@ -1954,26 +1958,26 @@
   background: transparent !important;
 }
 
-#ops-view .workspace-status-row .workspace-controls > * {
+#senders-view .workspace-status-row .workspace-controls > * {
   min-width: 0;
 }
 
-#ops-view .workspace-status-row .toolbar-field-note {
+#senders-view .workspace-status-row .toolbar-field-note {
   align-self: center;
   color: #9aa8ba;
   font-size: .68rem;
 }
 
-#ops-view .workspace-status-row .toolbar-actions {
+#senders-view .workspace-status-row .toolbar-actions {
   display: flex;
   gap: 7px;
 }
 
-#ops-view .workspace-status-row .toolbar-actions .btn {
+#senders-view .workspace-status-row .toolbar-actions .btn {
   min-width: 70px;
 }
 
-#ops-view .workspace-status-row .manual-start-warning {
+#senders-view .workspace-status-row .manual-start-warning {
   display: none;
 }
 
@@ -2005,10 +2009,10 @@
 }
 
 #ops-view #ops-progress-details,
-#ops-view .react-supporting-panels > *,
+#senders-view .react-supporting-panels > *,
 #ops-view .campaign-history-panel,
-#ops-view .profile-detail-panel,
-#ops-view .diagnostics-panel {
+#senders-view .profile-detail-panel,
+#senders-view .diagnostics-panel {
   min-height: 34px;
   margin: 0;
   overflow: hidden;
@@ -2018,7 +2022,8 @@
   box-shadow: none !important;
 }
 
-#ops-view details > summary {
+#ops-view details > summary,
+#senders-view details > summary {
   min-height: 34px;
   padding: 7px 10px;
   color: #c8d3df;
@@ -2920,11 +2925,11 @@
     border-left: 2px solid rgba(88,212,154,.65) !important;
   }
 
-  #ops-view .sender-status-head {
+  #senders-view .sender-status-head {
     min-height: 38px;
   }
 
-  #ops-view .sender-status-table-wrap {
+  #senders-view .sender-status-table-wrap {
     max-height: none;
   }
 
@@ -2934,26 +2939,26 @@
     font-size: .65rem;
   }
 
-  #ops-view .workspace-status-row {
+  #senders-view .workspace-status-row {
     display: block !important;
   }
 
-  #ops-view .workspace-status-row .workspace-controls.toolbar {
+  #senders-view .workspace-status-row .workspace-controls.toolbar {
     grid-template-columns: 1fr;
   }
 
-  #ops-view .workspace-status-row .toolbar-field-note,
-  #ops-view .workspace-status-row .toolbar-actions {
+  #senders-view .workspace-status-row .toolbar-field-note,
+  #senders-view .workspace-status-row .toolbar-actions {
     grid-column: 1 / -1;
     flex-wrap: wrap;
   }
 
-  #ops-view .workspace-status-row .toolbar-actions .btn {
+  #senders-view .workspace-status-row .toolbar-actions .btn {
     min-width: 0;
     flex: 1;
   }
 
-  #ops-view .workspace-status-row #react-start-ready-btn {
+  #senders-view .workspace-status-row #start-ready-btn {
     flex: 1 0 100%;
   }
 

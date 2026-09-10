@@ -1359,16 +1359,20 @@ class WebDashboardAppTests(unittest.TestCase):
         tab_start = source.index("function applyDashboardTab()")
         tab_end = source.index("function isOpsTabVisible()", tab_start)
         tab_body = source[tab_start:tab_end]
-        self.assertIn("const leadsActive = activeDashboardTab === \"leads\" && !wallboardMode;", tab_body)
-        self.assertIn("mountExclusiveDashboardPanel(leadsActive);", tab_body)
-        self.assertIn("els.opsTabBtn.classList.toggle(\"is-active\", !leadsActive);", tab_body)
+        self.assertIn('const selectedTab = wallboardMode ? "ops" : activeDashboardTab;', tab_body)
+        self.assertIn('const leadsActive = selectedTab === "leads";', tab_body)
+        self.assertIn('const sendersActive = selectedTab === "senders";', tab_body)
+        self.assertIn("mountExclusiveDashboardPanel(selectedTab);", tab_body)
+        self.assertIn('const active = selectedTab === "ops";', tab_body)
         self.assertIn("els.leadsTabBtn.classList.toggle(\"is-active\", leadsActive);", tab_body)
-        self.assertIn("els.opsView.hidden = leadsActive;", tab_body)
+        self.assertIn("els.sendersTabBtn.classList.toggle(\"is-active\", sendersActive);", tab_body)
+        self.assertIn('const hidden = selectedTab !== "ops";', tab_body)
         self.assertIn("els.leadsView.hidden = !leadsActive;", tab_body)
-        self.assertIn("els.opsView.setAttribute(\"aria-hidden\", String(leadsActive));", tab_body)
+        self.assertIn("els.sendersView.hidden = !sendersActive;", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"aria-hidden\", String(!leadsActive));", tab_body)
         self.assertIn("els.opsView.setAttribute(\"inert\", \"\");", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"inert\", \"\");", tab_body)
+        self.assertIn("els.sendersView.setAttribute(\"inert\", \"\");", tab_body)
 
         self.assertNotIn("// --- TAB VISIBILITY GUARD ---", source)
         self.assertNotIn("// HARD TAB BODY CLASS FIX", source)
@@ -1383,19 +1387,21 @@ class WebDashboardAppTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
 
         for expected in [
-            "function mountExclusiveDashboardPanel(leadsActive)",
+            "function mountExclusiveDashboardPanel(activeTab)",
             "ensureTabPanelMountAnchors();",
             "if (els.opsView?.isConnected) els.opsView.remove();",
             "if (els.leadsView?.isConnected) els.leadsView.remove();",
+            "if (els.sendersView?.isConnected) els.sendersView.remove();",
             "insertAfterAnchor(tabPanelMounts.opsAnchor, els.opsView);",
             "insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);",
+            "insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);",
         ]:
             self.assertIn(expected, source)
 
         apply_start = source.index("function applyDashboardTab()")
         apply_end = source.index("function isOpsTabVisible()", apply_start)
         body = source[apply_start:apply_end]
-        self.assertLess(body.index("mountExclusiveDashboardPanel(leadsActive);"), body.index("els.opsView.classList.toggle"))
+        self.assertLess(body.index("mountExclusiveDashboardPanel(selectedTab);"), body.index("els.opsView.classList.toggle"))
 
         self.assertIn("#leads-view.leads-workspace:not([hidden])", styles)
         self.assertNotIn("#leads-view.leads-workspace {\n  display: grid;", styles)
@@ -1784,7 +1790,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "syncProgressDetailsToggle",
             "opsProgressDetailsToggle",
             "els.opsProgressDetails.open = !els.opsProgressDetails.open",
-            'opsRoot?.querySelector(".ops-progress-strip")',
+            'sendersRoot?.querySelector(".sender-status-mount")',
             "data.auth_enabled === false",
             "is-auth-disabled",
             "ops-progress-summary-item",
@@ -1860,8 +1866,9 @@ class WebDashboardAppTests(unittest.TestCase):
     def test_navigation_uses_senders_and_lead_ops_labels(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
 
-        self.assertIn('setNodeText(els.opsTabBtn, "Senders")', source)
-        self.assertIn('setNodeText(els.leadsTabBtn, "Lead Ops")', source)
+        self.assertIn('setNodeText(els.opsTabBtn, "Overview")', source)
+        self.assertIn('setNodeText(els.leadsTabBtn, "Leads")', source)
+        self.assertIn('setNodeText(els.sendersTabBtn, "Senders")', source)
 
     def test_warm_jc_sender_row_is_visible_but_opens_lead_ops_instead_of_starting(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1925,7 +1932,7 @@ class WebDashboardAppTests(unittest.TestCase):
         snapshot_body = source[snapshot_start:snapshot_end]
 
         self.assertEqual(ensure_body.count('id="senders-table-panel"'), 1)
-        self.assertIn('opsRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
+        self.assertIn('sendersRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
         self.assertIn("panels.shift()", ensure_body)
         self.assertIn("panels.forEach((panel) => panel.remove())", ensure_body)
         self.assertNotIn("senderStatusPanel?.isConnected", ensure_body)
@@ -1938,7 +1945,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertEqual(render_body.count("Private JC sender"), 1)
         self.assertEqual(render_body.count('profile?.name === "private_jc_warm"'), 1)
 
-    def test_sender_panel_lookup_survives_detached_ops_view_during_lead_ops_tab(self) -> None:
+    def test_sender_panel_lookup_survives_detached_senders_view_on_other_tabs(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         ensure_start = source.index("function ensureSenderStatusPanel")
         ensure_end = source.index("function syncProgressDetailsToggle", ensure_start)
@@ -1948,9 +1955,10 @@ class WebDashboardAppTests(unittest.TestCase):
         mount_body = source[mount_start:mount_end]
 
         self.assertIn("if (els.opsView?.isConnected) els.opsView.remove()", mount_body)
-        self.assertIn("const opsRoot = els.opsView", ensure_body)
-        self.assertIn('opsRoot?.querySelector(".ops-progress-strip")', ensure_body)
-        self.assertIn('opsRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
+        self.assertIn("if (els.sendersView?.isConnected) els.sendersView.remove()", mount_body)
+        self.assertIn("const sendersRoot = els.sendersView", ensure_body)
+        self.assertIn('sendersRoot?.querySelector(".sender-status-mount")', ensure_body)
+        self.assertIn('sendersRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
 
     def test_sender_rows_dedupe_warm_jc_and_jc_by_profile_name(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

@@ -44,7 +44,7 @@ async function boot(controlledHandler) {
   const parsed = new DOMParser().parseFromString(INDEX_HTML, "text/html");
   document.head.innerHTML = parsed.head.innerHTML;
   document.body.innerHTML = parsed.body.innerHTML;
-  window.history.replaceState({}, "", "/?tab=ops");
+  window.history.replaceState({}, "", "/?tab=senders");
   const fetchMock = vi.fn((url, options = {}) => {
     const pathname = String(url);
     if (pathname === "/api/auth/status") return Promise.resolve(response({ ok: true, authenticated: true, auth_enabled: false, auth_disabled: true }));

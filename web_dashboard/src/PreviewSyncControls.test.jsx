@@ -98,7 +98,7 @@ async function flushMicrotasks(turns = 8) {
 
 async function bootController(fetchMock) {
   installDashboardDocument();
-  window.history.replaceState({}, "", "/?tab=ops");
+  window.history.replaceState({}, "", "/?tab=senders");
   vi.stubGlobal("fetch", fetchMock);
   const rootNode = document.getElementById("dashboard-root");
   const root = createRoot(rootNode);

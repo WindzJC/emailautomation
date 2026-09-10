@@ -238,7 +238,7 @@ export function SenderStartControls({
   return (
     <div className="react-start-ready-control">
       <button
-        id="react-start-ready-btn"
+        id="start-ready-btn"
         className="btn btn-primary"
         type="button"
         disabled={disabled}
@@ -325,11 +325,10 @@ export function MetricCard({ children }) {
   );
 }
 
-export function SenderTable({ progress, details, controls }) {
+export function SenderTable({ controls }) {
   return (
     <section className="react-sender-console" aria-label="Sender operations">
-      <LegacyNode html={progress} />
-      <LegacyNode html={details} />
+      <div className="sender-status-mount" aria-hidden="true" />
       <CommandBar html={controls} />
     </section>
   );
@@ -364,31 +363,46 @@ export function EnvironmentBanner() {
   );
 }
 
-export function SendersDashboard({ view }) {
+export function OverviewDashboard({ view }) {
   return (
-    <section id="ops-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="ops-tab-btn">
+    <section id="ops-view" className="dashboard-view workspace-view react-workspace react-overview-page" role="tabpanel" aria-labelledby="ops-tab-btn">
       <PageHeading
-        eyebrow="Campaign delivery"
-        title="Sender operations"
-        description="Review queue health, then start only the sender you intend to run."
-        aside={<StatusPill tone="live">Live operations</StatusPill>}
+        eyebrow="Operations control plane"
+        title="Email operations overview"
+        description="Monitor system health, queued work, run progress, and items that need attention."
+        aside={<StatusPill tone="live">Live summary</StatusPill>}
       />
 
       <MetricCard>
         <LegacyNode html={view.metrics} />
       </MetricCard>
 
-      <SenderTable
-        progress={view.progress}
-        details={view.progressDetails}
-        controls={view.commandBar}
+      <section className="react-overview-progress" aria-label="Run progress and alerts">
+        <LegacyNode html={view.progress} />
+        <LegacyNode html={view.progressDetails} />
+      </section>
+
+      <LegacyNode html={view.history} />
+    </section>
+  );
+}
+
+export function SendersDashboard({ view }) {
+  return (
+    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page hidden" role="tabpanel" aria-labelledby="senders-tab-btn" hidden>
+      <PageHeading
+        eyebrow="Delivery authority"
+        title="Senders"
+        description="Review sender readiness and use the existing gated controls for the intended profile."
+        aside={<StatusPill tone="safe">Manual authority</StatusPill>}
       />
+
+      <SenderTable controls={view.commandBar} />
 
       {view.controlledTest ? <LegacyNode html={view.controlledTest} /> : null}
 
       <section className="react-supporting-panels">
         <LegacyNode html={view.profileDetail} />
-        <LegacyNode html={view.history} />
       </section>
     </section>
   );
@@ -512,44 +526,15 @@ export function LeadOpsDashboard({ view }) {
   );
 }
 
-const PHASE_ONE_PLACEHOLDER_SECTIONS = [
-  "campaigns",
-  "sending",
-  "senders",
-  "suppressions",
-  "recovery",
-  "activity",
-  "settings",
-];
-
-export function ControlPlanePlaceholders() {
-  return (
-    <div className="control-plane-placeholder-views" aria-hidden="true">
-      {PHASE_ONE_PLACEHOLDER_SECTIONS.map((section) => (
-        <section
-          id={`${section}-placeholder-view`}
-          key={section}
-          className="control-plane-placeholder-view"
-          data-control-plane-placeholder={section}
-          aria-labelledby={`${section}-section-btn`}
-          hidden
-        >
-          <p>Authority has not been migrated to this section.</p>
-        </section>
-      ))}
-    </div>
-  );
-}
-
 export function AppShell({ template }) {
   return (
     <div className="page booting react-dashboard min-h-screen bg-canvas text-ink" data-dashboard-ui="react-tailwind-components">
       <div className="app-shell react-app-shell">
         <Sidebar {...template.sidebar} />
         <main className="app-main react-main">
+          <OverviewDashboard view={template.senders} />
           <SendersDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
-          <ControlPlanePlaceholders />
         </main>
       </div>
     </div>

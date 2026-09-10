@@ -69,9 +69,9 @@ async function flushMicrotasks(turns = 8) {
   }
 }
 
-async function bootController(fetchMock) {
+async function bootController(fetchMock, tab = "senders") {
   installDashboardDocument();
-  window.history.replaceState({}, "", "/?tab=ops");
+  window.history.replaceState({}, "", `/?tab=${tab}`);
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -123,7 +123,7 @@ function baseFetchMock(startHandler, startReadyHandler = null) {
 }
 
 function startReadyButton() {
-  return document.getElementById("react-start-ready-btn");
+  return document.getElementById("start-ready-btn");
 }
 
 function startReadyPosts(fetchMock) {
@@ -189,7 +189,7 @@ describe("individual sender Start controls", () => {
       }
       return fallback(url, options);
     });
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "ops");
 
     const card = document.querySelector(".summary-card-sendgrid");
     const feed = card.querySelector(".sendgrid-outcome-health");
@@ -354,7 +354,6 @@ describe("Start Ready Senders controls", () => {
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
     root = await bootController(fetchMock);
 
-    expect(document.getElementById("start-ready-btn")).not.toBeInTheDocument();
     expect(startReadyButton()).toHaveTextContent("Start Ready Senders");
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(16));
