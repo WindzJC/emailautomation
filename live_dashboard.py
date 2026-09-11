@@ -2641,8 +2641,20 @@ def _run_important_dispatch_job(job_id: str) -> None:
         job["pre_dispatch_archive_path"] = archive["archive_path"]
         job["message"] = "Pre-dispatch archive created. Confirming queue write."
         _save_important_dispatch_job(job)
+        preview_id = str(job.get("preview_id") or "").strip()
+        preview_path_text = str(job.get("preview_path") or "").strip()
+        preview_dir = IMPORTANT_LEADS_DISPATCH_PREVIEWS
+        if preview_path_text:
+            preview_path = _resolve_approved_dispatch_preview_path(
+                preview_path_text,
+                preview_id,
+                purpose="Dispatch preview",
+            )
+            if not preview_path.exists():
+                raise FileNotFoundError(f"Dispatch preview not found: {preview_id}")
+            preview_dir = preview_path.parent
         report = confirm_dispatch_preview(
-            str(job.get("preview_id") or ""),
+            preview_id,
             recontact_route=(str(job.get("recontact_route") or "").strip() or None),
             fresh_cold_route=(str(job.get("fresh_cold_route") or "").strip() or None),
             require_stopped=True,
@@ -2650,7 +2662,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
             backup_root=settings.BACKUPS_DIR,
             report_dir=settings.STATE_DIR,
             persist_state=True,
-            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+            preview_dir=preview_dir,
         )
         report["pre_dispatch_archive"] = archive
         report["pre_dispatch_archive_path"] = archive["archive_path"]
@@ -2729,6 +2741,7 @@ def _run_important_dispatch_job(job_id: str) -> None:
 def _start_important_dispatch_job(
     *,
     preview_id: str,
+    preview_path: str = "",
     campaign_type: str,
     dispatch_source_mode: str,
     dispatch_source_name: str,
@@ -2746,6 +2759,7 @@ def _start_important_dispatch_job(
     job = {
         "job_id": job_id,
         "preview_id": preview_id,
+        "preview_path": str(preview_path or "").strip(),
         "status": "queued",
         "stage": "queued",
         "phase": "queued",
@@ -8452,15 +8466,86 @@ def _validate_dashboard_fresh_cold_route(
     return route
 
 
+def _resolve_dispatch_preview_for_confirm(
+    payload: ImportantLeadDispatchPayload | None,
+) -> tuple[dict[str, object], Path]:
+    preview_id = str(getattr(payload, "preview_id", "") if payload else "").strip()
+    if not preview_id:
+        raise ValueError("Run Preview Dispatch first.")
+
+    requested_job_id = str(getattr(payload, "job_id", "") if payload else "").strip()
+    requested_run_id = str(getattr(payload, "current_run_id", "") if payload else "").strip()
+    if requested_job_id and requested_run_id and requested_job_id != requested_run_id:
+        raise RuntimeError("Dispatch preview run binding is inconsistent. Refresh Lead Ops and re-run Preview Dispatch.")
+
+    bound_job_id = requested_job_id or requested_run_id
+    if not bound_job_id:
+        preview_path = IMPORTANT_LEADS_DISPATCH_PREVIEWS / f"{preview_id}.json"
+        preview = validate_dispatch_preview(
+            preview_id,
+            preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS,
+        )
+        return preview, preview_path
+
+    if Path(bound_job_id).name != bound_job_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", bound_job_id):
+        raise RuntimeError("Dispatch preview run binding is invalid. Refresh Lead Ops and re-run Preview Dispatch.")
+
+    latest_job = _latest_completed_important_check_job()
+    latest_job_id = str(latest_job.get("job_id") or "").strip() if latest_job else ""
+    if not latest_job or latest_job_id != bound_job_id:
+        raise RuntimeError("Dispatch preview is not bound to the current completed Lead Check run. Re-run Preview Dispatch.")
+
+    job = _load_important_check_job(bound_job_id)
+    if str(job.get("auto_dispatch_preview_status") or "").strip().lower() != "completed":
+        raise RuntimeError("Current Lead Check run has no completed Preview Dispatch. Re-run Preview Dispatch.")
+
+    bound_preview_id = str(job.get("auto_dispatch_preview_id") or "").strip()
+    bound_preview_path = str(job.get("auto_dispatch_preview_path") or "").strip()
+    if not bound_preview_id or not bound_preview_path:
+        raise RuntimeError("Current Lead Check run is missing its Preview Dispatch binding. Re-run Preview Dispatch.")
+    if bound_preview_id != preview_id:
+        raise RuntimeError("Dispatch preview does not match the current Lead Check run. Re-run Preview Dispatch.")
+
+    preview_path = _resolve_approved_dispatch_preview_path(
+        bound_preview_path,
+        preview_id,
+        purpose="Dispatch preview",
+    )
+    if not preview_path.exists():
+        raise FileNotFoundError(f"Dispatch preview not found: {preview_id}")
+
+    preview = validate_dispatch_preview(preview_id, preview_dir=preview_path.parent)
+    declared_path_text = str(preview.get("preview_path") or "").strip()
+    if declared_path_text:
+        declared_path = _resolve_approved_dispatch_preview_path(
+            declared_path_text,
+            preview_id,
+            purpose="Dispatch preview",
+        )
+        if declared_path != preview_path:
+            raise RuntimeError("Dispatch preview stored path does not match the current Lead Check binding. Re-run Preview Dispatch.")
+
+    if str(preview.get("dispatch_source_mode") or "").strip() == DISPATCH_SOURCE_TRIAGED_KEEP:
+        keep_path = Path(str(job.get("auto_triage_keep_path") or ""))
+        recovery_block = _preview_recovery_request_block(
+            payload=payload,
+            job=job,
+            source_path=keep_path,
+            require_client_binding=True,
+        )
+        if recovery_block is not None:
+            raise RuntimeError(str(recovery_block.get("message") or "Dispatch preview recovery binding is stale."))
+
+    return preview, preview_path
+
+
 def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = None) -> JSONResponse:
     try:
         preflight_block = _dispatch_preflight_block_response(snapshot=_build_live_snapshot())
         if preflight_block is not None:
             return preflight_block
         preview_id = str(getattr(payload, "preview_id", "") if payload else "").strip()
-        if not preview_id:
-            raise ValueError("Run Preview Dispatch first.")
-        preview = validate_dispatch_preview(preview_id, preview_dir=IMPORTANT_LEADS_DISPATCH_PREVIEWS)
+        preview, resolved_preview_path = _resolve_dispatch_preview_for_confirm(payload)
         requested_recontact_route = _validate_dashboard_recontact_route(
             preview,
             getattr(payload, "recontact_route", "") if payload else "",
@@ -8542,6 +8627,7 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
 
         job = _start_important_dispatch_job(
             preview_id=preview_id,
+            preview_path=str(resolved_preview_path),
             campaign_type=preview_campaign_type,
             dispatch_source_mode=str(preview.get("dispatch_source_mode") or DISPATCH_SOURCE_TRIAGED_KEEP),
             dispatch_source_name=str(preview.get("dispatch_source_name") or ""),
@@ -8968,7 +9054,14 @@ def _legacy_confirmed_dispatch_preview_path(preview_id: str) -> Path:
     )
 
 
-def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Path:
+def _resolve_approved_dispatch_preview_path(
+    path_value: str | Path,
+    preview_id: str,
+    *,
+    purpose: str = "Confirmed dispatch preview",
+) -> Path:
+    if not preview_id or Path(preview_id).name != preview_id or not re.fullmatch(r"[A-Za-z0-9_-]+", preview_id):
+        raise RuntimeError(f"{purpose} ID is invalid.")
     candidate = Path(path_value)
     if not candidate.is_absolute():
         candidate = settings.APP_ROOT / candidate
@@ -8977,11 +9070,11 @@ def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Pat
     try:
         resolved.relative_to(app_root)
     except ValueError as exc:
-        raise RuntimeError(
-            "Confirmed dispatch preview path is outside the repository. Repair is blocked."
-        ) from exc
+        raise RuntimeError(f"{purpose} path is outside the repository.") from exc
 
     expected_name = f"{preview_id}.json"
+    if resolved.name != expected_name:
+        raise RuntimeError(f"{purpose} path does not match its preview ID.")
 
     if resolved == (IMPORTANT_LEADS_DISPATCH_PREVIEWS / expected_name).resolve():
         return resolved
@@ -8994,7 +9087,7 @@ def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Pat
         relative = resolved.relative_to(runs_root)
     except ValueError as exc:
         raise RuntimeError(
-            "Confirmed dispatch preview path is outside an approved preview directory. Repair is blocked."
+            f"{purpose} path is outside an approved preview directory."
         ) from exc
 
     if (
@@ -9002,9 +9095,29 @@ def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Pat
         or relative.parts[1] != "dispatch_previews"
         or relative.parts[2] != expected_name
     ):
-        raise RuntimeError("Confirmed dispatch preview path is invalid. Repair is blocked.")
+        raise RuntimeError(f"{purpose} path is invalid.")
 
     return resolved
+
+
+def _safe_confirmed_preview_path(path_value: str | Path, preview_id: str) -> Path:
+    try:
+        return _resolve_approved_dispatch_preview_path(
+            path_value,
+            preview_id,
+            purpose="Confirmed dispatch preview",
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "outside the repository" in message:
+            raise RuntimeError(
+                "Confirmed dispatch preview path is outside the repository. Repair is blocked."
+            ) from exc
+        if "outside an approved preview directory" in message:
+            raise RuntimeError(
+                "Confirmed dispatch preview path is outside an approved preview directory. Repair is blocked."
+            ) from exc
+        raise RuntimeError("Confirmed dispatch preview path is invalid. Repair is blocked.") from exc
 
 
 def _load_confirmed_preview_candidate(path: Path, preview_id: str) -> dict[str, object]:

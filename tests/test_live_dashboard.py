@@ -7426,6 +7426,287 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertIn("campaign type", body["message"])
         start_dispatch_job.assert_not_called()
 
+    def test_confirm_dispatch_important_leads_uses_run_scoped_bound_preview_path(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            jobs = app_root / "_important" / "check_runs" / "jobs"
+            preview_id = "dispatch_preview_bound_1234"
+            job_id = "check_bound_1234"
+            keep_path = runs / job_id / "leads_triaged_keep.csv"
+            preview_path = runs / job_id / "dispatch_previews" / f"{preview_id}.json"
+            keep_path.parent.mkdir(parents=True, exist_ok=True)
+            keep_path.write_text("Email\nbound@example.test\n", encoding="utf-8")
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            preview_path.write_text("{}", encoding="utf-8")
+            job = {
+                "job_id": job_id,
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "auto_dispatch_preview_id": preview_id,
+                "auto_dispatch_preview_path": str(preview_path),
+                "auto_triage_keep_path": str(keep_path),
+            }
+            preview = {
+                "preview_id": preview_id,
+                "preview_path": str(preview_path),
+                "campaign_type": "cold",
+                "dispatch_source_mode": "triaged_keep",
+                "dispatch_cap": "all",
+                "dispatch_source_name": "Fast Triage Keep",
+                "dispatch_source_path": str(keep_path),
+                "dispatch_source_row_count": 1,
+                "dispatch_eligible_row_count": 1,
+                "dispatch_selected_row_count": 1,
+                "total_rows_would_write": 1,
+                "fresh_cold_route": "private_jc",
+                "queue_paths": {
+                    "private_jc": str(app_root / "private.csv"),
+                    "sendgrid_1": str(app_root / "sendgrid.csv"),
+                },
+                "queue_key_order": ["private_jc", "sendgrid_1"],
+            }
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                preview_id=preview_id,
+                job_id=job_id,
+                current_run_id=job_id,
+                preview_recovery_binding={"synthetic": "binding"},
+                campaign_type="cold",
+                dispatch_source_mode="triaged_keep",
+                dispatch_cap="all",
+                fresh_cold_route="private_jc",
+            )
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(live_dashboard.settings, "APP_ROOT", app_root))
+                stack.enter_context(patch.object(live_dashboard, "IMPORTANT_LEADS_RUNS", runs))
+                stack.enter_context(patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical))
+                stack.enter_context(patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs))
+                stack.enter_context(patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job))
+                stack.enter_context(patch.object(live_dashboard, "_load_important_check_job", return_value=job))
+                validator = stack.enter_context(patch.object(live_dashboard, "validate_dispatch_preview", return_value=preview))
+                recovery = stack.enter_context(patch.object(live_dashboard, "_preview_recovery_request_block", return_value=None))
+                stack.enter_context(patch.object(live_dashboard, "_dispatch_preflight_block_response", return_value=None))
+                stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "_combined_leads_status", return_value={"dispatch_source_path": str(keep_path)}))
+                stack.enter_context(patch.object(live_dashboard, "assert_dispatch_destination_queues_empty"))
+                starter = stack.enter_context(patch.object(live_dashboard, "_start_important_dispatch_job", return_value={"job_id": "dispatch_bound"}))
+                stack.enter_context(patch.object(live_dashboard, "shard_status", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "important_leads_status", return_value={}))
+                stack.enter_context(patch.object(live_dashboard, "important_leads_verify_status", return_value={}))
+                response = live_dashboard.confirm_dispatch_important_leads(payload)
+
+            self.assertEqual(202, response.status_code)
+            validator.assert_called_once_with(preview_id, preview_dir=preview_path.parent)
+            recovery.assert_called_once()
+            self.assertEqual(str(preview_path), starter.call_args.kwargs["preview_path"])
+            self.assertEqual("private_jc", starter.call_args.kwargs["fresh_cold_route"])
+
+    def test_confirm_dispatch_bound_preview_id_mismatch_fails_before_validation(self) -> None:
+        job = {
+            "job_id": "check_bound_mismatch",
+            "status": "completed",
+            "auto_dispatch_preview_status": "completed",
+            "auto_dispatch_preview_id": "dispatch_preview_expected",
+            "auto_dispatch_preview_path": "_important/runs/check_bound_mismatch/dispatch_previews/dispatch_preview_expected.json",
+        }
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            preview_id="dispatch_preview_other",
+            job_id=job["job_id"],
+            current_run_id=job["job_id"],
+        )
+        with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job), patch.object(
+            live_dashboard, "_load_important_check_job", return_value=job
+        ), patch.object(live_dashboard, "validate_dispatch_preview") as validator:
+            with self.assertRaisesRegex(RuntimeError, "does not match the current Lead Check run"):
+                live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+        validator.assert_not_called()
+
+    def test_confirm_dispatch_rejects_bound_preview_path_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as appdir, tempfile.TemporaryDirectory() as outside_dir:
+            app_root = Path(appdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_outside_1234"
+            outside_path = Path(outside_dir) / f"{preview_id}.json"
+            outside_path.write_text("{}", encoding="utf-8")
+            job = {
+                "job_id": "check_outside_1234",
+                "status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "auto_dispatch_preview_id": preview_id,
+                "auto_dispatch_preview_path": str(outside_path),
+            }
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                preview_id=preview_id,
+                job_id=job["job_id"],
+                current_run_id=job["job_id"],
+            )
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical), patch.object(
+                live_dashboard, "_latest_completed_important_check_job", return_value=job
+            ), patch.object(live_dashboard, "_load_important_check_job", return_value=job), patch.object(
+                live_dashboard, "validate_dispatch_preview"
+            ) as validator:
+                with self.assertRaisesRegex(RuntimeError, "outside the repository"):
+                    live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+            validator.assert_not_called()
+
+    def test_dispatch_worker_uses_bound_run_scoped_preview_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            jobs = app_root / "dispatch_jobs"
+            jobs.mkdir(parents=True)
+            preview_id = "dispatch_preview_worker_1234"
+            preview_path = runs / "check_worker" / "dispatch_previews" / f"{preview_id}.json"
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_text("{}", encoding="utf-8")
+            job = {
+                "job_id": "dispatch_worker_test",
+                "preview_id": preview_id,
+                "preview_path": str(preview_path),
+                "status": "queued",
+                "stage": "queued",
+                "phase": "queued",
+                "total_rows": 1,
+            }
+            (jobs / "dispatch_worker_test.json").write_text(json.dumps(job), encoding="utf-8")
+            report_path = app_root / "report.json"
+            fake_report = {
+                "run_id": "dispatch_run_worker",
+                "report_path": str(report_path),
+                "added_astra": 1,
+                "added_sendgrid": 0,
+                "skipped_both": 0,
+                "dispatch_selected_row_count": 1,
+                "suppressed_skipped": 0,
+                "duplicate_master_skipped": 0,
+                "invalid_malformed_skipped": 0,
+            }
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard.settings, "STATE_DIR", app_root / "state"
+            ), patch.object(live_dashboard.settings, "BACKUPS_DIR", app_root / "backups"), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_DISPATCH_JOBS", jobs
+            ), patch.object(
+                live_dashboard,
+                "_create_pre_dispatch_archive",
+                return_value={"archive_path": str(app_root / "archive.tar.gz")},
+            ), patch.object(
+                live_dashboard, "confirm_dispatch_preview", return_value=fake_report
+            ) as confirmer, patch.object(live_dashboard, "save_state"), patch.object(
+                live_dashboard, "_write_lead_ops_progress"
+            ):
+                live_dashboard._run_important_dispatch_job("dispatch_worker_test")
+
+            self.assertEqual(preview_path.parent, confirmer.call_args.kwargs["preview_dir"])
+            saved = json.loads((jobs / "dispatch_worker_test.json").read_text(encoding="utf-8"))
+            self.assertEqual("completed", saved["status"])
+
+    def test_confirm_dispatch_rejects_missing_bound_preview_path(self) -> None:
+        preview_id = "dispatch_preview_missing_path_1234"
+        job = {
+            "job_id": "check_missing_path_1234",
+            "status": "completed",
+            "auto_dispatch_preview_status": "completed",
+            "auto_dispatch_preview_id": preview_id,
+            "auto_dispatch_preview_path": "",
+        }
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            preview_id=preview_id,
+            job_id=job["job_id"],
+            current_run_id=job["job_id"],
+        )
+        with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job), patch.object(
+            live_dashboard, "_load_important_check_job", return_value=job
+        ), patch.object(live_dashboard, "validate_dispatch_preview") as validator:
+            with self.assertRaisesRegex(RuntimeError, "missing its Preview Dispatch binding"):
+                live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+        validator.assert_not_called()
+
+    def test_confirm_dispatch_rejects_missing_bound_preview_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_missing_file_1234"
+            job_id = "check_missing_file_1234"
+            preview_path = runs / job_id / "dispatch_previews" / f"{preview_id}.json"
+            job = {
+                "job_id": job_id,
+                "status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "auto_dispatch_preview_id": preview_id,
+                "auto_dispatch_preview_path": str(preview_path),
+            }
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                preview_id=preview_id,
+                job_id=job_id,
+                current_run_id=job_id,
+            )
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical), patch.object(
+                live_dashboard, "_latest_completed_important_check_job", return_value=job
+            ), patch.object(live_dashboard, "_load_important_check_job", return_value=job), patch.object(
+                live_dashboard, "validate_dispatch_preview"
+            ) as validator:
+                with self.assertRaisesRegex(FileNotFoundError, f"Dispatch preview not found: {preview_id}"):
+                    live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+            validator.assert_not_called()
+
+    def test_confirm_dispatch_rejects_bound_preview_wrong_filename(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            app_root = Path(tmpdir)
+            runs = app_root / "_important" / "runs"
+            canonical = app_root / "_important" / "dispatch_jobs" / "previews"
+            preview_id = "dispatch_preview_expected_name_1234"
+            job_id = "check_wrong_filename_1234"
+            wrong_path = runs / job_id / "dispatch_previews" / "dispatch_preview_wrong_name.json"
+            wrong_path.parent.mkdir(parents=True, exist_ok=True)
+            wrong_path.write_text("{}", encoding="utf-8")
+            job = {
+                "job_id": job_id,
+                "status": "completed",
+                "auto_dispatch_preview_status": "completed",
+                "auto_dispatch_preview_id": preview_id,
+                "auto_dispatch_preview_path": str(wrong_path),
+            }
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                preview_id=preview_id,
+                job_id=job_id,
+                current_run_id=job_id,
+            )
+            with patch.object(live_dashboard.settings, "APP_ROOT", app_root), patch.object(
+                live_dashboard, "IMPORTANT_LEADS_RUNS", runs
+            ), patch.object(live_dashboard, "IMPORTANT_LEADS_DISPATCH_PREVIEWS", canonical), patch.object(
+                live_dashboard, "_latest_completed_important_check_job", return_value=job
+            ), patch.object(live_dashboard, "_load_important_check_job", return_value=job), patch.object(
+                live_dashboard, "validate_dispatch_preview"
+            ) as validator:
+                with self.assertRaisesRegex(RuntimeError, "path does not match its preview ID"):
+                    live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+            validator.assert_not_called()
+
+    def test_confirm_dispatch_rejects_job_run_binding_mismatch(self) -> None:
+        payload = live_dashboard.ImportantLeadDispatchPayload(
+            preview_id="dispatch_preview_binding_mismatch_1234",
+            job_id="check_binding_a",
+            current_run_id="check_binding_b",
+        )
+        with patch.object(live_dashboard, "_latest_completed_important_check_job") as latest_job, patch.object(
+            live_dashboard, "validate_dispatch_preview"
+        ) as validator:
+            with self.assertRaisesRegex(RuntimeError, "run binding is inconsistent"):
+                live_dashboard._resolve_dispatch_preview_for_confirm(payload)
+        latest_job.assert_not_called()
+        validator.assert_not_called()
+
     def test_preview_dispatch_important_leads_blocks_when_senders_active(self) -> None:
         payload = live_dashboard.ImportantLeadDispatchPayload(
             dispatch_source_mode="triaged_keep",
