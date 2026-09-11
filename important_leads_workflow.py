@@ -35,6 +35,7 @@ from send_shard import (
     RECONTACT_SOURCE_KIND_FULL,
     RECONTACT_SOURCE_KIND_SAFER,
     ROLE_LOCALPART_BLOCKLIST,
+    WARM_COPY_POLICY_VERSION,
     is_recontact_cold_campaign,
     is_role_recipient,
     load_already_done,
@@ -45,7 +46,8 @@ from send_shard import (
     normalized_warm_confirmation_payload,
     render_warm_email_copy,
     send_idempotency_db_path,
-    warm_email_copy_rejection_reason,
+    warm_diagnosis_contract,
+    validate_warm_copy_policy_row,
     validate_warm_confirmed_queue,
     warm_confirmation_payload_hash,
 )
@@ -202,8 +204,27 @@ WARM_RESEARCH_HEADERS = (
     "RecommendedService",
     "OutreachAngle",
 )
-WARM_RESEARCH_OPTIONAL_HEADERS = ("PersonalizationLine",)
-WARM_RESEARCH_OUTPUT_HEADERS = (*WARM_RESEARCH_HEADERS, *WARM_RESEARCH_OPTIONAL_HEADERS, "ResearchStatus")
+WARM_RESEARCH_REQUIRED_HEADERS = tuple(
+    header for header in WARM_RESEARCH_HEADERS if header != "RecommendedService"
+)
+WARM_RESEARCH_OPTIONAL_HEADERS = (
+    "PersonalizationLine",
+    "DiagnosisStatus",
+    "AuditCompleted",
+    "RecommendationEvidence",
+)
+WARM_AUTHORITY_OUTPUT_HEADERS = (
+    "PreviewOffer",
+    "RecommendedServicePhrase",
+    "WarmTemplateMode",
+    "WarmCopyPolicyVersion",
+)
+WARM_RESEARCH_OUTPUT_HEADERS = (
+    *WARM_RESEARCH_HEADERS,
+    *WARM_RESEARCH_OPTIONAL_HEADERS,
+    *WARM_AUTHORITY_OUTPUT_HEADERS,
+    "ResearchStatus",
+)
 WARM_EMAIL_READY_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "AuthorEmail", "ContactMethod")
 WARM_CONTACT_FORM_HEADERS = (*WARM_RESEARCH_OUTPUT_HEADERS, "ContactMethod")
 WARM_REJECTED_HEADERS = (
@@ -220,7 +241,14 @@ WARM_EMAIL_PREVIEW_HEADERS = (
     "EmailSubject",
     "EmailBody",
     "NeedSignal",
+    "DiagnosisStatus",
+    "AuditCompleted",
+    "RecommendationEvidence",
     "RecommendedService",
+    "PreviewOffer",
+    "RecommendedServicePhrase",
+    "WarmTemplateMode",
+    "WarmCopyPolicyVersion",
     "OutreachAngle",
     "PersonalizationLine",
     "SourceURL",
@@ -1230,12 +1258,12 @@ def _warm_research_rows(path: Path) -> tuple[List[Dict[str, str]], int]:
     )
     raw_headers = [str(value or "").lstrip("\ufeff").strip() for value in (reader.fieldnames or [])]
     header_by_key = {_normalize_header_key(header): header for header in raw_headers if header}
-    missing = [header for header in WARM_RESEARCH_HEADERS if _normalize_header_key(header) not in header_by_key]
+    missing = [header for header in WARM_RESEARCH_REQUIRED_HEADERS if _normalize_header_key(header) not in header_by_key]
     if missing:
         raise ImportantLeadsCheckError(
             "WARM_HEADERS_MISSING",
             "Warm Research upload is missing required columns: " + ", ".join(missing),
-            details={"required_headers": list(WARM_RESEARCH_HEADERS), "missing_headers": missing},
+            details={"required_headers": list(WARM_RESEARCH_REQUIRED_HEADERS), "missing_headers": missing},
         )
 
     rows: List[Dict[str, str]] = []
@@ -1243,10 +1271,10 @@ def _warm_research_rows(path: Path) -> tuple[List[Dict[str, str]], int]:
     status_header = header_by_key.get(_normalize_header_key("Status"), "")
     research_status_header = header_by_key.get(_normalize_header_key("ResearchStatus"), "")
     for raw_row in reader:
-        row = {
-            header: _strip_cell(raw_row.get(header_by_key[_normalize_header_key(header)], ""))
-            for header in WARM_RESEARCH_HEADERS
-        }
+        row = {}
+        for header in WARM_RESEARCH_HEADERS:
+            source_header = header_by_key.get(_normalize_header_key(header), "")
+            row[header] = _strip_cell(raw_row.get(source_header, "")) if source_header else ""
         for header in WARM_RESEARCH_OPTIONAL_HEADERS:
             source_header = header_by_key.get(_normalize_header_key(header), "")
             row[header] = _strip_cell(raw_row.get(source_header, "")) if source_header else ""
@@ -1350,6 +1378,22 @@ def check_warm_research_leads(
     for index, (row, email, contact_method, reject_code, reject_reason) in enumerate(parsed, start=1):
         code = reject_code
         reason = reject_reason
+        diagnosis = warm_diagnosis_contract(
+            diagnosis_status=row.get("DiagnosisStatus", ""),
+            audit_completed=row.get("AuditCompleted", ""),
+            recommendation_evidence=row.get("RecommendationEvidence", ""),
+            recommended_service=row.get("RecommendedService", ""),
+        )
+        row.update({
+            "DiagnosisStatus": str(diagnosis["diagnosis_status"]),
+            "AuditCompleted": str(diagnosis["audit_completed"]),
+            "RecommendationEvidence": str(diagnosis["recommendation_evidence"]),
+            "RecommendedService": str(diagnosis["recommended_service"]),
+            "WarmTemplateMode": str(diagnosis["template_mode"]),
+            "WarmCopyPolicyVersion": str(diagnosis["copy_policy_version"]),
+            "PreviewOffer": "",
+            "RecommendedServicePhrase": "",
+        })
         if not code and contact_method == "email":
             if email in seen_emails:
                 code, reason = "DUPLICATE_IN_BATCH", "Duplicate direct email in this Warm Research upload."
@@ -1368,17 +1412,26 @@ def check_warm_research_leads(
                             reason = "Warm copy safety gate could not build safe personalization from NeedSignal."
                     row["PersonalizationLine"] = personalization_line
                 if not code:
-                    copy_rejection = warm_email_copy_rejection_reason(
-                        book_title_or_project=row.get("BookTitleOrProject", ""),
-                        recommended_service=row.get("RecommendedService", ""),
-                        personalization_line=personalization_line,
-                    )
-                    if copy_rejection:
-                        code = copy_rejection
-                        reason = f"Warm copy safety gate rejected this row: {copy_rejection}."
+                    try:
+                        rendered_copy = render_warm_email_copy(
+                            first_name=_trimmed_first_name(row.get("AuthorName", "")) or "there",
+                            book_title_or_project=row.get("BookTitleOrProject", ""),
+                            recommended_service=row.get("RecommendedService", ""),
+                            personalization_line=personalization_line,
+                            diagnosis_status=row.get("DiagnosisStatus", ""),
+                            audit_completed=row.get("AuditCompleted", ""),
+                            recommendation_evidence=row.get("RecommendationEvidence", ""),
+                        )
+                    except ValueError as exc:
+                        code = str(exc)
+                        reason = f"Warm copy safety gate rejected this row: {exc}."
                     else:
                         row["PersonalizationLine"] = normalize_warm_personalization_line(
                             row.get("PersonalizationLine", "")
+                        )
+                        row["PreviewOffer"] = str(rendered_copy["preview_offer"])
+                        row["RecommendedServicePhrase"] = str(
+                            rendered_copy["recommended_service_phrase"]
                         )
         elif not code and contact_method == "contact_form":
             contact_key = _strip_cell(row.get("ContactPath", "")).lower().rstrip("/")
@@ -1417,6 +1470,9 @@ def check_warm_research_leads(
         "input_rows": len(rows),
         "total_input_rows": len(rows),
         "warm_email_ready_rows": len(email_ready),
+        "warm_copy_policy_version_required": WARM_COPY_POLICY_VERSION,
+        "warm_email_preview_policy_version": "",
+        "warm_preview_policy_current": False,
         "warm_contact_form_rows": len(contact_forms),
         "warm_rejected_rows": len(rejected),
         "already_contacted_rows": int(reason_counts.get("ALREADY_CONTACTED", 0)),
@@ -1453,7 +1509,7 @@ def generate_warm_email_preview(
         )
 
     fieldnames, rows = _read_csv_rows(email_ready_path)
-    required = {"AuthorName", "AuthorEmail", "BookTitleOrProject", "NeedSignal", "RecommendedService", "OutreachAngle"}
+    required = {"AuthorName", "AuthorEmail", "BookTitleOrProject", "NeedSignal", "OutreachAngle"}
     missing = sorted(required - set(fieldnames))
     if missing:
         raise ImportantLeadsCheckError(
@@ -1474,6 +1530,9 @@ def generate_warm_email_preview(
             book_title_or_project=book_title,
             recommended_service=_strip_cell(row.get("RecommendedService", "")),
             personalization_line=_strip_cell(row.get("PersonalizationLine", "")),
+            diagnosis_status=_strip_cell(row.get("DiagnosisStatus", "")),
+            audit_completed=_strip_cell(row.get("AuditCompleted", "")),
+            recommendation_evidence=_strip_cell(row.get("RecommendationEvidence", "")),
         )
         preview_rows.append({
             "AuthorName": _strip_cell(row.get("AuthorName", "")),
@@ -1482,7 +1541,14 @@ def generate_warm_email_preview(
             "EmailSubject": str(rendered_copy["subject"]),
             "EmailBody": str(rendered_copy["body"]),
             "NeedSignal": _strip_cell(row.get("NeedSignal", "")),
-            "RecommendedService": _strip_cell(row.get("RecommendedService", "")),
+            "DiagnosisStatus": str(rendered_copy["diagnosis_status"]),
+            "AuditCompleted": str(rendered_copy["audit_completed"]),
+            "RecommendationEvidence": str(rendered_copy["recommendation_evidence"]),
+            "RecommendedService": str(rendered_copy["recommended_service"]),
+            "PreviewOffer": str(rendered_copy["preview_offer"]),
+            "RecommendedServicePhrase": str(rendered_copy["recommended_service_phrase"]),
+            "WarmTemplateMode": str(rendered_copy["warm_template_mode"]),
+            "WarmCopyPolicyVersion": str(rendered_copy["warm_copy_policy_version"]),
             "OutreachAngle": _clean_warm_outreach_angle(row.get("OutreachAngle", "")),
             "PersonalizationLine": str(rendered_copy["personalization_line"]),
             "SourceURL": _strip_cell(row.get("SourceURL", "")),
@@ -1496,6 +1562,8 @@ def generate_warm_email_preview(
         "source_label": _display_path_label(email_ready_path),
         "output_label": _display_path_label(preview_path),
         "warm_email_preview_rows": len(preview_rows),
+        "warm_copy_policy_version": WARM_COPY_POLICY_VERSION,
+        "warm_preview_policy_current": True,
         "dispatch_enabled": False,
         "warm_confirmation_enabled": True,
         "message": "Warm draft preview generated. Explicit Warm Private JC confirmation is required before queue creation.",
@@ -1614,6 +1682,14 @@ def confirm_warm_private_jc_preview(
     if preview_path.name != EXPECTED_WARM_PREVIEW_FILENAME:
         raise ValueError(f"Warm confirmation source must be {EXPECTED_WARM_PREVIEW_FILENAME}.")
     fieldnames, rows = _read_csv_rows(preview_path)
+    if (
+        "WarmCopyPolicyVersion" not in fieldnames
+        or any(_strip_cell(row.get("WarmCopyPolicyVersion", "")) != WARM_COPY_POLICY_VERSION for row in rows)
+    ):
+        raise ImportantLeadsCheckError(
+            "warm_preview_policy_stale",
+            "Regenerate the Warm Email Preview under the current diagnosis policy before confirming.",
+        )
     missing = sorted(set(WARM_EMAIL_PREVIEW_HEADERS) - set(fieldnames))
     if missing:
         raise ValueError("Warm preview is missing required columns: " + ", ".join(missing))
@@ -1677,21 +1753,12 @@ def confirm_warm_private_jc_preview(
         if re.search(r"{[A-Za-z][A-Za-z0-9_]*}", _strip_cell(row.get("EmailSubject", "")) + _strip_cell(row.get("EmailBody", ""))):
             violations["unresolved_preview_placeholder"] += 1
             continue
-        try:
-            rendered_copy = render_warm_email_copy(
-                first_name=_trimmed_first_name(row.get("AuthorName", "")) or "there",
-                book_title_or_project=row.get("BookTitleOrProject", ""),
-                recommended_service=row.get("RecommendedService", ""),
-                personalization_line=row.get("PersonalizationLine", ""),
-            )
-        except ValueError as exc:
-            violations[str(exc)] += 1
-            continue
-        if (
-            _strip_cell(row.get("EmailSubject", "")) != str(rendered_copy["subject"]).strip()
-            or _strip_cell(row.get("EmailBody", "")) != str(rendered_copy["body"]).strip()
-        ):
-            violations["preview_copy_mismatch"] += 1
+        policy_result = validate_warm_copy_policy_row({
+            "FirstName": _trimmed_first_name(row.get("AuthorName", "")) or "there",
+            **row,
+        })
+        if not bool(policy_result.get("valid")):
+            violations[str(policy_result.get("reason") or "warm_copy_policy_invalid")] += 1
             continue
         if email in blocked:
             violations["suppressed_or_bad_outcome"] += 1
@@ -1720,6 +1787,7 @@ def confirm_warm_private_jc_preview(
         _write_csv_atomic(queue_path, WARM_PRIVATE_JC_QUEUE_HEADERS, queue_rows)
         manifest = {
             "schema_version": 2,
+            "warm_copy_policy_version": WARM_COPY_POLICY_VERSION,
             "confirmation_id": confirmation_id,
             "confirmed": True,
             "confirmed_at_utc": iso_utc(),
@@ -1743,6 +1811,7 @@ def confirm_warm_private_jc_preview(
         **manifest,
         "ok": True,
         "warm_private_jc_confirmed": True,
+        "warm_copy_policy_version": WARM_COPY_POLICY_VERSION,
         "warm_private_jc_remaining": len(queue_rows),
         "message": f"Warm Private JC confirmed with {len(queue_rows)} previewed recipient(s).",
     }

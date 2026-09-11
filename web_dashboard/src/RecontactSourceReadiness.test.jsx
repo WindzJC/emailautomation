@@ -46,7 +46,11 @@ function leadCheck(state = "failed") {
       preview_block_reason: "",
       output_exists: true,
       rejected_exists: true,
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
       cleaned_rows: 20,
+      rejected_rows: 5,
+      generated_at_utc: "2026-08-28T00:05:00Z",
     };
   }
   if (state === "processing") {
@@ -170,6 +174,7 @@ function restartedStagedRecontactStatus() {
     lead_check_status: {
       ...leadCheck("success"),
       message: "Cleaned and rejected output files exist for the current upload.",
+      checked_source_filename: "Private_JC_Only_Leads_READY.csv",
       cleaned_rows: 15342,
       rejected_rows: 3929,
       outputs_exist: true,
@@ -187,6 +192,7 @@ function restartedStagedRecontactStatus() {
       job_id: runId,
       run_id: runId,
       upload_type: "cold",
+      checked_source_filename: "Private_JC_Only_Leads_READY.csv",
       input_rows: 19271,
       cleaned_rows: 15342,
       rejected_rows: 3929,
@@ -248,6 +254,31 @@ function currentRecontactPreview(status, overrides = {}) {
     dispatch_cap: "all",
     queue_safety: { safe: true },
     updated_at_utc: "2026-09-02T00:49:51+00:00",
+    ...overrides,
+  };
+}
+
+function currentFreshPreview(status, overrides = {}) {
+  return {
+    preview_id: "fresh-preview-current",
+    status: "previewed",
+    campaign_type: "cold",
+    fresh_cold_route: "sendgrid",
+    dispatch_source_mode: "triaged_keep",
+    dispatch_source_path: status.dispatch_source_options.triaged_keep.dispatch_source_path,
+    dispatch_source_exists: true,
+    dispatch_source_row_count: 20,
+    dispatch_eligible_row_count: 20,
+    verification_required: false,
+    dispatch_cap: "all",
+    total_planned_unique_count: 20,
+    total_rows_would_write: 20,
+    rows_to_add_sendgrid: 20,
+    history_policy_version: 2,
+    prior_success_policy: "block_global",
+    duplicate_planned_email_count: 0,
+    planned_authoritative_sent_overlap_count: 0,
+    queue_safety: { safe: true },
     ...overrides,
   };
 }
@@ -414,7 +445,7 @@ describe("source-scoped Recontact readiness", () => {
     expect(confirmButton()).toBeDisabled();
     expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("15,203 checked rows");
     expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("Eligible after mandatory safety: Preview required");
-    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Checked Recontact source is ready for Preview Dispatch");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Preview Dispatch");
 
     fireEvent.click(previewButton());
     await act(async () => flushMicrotasks());
@@ -733,6 +764,257 @@ describe("source-scoped Recontact readiness", () => {
 
     expect(document.getElementById("leads-dispatch-mode-cards")).toHaveTextContent("Eligible after mandatory safety: Preview required");
     expect(confirmButton()).toBeDisabled();
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("renders one authoritative four-stage Cold rail with no current source", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.lead_check_status = {};
+    status.latest_master_check = {};
+    status.lead_ops_progress_by_workflow = { cold: {}, warm_research: {} };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail.querySelectorAll(".workflow-track-step")).toHaveLength(4);
+    expect(rail).toHaveTextContent("Source Action required");
+    expect(rail).toHaveTextContent("Campaign Locked");
+    expect(rail).toHaveTextContent("Preview");
+    expect(rail).toHaveTextContent("Confirm Locked");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Upload & Check source");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("shows the active authoritative filename without leaking prior completed source evidence", async () => {
+    const status = leadsStatus({ checkState: "processing" });
+    status.lead_check_status = {
+      ...leadCheck("processing"),
+      checked_source_filename: "new-upload.csv",
+      progress_percent: 42,
+    };
+    status.active_important_check_job = {
+      job_id: "new-job",
+      status: "running",
+      phase: "checking",
+      selected_filename: "new-upload.csv",
+    };
+    status.active_important_check_jobs.cold = status.active_important_check_job;
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-20T00:00:00Z",
+      checked_source_filename: "previous-upload.csv",
+      input_rows: 9999,
+      cleaned_rows: 9000,
+      rejected_rows: 999,
+    };
+    status.latest_auto_dispatch_preview = currentFreshPreview(status, { preview_id: "previous-preview" });
+    status.latest_auto_dispatch_preview_current = true;
+    status.latest_dispatch = { generated_at_utc: "2026-08-20T00:05:00Z" };
+    status.latest_confirmed_dispatch_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Source Processing");
+    expect(rail).toHaveTextContent("Source: new-upload.csv");
+    expect(rail).toHaveTextContent("Checking… · 42%");
+    expect(rail).not.toHaveTextContent("previous-upload.csv");
+    expect(rail).not.toHaveTextContent("9,000 cleaned");
+    expect(rail).toHaveTextContent("Campaign Locked");
+    expect(rail).toHaveTextContent("Preview Locked");
+    expect(rail).toHaveTextContent("Confirm Locked");
+    expect(rail).not.toHaveTextContent("Preview Ready");
+    expect(rail).not.toHaveTextContent("Confirm Confirmed");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Wait for lead check");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("summarizes the checked filename, Fresh campaign route, and required Preview", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
+      cleaned_rows: 20,
+      rejected_rows: 5,
+    };
+    status.latest_lead_triage = {
+      generated_at_utc: "2026-08-28T00:06:00Z",
+      keep_count: 20,
+    };
+
+    const boot = await bootController(status);
+    root = boot.root;
+    const route = document.querySelector("[data-fresh-cold-route]");
+    fireEvent.change(route, { target: { value: "private_jc" } });
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Source Checked");
+    expect(rail).toHaveTextContent("Source: authors-september.csv");
+    expect(rail).toHaveTextContent("25 input · 20 cleaned · 5 rejected · 20 keep");
+    expect(rail).toHaveTextContent("Checked 2026-08-27 17:05:00 PDT");
+    expect(rail).toHaveTextContent("Campaign Configured");
+    expect(rail).toHaveTextContent("Campaign: Fresh Cold Keep");
+    expect(rail).toHaveTextContent("Route: Private JC Cold");
+    expect(rail).toHaveTextContent("Preview Action required");
+    expect(rail).toHaveTextContent("Confirm Locked");
+    expect(document.querySelectorAll("[data-fresh-cold-route]")).toHaveLength(1);
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("transports lossless Preview recovery timestamps without numeric coercion", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    const recoveryBinding = {
+      job_id: "check_lossless_binding",
+      current_run_id: "check_lossless_binding",
+      master_path: "/synthetic/run/leads.csv",
+      triaged_keep_path: "/synthetic/run/leads_triaged_keep.csv",
+      artifacts: {
+        input: {
+          path: "/synthetic/run/leads.csv",
+          mtime_ns: "1789080427555309480",
+          size: 3699662,
+        },
+        keep: {
+          path: "/synthetic/run/leads_triaged_keep.csv",
+          mtime_ns: "1789080427555309480",
+          size: 2123456,
+        },
+      },
+    };
+    const progress = {
+      job_id: "check_lossless_binding",
+      current_run_id: "check_lossless_binding",
+      phase: "ready_for_preview",
+      status: "ready_for_preview",
+      preview_recovery_binding: recoveryBinding,
+    };
+    status.lead_ops_progress = progress;
+    status.lead_ops_progress_by_workflow.cold = progress;
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+    };
+    status.latest_lead_triage = {
+      generated_at_utc: "2026-08-28T00:06:00Z",
+      keep_count: 20,
+    };
+
+    expect(typeof recoveryBinding.artifacts.input.mtime_ns).toBe("string");
+    expect(JSON.parse(JSON.stringify(recoveryBinding))).toEqual(recoveryBinding);
+
+    const boot = await bootController(status);
+    root = boot.root;
+    fireEvent.change(document.querySelector("[data-fresh-cold-route]"), { target: { value: "private_jc" } });
+    fireEvent.click(previewButton());
+    await act(async () => flushMicrotasks());
+
+    expect(previewPosts(boot.fetchMock)).toHaveLength(1);
+    const [, request] = previewPosts(boot.fetchMock)[0];
+    const payload = JSON.parse(request.body);
+    expect(payload.fresh_cold_route).toBe("private_jc");
+    expect(payload.preview_recovery_binding).toEqual(recoveryBinding);
+    expect(payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("1789080427555309480");
+    expect(typeof payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("string");
+  });
+
+  it("never presents a stale source filename as the current checked identity", async () => {
+    const status = leadsStatus({ checkState: "failed" });
+    status.lead_check_status = {
+      ...leadCheck("failed"),
+      state: "stale",
+      checked_source_filename: "previous-successful-upload.csv",
+      message: "The current source state is stale.",
+    };
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-20T00:00:00Z",
+      checked_source_filename: "previous-successful-upload.csv",
+      cleaned_rows: 9000,
+    };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Source Stale");
+    expect(rail).toHaveTextContent("Source: No current checked source");
+    expect(rail).not.toHaveTextContent("previous-successful-upload.csv");
+    expect(rail).not.toHaveTextContent("9,000 cleaned");
+    expect(rail).toHaveTextContent("Campaign Locked");
+    expect(rail).toHaveTextContent("Confirm Locked");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("marks only an exactly matching Preview current and review-ready", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
+      cleaned_rows: 20,
+      rejected_rows: 5,
+    };
+    status.latest_lead_triage = { generated_at_utc: "2026-08-28T00:06:00Z", keep_count: 20 };
+    status.latest_auto_dispatch_preview = currentFreshPreview(status);
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Preview Ready");
+    expect(rail).toHaveTextContent("20 planned");
+    expect(rail).toHaveTextContent("Confirm Review required");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Review Preview and Confirm");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("invalidates the visible Preview state when the selected route changes", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
+      cleaned_rows: 20,
+      rejected_rows: 5,
+    };
+    status.latest_lead_triage = { generated_at_utc: "2026-08-28T00:06:00Z", keep_count: 20 };
+    status.latest_auto_dispatch_preview = currentFreshPreview(status);
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+    expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Preview Ready");
+
+    fireEvent.change(document.querySelector("[data-fresh-cold-route]"), { target: { value: "private_jc" } });
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Preview Re-preview required");
+    expect(rail).toHaveTextContent("Confirm Locked");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Preview Dispatch");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("hydrates a current confirmed dispatch without duplicating consequential controls", async () => {
+    const status = restartedStagedRecontactStatus();
+    status.latest_auto_dispatch_preview = currentRecontactPreview(status);
+    status.latest_auto_dispatch_preview_current = true;
+    status.latest_dispatch = {
+      generated_at_utc: "2026-09-02T01:00:00Z",
+      campaign_type: "recontact_cold",
+      dispatch_source_path: status.dispatch_source.dispatch_source_path,
+    };
+    status.latest_confirmed_dispatch_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Confirm Confirmed");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Complete Dispatch confirmed");
+    expect(document.querySelectorAll("[data-recontact-route]")).toHaveLength(1);
+    expect(document.querySelectorAll("#leads-important-dispatch-preview-btn")).toHaveLength(1);
+    expect(document.querySelectorAll("#leads-important-dispatch-confirm-btn")).toHaveLength(1);
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 

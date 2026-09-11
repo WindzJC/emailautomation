@@ -82,7 +82,7 @@ def test_legacy_fallback_queue_is_not_retemplated_in_dry_run(tmp_path: Path) -> 
     queue_before = queue.read_bytes()
     confirmation_before = confirmation.read_bytes()
 
-    with pytest.raises(ValueError, match="personalized-copy safety gate"):
+    with pytest.raises(ValueError, match="current diagnosis policy"):
         repair_warm_queue(
             queue_path=queue,
             confirmation_path=confirmation,
@@ -104,7 +104,7 @@ def test_legacy_fallback_queue_is_not_retemplated_or_written(tmp_path: Path) -> 
     queue_before = queue.read_bytes()
     confirmation_before = confirmation.read_bytes()
 
-    with pytest.raises(ValueError, match="personalized-copy safety gate"):
+    with pytest.raises(ValueError, match="current diagnosis policy"):
         repair_warm_queue(
             queue_path=queue,
             confirmation_path=confirmation,

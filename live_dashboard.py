@@ -162,6 +162,7 @@ from provider_pacing import mark_recovery_started, provider_pacing_status
 from send_shard import (
     CAMPAIGN_TYPE_COLD,
     PROFILES,
+    WARM_COPY_POLICY_VERSION,
     campaign_id_for_row,
     get_row_value_ci,
     authoritative_send_log_paths,
@@ -703,6 +704,47 @@ def _file_signature(path: Path) -> tuple[int, int]:
     return stat.st_mtime_ns, stat.st_size
 
 
+def _canonical_preview_recovery_binding(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_artifacts = value.get("artifacts")
+    if not isinstance(raw_artifacts, dict) or not raw_artifacts:
+        return None
+    artifacts: dict[str, dict[str, object]] = {}
+    for name, raw_artifact in raw_artifacts.items():
+        if not isinstance(name, str) or not isinstance(raw_artifact, dict):
+            return None
+        raw_mtime_ns = raw_artifact.get("mtime_ns")
+        if isinstance(raw_mtime_ns, bool):
+            return None
+        if isinstance(raw_mtime_ns, int):
+            if raw_mtime_ns < 0:
+                return None
+            mtime_ns = str(raw_mtime_ns)
+        elif isinstance(raw_mtime_ns, str):
+            if not raw_mtime_ns or not raw_mtime_ns.isascii() or not raw_mtime_ns.isdecimal():
+                return None
+            mtime_ns = raw_mtime_ns
+        else:
+            return None
+        artifact = dict(raw_artifact)
+        artifact["mtime_ns"] = mtime_ns
+        artifacts[name] = artifact
+    binding = dict(value)
+    binding["artifacts"] = artifacts
+    return binding
+
+
+def _preview_recovery_bindings_match(left: object, right: object) -> bool:
+    canonical_left = _canonical_preview_recovery_binding(left)
+    canonical_right = _canonical_preview_recovery_binding(right)
+    return (
+        canonical_left is not None
+        and canonical_right is not None
+        and canonical_left == canonical_right
+    )
+
+
 def _preview_recovery_binding(job: dict[str, object]) -> dict[str, object]:
     job_id = str(job.get("job_id") or "").strip()
     if not job_id or str(job.get("auto_triage_status") or "").strip().lower() != "completed":
@@ -716,7 +758,7 @@ def _preview_recovery_binding(job: dict[str, object]) -> dict[str, object]:
             return {}
         artifacts[name] = {
             "path": str(path.resolve(strict=False)),
-            "mtime_ns": mtime_ns,
+            "mtime_ns": str(mtime_ns),
             "size": size,
         }
     return {
@@ -3099,6 +3141,14 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
         and (stale_seconds is None or stale_seconds >= stale_threshold_seconds)
     )
     current_run_id = active_job_id or str(latest_check.get("check_job_id") or latest_check.get("job_id") or "").strip()
+    checked_source_filename = str(
+        (active_check or {}).get("selected_filename")
+        or (active_check or {}).get("original_uploaded_filename")
+        or (active_check or {}).get("server_received_filename")
+        or (active_check or {}).get("source_label")
+        or latest_check.get("checked_source_filename")
+        or ""
+    ).strip()
     current_run_label = _dashboard_path_label(output_path) if output_path else ""
     latest_output_label = str(latest_check.get("output_label") or latest_check.get("output_path") or "").strip()
 
@@ -3188,6 +3238,7 @@ def _build_lead_check_status(status: dict[str, object], state: dict[str, object]
         "message": message,
         "guidance": guidance,
         "current_run_id": current_run_id,
+        "checked_source_filename": checked_source_filename,
         "input_path": str(input_path or ""),
         "output_path": str(output_path or ""),
         "rejected_path": str(rejected_path or ""),
@@ -3463,6 +3514,14 @@ def _apply_latest_staged_run_status(status: dict[str, object]) -> dict[str, obje
     latest_master_check = dict(job_check or status.get("latest_master_check") or {})
     latest_master_check.update(
         {
+            "checked_source_filename": str(
+                job.get("selected_filename")
+                or job.get("original_uploaded_filename")
+                or job.get("server_received_filename")
+                or job.get("source_label")
+                or latest_master_check.get("checked_source_filename")
+                or ""
+            ).strip(),
             "intake_mode": intake_mode,
             "intake_mode_label": intake_mode_label,
             "input_rows": int(
@@ -7164,6 +7223,10 @@ def get_warm_research_review() -> JSONResponse:
         _identity(row): row
         for row in preview_rows
     }
+    preview_policy_current = bool(preview_rows) and all(
+        bool(_send_shard.validate_warm_copy_policy_row(row).get("valid"))
+        for row in preview_rows
+    )
 
     def _base_review_row(row: dict) -> dict:
         return {
@@ -7187,6 +7250,12 @@ def get_warm_research_review() -> JSONResponse:
             "PersonalizationLine": _clean(
                 row.get("PersonalizationLine")
             ),
+            "DiagnosisStatus": _clean(row.get("DiagnosisStatus")) or "signal_only",
+            "AuditCompleted": _clean(row.get("AuditCompleted")) or "false",
+            "RecommendationEvidence": _clean(row.get("RecommendationEvidence")),
+            "WarmTemplateMode": _clean(row.get("WarmTemplateMode")) or "signal_only",
+            "WarmCopyPolicyVersion": _clean(row.get("WarmCopyPolicyVersion")),
+            "PreviewOffer": _clean(row.get("PreviewOffer")),
         }
 
     review_rows: list[dict] = []
@@ -7205,10 +7274,7 @@ def get_warm_research_review() -> JSONResponse:
             {
                 "Status": "READY",
                 "BlockReason": "",
-                "PreviewOffer": (
-                    _send_shard.warm_preview_offer(service)
-                    or ""
-                ),
+                "PreviewOffer": _clean(preview.get("PreviewOffer") or item.get("PreviewOffer")),
                 "EmailSubject": _clean(
                     preview.get("EmailSubject")
                 ),
@@ -7230,12 +7296,7 @@ def get_warm_research_review() -> JSONResponse:
                     "Professional contact-form route requires "
                     "manual review; it is not email-ready."
                 ),
-                "PreviewOffer": (
-                    _send_shard.warm_preview_offer(
-                        item["RecommendedService"]
-                    )
-                    or ""
-                ),
+                "PreviewOffer": item["PreviewOffer"],
                 "EmailSubject": "",
                 "EmailBody": "",
             }
@@ -7283,6 +7344,8 @@ def get_warm_research_review() -> JSONResponse:
             "ok": True,
             "job_id": str(job.get("job_id") or ""),
             "preview_generated": bool(preview_rows),
+            "preview_policy_current": preview_policy_current,
+            "warm_copy_policy_version": WARM_COPY_POLICY_VERSION,
             "ready_count": len(ready_rows),
             "contact_form_count": len(contact_rows),
             "blocked_count": len(rejected_rows),
@@ -7331,6 +7394,9 @@ def generate_warm_research_email_preview() -> JSONResponse:
         "warm_email_preview_rows": int(preview.get("warm_email_preview_rows") or 0),
         "warm_email_preview_label": str(preview.get("output_label") or ""),
         "warm_email_preview_generated_at_utc": str(preview.get("generated_at_utc") or ""),
+        "warm_copy_policy_version_required": WARM_COPY_POLICY_VERSION,
+        "warm_email_preview_policy_version": str(preview.get("warm_copy_policy_version") or ""),
+        "warm_preview_policy_current": bool(preview.get("warm_preview_policy_current")),
     })
     updated_job["check"] = updated_check
     updated_job["warm_email_preview"] = preview
@@ -7363,6 +7429,11 @@ def confirm_warm_research_private_jc() -> JSONResponse:
         )
     try:
         confirmation = confirm_warm_private_jc_preview(preview_path=preview_path)
+    except ImportantLeadsCheckError as exc:
+        return JSONResponse(
+            {"ok": False, "blocked": True, "error": exc.code, "message": exc.message, "details": exc.details},
+            status_code=409,
+        )
     except Exception as exc:
         return JSONResponse(
             {"ok": False, "blocked": True, "error": "warm_confirm_blocked", "message": str(exc)},
@@ -7644,7 +7715,10 @@ def _run_claimed_manual_dispatch_preview_background(
         return
 
     try:
-        if expected_recovery_binding and _preview_recovery_binding(job) != expected_recovery_binding:
+        if expected_recovery_binding and not _preview_recovery_bindings_match(
+            _preview_recovery_binding(job),
+            expected_recovery_binding,
+        ):
             raise RuntimeError("Preview recovery refused: staged source artifacts changed before preview execution.")
         preview = preview_dispatch_master_leads(
             master_path=master_path,
@@ -7661,7 +7735,10 @@ def _run_claimed_manual_dispatch_preview_background(
         )
         if expected_recovery_binding:
             post_build_job = _load_important_check_job(check_job_id)
-            if _preview_recovery_binding(post_build_job) != expected_recovery_binding:
+            if not _preview_recovery_bindings_match(
+                _preview_recovery_binding(post_build_job),
+                expected_recovery_binding,
+            ):
                 post_build_job.pop("auto_dispatch_preview_id", None)
                 post_build_job.pop("auto_dispatch_preview_path", None)
                 post_build_job.pop("auto_dispatch_preview", None)
@@ -7878,7 +7955,10 @@ def _preview_recovery_request_block(
             "error": "preview_recovery_binding_required",
             "message": "Preview recovery refused: refresh Lead Ops before retrying Preview.",
         }
-    if requested_binding and requested_binding != current_binding:
+    if requested_binding and not _preview_recovery_bindings_match(
+        requested_binding,
+        current_binding,
+    ):
         return {
             "error": "preview_recovery_fingerprint_mismatch",
             "message": "Preview recovery refused: staged source artifacts changed after the page was loaded.",

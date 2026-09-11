@@ -125,7 +125,7 @@ describe("Warm Outreach controller layout", () => {
     document.body.innerHTML = "";
   });
 
-  async function boot({ checked = false, drafts = 0, historical = false, running = false } = {}) {
+  async function boot({ checked = false, drafts = 0, historical = false, running = false, previewPolicyCurrent = Boolean(drafts) } = {}) {
     vi.useFakeTimers();
     const html = fs.readFileSync(path.resolve(process.cwd(), "web_dashboard/index.html"), "utf8");
     const parsed = new DOMParser().parseFromString(html, "text/html");
@@ -138,6 +138,9 @@ describe("Warm Outreach controller layout", () => {
         upload_type: "warm_research", current_upload_valid: true,
         current_job_id: "fixture-check", generated_at_utc: "2026-09-01T00:00:00Z",
         warm_email_ready_rows: 7, warm_email_preview_rows: drafts,
+        warm_copy_policy_version_required: "warm_diagnosis_gate_v1",
+        warm_email_preview_policy_version: previewPolicyCurrent && drafts ? "warm_diagnosis_gate_v1" : "legacy",
+        warm_preview_policy_current: Boolean(previewPolicyCurrent && drafts),
       } : {},
       lead_ops_progress_by_workflow: { warm_research: checked ? {
         job_id: "fixture-check", selected_upload_type: "warm_research", phase: "ready_for_preview",
@@ -205,6 +208,14 @@ describe("Warm Outreach controller layout", () => {
     const confirm = panel.querySelector('[data-leads-next-action="confirm_warm_private_jc"]');
     if (drafts) expect(confirm).toBeEnabled(); else expect(confirm).toBeDisabled();
     expect(panel.querySelector('[data-leads-next-action="start_warm_private_jc"]')).toBeDisabled();
+    expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
+  });
+
+  it("keeps legacy warm preview visibly stale and confirmation disabled", async () => {
+    const fetchMock = await boot({ checked: true, drafts: 7, previewPolicyCurrent: false });
+    const panel = document.getElementById("leads-current-run-panel");
+    expect(panel).toHaveTextContent("Preview policy stale");
+    expect(panel.querySelector('[data-leads-next-action="confirm_warm_private_jc"]')).toBeDisabled();
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 

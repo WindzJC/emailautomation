@@ -319,22 +319,23 @@ class WebDashboardAppTests(unittest.TestCase):
         for expected in [
             "Current Warm Outreach · Re-upload required",
             "No Current Warm Queue",
-            "!checked || draftCount <= 0 || warmConfirmed",
+            "!checked || draftCount <= 0 || !previewPolicy.current || warmConfirmed",
             "!checked || !warmConfirmed || !laneConfirmed || warmRemaining <= 0",
-            "Historical sender activity below does not unlock this upload workflow.",
+            "This sender history is separate from the current upload workflow and cannot unlock preview, confirmation, or Start.",
             "Previous Warm Outreach Run",
+            "Preview policy stale — regenerate required",
         ]:
             self.assertIn(expected, panel_body)
         for expected in [
             'workflow.reuploadRequired',
             'status: reviewed ? "Reviewed" : checked ? "Available" : "Locked"',
-            'status: draftReady ? "Complete" : checked ? "Available" : "Locked"',
+            'status: draftReady ? "Complete" : previewPolicy.stale ? "Stale" : checked ? "Available" : "Locked"',
             'status: currentConfirmed ? "Complete" : draftReady ? "Required" : "Locked"',
         ]:
             self.assertIn(expected, tracker_body)
         self.assertIn("Previous Warm Outreach Run", banner_body)
         self.assertIn("Historical results — not current workflow state", banner_body)
-        self.assertIn("workflow.valid && Number(report.warm_email_preview_rows || 0) > 0", banner_body)
+        self.assertIn("workflow.valid && warmPreviewPolicyState(report).current", banner_body)
 
     def test_cold_workflow_tracker_ends_at_confirm_without_changing_queue_safety(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -342,9 +343,13 @@ class WebDashboardAppTests(unittest.TestCase):
         tracker_end = source.index("function renderLeadsWorkflowStatusBanner", tracker_start)
         tracker_body = source[tracker_start:tracker_end]
 
-        for step in ['step: "Source"', 'step: "Check"', 'step: "Triage"', 'step: "Preview"', 'step: "Confirm"']:
-            self.assertIn(step, tracker_body)
-        self.assertNotIn('step: "Start"', tracker_body)
+        derivation_start = source.index("function deriveColdCampaignWorkflowState")
+        derivation_end = source.index("function currentRunPreviewBlockMessage", derivation_start)
+        derivation_body = source[derivation_start:derivation_end]
+        for step in ['label: "Source"', 'label: "Campaign"', 'label: "Preview"', 'label: "Confirm"']:
+            self.assertIn(step, derivation_body)
+        self.assertNotIn('label: "Start"', derivation_body)
+        self.assertIn("[workflow.source, workflow.campaign, workflow.preview, workflow.confirm]", tracker_body)
         self.assertNotIn("const liveQueueExists = liveRecipientQueueTotal(status) > 0", tracker_body)
         self.assertIn("function confirmedDispatchQueueState", source)
 
@@ -658,11 +663,10 @@ class WebDashboardAppTests(unittest.TestCase):
             "Preview locked",
             "button.classList.toggle(\"is-locked\"",
             "Locked until Check/Triage completes.",
-            "step: \"Source\"",
-            "step: \"Check\"",
-            "step: \"Triage\"",
-            "step: \"Preview\"",
-            "step: \"Confirm\"",
+            'label: "Source"',
+            'label: "Campaign"',
+            'label: "Preview"',
+            'label: "Confirm"',
         ]:
             self.assertIn(expected, source)
         self.assertNotIn('state === "processing" ? "Processing / checking" : "Not started"', source)
@@ -1147,7 +1151,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Warm Research uses its own draft, confirmation, and Private JC lane.",
             "Warm Outreach Validation",
             "Explicit confirmation required",
-            "Historical sender activity below does not unlock this upload workflow.",
+            "This sender history is separate from the current upload workflow and cannot unlock preview, confirmation, or Start.",
             "applyWarmResearchLayoutState",
             "warm-research-mode",
             "Generate Email Preview",
@@ -2135,6 +2139,22 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("warm-status-summary", source)
         self.assertIn("formatWarmActivity(lane.last_sent_timestamp)", source)
         self.assertIn('href="mailto:${escapeHtml(lane.last_sent_email)}"', source)
+
+    def test_warm_diagnosis_and_preview_policy_are_operator_visible(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+
+        for expected in [
+            "Audited / evidence-backed",
+            "Signal only",
+            "Diagnosed preview",
+            "Signal-only preview",
+            "Recommendation Evidence",
+            "Research metadata only — not authorized in rendered recommendation",
+            "Preview policy stale — regenerate required",
+        ]:
+            self.assertIn(expected, source)
+        self.assertIn("warmPreviewPolicyState(report)", source)
+        self.assertIn("!previewPolicy.current", source)
 
     def test_header_status_is_compact_and_overflow_safe(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

@@ -1530,6 +1530,7 @@ function selectedModeLeadCheckStatus(status = lastLeadsStatus, uploadType = sele
       latest_master_check_matches_current_run: true,
       generated_at_utc: selectedReport.generated_at_utc,
       current_run_id: selectedReport.current_run_id || selectedReport.run_id || selectedReport.check_run_id || "",
+      checked_source_filename: selectedReport.checked_source_filename || "",
       input_path: selectedReport.input_path || selectedReport.source_path || "",
       check_job_id: selectedReport.check_job_id || selectedReport.job_id || "",
       confirm_ready: false,
@@ -1557,6 +1558,7 @@ function selectedModeLeadCheckStatus(status = lastLeadsStatus, uploadType = sele
       latest_master_check_matches_current_run: false,
       check_job_id: activeJob.job_id,
       current_run_id: activeJob.current_run_id || activeJob.run_id || activeJob.check_run_id || "",
+      checked_source_filename: selectedFilename,
       input_path: activeJob.input_path || activeJob.source_path || activeJob.server_path || "",
       selected_filename: selectedFilename,
       updated_at_utc: activeJob.updated_at_utc || activeJob.started_at_utc || activeJob.created_at_utc || "",
@@ -4505,6 +4507,25 @@ function currentWarmWorkflowState(status = lastLeadsStatus) {
   };
 }
 
+function warmPreviewPolicyState(report = {}) {
+  const previewRows = Number(report?.warm_email_preview_rows || 0);
+  const requiredVersion = String(report?.warm_copy_policy_version_required || "").trim();
+  const previewVersion = String(report?.warm_email_preview_policy_version || "").trim();
+  const current = Boolean(
+    previewRows > 0
+    && report?.warm_preview_policy_current === true
+    && requiredVersion
+    && previewVersion === requiredVersion
+  );
+  return {
+    current,
+    stale: previewRows > 0 && !current,
+    previewRows,
+    requiredVersion,
+    previewVersion,
+  };
+}
+
 function currentWarmPrivateJcStatus(status = lastLeadsStatus, snapshot = lastSnapshot) {
   return status?.warm_private_jc_status
     || snapshot?.warm_private_jc_status
@@ -4615,6 +4636,9 @@ function warmLeadReviewMarkup(review = lastWarmLeadReview) {
       : escapeHtml(sourceUrl || "—");
 
     const blockReason = String(row?.BlockReason || "").trim();
+    const diagnosisStatus = String(row?.DiagnosisStatus || "signal_only").trim().toLowerCase();
+    const templateMode = String(row?.WarmTemplateMode || "signal_only").trim().toLowerCase();
+    const audited = diagnosisStatus === "audited" && templateMode === "diagnosed";
 
     const emailPreview = row?.EmailSubject
       ? `
@@ -4663,8 +4687,26 @@ function warmLeadReviewMarkup(review = lastWarmLeadReview) {
           </span>
 
           <span>
+            <strong>Diagnosis</strong>
+            ${audited ? "Audited / evidence-backed" : "Signal only"}
+          </span>
+
+          <span>
+            <strong>Template</strong>
+            ${audited ? "Diagnosed preview" : "Signal-only preview"}
+          </span>
+
+          ${audited ? `
+            <span>
+              <strong>Recommendation Evidence</strong>
+              ${escapeHtml(row?.RecommendationEvidence || "—")}
+            </span>
+          ` : ""}
+
+          <span>
             <strong>Astra Service</strong>
             ${escapeHtml(row?.RecommendedService || "—")}
+            ${audited ? "" : " · Research metadata only — not authorized in rendered recommendation"}
           </span>
 
           ${row?.PreviewOffer ? `
@@ -5365,6 +5407,187 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
   };
 }
 
+function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = currentRunWorkflowState(status)) {
+  const leadCheck = currentLeadCheckStatus(status);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  const recontactSelected = selectedCampaign === "recontact_cold";
+  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const sourceReadiness = selectedDispatchSourceReadiness(selectedCampaign, dispatchSource, status);
+  const checkState = String(leadCheck?.state || "not_started").toLowerCase();
+  const processing = ["processing", "upload_received"].includes(checkState) || state.checkStatus === "running";
+  const sourceFailed = ["failed", "stale", "mismatch", "not_ready"].includes(checkState);
+  const sourceComplete = recontactSelected ? sourceReadiness.ready : state.checkStatus === "completed";
+  const currentSourceReady = !processing && sourceComplete && sourceReadiness.ready;
+  const sourceFilename = String(leadCheck?.checked_source_filename || "").trim();
+  const latestCheck = state.latestCheck || {};
+  const latestTriage = state.latestTriage || {};
+  const inputRows = Number(latestCheck.input_rows ?? status?.pipeline?.input_rows ?? 0);
+  const cleanedRows = Number(leadCheck.cleaned_rows ?? latestCheck.cleaned_rows ?? latestCheck.output_rows ?? 0);
+  const rejectedRows = Number(leadCheck.rejected_rows ?? latestCheck.rejected_rows ?? latestCheck.reject_count ?? 0);
+  const triageCurrent = state.checkStatus === "completed" && state.triageStatus === "completed";
+  const keepRows = triageCurrent
+    ? Number(latestTriage.keep_count ?? latestTriage.kept_rows ?? dispatchSource.dispatch_source_row_count ?? 0)
+    : null;
+  const sourceCounts = sourceComplete && !processing
+    ? [
+      inputRows > 0 ? `${inputRows.toLocaleString()} input` : "",
+      `${cleanedRows.toLocaleString()} cleaned`,
+      `${rejectedRows.toLocaleString()} rejected`,
+      keepRows !== null ? `${keepRows.toLocaleString()} keep` : "",
+    ].filter(Boolean).join(" · ")
+    : "";
+  const checkedAt = sourceComplete && leadCheck.generated_at_utc
+    ? `Checked ${formatGeneratedAt(leadCheck.generated_at_utc)}`
+    : "";
+
+  let source;
+  if (processing) {
+    const progressValue = Number(leadCheck.progress_percent);
+    const progress = Number.isFinite(progressValue) ? ` · ${Math.max(0, Math.min(100, progressValue)).toFixed(0)}%` : "";
+    source = {
+      label: "Source",
+      status: "Processing",
+      tone: "warn",
+      detailLabel: "Source",
+      detail: sourceFilename || "Current upload",
+      evidence: `Checking…${progress}`,
+    };
+  } else if (sourceComplete) {
+    source = {
+      label: "Source",
+      status: "Checked",
+      tone: "good",
+      detailLabel: "Source",
+      detail: sourceFilename || "Checked source identity unavailable",
+      evidence: sourceCounts,
+      meta: checkedAt,
+    };
+  } else if (sourceFailed) {
+    source = {
+      label: "Source",
+      status: checkState === "mismatch" || checkState === "stale" ? "Stale" : "Blocked",
+      tone: "bad",
+      detailLabel: "Source",
+      detail: "No current checked source",
+      evidence: String(leadCheck.preview_block_reason || leadCheck.message || sourceReadiness.block_reason || "Upload & Check is required."),
+    };
+  } else {
+    source = {
+      label: "Source",
+      status: "Action required",
+      tone: "warn",
+      detailLabel: "Source",
+      detail: "No current checked source",
+      evidence: "Upload & Check a source file.",
+    };
+  }
+
+  const routeLabel = recontactSelected
+    ? recontactRouteLabel(selectedRecontactRoute)
+    : freshColdRouteLabel(selectedFreshColdRoute);
+  const campaign = {
+    label: "Campaign",
+    status: currentSourceReady ? "Configured" : "Locked",
+    tone: currentSourceReady ? "good" : "neutral",
+    detailLabel: "Campaign",
+    detail: recontactSelected ? "Checked Recontact Pool" : "Fresh Cold Keep",
+    evidenceLabel: currentSourceReady ? "Route" : "",
+    evidence: currentSourceReady ? routeLabel : "Waiting for an eligible source.",
+  };
+
+  const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
+  const previewSummary = previewCurrent ? dispatchPreviewRouteSummary(lastImportantDispatchPreview, dispatchSource) : null;
+  const hadPreview = Boolean(lastImportantDispatchPreview?.preview_id);
+  const previewBlocked = currentRunPreviewBlockMessage(dispatchSource, state);
+  let preview;
+  if (processing) {
+    preview = { label: "Preview", status: "Locked", tone: "neutral", detail: "Waiting for the current source check.", evidence: "A previous Preview cannot authorize the new upload." };
+  } else if (importantLeadDispatchPreviewLoading || state.previewStatus === "running") {
+    preview = { label: "Preview", status: "Processing", tone: "warn", detail: "Building current Preview", evidence: "Wait for Preview to complete." };
+  } else if (previewCurrent) {
+    preview = {
+      label: "Preview",
+      status: "Ready",
+      tone: "good",
+      detail: `${Number(previewSummary?.uniquePlanned || 0).toLocaleString()} planned`,
+      evidence: routeLabel,
+    };
+  } else if (hadPreview) {
+    preview = {
+      label: "Preview",
+      status: "Re-preview required",
+      tone: "warn",
+      detail: "Previous Preview does not match current configuration.",
+      evidence: previewBlocked || `Current route: ${routeLabel}`,
+    };
+  } else if (currentSourceReady && !previewBlocked) {
+    preview = {
+      label: "Preview",
+      status: "Action required",
+      tone: "warn",
+      detail: "No Preview for current configuration.",
+      evidence: routeLabel,
+    };
+  } else {
+    preview = {
+      label: "Preview",
+      status: previewBlocked ? "Blocked" : "Locked",
+      tone: previewBlocked ? "bad" : "neutral",
+      detail: "Waiting for a current source and campaign.",
+      evidence: previewBlocked || "Preview is not available yet.",
+    };
+  }
+
+  const confirmedCurrent = Boolean(
+    status?.latest_confirmed_dispatch_current === true
+    && (status?.latest_dispatch?.generated_at_utc || lastImportantDispatch?.generated_at_utc),
+  );
+  const confirmSafety = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
+  let confirm;
+  if (processing) {
+    confirm = { label: "Confirm", status: "Locked", tone: "neutral", detail: "Waiting for the current source check.", evidence: "A previous confirmation cannot authorize the new upload." };
+  } else if (confirmedCurrent) {
+    confirm = { label: "Confirm", status: "Confirmed", tone: "good", detail: "Dispatch confirmation is current.", evidence: "Queue plan is bound to the confirmed dispatch." };
+  } else if (importantLeadDispatchConfirmLoading || state.confirmStatus === "running") {
+    confirm = { label: "Confirm", status: "Processing", tone: "warn", detail: "Confirmation is in progress.", evidence: "Wait for the current operation." };
+  } else if (previewCurrent && confirmSafety.ready) {
+    confirm = { label: "Confirm", status: "Review required", tone: "warn", detail: "Review the current Preview before confirming.", evidence: "Confirm is the queue-write boundary." };
+  } else {
+    confirm = {
+      label: "Confirm",
+      status: "Locked",
+      tone: "neutral",
+      detail: "Waiting for a valid current Preview.",
+      evidence: previewCurrent ? String(confirmSafety.message || confirmSafety.buttonTitle || "Confirm safety checks are not satisfied.") : "Preview must match the current configuration.",
+    };
+  }
+
+  let nextAction;
+  if (processing) {
+    nextAction = { prefix: "Next", message: "Wait for lead check", tone: "active" };
+  } else if (!recontactSelected && state.checkStatus !== "completed") {
+    nextAction = sourceFailed
+      ? { prefix: "Blocked", message: source.evidence, tone: "bad" }
+      : { prefix: "Next", message: "Upload & Check source", tone: "warn" };
+  } else if (!recontactSelected && state.triageStatus === "running") {
+    nextAction = { prefix: "Next", message: "Wait for Fast Triage", tone: "active" };
+  } else if (!recontactSelected && state.triageStatus !== "completed") {
+    nextAction = { prefix: "Next", message: "Run Fast Triage", tone: "warn" };
+  } else if (!currentSourceReady || previewBlocked) {
+    nextAction = { prefix: "Blocked", message: previewBlocked || sourceReadiness.block_reason || "Current source is not ready.", tone: "bad" };
+  } else if (!previewCurrent) {
+    nextAction = { prefix: "Next", message: "Preview Dispatch", tone: "warn" };
+  } else if (!confirmedCurrent) {
+    nextAction = confirmSafety.ready
+      ? { prefix: "Next", message: "Review Preview and Confirm", tone: "warn" }
+      : { prefix: "Blocked", message: confirm.evidence, tone: "bad" };
+  } else {
+    nextAction = { prefix: "Complete", message: "Dispatch confirmed", tone: "good" };
+  }
+
+  return { source, campaign, preview, confirm, nextAction };
+}
+
 function currentRunPreviewBlockMessage(dispatchSource = {}, state = currentRunWorkflowState()) {
   const readiness = selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), dispatchSource, lastLeadsStatus);
   const rawReason = String(readiness.block_reason || dispatchPreviewBlockReason(dispatchSource) || "").trim();
@@ -5613,6 +5836,7 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
     const warmRemaining = Number(lane.queued_remaining_count ?? lane.remaining ?? 0);
     const warmSent = Number(lane.sent_count ?? 0);
     const draftCount = Number(report.warm_email_preview_rows || 0);
+    const previewPolicy = warmPreviewPolicyState(report);
     const warmCap = Number(lane.cap ?? 0);
     const warmOriginal = Number(lane.ready_original_count ?? lane.original_count ?? draftCount ?? 0);
     const warmStateHeadline = workflow.reuploadRequired
@@ -5705,8 +5929,9 @@ function renderLeadsCurrentRunPanel(status = lastLeadsStatus) {
             </div>
             <div class="leads-action-slot warm-action-stack">
               <button class="btn btn-secondary" type="button" data-leads-next-action="generate_warm_preview" ${!checked || warmDraftPreviewLoading ? "disabled" : ""}>${warmDraftPreviewLoading ? "Generating..." : "Generate Email Preview"}</button>
-              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Outreach Confirmed" : "Confirm Warm Outreach"}</button>
+              <button class="btn btn-primary" type="button" data-leads-next-action="confirm_warm_private_jc" ${!checked || draftCount <= 0 || !previewPolicy.current || warmConfirmed ? "disabled" : ""}>${warmConfirmed ? "Warm Outreach Confirmed" : "Confirm Warm Outreach"}</button>
             </div>
+            ${previewPolicy.stale ? `<div class="warm-live-warning"><strong>Preview policy stale — regenerate required</strong><span>Generate and review a new Warm Email Preview under the current diagnosis policy before confirming.</span></div>` : ""}
             ${lane.blocked ? `<div class="warm-live-warning"><strong>Blocked: no eligible warm rows</strong><span>${escapeHtml(lane.last_worker_reason || "queue_exhausted_no_eligible_rows")}</span></div>` : ""}
             <div class="warm-live-summary ${warmRunning ? "warm-live-summary-running" : ""}" aria-label="Warm sender status">
               <span>Sent <strong>${warmSent.toLocaleString()}</strong></span>
@@ -5882,7 +6107,8 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     const activeJob = currentImportantCheckJob(status);
     const running = isActiveImportantLeadCheckJob(activeJob) && activeJob?.upload_type === "warm_research";
     const checked = workflow.valid;
-    const draftReady = checked && Number(report.warm_email_preview_rows || 0) > 0;
+    const previewPolicy = warmPreviewPolicyState(report);
+    const draftReady = checked && previewPolicy.current;
     const currentConfirmed = checked && Boolean(report.warm_private_jc_confirmed);
     const hasCurrentAttempt = Boolean(workflow.progress?.job_id);
     const reviewed = checked && Boolean(lastWarmLeadReview);
@@ -5934,9 +6160,11 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
       },
       {
         step: "Preview Email",
-        status: draftReady ? "Complete" : checked ? "Available" : "Locked",
+        status: draftReady ? "Complete" : previewPolicy.stale ? "Stale" : checked ? "Available" : "Locked",
         detail: draftReady
           ? `${Number(report.warm_email_preview_rows || 0).toLocaleString()} canonical email previews generated`
+          : previewPolicy.stale
+            ? "Preview policy stale — regenerate required."
           : checked
             ? "Generates canonical EmailSubject and EmailBody without writing a sender queue."
             : "Locked until validation completes.",
@@ -5970,75 +6198,24 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     return;
   }
   const state = currentRunWorkflowState(status);
-  const latestCheck = state.latestCheck || {};
-  const latestTriage = state.latestTriage || {};
-  const dispatchSource = dispatchSourceForSelectedMode().source || {};
-  const sourceReadiness = selectedDispatchSourceReadiness(selectedImportantDispatchCampaignType(), dispatchSource, status);
-  const checkRows = Number(latestCheck.cleaned_rows || latestCheck.output_rows || latestCheck.input_rows || 0);
-  const checkRejected = Number(latestCheck.rejected_rows || latestCheck.reject_count || latestCheck.removed_rows || 0);
-  const keepRows = Number(latestTriage.keep_count || latestTriage.kept_rows || dispatchSource.dispatch_source_row_count || 0);
-  const rejectRows = Number(latestTriage.reject_count || latestTriage.rejected_count || 0);
-  const quarantineRows = Number(latestTriage.quarantine_count || latestTriage.review_count || 0);
-  const selectedCampaign = selectedImportantDispatchCampaignType();
-  const recontactSelected = selectedCampaign === "recontact_cold";
-  const previewCurrent = Boolean(lastImportantDispatchPreview && dispatchPreviewMatchesCurrentSelection());
-  const selectedSource = selectedDispatchSourceLabel(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
-  const confirmReady = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null).ready;
-  const hasUpload = Boolean(state.activeCheck?.job_id || latestCheck?.generated_at_utc);
-  const checkFailed = state.checkStatus === "failed";
-  const triageLocked = state.checkStatus !== "completed";
-  const previewBlocked = currentRunPreviewBlockMessage(dispatchSource, state);
-  const tasks = [
-    {
-      step: "Source",
-      status: sourceReadiness.ready ? "Complete" : hasUpload ? "Review" : "Waiting",
-      detail: sourceReadiness.ready
-        ? `${selectedSource} is structurally ready for Preview Dispatch.`
-        : sourceReadiness.block_reason || (hasUpload ? "A source is staged but is not ready." : "Choose a CSV/XLSX source."),
-      tone: sourceReadiness.ready ? "good" : "neutral",
-    },
-    {
-      step: "Check",
-      status: state.checkStatus === "completed" ? "Complete" : checkFailed ? "Failed/Stale" : state.checkStatus === "running" ? "Running" : "Waiting",
-      detail: checkRows ? `${checkRows.toLocaleString()} cleaned, ${checkRejected.toLocaleString()} rejected` : state.checkStatus === "running" ? "Waiting for leads.csv and leads_rejected.csv." : "Run Upload & Check.",
-      tone: state.checkStatus === "completed" ? "good" : checkFailed ? "bad" : state.checkStatus === "running" ? "warn" : "neutral",
-    },
-    {
-      step: "Triage",
-      status: state.triageStatus === "completed" ? "Complete" : triageLocked ? "Locked" : state.triageStatus === "running" ? "Running" : "Waiting",
-      detail: keepRows
-        ? `${keepRows.toLocaleString()} keep, ${rejectRows.toLocaleString()} reject, ${quarantineRows.toLocaleString()} quarantine`
-        : recontactSelected ? "Fresh Cold triage state does not gate the checked Recontact source." : triageLocked ? "Locked until check completes." : "Run Fast Triage after Check.",
-      tone: state.triageStatus === "completed" ? "good" : state.triageStatus === "running" ? "warn" : "neutral",
-    },
-    {
-      step: "Preview",
-      status: previewCurrent ? "Complete" : previewBlocked ? "Locked" : "Ready",
-      detail: previewCurrent ? "Preview matches selected source and campaign." : previewBlocked || `${selectedSource}. ${selectedCampaign === "cold" ? "Fresh Cold" : "Recontact"} mode ready to preview.`,
-      tone: previewCurrent ? "good" : previewBlocked ? "neutral" : "warn",
-    },
-    {
-      step: "Confirm",
-      status: confirmReady ? "Ready" : "Locked",
-      detail: "Confirm writes queues only after preview passes.",
-      tone: confirmReady ? "good" : "neutral",
-    },
-  ];
+  const workflow = deriveColdCampaignWorkflowState(status, state);
+  const tasks = [workflow.source, workflow.campaign, workflow.preview, workflow.confirm];
   setNodeHtml(
     els.leadsWorkflowTaskList,
     `
       <div class="workflow-tracker-head">
-        <p class="eyebrow">Workflow Tracker</p>
-        <span>${escapeHtml(selectedCampaign === "cold" ? "Fresh Cold" : "Recontact Existing Leads")}</span>
+        <p class="eyebrow">Current Cold Workflow</p>
       </div>
-      <ol class="workflow-tracker-row" aria-label="Lead dispatch workflow">
+      <ol class="workflow-tracker-row" aria-label="Cold campaign workflow status">
         ${tasks.map((task, index) => `
-          <li class="workflow-track-step workflow-track-step-${escapeHtml(task.tone)}">
+          <li class="workflow-track-step workflow-track-step-${escapeHtml(task.tone)} workflow-track-step-${escapeHtml(task.label.toLowerCase())}">
             <span class="workflow-track-number">${index + 1}</span>
             <span class="workflow-track-copy">
-              <strong>${escapeHtml(task.step)}</strong>
+              <strong>${escapeHtml(task.label)}</strong>
               <em>${escapeHtml(task.status)}</em>
-              <small>${escapeHtml(task.detail)}</small>
+              <small class="workflow-track-primary" title="${escapeHtml(task.detail)}">${task.detailLabel ? `<b>${escapeHtml(task.detailLabel)}:</b> ` : ""}${escapeHtml(task.detail)}</small>
+              ${task.evidence ? `<small class="workflow-track-evidence" title="${escapeHtml(task.evidence)}">${task.evidenceLabel ? `<b>${escapeHtml(task.evidenceLabel)}:</b> ` : ""}${escapeHtml(task.evidence)}</small>` : ""}
+              ${task.meta ? `<small class="workflow-track-meta" title="${escapeHtml(task.meta)}">${escapeHtml(task.meta)}</small>` : ""}
             </span>
           </li>
         `).join("")}
@@ -6063,7 +6240,8 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
                 <p class="eyebrow">Current workflow outputs</p>
                 <strong>${workflow.reuploadRequired ? "Re-upload required" : "Warm Outreach Validation"}</strong>
               </div>
-              ${workflow.valid && Number(report.warm_email_preview_rows || 0) > 0 ? `<span class="mini-pill">Draft preview ready</span>` : ""}
+              ${workflow.valid && warmPreviewPolicyState(report).current ? `<span class="mini-pill">Draft preview ready</span>` : ""}
+              ${workflow.valid && warmPreviewPolicyState(report).stale ? `<span class="mini-pill">Preview policy stale</span>` : ""}
             </div>
             ${warmResearchMetricMarkup(report)}
             ${workflow.valid ? "" : `<p class="muted">Current metrics are cleared and actions remain locked until a valid current upload completes.</p>`}
@@ -6089,40 +6267,15 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
     );
     return;
   }
-  const state = currentRunWorkflowState(status);
-  const dispatchSource = dispatchSourceForSelectedMode().source || {};
-  const dispatchPreview = dispatchPreviewMatchesCurrentSelection() ? lastImportantDispatchPreview : null;
-  const dispatchSummary = dispatchPreviewRouteSummary(dispatchPreview, dispatchSource);
-  const selectedCampaign = selectedImportantDispatchCampaignType();
-  const sourceReadiness = selectedDispatchSourceReadiness(selectedCampaign, dispatchSource, status);
-  const recontactSelected = selectedCampaign === "recontact_cold";
-  const confirmedQueue = confirmedDispatchQueueState(status);
-  const stagedRunWarning = confirmedQueue.liveMatches && currentRunPreviewBlockMessage(dispatchSource, state)
-    ? "New staged run not ready — previous dispatch is queued."
-    : "";
-  const headline = dispatchSummary.sentLogOverlap > 0 && !recontactSelected
-    ? `BLOCKED — Planned recipients overlap authoritative sent/contact logs: ${dispatchSummary.sentLogOverlap.toLocaleString()}.`
-    : dispatchSummary.skippedMathMismatch
-      ? `BLOCKED — Skipped rows ${dispatchSummary.skippedRows.toLocaleString()} do not match skipped reasons ${dispatchSummary.skippedReasonTotal.toLocaleString()}.`
-      : dispatchSummary.historyRemoved && state.previewStatus === "ready" && !recontactSelected
-        ? `SAFE — History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()} already-sent/contacted rows. ${dispatchSummary.uniquePlanned.toLocaleString()} cold-safe leads remain.`
-        : recontactSelected && state.previewStatus === "ready"
-          ? "READY — Recontact Preview calculated. Review mandatory safety before Confirm."
-          : recontactSelected && sourceReadiness.ready
-            ? "READY — Checked Recontact source is ready for Preview Dispatch."
-            : recontactSelected
-              ? `BLOCKED — ${sourceReadiness.block_reason || "Checked Recontact source is not ready."}`
-              : state.triageStatus === "completed" && state.previewStatus !== "ready"
-                ? "READY — Preview Dispatch required before Confirm."
-                : workflowNextStepMessage(state.checkStatus, state.triageStatus, state.previewStatus, state.confirmStatus);
+  const workflow = deriveColdCampaignWorkflowState(status);
+  const nextAction = workflow.nextAction;
   setNodeHtml(
     els.leadsWorkflowStatusBanner,
     `
-      <div class="workflow-banner-inline">
-        <span class="eyebrow">Current step</span>
-        <strong>${escapeHtml(headline)}</strong>
+      <div class="workflow-banner-inline workflow-next-action workflow-next-action-${escapeHtml(nextAction.tone)}">
+        <span class="eyebrow">${escapeHtml(nextAction.prefix)}</span>
+        <strong>${escapeHtml(nextAction.message)}</strong>
       </div>
-      ${stagedRunWarning ? `<div class="workflow-staged-warning">${escapeHtml(stagedRunWarning)}</div>` : ""}
     `,
   );
 }

@@ -404,16 +404,10 @@ export function SendersDashboard({ view }) {
 export function LeadStepper({ status, steps }) {
   return (
     <section className="operator-stepper" aria-label="Current workflow progress">
-      <LegacyNode html={status} />
-      <div className="react-stepper-shell react-legacy-stepper">
+      <div className="react-stepper-shell react-workflow-status-rail react-cold-copy">
         <LegacyNode html={steps} />
       </div>
-      <ol className="operator-flow-line react-cold-copy" aria-label="Cold workflow steps">
-        <li><span>1</span><strong>Source</strong></li>
-        <li><span>2</span><strong>Campaign</strong></li>
-        <li><span>3</span><strong>Preview</strong></li>
-        <li><span>4</span><strong>Confirm</strong></li>
-      </ol>
+      <LegacyNode html={status} />
 
       <ol className="operator-flow-line react-warm-copy" aria-label="Warm Outreach workflow steps">
         <li><span>1</span><strong>Upload Batch</strong></li>

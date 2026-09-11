@@ -66,6 +66,14 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def audited_warm_authority() -> dict[str, object]:
+    return {
+        "diagnosis_status": "audited",
+        "audit_completed": True,
+        "recommendation_evidence": "Reviewed the synthetic project and documented the presentation gap.",
+    }
+
+
 def warm_preview_row(
     email: str = "taylor@example.com",
     *,
@@ -74,12 +82,19 @@ def warm_preview_row(
     service: str = "Book landing page",
     personalization: str = "I saw that your launch gives readers a clear path into the story.",
     contact_path: str | None = None,
+    diagnosed: bool = True,
 ) -> dict[str, str]:
+    diagnosis_status = "audited" if diagnosed else "signal_only"
+    audit_completed = "true" if diagnosed else "false"
+    evidence = "Reviewed the synthetic project presentation and documented the reader-path gap." if diagnosed else ""
     rendered = send_shard.render_warm_email_copy(
         first_name=author_name.split()[0],
         book_title_or_project=project,
         recommended_service=service,
         personalization_line=personalization,
+        diagnosis_status=diagnosis_status,
+        audit_completed=audit_completed,
+        recommendation_evidence=evidence,
     )
     return {
         "AuthorName": author_name,
@@ -88,7 +103,14 @@ def warm_preview_row(
         "EmailSubject": str(rendered["subject"]),
         "EmailBody": str(rendered["body"]).strip(),
         "NeedSignal": "Readers need a clearer path into the story.",
+        "DiagnosisStatus": str(rendered["diagnosis_status"]),
+        "AuditCompleted": str(rendered["audit_completed"]),
+        "RecommendationEvidence": str(rendered["recommendation_evidence"]),
         "RecommendedService": service,
+        "PreviewOffer": str(rendered["preview_offer"]),
+        "RecommendedServicePhrase": str(rendered["recommended_service_phrase"]),
+        "WarmTemplateMode": str(rendered["warm_template_mode"]),
+        "WarmCopyPolicyVersion": str(rendered["warm_copy_policy_version"]),
         "OutreachAngle": "Focus on the existing reader-path issue.",
         "PersonalizationLine": str(rendered["personalization_line"]),
         "SourceURL": "https://example.com/source",
@@ -712,6 +734,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 "RecommendedService": "Book campaign page upgrade",
                 "OutreachAngle": "Lead with a clearer visual story.",
                 "PersonalizationLine": "I saw that the campaign page is still being refined around the reader path.",
+                "DiagnosisStatus": "audited",
+                "AuditCompleted": "true",
+                "RecommendationEvidence": "Reviewed the synthetic campaign page and documented the presentation gap.",
                 "ResearchStatus": "New",
             }
             write_csv(
@@ -763,6 +788,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     "RecommendedService": "Custom author website",
                     "OutreachAngle": outreach_angle,
                     "PersonalizationLine": personalization,
+                    "DiagnosisStatus": "signal_only",
+                    "AuditCompleted": "false",
+                    "RecommendationEvidence": "",
                     "ResearchStatus": "New",
                     "ContactMethod": "email",
                 }],
@@ -777,15 +805,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 "without replacing the parts of the launch that already work.",
                 body,
             )
-            self.assertIn(
-                "Based on what you described, the most direct way I’d approach it is "
-                "a custom author website—focused specifically on that issue",
-                body,
-            )
+            self.assertIn("the first step is to look closely at the specific issue", body)
+            self.assertNotIn("a custom author website", body)
+            self.assertEqual("signal_only", row["WarmTemplateMode"])
             self.assertNotIn(need_signal, body)
             self.assertNotIn(outreach_angle, body)
             self.assertIn(
-                "\nWindelle JC\nFounder & CEO, Astra Productions\nastraproductions.co\n",
+                "\nWindelle JC\n\nFounder & CEO, Astra Productions\n\nastraproductions.co\n",
                 body,
             )
             self.assertTrue(
@@ -835,7 +861,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             ),
         )
 
-    def test_warm_recommended_service_values_require_exact_allowlist_and_offer(self) -> None:
+    def test_warm_recommended_service_maps_curate_copy_without_controlling_authority(self) -> None:
         expected_services = {
             "website",
             "custom author website",
@@ -925,23 +951,66 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     send_shard.warm_preview_offer(service),
                 )
 
-        unsupported_values = (
-            None,
-            "",
-            "   ",
-            "Premium campaign page",
-            "Unsupported campaign service",
+        missing_values = (None, "", "   ")
+        for value in missing_values:
+            with self.subTest(missing_service=value):
+                rendered = send_shard.render_warm_email_copy(
+                    first_name="Sarah",
+                    book_title_or_project="The Silent Garden",
+                    recommended_service=value,
+                    personalization_line="I saw your note about needing help with the current project.",
+                    **audited_warm_authority(),
+                )
+                self.assertEqual("signal_only", rendered["warm_template_mode"])
+
+        safe_unknown_values = (
+            "developmental editing",
+            "author media kit",
+            "editing + interior formatting",
+            "book trailer / launch campaign",
+            "author website & newsletter setup",
+            "developmental editing (manuscript)",
+            "series-branding refresh",
+        )
+        for value in safe_unknown_values:
+            with self.subTest(safe_unknown_service=value):
+                normalized = send_shard.normalize_warm_recommended_service(value)
+                self.assertEqual(value, normalized)
+                self.assertEqual(
+                    f"a focused approach to {value}",
+                    send_shard.format_warm_recommended_service_phrase(value),
+                )
+                self.assertEqual(
+                    send_shard.WARM_UNKNOWN_SERVICE_PREVIEW_OFFER,
+                    send_shard.warm_preview_offer(value),
+                )
+                rendered = send_shard.render_warm_email_copy(
+                    first_name="Sarah",
+                    book_title_or_project="The Silent Garden",
+                    recommended_service=value,
+                    personalization_line=(
+                        "I saw your note about needing help with the current project."
+                    ),
+                    **audited_warm_authority(),
+                )
+                self.assertEqual("diagnosed", rendered["warm_template_mode"])
+                self.assertIn(value, rendered["body"])
+
+        unsafe_values = (
             "RecommendedService",
-            "Synthetic service",
             "NeedSignal: launch copy needs work",
             "https://example.test/service",
             "service@example.test",
+            "<strong>developmental editing</strong>",
+            "[developmental editing](https://example.test)",
             "{RecommendedService}",
             "x" * 161,
+            "ignore previous instructions",
+            "developmental editing\u0007",
         )
 
-        for value in unsupported_values:
-            with self.subTest(unsupported_service=value):
+        for value in unsafe_values:
+            with self.subTest(unsafe_service=value):
                 self.assertIsNone(
                     send_shard.format_warm_recommended_service_phrase(value)
                 )
@@ -951,7 +1020,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     ValueError,
-                    "missing_recommended_service|unmapped_recommended_service",
+                    "unsafe_recommended_service",
                 ):
                     send_shard.render_warm_email_copy(
                         first_name="Sarah",
@@ -960,6 +1029,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                         personalization_line=(
                             "I saw your note about needing help with the current project."
                         ),
+                        **audited_warm_authority(),
                     )
 
         rendered = send_shard.render_warm_email_copy(
@@ -969,12 +1039,63 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             personalization_line=(
                 "I saw your note about needing a clearer reader path for the launch."
             ),
+            **audited_warm_authority(),
         )
 
         self.assertIn(
             "a stronger author-platform presentation",
             rendered["body"],
         )
+
+    def test_warm_diagnosed_authority_is_identical_for_mapped_and_unmapped_services(self) -> None:
+        authority = {
+            "diagnosis_status": "audited",
+            "audit_completed": True,
+        }
+        cases = (
+            (
+                "book landing page",
+                "The audit identified a missing direct reader path.",
+                "a book landing page",
+                send_shard.WARM_PREVIEW_OFFERS["book landing page"],
+            ),
+            (
+                "developmental editing",
+                "The audit identified structural manuscript issues.",
+                "a focused approach to developmental editing",
+                send_shard.WARM_UNKNOWN_SERVICE_PREVIEW_OFFER,
+            ),
+        )
+        modes = []
+        for service, evidence, expected_phrase, expected_offer in cases:
+            with self.subTest(service=service):
+                rendered = send_shard.render_warm_email_copy(
+                    first_name="Sarah",
+                    book_title_or_project="The Silent Garden",
+                    recommended_service=service,
+                    personalization_line="I saw your note about the issue affecting the current manuscript.",
+                    recommendation_evidence=evidence,
+                    **authority,
+                )
+                modes.append(rendered["warm_template_mode"])
+                self.assertEqual("audited", rendered["diagnosis_status"])
+                self.assertEqual("true", rendered["audit_completed"])
+                self.assertEqual(expected_phrase, rendered["recommended_service_phrase"])
+                self.assertEqual(expected_offer, rendered["preview_offer"])
+        self.assertEqual(["diagnosed", "diagnosed"], modes)
+
+        signal_only = send_shard.render_warm_email_copy(
+            first_name="Sarah",
+            book_title_or_project="The Silent Garden",
+            recommended_service="developmental editing",
+            personalization_line="I saw your note about the issue affecting the current manuscript.",
+            diagnosis_status="audited",
+            audit_completed=True,
+            recommendation_evidence="",
+        )
+        self.assertEqual("signal_only", signal_only["warm_template_mode"])
+        self.assertEqual("", signal_only["recommended_service_phrase"])
+        self.assertNotIn("developmental editing", signal_only["body"])
 
     def test_warm_research_requires_safe_personalization_and_builds_blank_optional_value(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1292,6 +1413,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "PersonalizationLine",
             send_shard.WARM_CONFIRMATION_PROTECTED_FIELDS,
         )
+        for fields in (
+            important_leads_workflow.WARM_EMAIL_READY_HEADERS,
+            important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS,
+            important_leads_workflow.WARM_PRIVATE_JC_QUEUE_HEADERS,
+            send_shard.WARM_CONFIRMATION_PROTECTED_FIELDS,
+        ):
+            self.assertIn("RecommendedServicePhrase", fields)
 
     def test_warm_generic_personalization_phrases_fail_closed(self) -> None:
         for phrase in send_shard.WARM_GENERIC_PERSONALIZATION_PHRASES:
@@ -1305,15 +1433,19 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     ),
                 )
 
-    def test_warm_missing_preview_offer_fails_closed(self) -> None:
+    def test_warm_missing_curated_preview_offer_uses_safe_fallback(self) -> None:
         with patch.dict(send_shard.WARM_PREVIEW_OFFERS, {"book landing page": ""}, clear=False):
-            with self.assertRaisesRegex(ValueError, "missing_preview_offer"):
-                send_shard.render_warm_email_copy(
-                    first_name="Sarah",
-                    book_title_or_project="The Silent Garden",
-                    recommended_service="Book landing page",
-                    personalization_line="I saw that readers do not have a clear path into the book.",
-                )
+            rendered = send_shard.render_warm_email_copy(
+                first_name="Sarah",
+                book_title_or_project="The Silent Garden",
+                recommended_service="Book landing page",
+                personalization_line="I saw that readers do not have a clear path into the book.",
+                **audited_warm_authority(),
+            )
+        self.assertEqual(
+            send_shard.WARM_UNKNOWN_SERVICE_PREVIEW_OFFER,
+            rendered["preview_offer"],
+        )
 
     def test_warm_trailer_lead_renders_service_specific_offer(self) -> None:
         rendered = send_shard.render_warm_email_copy(
@@ -1321,6 +1453,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             book_title_or_project="The Silent Garden",
             recommended_service="Cinematic book trailer",
             personalization_line="I saw that you were looking for help producing a trailer for the upcoming book.",
+            **audited_warm_authority(),
         )
         self.assertIn(
             "a short trailer concept covering the opening hook, pacing, visual direction, and ending CTA",
@@ -1366,6 +1499,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     book_title_or_project="The Silent Garden",
                     recommended_service=service,
                     personalization_line=personalization,
+                    **audited_warm_authority(),
                 )
 
                 self.assertIn(phrase, rendered["body"])
@@ -1374,6 +1508,245 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                     "About The Silent Garden",
                     rendered["subject"],
                 )
+
+    def test_warm_diagnosis_authority_is_explicit_and_defaults_fail_closed(self) -> None:
+        base = {
+            "first_name": "Sarah",
+            "book_title_or_project": "The Silent Garden",
+            "recommended_service": "Custom author website",
+            "personalization_line": "I saw your note about needing a clearer reader path for the launch.",
+        }
+        incomplete_authority = (
+            {},
+            {"diagnosis_status": "audited"},
+            {"audit_completed": True},
+            {"recommendation_evidence": "Reviewed the project presentation."},
+            {"diagnosis_status": "audited", "audit_completed": True},
+            {"diagnosis_status": "audited", "recommendation_evidence": "Reviewed the project presentation."},
+            {"audit_completed": True, "recommendation_evidence": "Reviewed the project presentation."},
+            {"diagnosis_status": "audited", "audit_completed": True, "research_status": "Reviewed"},
+        )
+        for authority in incomplete_authority:
+            with self.subTest(authority=authority):
+                accepted = {key: value for key, value in authority.items() if key != "research_status"}
+                rendered = send_shard.render_warm_email_copy(**base, **accepted)
+                self.assertEqual("signal_only", rendered["warm_template_mode"])
+                self.assertNotIn("the clearest opportunity appears to be", rendered["body"])
+                self.assertNotIn("a custom author website", rendered["body"])
+
+        diagnosed = send_shard.render_warm_email_copy(
+            **base,
+            **audited_warm_authority(),
+        )
+        self.assertEqual("diagnosed", diagnosed["warm_template_mode"])
+        self.assertEqual(send_shard.WARM_COPY_POLICY_VERSION, diagnosed["warm_copy_policy_version"])
+        self.assertIn("the clearest opportunity appears to be a custom author website", diagnosed["body"])
+
+    def test_signal_only_warm_upload_accepts_blank_recommended_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "warm.csv"
+            write_csv(
+                input_path,
+                list(important_leads_workflow.WARM_RESEARCH_REQUIRED_HEADERS),
+                [{
+                    "AuthorName": "Signal Example",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "NeedSignal": "The author said readers cannot find the current book details.",
+                    "SourcePlatform": "Synthetic source",
+                    "SourceURL": "https://example.test/source",
+                    "ContactPath": "signal@example.com",
+                    "OutreachAngle": "Focus only on the stated reader-path issue.",
+                }],
+            )
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=root / "warm_email_ready.csv",
+                contact_form_review_path=root / "warm_contact_form_review.csv",
+                rejected_path=root / "warm_rejected.csv",
+                log_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            ready = read_csv_rows(root / "warm_email_ready.csv")
+
+        self.assertEqual(1, report["warm_email_ready_rows"])
+        self.assertEqual("", ready[0]["RecommendedService"])
+        self.assertEqual("signal_only", ready[0]["DiagnosisStatus"])
+        self.assertEqual("false", ready[0]["AuditCompleted"])
+        self.assertEqual("signal_only", ready[0]["WarmTemplateMode"])
+        self.assertEqual(send_shard.WARM_COPY_POLICY_VERSION, ready[0]["WarmCopyPolicyVersion"])
+
+    def test_warm_upload_accepts_unknown_safe_service_with_complete_audit_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "warm.csv"
+            write_csv(
+                input_path,
+                [
+                    *important_leads_workflow.WARM_RESEARCH_HEADERS,
+                    *important_leads_workflow.WARM_RESEARCH_OPTIONAL_HEADERS,
+                ],
+                [{
+                    "AuthorName": "Audited Example",
+                    "BookTitleOrProject": "Synthetic Project",
+                    "NeedSignal": "The author described structural issues in the current manuscript.",
+                    "SourcePlatform": "Synthetic source",
+                    "SourceURL": "https://example.test/source",
+                    "ContactPath": "audited@example.com",
+                    "RecommendedService": "  developmental   editing  ",
+                    "OutreachAngle": "Focus on the documented structural issue.",
+                    "PersonalizationLine": "I saw your note about the structure affecting the current manuscript.",
+                    "DiagnosisStatus": "audited",
+                    "AuditCompleted": "true",
+                    "RecommendationEvidence": "The audit identified structural manuscript issues.",
+                }],
+            )
+            report = check_warm_research_leads(
+                input_path=input_path,
+                email_ready_path=root / "warm_email_ready.csv",
+                contact_form_review_path=root / "warm_contact_form_review.csv",
+                rejected_path=root / "warm_rejected.csv",
+                log_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            ready = read_csv_rows(root / "warm_email_ready.csv")
+
+        self.assertEqual(1, report["warm_email_ready_rows"])
+        self.assertEqual("developmental editing", ready[0]["RecommendedService"])
+        self.assertEqual("diagnosed", ready[0]["WarmTemplateMode"])
+        self.assertEqual(
+            "a focused approach to developmental editing",
+            ready[0]["RecommendedServicePhrase"],
+        )
+        self.assertEqual(
+            send_shard.WARM_UNKNOWN_SERVICE_PREVIEW_OFFER,
+            ready[0]["PreviewOffer"],
+        )
+
+    def test_warm_preview_policy_is_current_and_legacy_preview_cannot_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            legacy = warm_preview_row()
+            legacy.pop("WarmCopyPolicyVersion")
+            write_csv(preview_path, [field for field in important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS if field != "WarmCopyPolicyVersion"], [legacy])
+            with self.assertRaises(important_leads_workflow.ImportantLeadsCheckError) as raised:
+                confirm_warm_private_jc_preview(
+                    preview_path=preview_path,
+                    queue_path=queue_path,
+                    confirmation_path=root / "manifest.json",
+                    log_paths=[],
+                    cold_queue_paths=[],
+                    sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                    suppressed_path=root / "suppressed.csv",
+                    unsubscribed_path=root / "unsubscribed.csv",
+                    bad_events_path=root / "events.jsonl",
+                    lead_ledger_db_path=root / "ledger.sqlite3",
+                )
+            self.assertEqual("WARM_PREVIEW_POLICY_STALE", raised.exception.code)
+            self.assertIn("Regenerate the Warm Email Preview", raised.exception.message)
+            self.assertFalse(queue_path.exists())
+
+            current = warm_preview_row(diagnosed=False, service="")
+            write_csv(preview_path, list(important_leads_workflow.WARM_EMAIL_PREVIEW_HEADERS), [current])
+            confirmed = confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=root / "manifest.json",
+                log_paths=[],
+                cold_queue_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            queued = read_csv_rows(queue_path)
+
+        self.assertEqual(send_shard.WARM_COPY_POLICY_VERSION, confirmed["warm_copy_policy_version"])
+        self.assertEqual("signal_only", queued[0]["WarmTemplateMode"])
+        self.assertEqual("", queued[0]["RecommendedService"])
+
+    def test_warm_unknown_safe_audited_service_is_canonical_through_preview_confirm_and_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ready_path = root / "warm_email_ready.csv"
+            preview_path = root / "warm_email_preview.csv"
+            queue_path = root / "recipients_private_jc_warm.csv"
+            ready_row = {
+                field: "" for field in important_leads_workflow.WARM_EMAIL_READY_HEADERS
+            }
+            ready_row.update({
+                "AuthorName": "Taylor Example",
+                "AuthorEmail": "taylor@example.test",
+                "BookTitleOrProject": "Synthetic Project",
+                "NeedSignal": "The manuscript structure is making the reader path unclear.",
+                "SourcePlatform": "Synthetic source",
+                "SourceURL": "https://example.test/source",
+                "ContactPath": "mailto:taylor@example.test",
+                "ContactMethod": "email",
+                "RecommendedService": "  developmental   editing  ",
+                "OutreachAngle": "Focus on the documented manuscript structure issue.",
+                "PersonalizationLine": "I saw your note about the structure affecting the current manuscript.",
+                "DiagnosisStatus": "audited",
+                "AuditCompleted": "true",
+                "RecommendationEvidence": "The audit identified structural manuscript issues.",
+                "WarmTemplateMode": "diagnosed",
+                "WarmCopyPolicyVersion": send_shard.WARM_COPY_POLICY_VERSION,
+                "ResearchStatus": "New",
+            })
+            write_csv(
+                ready_path,
+                list(important_leads_workflow.WARM_EMAIL_READY_HEADERS),
+                [ready_row],
+            )
+
+            generate_warm_email_preview(
+                email_ready_path=ready_path,
+                preview_path=preview_path,
+            )
+            preview = read_csv_rows(preview_path)[0]
+            policy_result = send_shard.validate_warm_copy_policy_row(preview)
+            confirmed = confirm_warm_private_jc_preview(
+                preview_path=preview_path,
+                queue_path=queue_path,
+                confirmation_path=root / "manifest.json",
+                log_paths=[],
+                cold_queue_paths=[],
+                sendgrid_suppressions_path=root / "sendgrid_suppressions.csv",
+                suppressed_path=root / "suppressed.csv",
+                unsubscribed_path=root / "unsubscribed.csv",
+                bad_events_path=root / "events.jsonl",
+                lead_ledger_db_path=root / "ledger.sqlite3",
+            )
+            queued = read_csv_rows(queue_path)[0]
+
+        self.assertTrue(policy_result["valid"])
+        self.assertEqual("diagnosed", preview["WarmTemplateMode"])
+        self.assertEqual("developmental editing", preview["RecommendedService"])
+        self.assertEqual(
+            "a focused approach to developmental editing",
+            preview["RecommendedServicePhrase"],
+        )
+        self.assertEqual(
+            send_shard.WARM_UNKNOWN_SERVICE_PREVIEW_OFFER,
+            preview["PreviewOffer"],
+        )
+        self.assertIn("developmental editing", preview["EmailBody"])
+        self.assertEqual(preview["EmailSubject"], queued["EmailSubject"])
+        self.assertEqual(preview["EmailBody"].strip(), queued["EmailBody"].strip())
+        self.assertEqual(preview["RecommendedServicePhrase"], queued["RecommendedServicePhrase"])
+        self.assertEqual(preview["PreviewOffer"], queued["PreviewOffer"])
+        self.assertEqual(send_shard.WARM_COPY_POLICY_VERSION, confirmed["warm_copy_policy_version"])
 
     def test_warm_personalization_fidelity_does_not_invent_hiring_intent(self) -> None:
         rendered = send_shard.render_warm_email_copy(
@@ -5344,7 +5717,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
 
         self.assertFalse(lane["confirmed"])
         self.assertFalse(lane["ready"])
-        self.assertEqual("warm_confirmation_manifest_upgrade_required", lane["integrity_reason"])
+        self.assertEqual("warm_preview_policy_stale", lane["integrity_reason"])
 
     def test_cold_queue_rebuild_set_excludes_warm_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

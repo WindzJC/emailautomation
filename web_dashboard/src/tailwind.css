@@ -2218,14 +2218,6 @@
   display: contents;
 }
 
-.operator-stepper .react-legacy-stepper {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-}
-
 .operator-flow-line {
   order: 1;
   display: grid;
@@ -2797,9 +2789,154 @@
   display: none !important;
 }
 
-#leads-view.react-leads-page:not(.warm-research-mode)
-.leads-workflow-status-banner {
-  display: none !important;
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail {
+  order: 1;
+  display: grid;
+  min-width: 0;
+  padding: 7px 8px 8px;
+  border: 1px solid var(--console-line-soft);
+  border-radius: 6px 6px 0 0;
+  background: rgba(11, 18, 27, .72);
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-tracker-head {
+  min-height: 18px;
+  padding: 0 3px 5px;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-tracker-row {
+  grid-template-columns: minmax(240px, 1.25fr) minmax(190px, 1.05fr) minmax(170px, .9fr) minmax(170px, .9fr);
+  gap: 0;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step {
+  position: relative;
+  min-height: 78px;
+  padding: 8px 10px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step:not(:last-child) {
+  border-right: 1px solid var(--console-line-soft);
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy {
+  min-width: 0;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy > strong,
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy > em,
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy > em {
+  color: #bdc9d8;
+  font-size: .62rem;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step-good .workflow-track-copy > em {
+  color: #75cba2;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step-warn .workflow-track-copy > em {
+  color: #e2bb69;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step-bad .workflow-track-copy > em {
+  color: #e78f8f;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-evidence {
+  color: #8292a7;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-copy > .workflow-track-primary {
+  overflow: visible;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-primary > b,
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-evidence > b {
+  color: #9caec4;
+  font-size: .6rem;
+  letter-spacing: .025em;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-meta {
+  color: #7f91a8;
+  font-size: .6rem;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .leads-workflow-status-banner {
+  order: 2;
+  display: block !important;
+  min-height: 34px;
+  margin: 0;
+  padding: 7px 11px;
+  border: 1px solid var(--console-line-soft);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: rgba(8, 14, 22, .8);
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .workflow-next-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .workflow-next-action > strong {
+  overflow: hidden;
+  color: #dbe5f1;
+  font-size: .71rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .workflow-next-action-good > strong {
+  color: #8bd8b4;
+}
+
+#leads-view.react-leads-page:not(.warm-research-mode) .workflow-next-action-bad > strong {
+  color: #ed9e9e;
+}
+
+@media (max-width: 980px) {
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-tracker-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step:nth-child(2) {
+    border-right: 0;
+  }
+
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--console-line-soft);
+  }
+}
+
+@media (max-width: 620px) {
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-tracker-row {
+    grid-template-columns: 1fr;
+  }
+
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step,
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step:nth-child(2) {
+    border-right: 0;
+  }
+
+  #leads-view.react-leads-page:not(.warm-research-mode) .react-workflow-status-rail .workflow-track-step:not(:last-child) {
+    border-bottom: 1px solid var(--console-line-soft);
+  }
 }
 
 .react-leads-page.warm-research-mode .operator-step-campaign,

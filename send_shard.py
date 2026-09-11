@@ -1830,36 +1830,38 @@ Best regards,
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
 # Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.
-
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle} and noticed an opportunity to strengthen how the book "
-    "and your wider author presence are presented online—so someone discovering your work "
-    "can quickly understand what makes it worth exploring and know where to go next."
+    "I came across {BookTitle} and thought there may be an opportunity to strengthen how the book "
+    "and your wider author presence come together online—so someone discovering your work can "
+    "quickly understand what makes it worth exploring and know where to go next."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your work and noticed an opportunity to strengthen how your author presence "
-    "is presented online—so someone discovering you can quickly understand your work, "
-    "what makes it worth exploring, and know where to go next."
+    "I came across your work and thought there may be an opportunity to strengthen how your author "
+    "presence comes together online—so someone discovering you can quickly understand your work, "
+    "what makes it worth exploring, and where to go next."
 )
 
 PITCH_JC_SUBJECT = "One idea for {BookTitle}"
+
 PITCH_JC_SUBJECT_FALLBACK = "One idea for your author platform"
 
 PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-When a reader, reviewer, bookseller, publisher, or media contact looks up a book or author, that online experience becomes part of the first impression.
+When someone looks up a book or author, what they find next often shapes whether they keep exploring.
 
 At Astra Productions, we look at the full reader journey—from how the book is introduced, to the author presence behind it, to how easily someone can explore further or purchase.
 
-If you're open to it, I can send you the three improvements I would prioritize first for {{BookTitle}} and explain why.
+If you're open to it, I can take a closer look at {{BookTitle}} and send you the three areas I would prioritize first, along with why I think they matter.
 
-No meeting is needed. I can send them directly by email.
+There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
+
 Founder & CEO, Astra Productions
+
 astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
@@ -1869,21 +1871,22 @@ PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-When a reader, reviewer, bookseller, publisher, or media contact looks an author up, that online experience becomes part of the first impression.
+When someone looks an author up, what they find next often shapes whether they keep exploring.
 
 At Astra Productions, we look at the full reader journey—from how the work is introduced, to the author presence behind it, to how easily someone can explore further or purchase.
 
-If you're open to it, I can send you the three improvements I would prioritize first for your author presence and explain why.
+If you're open to it, I can take a closer look at your current author presence and send you the three areas I would prioritize first, along with why I think they matter.
 
-No meeting is needed. I can send them directly by email.
+There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
+
 Founder & CEO, Astra Productions
+
 astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
 """
-
 PITCH_WARM_SUBJECT = "About {BookTitleOrProject}"
 PITCH_WARM_SUBJECT_FALLBACK = "About your author project"
 
@@ -1891,14 +1894,35 @@ PITCH_WARM_BODY_PERSONALIZED = """Hi {FirstName},
 
 {PersonalizationLine}
 
-Based on what you described, the most direct way I’d approach it is {RecommendedServicePhrase}—focused specifically on that issue rather than turning it into a larger project than necessary.
+From what you described, I think the first step is to look closely at the specific issue you’re trying to solve rather than turn it into a larger project than necessary.
+
+If useful, I can put together {PreviewOffer} for {BookTitleOrProject} showing the direction I would take, what I would prioritize first, and why.
+
+There’s no obligation, and no meeting is needed. I can send it directly by email.
+
+Windelle JC
+
+Founder & CEO, Astra Productions
+
+astraproductions.co
+
+P.S. If you would rather not hear from me again, reply “unsubscribe.”
+"""
+
+PITCH_WARM_BODY_DIAGNOSED = """Hi {FirstName},
+
+{PersonalizationLine}
+
+Based on what you described and what I found in reviewing {BookTitleOrProject}, the clearest opportunity appears to be {RecommendedServicePhrase}—focused specifically on that issue rather than turning it into a larger project than necessary.
 
 If useful, I can put together {PreviewOffer} for {BookTitleOrProject} so you can see how I’d approach it before deciding whether you want to take it any further.
 
 There’s no obligation, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
+
 Founder & CEO, Astra Productions
+
 astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
@@ -1906,6 +1930,17 @@ P.S. If you would rather not hear from me again, reply “unsubscribe.”
 
 PITCH_WARM_BODY_FALLBACK = None
 PITCH_WARM_BODY = None
+
+WARM_COPY_POLICY_VERSION = "warm_diagnosis_gate_v1"
+WARM_DIAGNOSIS_SIGNAL_ONLY = "signal_only"
+WARM_DIAGNOSIS_AUDITED = "audited"
+WARM_TEMPLATE_SIGNAL_ONLY = "signal_only"
+WARM_TEMPLATE_DIAGNOSED = "diagnosed"
+WARM_SIGNAL_ONLY_PREVIEW_OFFER = "a focused concept"
+WARM_UNKNOWN_SERVICE_PREVIEW_OFFER = (
+    "a focused concept showing how I’d approach that specific issue"
+)
+WARM_RECOMMENDED_SERVICE_MAX_LENGTH = 160
 
 WARM_RECOMMENDED_SERVICE_PHRASES = {
     "website": "a custom author website",
@@ -2011,6 +2046,18 @@ WARM_PERSONALIZATION_HTML_RE = re.compile(r"</?[a-z][^>]*>", flags=re.IGNORECASE
 WARM_PERSONALIZATION_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\r\n]+\]\([^)]+\)")
 WARM_PERSONALIZATION_PLACEHOLDER_RE = re.compile(r"\{[A-Za-z][A-Za-z0-9_]*\}")
 WARM_PERSONALIZATION_LIST_RE = re.compile(r"(?m)^\s*(?:[-*+•]|\d+[.)])\s+\S")
+WARM_UNSAFE_SERVICE_LABEL_RE = re.compile(
+    r"\b(?:recommended[\W_]*service|need[\W_]*signal|outreach[\W_]*angle|"
+    r"diagnosis[\W_]*status|audit[\W_]*completed|recommendation[\W_]*evidence|"
+    r"preview[\W_]*offer|warm[\W_]*template[\W_]*mode|research[\W_]*status|"
+    r"source[\W_]*(?:url|platform)|contact[\W_]*path|lead[\W_]*score|"
+    r"scraper[\W_]*notes?|research[\W_]*classification|"
+    r"internal[\W_]*(?:workflow[\W_]*)?(?:instruction|label)|"
+    r"system[\W_]*prompt|developer[\W_]*message|assistant[\W_]*message|"
+    r"prompt[\W_]*injection|follow[\W_]*(?:these|the)[\W_]*instructions?|"
+    r"ignore[\W_]*(?:all|any|the|previous|prior)[\W_]*instructions?)\b",
+    flags=re.IGNORECASE,
+)
 WARM_WEAK_PROJECT_TITLES = {
     "current catalog",
     "current catalog and newest two books",
@@ -2082,14 +2129,93 @@ def normalize_warm_book_title_or_project(value: object) -> str:
     return text
 
 
+def normalize_warm_recommended_service(value: object) -> str:
+    raw_text = str(value or "")
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in raw_text):
+        return ""
+    text = re.sub(r"\s+", " ", raw_text).strip()
+    if (
+        not text
+        or len(text) > WARM_RECOMMENDED_SERVICE_MAX_LENGTH
+        or _warm_text_has_unsafe_markup_or_structure(text)
+        or WARM_UNSAFE_SERVICE_LABEL_RE.search(text)
+        or WARM_PERSONALIZATION_URL_RE.search(text)
+        or WARM_PERSONALIZATION_EMAIL_RE.search(text)
+    ):
+        return ""
+    return text
+
+
 def format_warm_recommended_service_phrase(value: object) -> str | None:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return WARM_RECOMMENDED_SERVICE_PHRASES.get(text.casefold()) if text else None
+    service = normalize_warm_recommended_service(value)
+    if not service:
+        return None
+    curated_phrase = WARM_RECOMMENDED_SERVICE_PHRASES.get(service.casefold())
+    return curated_phrase or f"a focused approach to {service}"
 
 
 def warm_preview_offer(value: object) -> str | None:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return WARM_PREVIEW_OFFERS.get(text.casefold()) if text else None
+    service = normalize_warm_recommended_service(value)
+    if not service:
+        return None
+    curated_offer = WARM_PREVIEW_OFFERS.get(service.casefold())
+    return curated_offer or WARM_UNKNOWN_SERVICE_PREVIEW_OFFER
+
+
+def canonical_warm_service_copy(
+    value: object,
+    *,
+    template_mode: str,
+) -> dict[str, str]:
+    if template_mode != WARM_TEMPLATE_DIAGNOSED:
+        return {
+            "recommended_service": re.sub(r"\s+", " ", str(value or "")).strip(),
+            "recommended_service_phrase": "",
+            "preview_offer": WARM_SIGNAL_ONLY_PREVIEW_OFFER,
+        }
+    raw_service = str(value or "")
+    service = normalize_warm_recommended_service(raw_service)
+    if not raw_service.strip():
+        raise ValueError("missing_recommended_service")
+    if not service:
+        raise ValueError("unsafe_recommended_service")
+    return {
+        "recommended_service": service,
+        "recommended_service_phrase": str(format_warm_recommended_service_phrase(service)),
+        "preview_offer": str(warm_preview_offer(service)),
+    }
+
+
+def _warm_explicit_true(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().casefold() == "true"
+
+
+def warm_diagnosis_contract(
+    *,
+    diagnosis_status: object = "",
+    audit_completed: object = False,
+    recommendation_evidence: object = "",
+    recommended_service: object = "",
+) -> dict[str, object]:
+    requested_status = re.sub(r"\s+", "_", str(diagnosis_status or "").strip().casefold())
+    evidence = re.sub(r"\s+", " ", str(recommendation_evidence or "")).strip()
+    service = re.sub(r"\s+", " ", str(recommended_service or "")).strip()
+    audited = bool(
+        requested_status == WARM_DIAGNOSIS_AUDITED
+        and _warm_explicit_true(audit_completed)
+        and evidence
+        and service
+    )
+    return {
+        "diagnosis_status": WARM_DIAGNOSIS_AUDITED if audited else WARM_DIAGNOSIS_SIGNAL_ONLY,
+        "audit_completed": "true" if audited else "false",
+        "recommendation_evidence": evidence,
+        "recommended_service": service,
+        "template_mode": WARM_TEMPLATE_DIAGNOSED if audited else WARM_TEMPLATE_SIGNAL_ONLY,
+        "copy_policy_version": WARM_COPY_POLICY_VERSION,
+    }
 
 
 def warm_email_copy_rejection_reason(
@@ -2097,6 +2223,9 @@ def warm_email_copy_rejection_reason(
     book_title_or_project: object,
     recommended_service: object,
     personalization_line: object,
+    diagnosis_status: object = "",
+    audit_completed: object = False,
+    recommendation_evidence: object = "",
 ) -> str:
     raw_personalization = str(personalization_line or "")
     normalized_personalization = normalize_warm_personalization_line(raw_personalization)
@@ -2105,15 +2234,22 @@ def warm_email_copy_rejection_reason(
     folded_personalization = normalized_personalization.casefold()
     if any(phrase in folded_personalization for phrase in WARM_GENERIC_PERSONALIZATION_PHRASES):
         return "generic_personalization"
-    raw_service = re.sub(r"\s+", " ", str(recommended_service or "")).strip()
-    if not raw_service:
-        return "missing_recommended_service"
-    if format_warm_recommended_service_phrase(raw_service) is None:
-        return "unmapped_recommended_service"
-    if not warm_preview_offer(raw_service):
-        return "missing_preview_offer"
     if not normalize_warm_book_title_or_project(book_title_or_project):
         return "missing_project"
+    contract = warm_diagnosis_contract(
+        diagnosis_status=diagnosis_status,
+        audit_completed=audit_completed,
+        recommendation_evidence=recommendation_evidence,
+        recommended_service=recommended_service,
+    )
+    if contract["template_mode"] == WARM_TEMPLATE_DIAGNOSED:
+        try:
+            canonical_warm_service_copy(
+                contract["recommended_service"],
+                template_mode=WARM_TEMPLATE_DIAGNOSED,
+            )
+        except ValueError as exc:
+            return str(exc)
     return ""
 
 
@@ -2123,11 +2259,17 @@ def render_warm_email_copy(
     book_title_or_project: object,
     recommended_service: object,
     personalization_line: object = "",
+    diagnosis_status: object = "",
+    audit_completed: object = False,
+    recommendation_evidence: object = "",
 ) -> dict[str, object]:
     rejection_reason = warm_email_copy_rejection_reason(
         book_title_or_project=book_title_or_project,
         recommended_service=recommended_service,
         personalization_line=personalization_line,
+        diagnosis_status=diagnosis_status,
+        audit_completed=audit_completed,
+        recommendation_evidence=recommendation_evidence,
     )
     if rejection_reason:
         raise ValueError(rejection_reason)
@@ -2135,24 +2277,39 @@ def render_warm_email_copy(
     book_title = normalize_warm_book_title_or_project(book_title_or_project)
     subject = PITCH_WARM_SUBJECT.format(BookTitleOrProject=book_title)
     safe_personalization = normalize_warm_personalization_line(personalization_line)
-    recommended_service_phrase = format_warm_recommended_service_phrase(recommended_service)
-    preview_offer = warm_preview_offer(recommended_service)
-    assert recommended_service_phrase is not None
-    assert preview_offer is not None
+    contract = warm_diagnosis_contract(
+        diagnosis_status=diagnosis_status,
+        audit_completed=audit_completed,
+        recommendation_evidence=recommendation_evidence,
+        recommended_service=recommended_service,
+    )
+    diagnosed = contract["template_mode"] == WARM_TEMPLATE_DIAGNOSED
+    service_copy = canonical_warm_service_copy(
+        contract["recommended_service"],
+        template_mode=str(contract["template_mode"]),
+    )
     merge_values = {
         "FirstName": safe_first_name,
         "BookTitleOrProject": book_title,
-        "RecommendedServicePhrase": recommended_service_phrase,
-        "PreviewOffer": preview_offer,
+        "RecommendedServicePhrase": service_copy["recommended_service_phrase"],
+        "PreviewOffer": service_copy["preview_offer"],
         "PersonalizationLine": safe_personalization,
     }
     return {
         "subject": subject,
-        "body": PITCH_WARM_BODY_PERSONALIZED.format(**merge_values),
-        "template": "personalized",
+        "body": (
+            PITCH_WARM_BODY_DIAGNOSED if diagnosed else PITCH_WARM_BODY_PERSONALIZED
+        ).format(**merge_values),
+        "template": contract["template_mode"],
+        "warm_template_mode": contract["template_mode"],
+        "warm_copy_policy_version": contract["copy_policy_version"],
+        "diagnosis_status": contract["diagnosis_status"],
+        "audit_completed": contract["audit_completed"],
+        "recommendation_evidence": contract["recommendation_evidence"],
         "personalization_line": safe_personalization,
+        "recommended_service": service_copy["recommended_service"],
         "recommended_service_phrase": merge_values["RecommendedServicePhrase"],
-        "preview_offer": preview_offer,
+        "preview_offer": service_copy["preview_offer"],
     }
 
 
@@ -3895,6 +4052,13 @@ WARM_QUEUE_REQUIRED_HEADERS = {
     "SourceURL",
     "ContactPath",
     "ResearchStatus",
+    "DiagnosisStatus",
+    "AuditCompleted",
+    "RecommendationEvidence",
+    "PreviewOffer",
+    "RecommendedServicePhrase",
+    "WarmTemplateMode",
+    "WarmCopyPolicyVersion",
 }
 
 WARM_CONFIRMATION_PROTECTED_FIELDS = (
@@ -3912,6 +4076,13 @@ WARM_CONFIRMATION_PROTECTED_FIELDS = (
     "SourceURL",
     "ContactPath",
     "ResearchStatus",
+    "DiagnosisStatus",
+    "AuditCompleted",
+    "RecommendationEvidence",
+    "PreviewOffer",
+    "RecommendedServicePhrase",
+    "WarmTemplateMode",
+    "WarmCopyPolicyVersion",
     "campaign_type",
     "campaign_id",
 )
@@ -3941,12 +4112,109 @@ def _masked_warm_email(value: str) -> str:
     return f"{local[:1]}***@{domain}"
 
 
+def _warm_first_name_from_row(row: dict[str, str]) -> str:
+    explicit = re.sub(r"\s+", " ", str(row.get("FirstName") or "")).strip()
+    if explicit:
+        return explicit
+    author_name = re.sub(r"\s+", " ", str(row.get("AuthorName") or "")).strip()
+    if not author_name:
+        return "there"
+    token = author_name.split()[0]
+    return re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", token) or token
+
+
+def validate_warm_copy_policy_row(row: dict[str, str]) -> dict[str, object]:
+    policy_version = str(row.get("WarmCopyPolicyVersion") or "").strip()
+    if policy_version != WARM_COPY_POLICY_VERSION:
+        return {
+            "valid": False,
+            "reason": "warm_preview_policy_stale",
+            "message": "Regenerate the Warm Email Preview under the current diagnosis policy before confirming.",
+        }
+    template_mode = str(row.get("WarmTemplateMode") or "").strip().casefold()
+    if template_mode not in {WARM_TEMPLATE_SIGNAL_ONLY, WARM_TEMPLATE_DIAGNOSED}:
+        return {
+            "valid": False,
+            "reason": "warm_template_mode_invalid",
+            "message": "Warm row has an unrecognized template authority mode.",
+        }
+    contract = warm_diagnosis_contract(
+        diagnosis_status=row.get("DiagnosisStatus", ""),
+        audit_completed=row.get("AuditCompleted", ""),
+        recommendation_evidence=row.get("RecommendationEvidence", ""),
+        recommended_service=row.get("RecommendedService", ""),
+    )
+    normalized_status = str(row.get("DiagnosisStatus") or "").strip().casefold()
+    normalized_audit = "true" if _warm_explicit_true(row.get("AuditCompleted")) else "false"
+    if (
+        template_mode != contract["template_mode"]
+        or normalized_status != contract["diagnosis_status"]
+        or normalized_audit != contract["audit_completed"]
+    ):
+        return {
+            "valid": False,
+            "reason": "warm_diagnosis_authority_incomplete",
+            "message": "Warm diagnosed copy is not backed by complete explicit audit authority.",
+        }
+    try:
+        expected_copy = render_warm_email_copy(
+            first_name=_warm_first_name_from_row(row),
+            book_title_or_project=row.get("BookTitleOrProject", ""),
+            recommended_service=row.get("RecommendedService", ""),
+            personalization_line=row.get("PersonalizationLine", ""),
+            diagnosis_status=row.get("DiagnosisStatus", ""),
+            audit_completed=row.get("AuditCompleted", ""),
+            recommendation_evidence=row.get("RecommendationEvidence", ""),
+        )
+    except ValueError as exc:
+        return {
+            "valid": False,
+            "reason": str(exc),
+            "message": "Warm row does not satisfy the current copy-safety contract.",
+        }
+    actual_preview_offer = re.sub(r"\s+", " ", str(row.get("PreviewOffer") or "")).strip()
+    if actual_preview_offer != str(expected_copy["preview_offer"]):
+        return {
+            "valid": False,
+            "reason": "warm_preview_offer_mismatch",
+            "message": "Warm row PreviewOffer does not match the authorized template mode.",
+            "field": "PreviewOffer",
+        }
+    actual_service_phrase = re.sub(
+        r"\s+", " ", str(row.get("RecommendedServicePhrase") or "")
+    ).strip()
+    if actual_service_phrase != str(expected_copy["recommended_service_phrase"]):
+        return {
+            "valid": False,
+            "reason": "warm_recommended_service_phrase_mismatch",
+            "message": "Warm row RecommendedServicePhrase does not match canonical service copy.",
+            "field": "RecommendedServicePhrase",
+        }
+    for field, expected in (("EmailSubject", expected_copy["subject"]), ("EmailBody", expected_copy["body"])):
+        actual_text = str(row.get(field) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        expected_text = str(expected).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not actual_text or actual_text != expected_text:
+            return {
+                "valid": False,
+                "reason": "warm_queue_copy_mismatch",
+                "message": f"Warm row does not match canonical field {field}.",
+                "field": field,
+            }
+    return {"valid": True, "reason": "", "message": "Warm copy-policy row is valid.", "copy": expected_copy}
+
+
 def validate_warm_confirmed_queue(
     rows: Sequence[dict[str, str]],
     manifest: dict[str, object],
 ) -> dict[str, object]:
     if not bool(manifest.get("confirmed")):
         return {"valid": False, "reason": "warm_confirmation_required", "message": "Warm Private JC requires explicit confirmation."}
+    if str(manifest.get("warm_copy_policy_version") or "").strip() != WARM_COPY_POLICY_VERSION:
+        return {
+            "valid": False,
+            "reason": "warm_preview_policy_stale",
+            "message": "Regenerate the Warm Email Preview under the current diagnosis policy before confirming.",
+        }
     approved_rows = manifest.get("approved_rows")
     if not isinstance(approved_rows, dict) or not approved_rows:
         return {
@@ -3978,33 +4246,15 @@ def validate_warm_confirmed_queue(
                     "email": _masked_warm_email(email),
                     "field": field,
                 }
-        try:
-            expected_copy = render_warm_email_copy(
-                first_name=payload["FirstName"],
-                book_title_or_project=payload["BookTitleOrProject"],
-                recommended_service=payload["RecommendedService"],
-                personalization_line=payload["PersonalizationLine"],
-            )
-        except ValueError as exc:
+        policy_result = validate_warm_copy_policy_row(payload)
+        if not bool(policy_result.get("valid")):
             return {
                 "valid": False,
-                "reason": str(exc),
-                "message": "Warm queue row does not satisfy the personalized-copy safety gate.",
+                "reason": str(policy_result.get("reason") or "warm_copy_policy_invalid"),
+                "message": str(policy_result.get("message") or "Warm queue row does not satisfy the copy-policy safety gate."),
                 "email": _masked_warm_email(email),
+                "field": str(policy_result.get("field") or ""),
             }
-        for field, expected in (
-            ("EmailSubject", expected_copy["subject"]),
-            ("EmailBody", expected_copy["body"]),
-        ):
-            normalized_expected = str(expected).replace("\r\n", "\n").replace("\r", "\n").strip()
-            if payload[field] != normalized_expected:
-                return {
-                    "valid": False,
-                    "reason": "warm_queue_copy_mismatch",
-                    "message": f"Warm queue row does not match canonical field {field}.",
-                    "email": _masked_warm_email(email),
-                    "field": field,
-                }
         if email in seen:
             return {
                 "valid": False,
@@ -4085,6 +4335,12 @@ def validate_warm_queue_contract(csv_path: Path, rows: Sequence[dict[str, str]])
             return False
         if UNRESOLVED_PLACEHOLDER_RE.search(subject_text) or UNRESOLVED_PLACEHOLDER_RE.search(body_text):
             print(f"ERROR: warm queue row {index} contains unresolved placeholders.")
+            return False
+        policy_result = validate_warm_copy_policy_row(row)
+        if not bool(policy_result.get("valid")):
+            print(
+                f"ERROR: warm queue row {index} failed {policy_result.get('reason') or 'warm_copy_policy_invalid'}."
+            )
             return False
     return True
 

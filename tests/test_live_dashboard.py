@@ -2371,6 +2371,12 @@ class LiveDashboardTests(unittest.TestCase):
             body = json.loads(response.body)
             self.assertTrue(body["ok"])
             self.assertEqual(1, body["preview"]["warm_email_preview_rows"])
+            self.assertEqual(send_shard.WARM_COPY_POLICY_VERSION, body["preview"]["warm_copy_policy_version"])
+            self.assertTrue(body["preview"]["warm_preview_policy_current"])
+            self.assertEqual(
+                send_shard.WARM_COPY_POLICY_VERSION,
+                body["warm_check"]["warm_copy_policy_version_required"],
+            )
             self.assertTrue((run_dir / "warm_email_preview.csv").exists())
             self.assertFalse(any(run_dir.glob("recipients_*.csv")))
 
@@ -3912,6 +3918,7 @@ class LiveDashboardTests(unittest.TestCase):
                 "auto_dispatch_preview_status": "running",
                 "auto_dispatch_preview_started_at_utc": "2026-09-01T19:11:55+00:00",
                 "message": "Classifying eligible recipients",
+                "selected_filename": "Private_JC_Only_Leads_READY.csv",
                 "staged_run_dir": str(run_dir),
                 "effective_input_path": str(uploaded_path),
                 "output_path": str(paths["input"]),
@@ -4026,6 +4033,7 @@ class LiveDashboardTests(unittest.TestCase):
                 self.assertEqual(str(paths["input"]), running["dispatch_source"]["dispatch_source_path"])
                 self.assertEqual({}, running["latest_auto_dispatch_preview"])
                 self.assertNotEqual("not_started", running["lead_check_status"]["state"])
+                self.assertEqual("Private_JC_Only_Leads_READY.csv", running["lead_check_status"]["checked_source_filename"])
 
                 cleaned_status = running["dispatch_source"]
                 new_preview_path = run_dir / "dispatch_preview_recontact.json"
@@ -4071,6 +4079,7 @@ class LiveDashboardTests(unittest.TestCase):
                 self.assertEqual("dispatch_preview_recontact_current", completed["latest_auto_dispatch_preview"]["preview_id"])
                 self.assertTrue(completed["latest_auto_dispatch_preview_current"])
                 self.assertNotEqual("not_started", completed["lead_check_status"]["state"])
+                self.assertEqual("Private_JC_Only_Leads_READY.csv", completed["lead_check_status"]["checked_source_filename"])
 
                 job.pop("auto_dispatch_preview", None)
                 job.pop("auto_dispatch_preview_path", None)
@@ -4353,6 +4362,7 @@ class LiveDashboardTests(unittest.TestCase):
                     "job_id": "check_active",
                     "status": "running",
                     "stage": "checking",
+                    "selected_filename": "active-authors.csv",
                     "created_at_utc": "2026-05-21T16:00:00+00:00",
                     "updated_at_utc": live_dashboard.iso_utc(),
                 },
@@ -4367,6 +4377,7 @@ class LiveDashboardTests(unittest.TestCase):
 
             self.assertEqual("processing", result["state"])
             self.assertEqual("Processing / checking", result["label"])
+            self.assertEqual("active-authors.csv", result["checked_source_filename"])
             self.assertFalse(result["preview_ready"])
             self.assertIn("processing", result["preview_block_reason"].lower())
 
@@ -4386,6 +4397,7 @@ class LiveDashboardTests(unittest.TestCase):
                 "important_rejected_label": str(rejected_path),
                 "latest_master_check": {
                     "generated_at_utc": "2026-05-21T16:12:19+00:00",
+                    "checked_source_filename": "completed-authors.csv",
                     "output_label": str(output_path),
                     "rejected_label": str(rejected_path),
                     "cleaned_rows": 1,
@@ -4397,6 +4409,7 @@ class LiveDashboardTests(unittest.TestCase):
 
             self.assertEqual("success", result["state"])
             self.assertEqual("Success — ready for Preview Dispatch", result["label"])
+            self.assertEqual("completed-authors.csv", result["checked_source_filename"])
             self.assertTrue(result["preview_ready"])
             self.assertEqual(1, result["cleaned_rows"])
 
@@ -8583,6 +8596,28 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         confirm_preview.assert_called_once_with(preview_path=preview_path)
 
+    def test_warm_confirm_endpoint_exposes_stale_policy_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_path = Path(tmpdir) / "warm_email_preview.csv"
+            preview_path.write_text("AuthorEmail\nsynthetic@example.com\n", encoding="utf-8")
+            job = {"job_id": "warm-job", "warm_email_preview_path": str(preview_path), "check": {"upload_type": "warm_research"}}
+            error = important_leads_workflow.ImportantLeadsCheckError(
+                "warm_preview_policy_stale",
+                "Regenerate the Warm Email Preview under the current diagnosis policy before confirming.",
+            )
+            with patch.object(live_dashboard, "_current_completed_warm_check_job", return_value=job), patch.object(
+                live_dashboard,
+                "confirm_warm_private_jc_preview",
+                side_effect=error,
+            ):
+                response = live_dashboard.confirm_warm_research_private_jc()
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertTrue(body["blocked"])
+        self.assertEqual("WARM_PREVIEW_POLICY_STALE", body["error"])
+        self.assertIn("Regenerate the Warm Email Preview", body["message"])
+
     @patch.object(live_dashboard, "_manual_live_action_block_response", lambda profile_name="": None)
     def test_start_warm_private_jc_calls_runtime_only_when_confirmed(self) -> None:
         lane = {"confirmed": True, "ready": True, "remaining": 1, "message": "Ready."}
@@ -9433,6 +9468,142 @@ class LiveDashboardTests(unittest.TestCase):
                     require_client_binding=True,
                 )
             self.assertEqual("preview_recovery_fingerprint_mismatch", block["error"])
+
+    def test_preview_recovery_binding_serializes_mtime_losslessly_and_canonicalizes_strictly(self) -> None:
+        exact_mtime_ns = 1789080427555309480
+        rounded_browser_value = 1789080427555309600
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            job = {
+                "job_id": "check_lossless_binding",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "staged_run_dir": str(tmp),
+            }
+            for key, filename in {
+                "output_path": "leads.csv",
+                "rejected_path": "leads_rejected.csv",
+                "auto_triage_keep_path": "leads_triaged_keep.csv",
+                "auto_triage_rejected_path": "leads_triaged_reject.csv",
+                "auto_triage_quarantine_path": "leads_triaged_quarantine.csv",
+            }.items():
+                path = tmp / filename
+                self._write_csv(path, ["Email"], [])
+                job[key] = str(path)
+
+            with patch.object(
+                live_dashboard,
+                "_file_signature",
+                return_value=(exact_mtime_ns, 3699662),
+            ):
+                binding = live_dashboard._preview_recovery_binding(job)
+
+            self.assertTrue(binding)
+            for artifact in binding["artifacts"].values():
+                self.assertEqual(str(exact_mtime_ns), artifact["mtime_ns"])
+                self.assertIsInstance(artifact["mtime_ns"], str)
+            self.assertEqual(binding, json.loads(json.dumps(binding)))
+
+            legacy_numeric = json.loads(json.dumps(binding))
+            for artifact in legacy_numeric["artifacts"].values():
+                artifact["mtime_ns"] = exact_mtime_ns
+            self.assertTrue(live_dashboard._preview_recovery_bindings_match(binding, legacy_numeric))
+
+            rounded = json.loads(json.dumps(legacy_numeric))
+            rounded["artifacts"]["keep"]["mtime_ns"] = rounded_browser_value
+            self.assertFalse(live_dashboard._preview_recovery_bindings_match(binding, rounded))
+
+            for malformed in [True, 1.5, "1.5", "1e9", "-1", ""]:
+                with self.subTest(malformed=malformed):
+                    invalid = json.loads(json.dumps(binding))
+                    invalid["artifacts"]["keep"]["mtime_ns"] = malformed
+                    self.assertFalse(live_dashboard._preview_recovery_bindings_match(binding, invalid))
+
+    def test_preview_recovery_request_compares_every_bound_identity_and_artifact_field(self) -> None:
+        with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
+            tmp = Path(tmpdir)
+            job = {
+                "job_id": "check_exact_binding",
+                "status": "completed",
+                "auto_triage_status": "completed",
+                "staged_run_dir": str(tmp),
+            }
+            for key, filename in {
+                "output_path": "leads.csv",
+                "rejected_path": "leads_rejected.csv",
+                "auto_triage_keep_path": "leads_triaged_keep.csv",
+                "auto_triage_rejected_path": "leads_triaged_reject.csv",
+                "auto_triage_quarantine_path": "leads_triaged_quarantine.csv",
+            }.items():
+                path = tmp / filename
+                self._write_csv(path, ["Email"], [])
+                job[key] = str(path)
+            binding = live_dashboard._preview_recovery_binding(job)
+
+            def request_block(
+                requested_binding: dict[str, object],
+                *,
+                job_id: str = job["job_id"],
+                current_run_id: str = job["job_id"],
+            ) -> dict[str, str] | None:
+                payload = live_dashboard.ImportantLeadDispatchPayload(
+                    job_id=job_id,
+                    current_run_id=current_run_id,
+                    preview_recovery_binding=requested_binding,
+                )
+                with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job):
+                    return live_dashboard._preview_recovery_request_block(
+                        payload=payload,
+                        job=job,
+                        source_path=Path(job["auto_triage_keep_path"]),
+                        require_client_binding=True,
+                    )
+
+            self.assertIsNone(request_block(binding))
+
+            changed_mtime = json.loads(json.dumps(binding))
+            changed_mtime["artifacts"]["keep"]["mtime_ns"] = str(
+                int(changed_mtime["artifacts"]["keep"]["mtime_ns"]) + 1
+            )
+            changed_size = json.loads(json.dumps(binding))
+            changed_size["artifacts"]["keep"]["size"] += 1
+            changed_path = json.loads(json.dumps(binding))
+            changed_path["artifacts"]["keep"]["path"] += ".other"
+            changed_binding_job = json.loads(json.dumps(binding))
+            changed_binding_job["job_id"] = "different_job"
+            changed_binding_run = json.loads(json.dumps(binding))
+            changed_binding_run["current_run_id"] = "different_run"
+
+            for label, changed in [
+                ("one nanosecond", changed_mtime),
+                ("size", changed_size),
+                ("artifact path", changed_path),
+                ("binding job", changed_binding_job),
+                ("binding run", changed_binding_run),
+            ]:
+                with self.subTest(label=label):
+                    self.assertEqual("preview_recovery_fingerprint_mismatch", request_block(changed)["error"])
+
+            self.assertEqual(
+                "preview_recovery_job_mismatch",
+                request_block(binding, job_id="different_job")["error"],
+            )
+            self.assertEqual(
+                "preview_recovery_run_mismatch",
+                request_block(binding, current_run_id="different_run")["error"],
+            )
+            missing = live_dashboard.ImportantLeadDispatchPayload(
+                job_id=job["job_id"],
+                current_run_id=job["job_id"],
+            )
+            with patch.object(live_dashboard, "_latest_completed_important_check_job", return_value=job):
+                block = live_dashboard._preview_recovery_request_block(
+                    payload=missing,
+                    job=job,
+                    source_path=Path(job["auto_triage_keep_path"]),
+                    require_client_binding=True,
+                )
+            self.assertEqual("preview_recovery_binding_required", block["error"])
 
     def test_preview_worker_revalidates_recovery_binding_before_builder(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
@@ -10705,9 +10876,27 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
         "PersonalizationLine": (
             "I saw your note about being unable to update your website."
         ),
+        "DiagnosisStatus": "audited",
+        "AuditCompleted": "true",
+        "RecommendationEvidence": "Reviewed the synthetic website and documented the update constraint.",
         "AuthorEmail": "taylor@example.com",
         "ContactMethod": "email",
     }
+    rendered = send_shard.render_warm_email_copy(
+        first_name="Taylor",
+        book_title_or_project=ready_row["BookTitleOrProject"],
+        recommended_service=ready_row["RecommendedService"],
+        personalization_line=ready_row["PersonalizationLine"],
+        diagnosis_status=ready_row["DiagnosisStatus"],
+        audit_completed=ready_row["AuditCompleted"],
+        recommendation_evidence=ready_row["RecommendationEvidence"],
+    )
+    ready_row.update({
+        "PreviewOffer": str(rendered["preview_offer"]),
+        "RecommendedServicePhrase": str(rendered["recommended_service_phrase"]),
+        "WarmTemplateMode": str(rendered["warm_template_mode"]),
+        "WarmCopyPolicyVersion": str(rendered["warm_copy_policy_version"]),
+    })
 
     write_rows(ready_path, [ready_row])
 
@@ -10715,8 +10904,8 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
         preview_path,
         [{
             **ready_row,
-            "EmailSubject": "About Synthetic Project",
-            "EmailBody": "Canonical synthetic warm email body.",
+            "EmailSubject": str(rendered["subject"]),
+            "EmailBody": str(rendered["body"]),
         }],
     )
 
@@ -10771,6 +10960,11 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
         lambda: job,
     )
 
+    artifacts_before = {
+        path: path.read_bytes()
+        for path in (ready_path, rejected_path, contact_path, preview_path)
+    }
+
     response = live_dashboard.get_warm_research_review()
     body = json.loads(response.body)
 
@@ -10780,6 +10974,8 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
     assert body["contact_form_count"] == 1
     assert body["blocked_count"] == 1
     assert body["preview_generated"] is True
+    assert body["preview_policy_current"] is True
+    assert body["warm_copy_policy_version"] == send_shard.WARM_COPY_POLICY_VERSION
 
     ready = next(
         row
@@ -10794,11 +10990,12 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
         "I saw your note about being unable to update your website."
     )
     assert ready["RecommendedService"] == "Custom author website"
+    assert ready["DiagnosisStatus"] == "audited"
+    assert ready["WarmTemplateMode"] == "diagnosed"
+    assert ready["RecommendationEvidence"]
     assert ready["PreviewOffer"]
     assert ready["EmailSubject"] == "About Synthetic Project"
-    assert ready["EmailBody"] == (
-        "Canonical synthetic warm email body."
-    )
+    assert ready["EmailBody"] == str(rendered["body"]).strip()
 
     blocked = next(
         row
@@ -10810,3 +11007,7 @@ def test_warm_review_endpoint_exposes_canonical_review_chain(
         "unable_to_build_personalization"
         in blocked["BlockReason"]
     )
+    assert artifacts_before == {
+        path: path.read_bytes()
+        for path in (ready_path, rejected_path, contact_path, preview_path)
+    }

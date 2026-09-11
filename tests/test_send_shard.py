@@ -6188,6 +6188,168 @@ finished_path.write_text(
         self.assertEqual(1, result)
         self.assertIn("ERROR: warm queue is empty", stdout.getvalue())
 
+    def test_warm_copy_policy_guard_accepts_current_modes_and_rejects_legacy_or_incomplete_rows(self) -> None:
+        def row_for(*, diagnosed: bool) -> dict[str, str]:
+            diagnosis_status = "audited" if diagnosed else "signal_only"
+            audit_completed = "true" if diagnosed else "false"
+            evidence = "Reviewed the synthetic presentation and documented the gap." if diagnosed else ""
+            service = "Book landing page" if diagnosed else ""
+            rendered = send_shard.render_warm_email_copy(
+                first_name="Taylor",
+                book_title_or_project="Synthetic Project",
+                recommended_service=service,
+                personalization_line="I saw that readers cannot find a clear path into the project.",
+                diagnosis_status=diagnosis_status,
+                audit_completed=audit_completed,
+                recommendation_evidence=evidence,
+            )
+            return {
+                "FirstName": "Taylor",
+                "BookTitleOrProject": "Synthetic Project",
+                "RecommendedService": service,
+                "PersonalizationLine": str(rendered["personalization_line"]),
+                "DiagnosisStatus": str(rendered["diagnosis_status"]),
+                "AuditCompleted": str(rendered["audit_completed"]),
+                "RecommendationEvidence": str(rendered["recommendation_evidence"]),
+                "PreviewOffer": str(rendered["preview_offer"]),
+                "RecommendedServicePhrase": str(rendered["recommended_service_phrase"]),
+                "WarmTemplateMode": str(rendered["warm_template_mode"]),
+                "WarmCopyPolicyVersion": str(rendered["warm_copy_policy_version"]),
+                "EmailSubject": str(rendered["subject"]),
+                "EmailBody": str(rendered["body"]),
+            }
+
+        signal = row_for(diagnosed=False)
+        diagnosed = row_for(diagnosed=True)
+        self.assertTrue(send_shard.validate_warm_copy_policy_row(signal)["valid"])
+        self.assertTrue(send_shard.validate_warm_copy_policy_row(diagnosed)["valid"])
+
+        legacy = dict(signal)
+        legacy.pop("WarmCopyPolicyVersion")
+        self.assertEqual(
+            "warm_preview_policy_stale",
+            send_shard.validate_warm_copy_policy_row(legacy)["reason"],
+        )
+
+        incomplete = dict(diagnosed)
+        incomplete["RecommendationEvidence"] = ""
+        self.assertEqual(
+            "warm_diagnosis_authority_incomplete",
+            send_shard.validate_warm_copy_policy_row(incomplete)["reason"],
+        )
+
+        wrong_offer = dict(signal)
+        wrong_offer["PreviewOffer"] = "a diagnosed service proposal"
+        self.assertEqual(
+            "warm_preview_offer_mismatch",
+            send_shard.validate_warm_copy_policy_row(wrong_offer)["reason"],
+        )
+
+        unknown = row_for(diagnosed=True)
+        unknown["RecommendedService"] = "developmental editing"
+        unknown_copy = send_shard.render_warm_email_copy(
+            first_name="Taylor",
+            book_title_or_project=unknown["BookTitleOrProject"],
+            recommended_service=unknown["RecommendedService"],
+            personalization_line=unknown["PersonalizationLine"],
+            diagnosis_status=unknown["DiagnosisStatus"],
+            audit_completed=unknown["AuditCompleted"],
+            recommendation_evidence=unknown["RecommendationEvidence"],
+        )
+        unknown.update({
+            "PreviewOffer": str(unknown_copy["preview_offer"]),
+            "RecommendedServicePhrase": str(unknown_copy["recommended_service_phrase"]),
+            "EmailSubject": str(unknown_copy["subject"]),
+            "EmailBody": str(unknown_copy["body"]),
+        })
+        self.assertTrue(send_shard.validate_warm_copy_policy_row(unknown)["valid"])
+
+        unsafe = dict(unknown)
+        unsafe["RecommendedService"] = "https://example.test/service"
+        self.assertEqual(
+            "unsafe_recommended_service",
+            send_shard.validate_warm_copy_policy_row(unsafe)["reason"],
+        )
+
+    def test_warm_sender_refuses_unsafe_diagnosed_service_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            shards = root / "shards"
+            logs = root / "logs"
+            state = root / "state"
+            shards.mkdir()
+            logs.mkdir()
+            state.mkdir()
+            queue_path = shards / "recipients_private_jc_warm.csv"
+            rendered = send_shard.render_warm_email_copy(
+                first_name="Taylor",
+                book_title_or_project="Synthetic Project",
+                recommended_service="developmental editing",
+                personalization_line="I saw that readers cannot find a clear path into the project.",
+                diagnosis_status="audited",
+                audit_completed=True,
+                recommendation_evidence="Reviewed the synthetic presentation and documented the gap.",
+            )
+            row = {field: "" for field in send_shard.WARM_CONFIRMATION_PROTECTED_FIELDS}
+            row.update({
+                "Email": "synthetic@example.test",
+                "AuthorEmail": "synthetic@example.test",
+                "FirstName": "Taylor",
+                "AuthorName": "Taylor Example",
+                "BookTitleOrProject": "Synthetic Project",
+                "EmailSubject": str(rendered["subject"]),
+                "EmailBody": str(rendered["body"]),
+                "NeedSignal": "Readers cannot find a clear path into the project.",
+                "RecommendedService": "https://example.test/service",
+                "OutreachAngle": "Focus on the existing reader-path issue.",
+                "PersonalizationLine": str(rendered["personalization_line"]),
+                "ContactPath": "mailto:synthetic@example.test",
+                "ResearchStatus": "New",
+                "DiagnosisStatus": "audited",
+                "AuditCompleted": "true",
+                "RecommendationEvidence": str(rendered["recommendation_evidence"]),
+                "PreviewOffer": str(rendered["preview_offer"]),
+                "RecommendedServicePhrase": str(rendered["recommended_service_phrase"]),
+                "WarmTemplateMode": "diagnosed",
+                "WarmCopyPolicyVersion": send_shard.WARM_COPY_POLICY_VERSION,
+                "campaign_type": "warm_private_jc",
+                "campaign_id": "warm-synthetic",
+            })
+            self._write_csv(queue_path, list(row), [row])
+            payload = send_shard.normalized_warm_confirmation_payload(row)
+            manifest = {
+                "confirmed": True,
+                "warm_copy_policy_version": send_shard.WARM_COPY_POLICY_VERSION,
+                "approved_rows": {
+                    row["Email"]: {
+                        "payload": payload,
+                        "payload_sha256": send_shard.warm_confirmation_payload_hash(payload),
+                    }
+                },
+            }
+            stdout = io.StringIO()
+            with patch.object(send_shard, "SHARDS_DIR", shards), patch.object(
+                send_shard, "LOGS_DIR", logs
+            ), patch.object(send_shard, "STATE_DIR", state), patch.object(
+                send_shard, "load_warm_confirmation_manifest", return_value=manifest
+            ), patch.object(send_shard, "smtp_login") as smtp_login, patch.object(
+                sys, "argv", ["send_shard.py", "--profile", "private_jc_warm", "--preflight"]
+            ), redirect_stdout(stdout):
+                result = send_shard.main()
+
+        smtp_login.assert_not_called()
+        self.assertEqual(1, result)
+        self.assertIn("unsafe_recommended_service", stdout.getvalue())
+
+    def test_warm_confirmation_manifest_requires_current_copy_policy(self) -> None:
+        result = send_shard.validate_warm_confirmed_queue(
+            [{"Email": "synthetic@example.test"}],
+            {"confirmed": True, "approved_rows": {}},
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertEqual("warm_preview_policy_stale", result["reason"])
+
     def test_confirmed_warm_queue_allows_public_role_contact_paths_only_for_warm_profile(self) -> None:
         warm_queue = Path("recipients_private_jc_warm.csv")
         role_set = {"contact", "hello", "support"}
