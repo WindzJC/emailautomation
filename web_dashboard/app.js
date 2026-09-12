@@ -6974,6 +6974,11 @@ async function pollImportantLeadDispatchPreviewJob(jobId) {
       importantLeadDispatchPreviewLoading = false;
 
       if (preview?.preview_id) {
+        // An explicit successful Preview Dispatch re-validates this exact
+        // preview for the currently selected route. Clear any local route
+        // invalidation left behind by a prior dropdown change.
+        invalidatedFreshColdPreviewIds.delete(preview.preview_id);
+        invalidatedRecontactPreviewIds.delete(preview.preview_id);
         lastImportantDispatchPreview = {
           ...(preview || {}),
           _preview_key: currentDispatchPlanKey(),
@@ -7129,6 +7134,10 @@ async function previewImportantLeadDispatch() {
         persistedPreviewKey
         && persistedPreviewKey === currentPreviewKey
       );
+      // The server may reuse an already-complete persisted preview when it
+      // exactly matches the requested route/source. Treat that successful
+      // explicit preview as re-validation and clear local route invalidation.
+      invalidatedFreshColdPreviewIds.delete(data.preview.preview_id);
       invalidatedRecontactPreviewIds.delete(data.preview.preview_id);
       lastImportantDispatchPreview = {
         ...(data.preview || {}),

@@ -111,6 +111,7 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
                 campaign_type="cold",
                 dispatch_source_mode="triaged_keep",
                 dispatch_cap="all",
+                fresh_cold_route="both",
             )
 
             preview = {
@@ -119,6 +120,7 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
                 "dispatch_source_mode": "triaged_keep",
                 "dispatch_source_path": "",
                 "dispatch_cap": "all",
+                "fresh_cold_route": "both",
                 "queue_paths": {
                     key: str(path)
                     for key, path in queue_paths.items()

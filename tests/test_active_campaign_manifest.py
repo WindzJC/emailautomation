@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import tools.rebuild_recipient_queues as rebuild_tool
 import important_leads_workflow
+import send_shard
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -20,6 +21,21 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
 
 
 class ActiveCampaignManifestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Dispatch is fail-closed when reservation state cannot be read.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.idempotency_db = Path(temporary.name) / "send_idempotency.sqlite3"
+        with send_shard.sqlite3.connect(self.idempotency_db) as conn:
+            send_shard._init_send_idempotency_db(conn)
+        db_path = patch.object(
+            important_leads_workflow,
+            "send_idempotency_db_path",
+            return_value=self.idempotency_db,
+        )
+        db_path.start()
+        self.addCleanup(db_path.stop)
+
     def test_queue_safety_uses_manifest_checked_path_instead_of_stale_important_checked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

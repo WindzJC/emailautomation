@@ -185,7 +185,7 @@ class LiveDashboardAuthTests(unittest.TestCase):
 
                 markup = client.get("/").text
                 self.assertNotIn('id="start-btn"', markup)
-                self.assertIn('id="ops-tab-btn"', markup)
+                self.assertIn('id="senders-tab-btn"', markup)
                 self.assertIn('id="leads-tab-btn"', markup)
 
     def test_local_dashboard_no_auth_alias_is_supported(self) -> None:

@@ -3512,6 +3512,7 @@ class DashboardCoreTests(unittest.TestCase):
             SENDGRID_PROFILES=list(profiles.keys()),
             DASHBOARD_PROFILES=list(profiles.keys()),
             START_ALL_PROFILES=list(profiles.keys()),
+            PROFILE_GUARD_ENABLED=True,
             PROFILE_GUARD_BOUNCE_THRESHOLD=3,
         ):
             decisions = dashboard_core.evaluate_profile_delivery_guards([snapshot], attempts, events)
@@ -3584,6 +3585,7 @@ class DashboardCoreTests(unittest.TestCase):
                 SENDGRID_PROFILES=list(profiles.keys()),
                 DASHBOARD_PROFILES=list(profiles.keys()),
                 START_ALL_PROFILES=list(profiles.keys()),
+                PROFILE_GUARD_ENABLED=True,
                 PROFILE_GUARD_BOUNCE_THRESHOLD=3,
             ), patch.object(
                 dashboard_core,

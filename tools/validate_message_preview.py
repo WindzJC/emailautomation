@@ -80,7 +80,7 @@ ASTRA_VISUAL_REQUIRED_TERMS = (
     "astra productions",
     "reader journey",
     "author presence",
-    "three improvements",
+    "three areas",
     "no meeting is needed",
     "windelle jc",
     "founder & ceo, astra productions",

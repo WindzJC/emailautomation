@@ -35,6 +35,26 @@ from important_leads_workflow import ImportantLeadsCheckError
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _preview_dispatch_without_unresolved_idempotency(**kwargs):
+    """Exercise dispatch planning while isolating tests unrelated to idempotency state."""
+    with patch.object(
+        important_leads_workflow,
+        "_unresolved_idempotency_emails",
+        return_value=set(),
+    ):
+        return important_leads_workflow.preview_dispatch_master_leads(**kwargs)
+
+
+def _confirm_dispatch_without_unresolved_idempotency(*args, **kwargs):
+    """Exercise dispatch confirmation while isolating tests unrelated to idempotency state."""
+    with patch.object(
+        important_leads_workflow,
+        "_unresolved_idempotency_emails",
+        return_value=set(),
+    ):
+        return important_leads_workflow.confirm_dispatch_preview(*args, **kwargs)
+
+
 def _snapshot_live_dashboard_write_targets() -> dict[str, str]:
     targets = (
         REPOSITORY_ROOT / "_important" / "check_runs",
@@ -47,7 +67,22 @@ def _snapshot_live_dashboard_write_targets() -> dict[str, str]:
             continue
         for path in sorted(item for item in target.rglob("*") if item.is_file()):
             relative = path.relative_to(REPOSITORY_ROOT).as_posix()
-            snapshot[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            # The live dashboard refreshes PrivateEmail bounce state in the real
+            # repository even while tests use an isolated runtime. Those files
+            # are unrelated to Important Leads isolation and are intentionally
+            # excluded so this guard does not race the production monitor.
+            if relative.startswith("data/state/private_bounce_reports/") or relative in {
+                "data/state/private_bounce_monitor.json",
+                "data/state/private_bounce_state.json",
+            }:
+                continue
+            try:
+                snapshot[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except FileNotFoundError:
+                # A live background writer may rotate an unrelated state file
+                # between rglob() and read_bytes(); it cannot be attributed to
+                # the isolated test operation.
+                continue
     return snapshot
 
 
@@ -132,7 +167,7 @@ def test_dashboard_runtime_fixture_prevents_live_runtime_writes() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("Email,Status\n", encoding="utf-8")
 
-    preview = important_leads_workflow.preview_dispatch_master_leads(
+    preview = _preview_dispatch_without_unresolved_idempotency(
         master_path=source,
         rejected_path=runtime_root / "_important" / "leads_rejected.csv",
         dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_CLEANED,
@@ -2058,7 +2093,12 @@ class LiveDashboardTests(unittest.TestCase):
                     )
                 )
                 body = json.loads(response.body)
-                live_dashboard._run_important_check_job(body["job"]["job_id"])
+                with patch.object(
+                    important_leads_workflow,
+                    "_unresolved_idempotency_emails",
+                    return_value=set(),
+                ):
+                    live_dashboard._run_important_check_job(body["job"]["job_id"])
 
             self.assertEqual(202, response.status_code)
             self.assertTrue(body["ok"])
@@ -2123,7 +2163,7 @@ class LiveDashboardTests(unittest.TestCase):
             for path in sendgrid_logs:
                 path.write_text("Email,Status\n", encoding="utf-8")
 
-            preview = important_leads_workflow.preview_dispatch_master_leads(
+            preview = _preview_dispatch_without_unresolved_idempotency(
                 master_path=output_path,
                 rejected_path=rejected_path,
                 dispatch_source_mode=important_leads_workflow.DISPATCH_SOURCE_CLEANED,
@@ -3463,7 +3503,7 @@ class LiveDashboardTests(unittest.TestCase):
                 self._write_csv(path, ["Email"], [])
 
             with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
-                preview = important_leads_workflow.preview_dispatch_master_leads(
+                preview = _preview_dispatch_without_unresolved_idempotency(
                     master_path=master,
                     rejected_path=rejected,
                     verified_path=verified,
@@ -3522,7 +3562,7 @@ class LiveDashboardTests(unittest.TestCase):
             for path in [suppressions, suppressed, unsubscribed]:
                 self._write_csv(path, ["Email"], [])
 
-            preview = important_leads_workflow.preview_dispatch_master_leads(
+            preview = _preview_dispatch_without_unresolved_idempotency(
                 master_path=master,
                 rejected_path=rejected,
                 verified_path=verified,
@@ -3539,7 +3579,7 @@ class LiveDashboardTests(unittest.TestCase):
                 preview_dir=preview_dir,
             )
             with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
-                report = important_leads_workflow.confirm_dispatch_preview(
+                report = _confirm_dispatch_without_unresolved_idempotency(
                     str(preview["preview_id"]),
                     require_stopped=False,
                     backup_root=state / "backups",
@@ -3597,7 +3637,7 @@ class LiveDashboardTests(unittest.TestCase):
             )
             self._write_csv(unsubscribed, ["Email"], [])
 
-            preview = important_leads_workflow.preview_dispatch_master_leads(
+            preview = _preview_dispatch_without_unresolved_idempotency(
                 master_path=master,
                 rejected_path=rejected,
                 verified_path=verified,
@@ -3615,7 +3655,7 @@ class LiveDashboardTests(unittest.TestCase):
             )
             self.assertEqual(0, preview["total_rows_would_write"])
             with patch("send_shard.send_via_sendgrid") as send_via_sendgrid:
-                report = important_leads_workflow.confirm_dispatch_preview(
+                report = _confirm_dispatch_without_unresolved_idempotency(
                     str(preview["preview_id"]),
                     require_stopped=False,
                     backup_root=state / "backups",

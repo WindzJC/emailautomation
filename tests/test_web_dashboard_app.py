@@ -1281,10 +1281,13 @@ class WebDashboardAppTests(unittest.TestCase):
             "Review required",
             "sentLogOverlap",
             "Skipped rows ${summary.skippedRows.toLocaleString()} do not match skipped reasons",
-            "History filter excluded ${dispatchSummary.historyRemoved.toLocaleString()}",
+            "History filter excluded ${previewRouteSummary.historyRemoved.toLocaleString()}",
             "workflow-banner-inline",
-            "Current step",
             "leads-control-check-result",
+            "invalidatedFreshColdPreviewIds.delete(preview.preview_id);",
+            "invalidatedRecontactPreviewIds.delete(preview.preview_id);",
+            "invalidatedFreshColdPreviewIds.delete(data.preview.preview_id);",
+            "invalidatedRecontactPreviewIds.delete(data.preview.preview_id);",
         ]:
             self.assertIn(expected, source)
 
@@ -1370,7 +1373,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("els.leadsTabBtn.classList.toggle(\"is-active\", leadsActive);", tab_body)
         self.assertIn("els.sendersTabBtn.classList.toggle(\"is-active\", sendersActive);", tab_body)
         self.assertIn("els.leadsView.hidden = !leadsActive;", tab_body)
-        self.assertIn("els.sendersView.hidden = !sendersActive;", tab_body)
+        self.assertIn("els.sendersView.hidden = hidden;", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"aria-hidden\", String(!leadsActive));", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"inert\", \"\");", tab_body)
         self.assertIn("els.sendersView.setAttribute(\"inert\", \"\");", tab_body)

@@ -5820,7 +5820,7 @@ finished_path.write_text(
             "astra productions",
             "reader journey",
             "author presence",
-            "three improvements",
+            "three areas",
             "no meeting is needed",
             "windelle jc",
             "founder & ceo, astra productions",
@@ -5849,7 +5849,7 @@ finished_path.write_text(
         )
 
         self.assertIn("astra_visual_missing_service_term:reader journey", failures)
-        self.assertIn("astra_visual_missing_service_term:three improvements", failures)
+        self.assertIn("astra_visual_missing_service_term:three areas", failures)
         self.assertIn("astra_visual_missing_service_term:reply “unsubscribe.”", failures)
 
     def test_non_astra_consignment_message_fails_astra_visual_validation(self) -> None:
