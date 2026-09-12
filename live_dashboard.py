@@ -69,7 +69,7 @@ from controlled_sendgrid_test import (
     controlled_test_public_config,
     execute_controlled_sendgrid_test,
 )
-from runtime_authority import AuthorityError, assert_send_authorized
+from runtime_authority import AuthorityError, assert_send_authorized, current_machine
 from dashboard_security import (
     DashboardSecurityStatus,
     require_dashboard_startup_security,
@@ -5868,6 +5868,24 @@ def _preview_sync_authority_error() -> str:
     return ""
 
 
+def _preview_sync_verification_command(profile_name: str, python_bin: Path) -> list[str]:
+    if current_machine() == "cloud":
+        return [
+            str(settings.APP_ROOT / "deploy" / "cloud" / "verify.sh"),
+            "--profile",
+            profile_name,
+            "--require-authority",
+        ]
+    authority_check = (
+        "import os; from pathlib import Path; "
+        "from runtime_authority import assert_send_authorized; "
+        "authority = assert_send_authorized(Path.cwd()); "
+        "expected = os.environ.get('ASTRA_EXPECTED_GIT_COMMIT', '').strip(); "
+        "raise SystemExit(0 if expected and expected == str(authority.get('expected_git_commit') or '').strip() else 1)"
+    )
+    return [str(python_bin), "-c", authority_check]
+
+
 def _preview_sync_runtime_job() -> dict[str, object] | None:
     for directory in (
         IMPORTANT_LEADS_CHECK_JOBS,
@@ -6161,12 +6179,7 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
                 status_code=422,
             )
 
-        verify_cmd = [
-            str(settings.APP_ROOT / "deploy" / "cloud" / "verify.sh"),
-            "--profile",
-            profile_name,
-            "--require-authority",
-        ]
+        verify_cmd = _preview_sync_verification_command(profile_name, python_bin)
         preflight_cmd = [str(python_bin), "send_shard.py", "--profile", profile_name, "--preflight"]
         try:
             verify_proc = subprocess.run(

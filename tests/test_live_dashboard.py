@@ -331,12 +331,23 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("tools/validate_message_preview.py", calls[1][1])
         self.assertIn("--preview_messages", calls[0])
         self.assertIn("--fail-on-errors", calls[1])
-        self.assertIn("deploy/cloud/verify.sh", calls[2][0])
+        self.assertEqual("-c", calls[2][1])
+        self.assertIn("assert_send_authorized", calls[2][2])
         self.assertIn("--preflight", calls[3])
         self.assertEqual(4, len(calls))
         self.assertEqual(queue_before, queue_after)
         self.assertEqual(queue_checksum_before, queue_checksum_after)
         start_sender.assert_not_called()
+
+    def test_preview_sync_verification_command_uses_cloud_verifier_on_cloud(self) -> None:
+        with patch.object(live_dashboard, "current_machine", return_value="cloud"):
+            command = live_dashboard._preview_sync_verification_command(
+                "private_jc",
+                Path("/tmp/python"),
+            )
+
+        self.assertTrue(command[0].endswith("deploy/cloud/verify.sh"))
+        self.assertEqual(["--profile", "private_jc", "--require-authority"], command[1:])
 
     def test_background_automation_does_not_auto_start_senders_by_default(self) -> None:
         def exercise_monitor_start(**kwargs):
