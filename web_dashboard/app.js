@@ -1,11 +1,17 @@
 const els = {
   page: document.querySelector(".page"),
+  overviewView: document.getElementById("overview-view"),
   opsView: document.getElementById("ops-view"),
   leadsView: document.getElementById("leads-view"),
   sendersView: document.getElementById("senders-view"),
+  historyView: document.getElementById("history-view"),
+  diagnosticsView: document.getElementById("diagnostics-view"),
   opsTabBtn: document.getElementById("ops-tab-btn"),
-  leadsTabBtn: document.getElementById("leads-tab-btn"),
+  overviewTabBtn: document.getElementById("overview-tab-btn"),
+  leadsTabBtn: document.getElementById("campaigns-tab-btn") || document.getElementById("leads-tab-btn"),
   sendersTabBtn: document.getElementById("senders-tab-btn"),
+  historyTabBtn: document.getElementById("history-tab-btn"),
+  diagnosticsTabBtn: document.getElementById("diagnostics-tab-btn"),
   wsIndicator: document.getElementById("ws-indicator"),
   wsLabel: document.getElementById("ws-label"),
   healthBanner: document.getElementById("health-banner"),
@@ -205,12 +211,15 @@ let wallboardMode = false;
 let startReadyBusy = false;
 let startReadyJobId = "";
 let startReadyPollTimer = null;
-let activeDashboardTab = "senders";
+let activeDashboardTab = "overview";
 let activeLeadWorkflow = "cold";
 const tabPanelMounts = {
   initialized: false,
+  overviewAnchor: null,
   leadsAnchor: null,
   sendersAnchor: null,
+  historyAnchor: null,
+  diagnosticsAnchor: null,
 };
 let authState = {
   authEnabled: true,
@@ -480,7 +489,11 @@ function readWallboardModeFromLocation() {
 function readDashboardTabFromLocation() {
   const params = new URLSearchParams(window.location.search);
   const tab = params.get("tab");
-  return tab === "leads" ? "leads" : "senders";
+  if (tab === "leads" || tab === "campaigns") return "campaigns";
+  if (tab === "ops" || tab === "senders") return "senders";
+  if (tab === "history") return "history";
+  if (tab === "diagnostics") return "diagnostics";
+  return "overview";
 }
 
 function readLeadWorkflowFromLocation() {
@@ -508,7 +521,7 @@ function syncLocationState(historyMode = "replace") {
   } else {
     url.searchParams.delete("tab");
   }
-  if (activeDashboardTab === "leads" && !wallboardMode) {
+  if (activeDashboardTab === "campaigns" && !wallboardMode) {
     url.searchParams.set("workflow", activeLeadWorkflow);
   } else {
     url.searchParams.delete("workflow");
@@ -525,6 +538,10 @@ function insertAfterAnchor(anchor, node) {
 
 function ensureTabPanelMountAnchors() {
   if (tabPanelMounts.initialized) return;
+  if (els.overviewView?.parentNode) {
+    tabPanelMounts.overviewAnchor = document.createComment("overview-view-mount");
+    els.overviewView.parentNode.insertBefore(tabPanelMounts.overviewAnchor, els.overviewView);
+  }
   if (els.leadsView?.parentNode) {
     tabPanelMounts.leadsAnchor = document.createComment("leads-view-mount");
     els.leadsView.parentNode.insertBefore(tabPanelMounts.leadsAnchor, els.leadsView);
@@ -533,25 +550,49 @@ function ensureTabPanelMountAnchors() {
     tabPanelMounts.sendersAnchor = document.createComment("senders-view-mount");
     els.sendersView.parentNode.insertBefore(tabPanelMounts.sendersAnchor, els.sendersView);
   }
+  if (els.historyView?.parentNode) {
+    tabPanelMounts.historyAnchor = document.createComment("history-view-mount");
+    els.historyView.parentNode.insertBefore(tabPanelMounts.historyAnchor, els.historyView);
+  }
+  if (els.diagnosticsView?.parentNode) {
+    tabPanelMounts.diagnosticsAnchor = document.createComment("diagnostics-view-mount");
+    els.diagnosticsView.parentNode.insertBefore(tabPanelMounts.diagnosticsAnchor, els.diagnosticsView);
+  }
   tabPanelMounts.initialized = true;
 }
 
 function mountExclusiveDashboardPanel(activeTab) {
   ensureTabPanelMountAnchors();
-  if (els.leadsView?.isConnected) els.leadsView.remove();
-  if (els.sendersView?.isConnected) els.sendersView.remove();
-  if (activeTab === "leads") insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);
-  else insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);
+  if (!els.overviewView?.isConnected) insertAfterAnchor(tabPanelMounts.overviewAnchor, els.overviewView);
+  if (!els.leadsView?.isConnected) insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);
+  if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);
+  if (!els.historyView?.isConnected) insertAfterAnchor(tabPanelMounts.historyAnchor, els.historyView);
+  if (!els.diagnosticsView?.isConnected) insertAfterAnchor(tabPanelMounts.diagnosticsAnchor, els.diagnosticsView);
 }
 
 function applyDashboardTab() {
   const selectedTab = wallboardMode ? "senders" : activeDashboardTab;
-  const leadsActive = selectedTab === "leads";
+  const overviewActive = selectedTab === "overview";
+  const leadsActive = selectedTab === "campaigns";
   const sendersActive = selectedTab === "senders";
+  const historyActive = selectedTab === "history";
+  const diagnosticsActive = selectedTab === "diagnostics";
   mountExclusiveDashboardPanel(selectedTab);
 
-  if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Leads");
+  if (els.overviewTabBtn) setNodeText(els.overviewTabBtn, "Overview");
+  if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Campaigns");
   if (els.sendersTabBtn) setNodeText(els.sendersTabBtn, "Senders");
+  if (els.historyTabBtn) setNodeText(els.historyTabBtn, "History");
+  if (els.diagnosticsTabBtn) setNodeText(els.diagnosticsTabBtn, "Diagnostics");
+
+  if (els.overviewView) {
+    const hidden = !overviewActive;
+    els.overviewView.classList.toggle("hidden", hidden);
+    els.overviewView.hidden = hidden;
+    els.overviewView.setAttribute("aria-hidden", String(hidden));
+    if (hidden) els.overviewView.setAttribute("inert", "");
+    else els.overviewView.removeAttribute("inert");
+  }
 
   if (els.leadsView) {
     els.leadsView.classList.toggle("hidden", !leadsActive);
@@ -570,6 +611,30 @@ function applyDashboardTab() {
     else els.sendersView.removeAttribute("inert");
   }
 
+  if (els.historyView) {
+    const hidden = !historyActive;
+    els.historyView.classList.toggle("hidden", hidden);
+    els.historyView.hidden = hidden;
+    els.historyView.setAttribute("aria-hidden", String(hidden));
+    if (hidden) els.historyView.setAttribute("inert", "");
+    else els.historyView.removeAttribute("inert");
+  }
+
+  if (els.diagnosticsView) {
+    const hidden = !diagnosticsActive;
+    els.diagnosticsView.classList.toggle("hidden", hidden);
+    els.diagnosticsView.hidden = hidden;
+    els.diagnosticsView.setAttribute("aria-hidden", String(hidden));
+    if (hidden) els.diagnosticsView.setAttribute("inert", "");
+    else els.diagnosticsView.removeAttribute("inert");
+  }
+
+  if (els.overviewTabBtn) {
+    els.overviewTabBtn.classList.toggle("is-active", overviewActive);
+    els.overviewTabBtn.setAttribute("aria-selected", String(overviewActive));
+    els.overviewTabBtn.tabIndex = overviewActive ? 0 : -1;
+  }
+
   if (els.sendersTabBtn) {
     els.sendersTabBtn.classList.toggle("is-active", sendersActive);
     els.sendersTabBtn.setAttribute("aria-selected", String(sendersActive));
@@ -580,6 +645,18 @@ function applyDashboardTab() {
     els.leadsTabBtn.classList.toggle("is-active", leadsActive);
     els.leadsTabBtn.setAttribute("aria-selected", String(leadsActive));
     els.leadsTabBtn.tabIndex = leadsActive ? 0 : -1;
+  }
+
+  if (els.historyTabBtn) {
+    els.historyTabBtn.classList.toggle("is-active", historyActive);
+    els.historyTabBtn.setAttribute("aria-selected", String(historyActive));
+    els.historyTabBtn.tabIndex = historyActive ? 0 : -1;
+  }
+
+  if (els.diagnosticsTabBtn) {
+    els.diagnosticsTabBtn.classList.toggle("is-active", diagnosticsActive);
+    els.diagnosticsTabBtn.setAttribute("aria-selected", String(diagnosticsActive));
+    els.diagnosticsTabBtn.tabIndex = diagnosticsActive ? 0 : -1;
   }
 
   if (leadsActive) {
@@ -597,11 +674,11 @@ function isSendersTabVisible() {
 }
 
 function isSnapshotTabVisible() {
-  return isSendersTabVisible();
+  return !isLeadsTabVisible();
 }
 
 function isLeadsTabVisible() {
-  return activeDashboardTab === "leads" && !wallboardMode;
+  return activeDashboardTab === "campaigns" && !wallboardMode;
 }
 
 function markDashboardHydrated() {
@@ -730,8 +807,13 @@ function toggleWallboardMode() {
 }
 
 function setDashboardTab(nextTab) {
-  activeDashboardTab = nextTab === "leads" ? "leads" : "senders";
-  if (wallboardMode && activeDashboardTab === "leads") {
+  const normalized = nextTab === "leads"
+    ? "campaigns"
+    : ["overview", "campaigns", "senders", "history", "diagnostics"].includes(nextTab)
+      ? nextTab
+      : "overview";
+  activeDashboardTab = normalized;
+  if (wallboardMode && activeDashboardTab === "campaigns") {
     wallboardMode = false;
     applyWallboardMode();
   } else {
@@ -785,7 +867,7 @@ function setLeadWorkflow(nextWorkflow, { historyMode = "push" } = {}) {
     lastImportantVerifyJob = null;
     lastImportantDispatchJob = null;
   }
-  activeDashboardTab = "leads";
+  activeDashboardTab = "campaigns";
   wallboardMode = false;
   applyDashboardTab();
   syncLocationState(historyMode);
@@ -4925,7 +5007,7 @@ function renderImportantDispatch(result) {
     setNodeText(
       els.leadsDispatchCurrentQueueNote,
       currentJcQueuePending
-        ? "Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch."
+        ? "Current live queue: Private JC has unfinished recipients. Next dispatch/campaign blocked until current queue is finished."
         : "",
     );
   }
@@ -6724,7 +6806,7 @@ async function fetchLeadsStatus() {
     renderLeadsStatus(data.status || {});
     markDashboardHydrated();
   } catch (err) {
-    if (activeDashboardTab === "leads") {
+    if (activeDashboardTab === "campaigns") {
       showMessage(`Leads status failed: ${err}`, "error");
     }
   }
@@ -11120,15 +11202,19 @@ if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/st
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
 if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
   els.opsProgressDetailsToggle.addEventListener("click", () => {
-    els.opsProgressDetails.open = !els.opsProgressDetails.open;
+    setDashboardTab("diagnostics");
+    els.opsProgressDetails.open = true;
     syncProgressDetailsToggle();
   });
 }
 if (els.opsProgressDetails) {
   els.opsProgressDetails.addEventListener("toggle", () => syncProgressDetailsToggle());
 }
-if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("leads"));
+if (els.overviewTabBtn) els.overviewTabBtn.addEventListener("click", () => setDashboardTab("overview"));
+if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("campaigns"));
 if (els.sendersTabBtn) els.sendersTabBtn.addEventListener("click", () => setDashboardTab("senders"));
+if (els.historyTabBtn) els.historyTabBtn.addEventListener("click", () => setDashboardTab("history"));
+if (els.diagnosticsTabBtn) els.diagnosticsTabBtn.addEventListener("click", () => setDashboardTab("diagnostics"));
 document.querySelectorAll("[data-leads-workflow]").forEach((link) => {
   link.addEventListener("click", (event) => {
     event.preventDefault();

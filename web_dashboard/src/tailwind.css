@@ -1764,11 +1764,17 @@
 
 /* Senders: one strip, compact table, inline controls */
 
-.react-senders-page:not([hidden]) {
+.react-overview-page:not([hidden]),
+.react-senders-page:not([hidden]),
+.react-history-page:not([hidden]),
+.react-diagnostics-page:not([hidden]) {
   display: block;
 }
 
-.react-senders-page[hidden] {
+.react-overview-page[hidden],
+.react-senders-page[hidden],
+.react-history-page[hidden],
+.react-diagnostics-page[hidden] {
   display: none !important;
 }
 
@@ -1785,8 +1791,8 @@
   display: none;
 }
 
-#senders-view .workspace-summary-strip.summary-grid,
-#senders-view #summary-grid.workspace-summary-strip.summary-grid {
+#overview-view .workspace-summary-strip.summary-grid,
+#overview-view #summary-grid.workspace-summary-strip.summary-grid {
   display: grid !important;
   grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
   gap: 0 !important;
@@ -1796,8 +1802,8 @@
   background: transparent !important;
 }
 
-#senders-view .summary-card,
-#senders-view .workspace-summary-strip .summary-card {
+#overview-view .summary-card,
+#overview-view .workspace-summary-strip .summary-card {
   min-width: 0;
   min-height: 58px !important;
   padding: 7px 10px !important;
@@ -1808,42 +1814,62 @@
   box-shadow: none !important;
 }
 
-#senders-view .summary-card:last-child {
+#overview-view .summary-card:last-child {
   border-right: 0 !important;
 }
 
-#senders-view .summary-label {
+#overview-view .summary-label {
   margin-bottom: 5px;
   color: #a7b4c5;
   font-size: .66rem;
 }
 
-#senders-view .summary-value,
-#senders-view .summary-card-total_pending .summary-value {
+#overview-view .summary-value,
+#overview-view .summary-card-total_pending .summary-value {
   margin: 0;
   font-size: 1.05rem;
   line-height: 1.1;
 }
 
-#senders-view .summary-meta,
-#senders-view .summary-subline {
+#overview-view .summary-meta,
+#overview-view .summary-subline {
   margin-top: 5px;
   color: #9aa8ba;
   font-size: .67rem;
   line-height: 1.3;
 }
 
-#senders-view .summary-card-private_jc,
-#senders-view .summary-card-sendgrid {
+#overview-view .summary-card-private_jc,
+#overview-view .summary-card-sendgrid {
   border-left: 2px solid rgba(88,212,154,.65) !important;
 }
 
-#senders-view .summary-card-alerts {
+#overview-view .summary-card-alerts {
   color: #f5d488;
 }
 
-#senders-view .react-fleet-summary .summary-details-slot {
+#overview-view .react-fleet-summary .summary-details-slot {
   display: none;
+}
+
+#overview-view .summary-private-breakdown {
+  display: grid;
+  gap: 2px;
+  color: #9aa8ba;
+  font-size: .64rem;
+  line-height: 1.25;
+}
+
+#overview-view .summary-private-breakdown strong {
+  color: #d7e2ee;
+  font-weight: 700;
+}
+
+.react-overview-live-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, .75fr) minmax(0, 1.25fr);
+  gap: 8px;
+  margin-top: 9px;
 }
 
 .react-sender-console {
@@ -1922,6 +1948,18 @@
   box-shadow: inset 2px 0 var(--console-green);
 }
 
+#senders-view .sender-status-table tr.is-warm-jc td {
+  background: rgba(129,174,242,.035);
+}
+
+#senders-view .sender-status-profile-meta {
+  display: block;
+  margin-top: 2px;
+  color: #8fa1b5;
+  font-size: .62rem;
+  line-height: 1.25;
+}
+
 #senders-view .sender-status-table .mini-pill,
 #senders-view .sender-status-table .sender-status-action-btn {
   min-height: 24px;
@@ -1960,7 +1998,7 @@
   display: none;
 }
 
-#senders-view .workspace-status-row {
+#overview-view .workspace-status-row {
   display: block !important;
   min-height: 0;
   padding: 0 !important;
@@ -1968,7 +2006,7 @@
   background: transparent !important;
 }
 
-#senders-view .workspace-status-row .workspace-header {
+#overview-view .workspace-status-row .workspace-header {
   min-height: 0;
   padding: 0 !important;
   border: 0 !important;
@@ -1976,7 +2014,7 @@
   box-shadow: none !important;
 }
 
-#senders-view .workspace-status-row .workspace-controls.toolbar {
+#overview-view .workspace-status-row .workspace-controls.toolbar {
   display: grid !important;
   grid-template-columns: 1fr;
   align-items: end;
@@ -1987,30 +2025,33 @@
   background: transparent !important;
 }
 
-#senders-view .workspace-status-row .workspace-controls > * {
+#overview-view .workspace-status-row .workspace-controls > * {
   min-width: 0;
 }
 
-#senders-view .workspace-status-row .toolbar-field-note {
+#overview-view .workspace-status-row .toolbar-field-note {
   align-self: center;
   color: #9aa8ba;
   font-size: .68rem;
 }
 
-#senders-view .workspace-status-row .toolbar-actions {
+#overview-view .workspace-status-row .toolbar-actions {
   display: flex;
   gap: 7px;
 }
 
-#senders-view .workspace-status-row .toolbar-actions .btn {
+#overview-view .workspace-status-row .toolbar-actions .btn {
   min-width: 70px;
 }
 
-#senders-view .workspace-status-row .manual-start-warning {
-  display: none;
+#overview-view .workspace-status-row .manual-start-warning {
+  margin: 7px 0 0;
+  color: #9aa8ba;
+  font-size: .68rem;
+  line-height: 1.35;
 }
 
-#senders-view .ops-progress-strip {
+#overview-view .ops-progress-strip {
   order: 3;
   min-height: 34px;
   margin: 0;
@@ -2022,18 +2063,18 @@
   box-shadow: none;
 }
 
-#senders-view .ops-progress-strip > * {
+#overview-view .ops-progress-strip > * {
   margin: 0;
 }
 
-#senders-view .ops-progress-summary-head {
+#overview-view .ops-progress-summary-head {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: stretch;
   gap: 0;
 }
 
-#senders-view .ops-progress-summary-title {
+#overview-view .ops-progress-summary-title {
   display: flex;
   align-items: center;
   padding-right: 11px;
@@ -2046,13 +2087,13 @@
   white-space: nowrap;
 }
 
-#senders-view .ops-progress-summary {
+#overview-view .ops-progress-summary {
   display: grid;
   grid-template-columns: minmax(130px, .8fr) minmax(250px, 1.6fr) minmax(125px, .8fr) minmax(105px, .6fr);
   min-width: 0;
 }
 
-#senders-view .ops-progress-summary-item {
+#overview-view .ops-progress-summary-item {
   display: grid;
   align-content: center;
   gap: 1px;
@@ -2061,7 +2102,7 @@
   border-right: 1px solid var(--console-line-soft);
 }
 
-#senders-view .ops-progress-summary-item strong {
+#overview-view .ops-progress-summary-item strong {
   color: #94a4b8;
   font-size: .58rem;
   font-weight: 700;
@@ -2070,7 +2111,7 @@
   text-transform: uppercase;
 }
 
-#senders-view .ops-progress-summary-item span {
+#overview-view .ops-progress-summary-item span {
   overflow: hidden;
   color: #d7e2ee;
   font-size: .67rem;
@@ -2079,7 +2120,7 @@
   white-space: nowrap;
 }
 
-#senders-view .ops-progress-summary-action {
+#overview-view .ops-progress-summary-action {
   align-self: center;
   margin-left: 9px;
   padding: 4px 7px;
@@ -2092,14 +2133,35 @@
   white-space: nowrap;
 }
 
-#senders-view .ops-progress-summary-action:hover,
-#senders-view .ops-progress-summary-action:focus-visible {
+#overview-view .ops-progress-summary-action:hover,
+#overview-view .ops-progress-summary-action:focus-visible {
   background: rgba(129,174,242,.09);
   color: #c9dfff;
 }
 
-#senders-view #ops-progress-details {
-  order: 4;
+.react-overview-next-action,
+.react-diagnostics-note {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: #0a121c;
+  color: #cbd7e4;
+}
+
+.react-overview-next-action strong,
+.react-diagnostics-note strong {
+  color: #edf4fb;
+  font-size: .86rem;
+}
+
+.react-overview-next-action span,
+.react-diagnostics-note span {
+  color: #9aa8ba;
+  font-size: .72rem;
+  line-height: 1.35;
 }
 
 .react-supporting-panels {
@@ -2109,9 +2171,9 @@
   margin-top: 7px;
 }
 
-#senders-view #ops-progress-details,
+#diagnostics-view #ops-progress-details,
 #senders-view .react-supporting-panels > *,
-#senders-view .campaign-history-panel,
+#history-view .campaign-history-panel,
 #senders-view .profile-detail-panel,
 #senders-view .diagnostics-panel {
   min-height: 34px;
@@ -2123,7 +2185,9 @@
   box-shadow: none !important;
 }
 
-#senders-view details > summary {
+#senders-view details > summary,
+#history-view details > summary,
+#diagnostics-view details > summary {
   min-height: 34px;
   padding: 7px 10px;
   color: #c8d3df;
@@ -2165,6 +2229,43 @@
 
 .react-validation-tools-body .controlled-send-test-card {
   margin: 0;
+}
+
+#diagnostics-view .react-validation-tools {
+  margin-top: 8px;
+}
+
+#history-view .campaign-history-panel {
+  margin: 0;
+}
+
+.react-current-staged-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: #0a121c;
+}
+
+.react-current-staged-legend > div {
+  min-width: 0;
+}
+
+.react-current-staged-legend strong {
+  display: block;
+  color: #e1ebf5;
+  font-size: .78rem;
+}
+
+.react-current-staged-legend span {
+  display: block;
+  margin-top: 2px;
+  color: #9aa8ba;
+  font-size: .68rem;
+  line-height: 1.35;
 }
 
 /* Lead Ops: tabs and thin stepper */
@@ -3055,8 +3156,8 @@
     padding: 13px 12px 16px !important;
   }
 
-  #senders-view .workspace-summary-strip.summary-grid,
-  #senders-view #summary-grid.workspace-summary-strip.summary-grid {
+  #overview-view .workspace-summary-strip.summary-grid,
+  #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
     overflow: hidden;
   }
@@ -3159,46 +3260,46 @@
     font-size: .56rem;
   }
 
-  #senders-view .workspace-summary-strip.summary-grid,
-  #senders-view #summary-grid.workspace-summary-strip.summary-grid {
+  #overview-view .workspace-summary-strip.summary-grid,
+  #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
     overflow: hidden;
   }
 
-  #senders-view .ops-progress-summary-head {
+  #overview-view .ops-progress-summary-head {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  #senders-view .ops-progress-summary-title {
+  #overview-view .ops-progress-summary-title {
     grid-column: 1 / -1;
     padding: 0 0 5px;
     border-right: 0;
     border-bottom: 1px solid var(--console-line-soft);
   }
 
-  #senders-view .ops-progress-summary {
+  #overview-view .ops-progress-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     padding-top: 4px;
   }
 
-  #senders-view .ops-progress-summary-item {
+  #overview-view .ops-progress-summary-item {
     padding: 3px 8px;
   }
 
-  #senders-view .ops-progress-summary-item:nth-child(2) {
+  #overview-view .ops-progress-summary-item:nth-child(2) {
     border-right: 0;
   }
 
-  #senders-view .ops-progress-summary-item:nth-child(-n + 2) {
+  #overview-view .ops-progress-summary-item:nth-child(-n + 2) {
     border-bottom: 1px solid var(--console-line-soft);
   }
 
-  #senders-view .ops-progress-summary-action {
+  #overview-view .ops-progress-summary-action {
     margin: 4px 0 0 7px;
   }
 
-  #senders-view .summary-card,
-  #senders-view .workspace-summary-strip .summary-card {
+  #overview-view .summary-card,
+  #overview-view .workspace-summary-strip .summary-card {
     display: grid;
     grid-template-columns: 1fr;
     align-items: center;
@@ -3208,26 +3309,26 @@
     border-bottom: 1px solid var(--console-line-soft) !important;
   }
 
-  #senders-view .summary-card:last-child {
+  #overview-view .summary-card:last-child {
     border-bottom: 0 !important;
   }
 
-  #senders-view .summary-label,
-  #senders-view .summary-value {
+  #overview-view .summary-label,
+  #overview-view .summary-value {
     margin: 0;
     font-size: .68rem !important;
   }
 
-  #senders-view .summary-meta,
-  #senders-view .summary-subline {
+  #overview-view .summary-meta,
+  #overview-view .summary-subline {
     grid-column: 1;
     margin: 0;
     text-align: left;
     font-size: .6rem;
   }
 
-  #senders-view .summary-card-private_jc,
-  #senders-view .summary-card-sendgrid {
+  #overview-view .summary-card-private_jc,
+  #overview-view .summary-card-sendgrid {
     border-left: 2px solid rgba(88,212,154,.65) !important;
   }
 
@@ -3240,31 +3341,31 @@
   }
 
   .react-command-bar,
-  #senders-view .ops-progress-strip,
+  #overview-view .ops-progress-strip,
   .react-supporting-panels {
     font-size: .65rem;
   }
 
-  #senders-view .workspace-status-row {
+  #overview-view .workspace-status-row {
     display: block !important;
   }
 
-  #senders-view .workspace-status-row .workspace-controls.toolbar {
+  #overview-view .workspace-status-row .workspace-controls.toolbar {
     grid-template-columns: 1fr;
   }
 
-  #senders-view .workspace-status-row .toolbar-field-note,
-  #senders-view .workspace-status-row .toolbar-actions {
+  #overview-view .workspace-status-row .toolbar-field-note,
+  #overview-view .workspace-status-row .toolbar-actions {
     grid-column: 1 / -1;
     flex-wrap: wrap;
   }
 
-  #senders-view .workspace-status-row .toolbar-actions .btn {
+  #overview-view .workspace-status-row .toolbar-actions .btn {
     min-width: 0;
     flex: 1;
   }
 
-  #senders-view .workspace-status-row #start-ready-btn {
+  #overview-view .workspace-status-row #start-ready-btn {
     flex: 1 0 100%;
   }
 

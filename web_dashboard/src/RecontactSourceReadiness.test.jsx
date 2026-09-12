@@ -357,7 +357,7 @@ async function bootController(status, { activeSender = false, previewHandler = n
   });
   if (activeSender) {
     await act(async () => {
-      fireEvent.click(document.getElementById("leads-tab-btn"));
+      fireEvent.click(document.getElementById("campaigns-tab-btn"));
       await flushMicrotasks();
     });
   }

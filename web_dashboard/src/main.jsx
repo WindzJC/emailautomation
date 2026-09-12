@@ -300,10 +300,10 @@ export function CommandBar({ html }) {
     <section className="react-command-bar react-global-controls" aria-label="Global sender controls">
       <div className="react-section-heading">
         <div>
-          <p className="react-section-label">Global controls</p>
-          <span>Start, stop, and refresh controls</span>
+          <p className="react-section-label">Current live operations</p>
+          <span>Safety-gated fleet controls</span>
         </div>
-        <span className="react-section-state">No bulk start</span>
+        <span className="react-section-state">Secondary controls</span>
       </div>
       {controls}
     </section>
@@ -318,11 +318,18 @@ export function FleetSummary({ children }) {
   );
 }
 
-export function SenderTable({ controls }) {
+export function SenderTable() {
   return (
     <section className="react-sender-console" aria-label="Sender operations">
       <div className="sender-status-mount" aria-hidden="true" />
-      <CommandBar html={controls} />
+    </section>
+  );
+}
+
+export function CompactProgress({ progress }) {
+  return (
+    <section className="react-senders-progress" aria-label="Run progress and alerts summary">
+      <LegacyNode html={progress} />
     </section>
   );
 }
@@ -370,32 +377,75 @@ export function ValidationTools({ html }) {
   );
 }
 
-export function SendersDashboard({ view }) {
+export function OverviewDashboard({ view }) {
   return (
-    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page" role="tabpanel" aria-labelledby="senders-tab-btn">
+    <section id="overview-view" className="dashboard-view workspace-view react-workspace react-overview-page" role="tabpanel" aria-labelledby="overview-tab-btn">
       <PageHeading
-        eyebrow="Delivery authority"
-        title="Senders"
-        description="Fleet status, readiness, and gated sender controls in one operational workspace."
+        eyebrow="Operations"
+        title="Overview"
+        description="Current queue health, live runtime, and the next authorized action."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
-
       <FleetSummary>
         <LegacyNode html={view.metrics} />
       </FleetSummary>
-
-      <SenderTable controls={view.commandBar} />
-
-      <section className="react-senders-progress" aria-label="Run progress and alerts">
-        <LegacyNode html={view.progress} />
-        <LegacyNode html={view.progressDetails} />
+      <div className="react-overview-live-grid">
+        <CommandBar html={view.commandBar} />
+        <CompactProgress progress={view.progress} />
+      </div>
+      <section className="react-overview-next-action panel-shell" aria-label="Next action guidance">
+        <p className="react-section-label">Next action</p>
+        <strong>Start a qualified sender only when authorized.</strong>
+        <span>Readiness means a sender is qualified to start. Runtime shows whether it is currently running or stopped.</span>
       </section>
+    </section>
+  );
+}
 
-      {view.controlledTest ? <ValidationTools html={view.controlledTest} /> : null}
-
-      <section className="react-supporting-panels">
+export function SendersDashboard({ view }) {
+  return (
+    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page hidden" role="tabpanel" aria-labelledby="senders-tab-btn" hidden>
+      <PageHeading
+        eyebrow="Delivery authority"
+        title="Senders"
+        description="Sender rows show runtime separately from readiness. READY means qualified to start; STOPPED means runtime inactive."
+        aside={<StatusPill tone="live">Row controls</StatusPill>}
+      />
+      <SenderTable />
+      <section className="react-supporting-panels react-sender-detail-panels">
         <LegacyNode html={view.profileDetail} />
-        <LegacyNode html={view.history} />
+      </section>
+    </section>
+  );
+}
+
+export function HistoryDashboard({ view }) {
+  return (
+    <section id="history-view" className="dashboard-view workspace-view react-workspace react-history-page hidden" role="tabpanel" aria-labelledby="history-tab-btn" hidden>
+      <PageHeading
+        eyebrow="Records"
+        title="History"
+        description="Recent campaign runs, previews, validations, and start activity."
+      />
+      <LegacyNode html={view.history} />
+    </section>
+  );
+}
+
+export function DiagnosticsDashboard({ view }) {
+  return (
+    <section id="diagnostics-view" className="dashboard-view workspace-view react-workspace react-diagnostics-page hidden" role="tabpanel" aria-labelledby="diagnostics-tab-btn" hidden>
+      <PageHeading
+        eyebrow="System"
+        title="Diagnostics"
+        description="Expanded alerts, run progress, environment safety, and controlled sender validation."
+      />
+      <LegacyNode html={view.progressDetails} />
+      {view.controlledTest ? <ValidationTools html={view.controlledTest} /> : null}
+      <section className="react-diagnostics-note panel-shell">
+        <p className="react-section-label">Sender diagnostics</p>
+        <strong>Profile Detail remains available on Senders.</strong>
+        <span>Use the selected sender detail panel for focused delivery flow and advanced diagnostics.</span>
       </section>
     </section>
   );
@@ -481,27 +531,39 @@ export function LeadOpsDashboard({ view }) {
   }, []);
 
   return (
-    <section id="leads-view" className="dashboard-view workspace-view leads-workspace react-workspace react-leads-page hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
+    <section id="leads-view" className="dashboard-view workspace-view leads-workspace react-workspace react-leads-page hidden" role="tabpanel" aria-labelledby="campaigns-tab-btn" hidden>
       <PageHeading
-        eyebrow="Lead operations"
+        eyebrow="Campaigns"
         title={(
           <>
-            <span className="react-cold-copy">Prepare the next campaign</span>
+            <span className="react-cold-copy">Cold Campaigns</span>
             <span className="react-warm-copy">Warm Outreach</span>
           </>
         )}
         description={(
           <>
-            <span className="react-cold-copy">Check source quality, choose a campaign, preview the write set, then confirm.</span>
+            <span className="react-cold-copy">Current live queue is separate from the next staged campaign workflow.</span>
             <span className="react-warm-copy">Upload a qualified warm batch, validate each lead, review the evidence and personalization, preview the exact email, then explicitly confirm.</span>
           </>
         )}
         aside={<StatusPill tone="safe">Safety gated</StatusPill>}
       />
       <nav id="leads-workflow-nav" className="leads-workflow-nav" aria-label="Lead Ops workflows">
-        <a href="/?tab=leads&amp;workflow=cold" data-leads-workflow="cold">Cold Campaigns</a>
-        <a href="/?tab=leads&amp;workflow=warm" data-leads-workflow="warm">Warm Outreach</a>
+        <a href="/?tab=campaigns&amp;workflow=cold" data-leads-workflow="cold">Cold Campaigns</a>
+        <a href="/?tab=campaigns&amp;workflow=warm" data-leads-workflow="warm">Warm Outreach</a>
       </nav>
+      <section className="react-current-staged-legend panel-shell" aria-label="Current and staged campaign state">
+        <div>
+          <p className="react-section-label">Current / live</p>
+          <strong>Confirmed queues and running senders</strong>
+          <span>Finish the current live queue before confirming a new JC dispatch.</span>
+        </div>
+        <div>
+          <p className="react-section-label">Next / staged</p>
+          <strong>Upload, validate, preview, confirm</strong>
+          <span>These gates prepare the next campaign without changing live runtime.</span>
+        </div>
+      </section>
       <section className="leads-command-center operator-workflow-section react-lead-canvas">
         <div className="react-legacy-command-heading"><LegacyNode html={view.heading} /></div>
         <LeadStepper status={view.workflowStatus} steps={view.workflowSteps} />
@@ -519,8 +581,11 @@ export function AppShell({ template }) {
       <div className="app-shell react-app-shell">
         <Sidebar {...template.sidebar} />
         <main className="app-main react-main">
-          <SendersDashboard view={template.senders} />
+          <OverviewDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
+          <SendersDashboard view={template.senders} />
+          <HistoryDashboard view={template.senders} />
+          <DiagnosticsDashboard view={template.senders} />
         </main>
       </div>
     </div>

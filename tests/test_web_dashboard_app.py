@@ -139,10 +139,10 @@ class WebDashboardAppTests(unittest.TestCase):
         backend_source = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
 
         for expected in [
-            'href="/?tab=leads&amp;workflow=cold"',
+            'href="/?tab=campaigns&amp;workflow=cold"',
             'data-leads-workflow="cold"',
             "Cold Campaigns",
-            'href="/?tab=leads&amp;workflow=warm"',
+            'href="/?tab=campaigns&amp;workflow=warm"',
             'data-leads-workflow="warm"',
             "Warm Outreach",
         ]:
@@ -502,7 +502,7 @@ class WebDashboardAppTests(unittest.TestCase):
             self.assertIn(expected, html)
         self.assertNotIn("leads-recontact-recency-override", html)
 
-        styles = STYLES_CSS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
         for expected in [
             ".leads-command-center",
             ".leads-command-section",
@@ -517,7 +517,7 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         backend = LIVE_DASHBOARD_PY.read_text(encoding="utf-8")
         markup = INDEX_HTML.read_text(encoding="utf-8")
-        styles = STYLES_CSS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
 
         for expected in [
             "lead-check-status-card",
@@ -1133,7 +1133,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "leads-page-title",
             "leads-current-queue-note",
             "leads-dispatch-current-queue-note",
-            "Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch.",
+            "Current live queue: Private JC has unfinished recipients. Next dispatch/campaign blocked until current queue is finished.",
             "Changing source changes the eligible count.",
             "leads-operator-status-strip",
             "leads-workflow-status-banner",
@@ -1247,7 +1247,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Counts below describe the current checked and triaged source only.",
             "Source rows 0 · Not ready for preview until Upload & Check completes.",
             "leadsControlCheckResult",
-            "Private JC has an unfinished recipient queue.",
+            "Current live queue: Private JC has unfinished recipients.",
             "Reason ledger and queues",
             "Selected source has",
             "broader than the confirmed safe source",
@@ -1367,8 +1367,11 @@ class WebDashboardAppTests(unittest.TestCase):
         tab_end = source.index("function isOpsTabVisible()", tab_start)
         tab_body = source[tab_start:tab_end]
         self.assertIn('const selectedTab = wallboardMode ? "senders" : activeDashboardTab;', tab_body)
-        self.assertIn('const leadsActive = selectedTab === "leads";', tab_body)
+        self.assertIn('const overviewActive = selectedTab === "overview";', tab_body)
+        self.assertIn('const leadsActive = selectedTab === "campaigns";', tab_body)
         self.assertIn('const sendersActive = selectedTab === "senders";', tab_body)
+        self.assertIn('const historyActive = selectedTab === "history";', tab_body)
+        self.assertIn('const diagnosticsActive = selectedTab === "diagnostics";', tab_body)
         self.assertIn("mountExclusiveDashboardPanel(selectedTab);", tab_body)
         self.assertIn("els.leadsTabBtn.classList.toggle(\"is-active\", leadsActive);", tab_body)
         self.assertIn("els.sendersTabBtn.classList.toggle(\"is-active\", sendersActive);", tab_body)
@@ -1386,17 +1389,18 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertNotIn("advanced-file-details", html)
         self.assertNotIn("run-readiness-advanced", html)
 
-    def test_dashboard_tabs_mount_only_active_panel_in_live_dom(self) -> None:
+    def test_dashboard_tabs_keep_unique_hidden_panels_in_live_dom(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         styles = STYLES_CSS.read_text(encoding="utf-8")
 
         for expected in [
             "function mountExclusiveDashboardPanel(activeTab)",
             "ensureTabPanelMountAnchors();",
-            "if (els.leadsView?.isConnected) els.leadsView.remove();",
-            "if (els.sendersView?.isConnected) els.sendersView.remove();",
-            "insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);",
-            "insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);",
+            "if (!els.overviewView?.isConnected) insertAfterAnchor(tabPanelMounts.overviewAnchor, els.overviewView);",
+            "if (!els.leadsView?.isConnected) insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);",
+            "if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);",
+            "if (!els.historyView?.isConnected) insertAfterAnchor(tabPanelMounts.historyAnchor, els.historyView);",
+            "if (!els.diagnosticsView?.isConnected) insertAfterAnchor(tabPanelMounts.diagnosticsAnchor, els.diagnosticsView);",
         ]:
             self.assertIn(expected, source)
 
@@ -1791,7 +1795,8 @@ class WebDashboardAppTests(unittest.TestCase):
             "renderProgressSummaryStrip",
             "syncProgressDetailsToggle",
             "opsProgressDetailsToggle",
-            "els.opsProgressDetails.open = !els.opsProgressDetails.open",
+            'setDashboardTab("diagnostics")',
+            "els.opsProgressDetails.open = true",
             'sendersRoot?.querySelector(".sender-status-mount")',
             "data.auth_enabled === false",
             "is-auth-disabled",
@@ -1830,7 +1835,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for control_id in [
             'id="stop-btn"',
-            'id="leads-tab-btn"',
+            'id="campaigns-tab-btn"',
             'id="senders-tab-btn"',
             'id="leads-important-dispatch-preview-btn"',
         ]:
@@ -1865,12 +1870,15 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, source)
 
-    def test_navigation_uses_senders_and_lead_ops_labels(self) -> None:
+    def test_navigation_uses_canonical_information_architecture_labels(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         markup = INDEX_HTML.read_text(encoding="utf-8")
 
-        self.assertIn('setNodeText(els.leadsTabBtn, "Leads")', source)
+        self.assertIn('setNodeText(els.overviewTabBtn, "Overview")', source)
+        self.assertIn('setNodeText(els.leadsTabBtn, "Campaigns")', source)
         self.assertIn('setNodeText(els.sendersTabBtn, "Senders")', source)
+        self.assertIn('setNodeText(els.historyTabBtn, "History")', source)
+        self.assertIn('setNodeText(els.diagnosticsTabBtn, "Diagnostics")', source)
         self.assertNotIn('id="ops-tab-btn"', markup)
 
     def test_warm_jc_sender_row_is_visible_but_opens_lead_ops_instead_of_starting(self) -> None:
@@ -1916,9 +1924,9 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn('fetchJson("/api/leads/status")', source)
         self.assertIn("void hydrateWarmSenderLeadStatus()", source)
 
-        styles = STYLES_CSS.read_text(encoding="utf-8")
-        self.assertIn("#ops-view .sender-status-table tr.is-warm-jc td", styles)
-        self.assertIn("#ops-view .sender-status-profile-meta", styles)
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
+        self.assertIn("#senders-view .sender-status-table tr.is-warm-jc td", styles)
+        self.assertIn("#senders-view .sender-status-profile-meta", styles)
         self.assertIn('if (String(value || "") === "private_jc_warm") return "Warm Outreach";', source)
         self.assertNotIn("Warm Private JC${warmMax", render_body)
 
@@ -1948,7 +1956,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertEqual(render_body.count("Private JC sender"), 1)
         self.assertEqual(render_body.count('profile?.name === "private_jc_warm"'), 1)
 
-    def test_sender_panel_lookup_survives_detached_senders_view_on_other_tabs(self) -> None:
+    def test_sender_panel_lookup_uses_canonical_senders_view(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         ensure_start = source.index("function ensureSenderStatusPanel")
         ensure_end = source.index("function syncProgressDetailsToggle", ensure_start)
@@ -1957,7 +1965,7 @@ class WebDashboardAppTests(unittest.TestCase):
         mount_end = source.index("function applyDashboardTab", mount_start)
         mount_body = source[mount_start:mount_end]
 
-        self.assertIn("if (els.sendersView?.isConnected) els.sendersView.remove()", mount_body)
+        self.assertIn("if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView)", mount_body)
         self.assertIn("const sendersRoot = els.sendersView", ensure_body)
         self.assertIn('sendersRoot?.querySelector(".sender-status-mount")', ensure_body)
         self.assertIn('sendersRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
@@ -1975,7 +1983,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_warm_research_groups_outputs_and_lane_status_with_safety_copy(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        styles = STYLES_CSS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
 
         for expected in [
             "Warm Outreach Validation",
@@ -2085,7 +2093,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_private_email_total_explains_cold_and_warm_composition(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        styles = STYLES_CSS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
 
         self.assertIn("function privateEmailSentBreakdown", source)
         self.assertIn("const warm = Number(warmStatus.sent_count", source)
@@ -2093,7 +2101,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("Private Email total:", source)
         self.assertIn("JC cold:", source)
         self.assertIn("Warm JC:", source)
-        self.assertIn("#ops-view .summary-private-breakdown", styles)
+        self.assertIn("#overview-view .summary-private-breakdown", styles)
 
     def test_lead_ops_density_polish_applies_to_warm_and_cold_layouts(self) -> None:
         styles = STYLES_CSS.read_text(encoding="utf-8")

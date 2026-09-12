@@ -350,8 +350,8 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="/static/build/assets/dashboard-BjCBYzci.js"></script>
-    <link rel="stylesheet" crossorigin href="/static/build/assets/index-DDqENhAv.css">
+    <script type="module" crossorigin src="/static/build/assets/dashboard-CR3YYZtO.js"></script>
+    <link rel="stylesheet" crossorigin href="/static/build/assets/index-CTHs_F1G.css">
   </head>
   <body>
     <template id="dashboard-template">
@@ -368,7 +368,18 @@
 
           <div class="app-rail-tabs topbar-tabs" role="tablist" aria-label="Dashboard sections" aria-orientation="horizontal">
             <button
-              id="leads-tab-btn"
+              id="overview-tab-btn"
+              class="tab-btn is-active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="overview-view"
+              tabindex="0"
+            >
+              Overview
+            </button>
+            <button
+              id="campaigns-tab-btn"
               class="tab-btn"
               type="button"
               role="tab"
@@ -376,10 +387,16 @@
               aria-controls="leads-view"
               tabindex="-1"
             >
-              Leads
+              Campaigns
             </button>
-            <button id="senders-tab-btn" class="tab-btn is-active" type="button" role="tab" aria-controls="senders-view" aria-selected="true" tabindex="0">
+            <button id="senders-tab-btn" class="tab-btn" type="button" role="tab" aria-controls="senders-view" aria-selected="false" tabindex="-1">
               Senders
+            </button>
+            <button id="history-tab-btn" class="tab-btn" type="button" role="tab" aria-controls="history-view" aria-selected="false" tabindex="-1">
+              History
+            </button>
+            <button id="diagnostics-tab-btn" class="tab-btn" type="button" role="tab" aria-controls="diagnostics-view" aria-selected="false" tabindex="-1">
+              Diagnostics
             </button>
           </div>
 
@@ -638,7 +655,7 @@
             </details>
           </section>
 
-          <section id="leads-view" class="dashboard-view workspace-view leads-workspace hidden" role="tabpanel" aria-labelledby="leads-tab-btn" hidden>
+          <section id="leads-view" class="dashboard-view workspace-view leads-workspace hidden" role="tabpanel" aria-labelledby="campaigns-tab-btn" hidden>
             <section class="leads-page-title" aria-labelledby="leads-page-title-heading">
               <p class="eyebrow">Leads</p>
               <h2 id="leads-page-title-heading">Leads Operations</h2>
@@ -703,7 +720,7 @@
                         <span class="muted">Changing source changes the eligible count.</span>
                       </div>
                     </div>
-                    <div id="leads-dispatch-current-queue-note" class="leads-dispatch-current-queue-note" hidden>Private JC has an unfinished recipient queue. Finish the current queue before confirming a new dispatch.</div>
+                    <div id="leads-dispatch-current-queue-note" class="leads-dispatch-current-queue-note" hidden>Current live queue: Private JC has unfinished recipients. Next dispatch/campaign blocked until current queue is finished.</div>
                     <div id="leads-dispatch-mode-cards" class="dispatch-mode-cards" role="group" aria-label="Dispatch mode"></div>
                     <div class="leads-dispatch-grid leads-command-controls">
                       <div class="leads-quick-file dispatch-technical-select">

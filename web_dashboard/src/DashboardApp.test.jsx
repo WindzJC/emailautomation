@@ -11,8 +11,11 @@ const template = {
   sidebar: {
     brand: '<div class="app-rail-top">Email Automation</div>',
     navigation: `<div class="app-rail-tabs">
-      <button id="leads-tab-btn" aria-controls="leads-view">Leads</button>
+      <button id="overview-tab-btn" aria-controls="overview-view">Overview</button>
+      <button id="campaigns-tab-btn" aria-controls="leads-view">Campaigns</button>
       <button id="senders-tab-btn" aria-controls="senders-view">Senders</button>
+      <button id="history-tab-btn" aria-controls="history-view">History</button>
+      <button id="diagnostics-tab-btn" aria-controls="diagnostics-view">Diagnostics</button>
     </div>`,
     status: '<div class="app-rail-status"><span id="auth-status-label">Local dev</span></div>',
   },
@@ -48,8 +51,8 @@ describe("DashboardApp", () => {
     expect(screen.getByText("Manual Start/Resume can launch real workers and consume queues.")).toBeInTheDocument();
     expect(document.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
-    expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=leads&workflow=cold");
-    expect(document.querySelector('[data-leads-workflow="warm"]')).toHaveAttribute("href", "/?tab=leads&workflow=warm");
+    expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=campaigns&workflow=cold");
+    expect(document.querySelector('[data-leads-workflow="warm"]')).toHaveAttribute("href", "/?tab=campaigns&workflow=warm");
     expect(screen.getAllByText("Warm Outreach").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Upload Batch").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Validate").length).toBeGreaterThan(0);
@@ -61,38 +64,52 @@ describe("DashboardApp", () => {
     expect(document.querySelector('[data-dashboard-ui="react-tailwind-components"]')).toBeInTheDocument();
   });
 
-  it("shows only Leads and Senders as canonical destinations", () => {
+  it("shows canonical dashboard destinations", () => {
     render(<DashboardApp template={template} />);
     const navigation = document.querySelector(".react-sidebar-nav");
-    const labels = ["Leads", "Senders"];
+    const labels = ["Overview", "Campaigns", "Senders", "History", "Diagnostics"];
     expect(Array.from(navigation.querySelectorAll("button"), (button) => button.textContent.trim())).toEqual(labels);
     for (const label of labels) {
       expect(screen.getAllByText(label, { selector: ".react-sidebar-nav button" })).toHaveLength(1);
     }
-    expect(document.getElementById("leads-tab-btn")).toHaveAttribute("aria-controls", "leads-view");
+    expect(document.getElementById("overview-tab-btn")).toHaveAttribute("aria-controls", "overview-view");
+    expect(document.getElementById("campaigns-tab-btn")).toHaveAttribute("aria-controls", "leads-view");
     expect(document.getElementById("senders-tab-btn")).toHaveAttribute("aria-controls", "senders-view");
+    expect(document.getElementById("history-tab-btn")).toHaveAttribute("aria-controls", "history-view");
+    expect(document.getElementById("diagnostics-tab-btn")).toHaveAttribute("aria-controls", "diagnostics-view");
+    expect(document.getElementById("overview-view")).toBeInTheDocument();
     expect(document.getElementById("leads-view")).toBeInTheDocument();
     expect(document.getElementById("senders-view")).toBeInTheDocument();
-    for (const label of ["Overview", "Campaigns", "Sending", "Suppressions", "Recovery", "Activity", "Settings", "Replies"]) {
+    expect(document.getElementById("history-view")).toBeInTheDocument();
+    expect(document.getElementById("diagnostics-view")).toBeInTheDocument();
+    for (const label of ["Leads", "Sending", "Suppressions", "Recovery", "Activity", "Settings", "Replies"]) {
       expect(screen.queryByText(label, { selector: ".react-sidebar-nav button" })).not.toBeInTheDocument();
     }
   });
 
-  it("keeps summary, fleet authority, details, and validation tools together on Senders", () => {
+  it("separates overview, sender, history, and diagnostics regions without duplicate IDs", () => {
     render(<DashboardApp template={template} />);
+    const overview = document.getElementById("overview-view");
     const senders = document.getElementById("senders-view");
+    const diagnostics = document.getElementById("diagnostics-view");
+    const history = document.getElementById("history-view");
     expect(document.getElementById("ops-view")).not.toBeInTheDocument();
+    expect(overview).toHaveTextContent("Overview");
+    expect(overview.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
+    expect(overview.querySelector("#start-ready-btn")).toBeInTheDocument();
+    expect(overview.querySelector("#stop-btn")).toBeInTheDocument();
     expect(senders).toHaveTextContent("Senders");
-    expect(senders.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
-    expect(senders.querySelector("#start-ready-btn")).toBeInTheDocument();
-    expect(senders.querySelector("#stop-btn")).toBeInTheDocument();
-    expect(senders.querySelector("#controlled-send-test-btn")).toBeInTheDocument();
+    expect(senders.querySelector("#summary-grid")).not.toBeInTheDocument();
+    expect(senders.querySelector("#start-ready-btn")).not.toBeInTheDocument();
+    expect(senders.querySelector(".sender-status-mount")).toBeInTheDocument();
     expect(senders.querySelector("#profile-detail")).toBeInTheDocument();
-    const validationTools = senders.querySelector("details.react-validation-tools");
+    expect(history.querySelector("#campaign-run-history")).toBeInTheDocument();
+    const validationTools = diagnostics.querySelector("details.react-validation-tools");
     expect(validationTools).not.toHaveAttribute("open");
     expect(validationTools).toHaveTextContent("Validation Tools");
     expect(validationTools).toHaveTextContent("no production recipient queues");
     expect(validationTools.querySelectorAll(".controlled-send-test-card")).toHaveLength(3);
+    expect(diagnostics.querySelector("#ops-progress-details")).toBeInTheDocument();
     for (const id of [
       "start-ready-btn",
       "stop-btn",
@@ -239,37 +256,45 @@ describe("Warm Outreach controller layout", () => {
 
   it("keeps Leads and Senders navigation while resolving legacy ops links to Senders", async () => {
     const fetchMock = await boot();
-    const expectedLabels = ["Leads", "Senders"];
+    const expectedLabels = ["Overview", "Campaigns", "Senders", "History", "Diagnostics"];
     expect(Array.from(document.querySelectorAll(".react-sidebar-nav button"), (button) => button.textContent.trim())).toEqual(expectedLabels);
 
     fireEvent.click(document.getElementById("senders-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(window.location.search).toContain("tab=senders");
     expect(document.getElementById("senders-view")).toBeInTheDocument();
-    expect(document.getElementById("leads-view")).not.toBeInTheDocument();
+    expect(document.getElementById("leads-view")).toHaveAttribute("hidden");
 
-    fireEvent.click(document.getElementById("leads-tab-btn"));
+    fireEvent.click(document.getElementById("campaigns-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
-    expect(window.location.search).toContain("tab=leads");
+    expect(window.location.search).toContain("tab=campaigns");
     expect(document.getElementById("leads-view")).toBeInTheDocument();
-    expect(document.getElementById("senders-view")).not.toBeInTheDocument();
+    expect(document.getElementById("senders-view")).toHaveAttribute("hidden");
 
     fireEvent.click(document.getElementById("senders-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(window.location.search).toContain("tab=senders");
     const senders = document.getElementById("senders-view");
     expect(senders).toBeInTheDocument();
-    expect(document.getElementById("leads-view")).not.toBeInTheDocument();
+    expect(document.getElementById("leads-view")).toHaveAttribute("hidden");
     expect(document.querySelectorAll("#senders-table-panel")).toHaveLength(1);
     expect(senders.querySelector("#senders-table-panel")).toBeInTheDocument();
     expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
-    expect(senders.querySelector("#start-ready-btn")).toBeInTheDocument();
-    expect(senders.querySelector("#stop-btn")).toBeInTheDocument();
-    expect(Array.from(senders.querySelectorAll(".controlled-send-test-card"))).toHaveLength(3);
+    expect(Array.from(senders.querySelectorAll(".controlled-send-test-card"))).toHaveLength(0);
+
+    fireEvent.click(document.getElementById("diagnostics-tab-btn"));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(window.location.search).toContain("tab=diagnostics");
     expect(document.querySelectorAll("#controlled-send-test-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#controlled-send-test-jc-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#controlled-send-test-all-btn")).toHaveLength(1);
+
+    fireEvent.click(document.getElementById("overview-tab-btn"));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(window.location.search).toContain("tab=overview");
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
+    expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
 
     window.history.replaceState({}, "", "/?tab=ops");
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -280,8 +305,9 @@ describe("Warm Outreach controller layout", () => {
     window.history.replaceState({}, "", "/?tab=leads&workflow=warm");
     window.dispatchEvent(new PopStateEvent("popstate"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(window.location.search).toContain("tab=leads");
     expect(document.getElementById("leads-view")).toBeInTheDocument();
-    expect(document.getElementById("senders-view")).not.toBeInTheDocument();
+    expect(document.getElementById("senders-view")).toHaveAttribute("hidden");
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 });
