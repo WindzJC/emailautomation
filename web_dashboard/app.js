@@ -3,7 +3,6 @@ const els = {
   overviewView: document.getElementById("overview-view"),
   opsView: document.getElementById("ops-view"),
   leadsView: document.getElementById("leads-view"),
-  sendersView: document.getElementById("senders-view"),
   historyView: document.getElementById("history-view"),
   diagnosticsView: document.getElementById("diagnostics-view"),
   opsTabBtn: document.getElementById("ops-tab-btn"),
@@ -217,7 +216,6 @@ const tabPanelMounts = {
   initialized: false,
   overviewAnchor: null,
   leadsAnchor: null,
-  sendersAnchor: null,
   historyAnchor: null,
   diagnosticsAnchor: null,
 };
@@ -490,7 +488,7 @@ function readDashboardTabFromLocation() {
   const params = new URLSearchParams(window.location.search);
   const tab = params.get("tab");
   if (tab === "leads" || tab === "campaigns") return "campaigns";
-  if (tab === "ops" || tab === "senders") return "senders";
+  if (tab === "ops" || tab === "senders") return "overview";
   if (tab === "history") return "history";
   if (tab === "diagnostics") return "diagnostics";
   return "overview";
@@ -546,10 +544,6 @@ function ensureTabPanelMountAnchors() {
     tabPanelMounts.leadsAnchor = document.createComment("leads-view-mount");
     els.leadsView.parentNode.insertBefore(tabPanelMounts.leadsAnchor, els.leadsView);
   }
-  if (els.sendersView?.parentNode) {
-    tabPanelMounts.sendersAnchor = document.createComment("senders-view-mount");
-    els.sendersView.parentNode.insertBefore(tabPanelMounts.sendersAnchor, els.sendersView);
-  }
   if (els.historyView?.parentNode) {
     tabPanelMounts.historyAnchor = document.createComment("history-view-mount");
     els.historyView.parentNode.insertBefore(tabPanelMounts.historyAnchor, els.historyView);
@@ -565,23 +559,20 @@ function mountExclusiveDashboardPanel(activeTab) {
   ensureTabPanelMountAnchors();
   if (!els.overviewView?.isConnected) insertAfterAnchor(tabPanelMounts.overviewAnchor, els.overviewView);
   if (!els.leadsView?.isConnected) insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);
-  if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);
   if (!els.historyView?.isConnected) insertAfterAnchor(tabPanelMounts.historyAnchor, els.historyView);
   if (!els.diagnosticsView?.isConnected) insertAfterAnchor(tabPanelMounts.diagnosticsAnchor, els.diagnosticsView);
 }
 
 function applyDashboardTab() {
-  const selectedTab = wallboardMode ? "senders" : activeDashboardTab;
+  const selectedTab = wallboardMode ? "overview" : activeDashboardTab;
   const overviewActive = selectedTab === "overview";
   const leadsActive = selectedTab === "campaigns";
-  const sendersActive = selectedTab === "senders";
   const historyActive = selectedTab === "history";
   const diagnosticsActive = selectedTab === "diagnostics";
   mountExclusiveDashboardPanel(selectedTab);
 
   if (els.overviewTabBtn) setNodeText(els.overviewTabBtn, "Overview");
   if (els.leadsTabBtn) setNodeText(els.leadsTabBtn, "Campaigns");
-  if (els.sendersTabBtn) setNodeText(els.sendersTabBtn, "Senders");
   if (els.historyTabBtn) setNodeText(els.historyTabBtn, "History");
   if (els.diagnosticsTabBtn) setNodeText(els.diagnosticsTabBtn, "Diagnostics");
 
@@ -600,15 +591,6 @@ function applyDashboardTab() {
     els.leadsView.setAttribute("aria-hidden", String(!leadsActive));
     if (!leadsActive) els.leadsView.setAttribute("inert", "");
     else els.leadsView.removeAttribute("inert");
-  }
-
-  if (els.sendersView) {
-    const hidden = !sendersActive;
-    els.sendersView.classList.toggle("hidden", hidden);
-    els.sendersView.hidden = hidden;
-    els.sendersView.setAttribute("aria-hidden", String(hidden));
-    if (hidden) els.sendersView.setAttribute("inert", "");
-    else els.sendersView.removeAttribute("inert");
   }
 
   if (els.historyView) {
@@ -633,12 +615,6 @@ function applyDashboardTab() {
     els.overviewTabBtn.classList.toggle("is-active", overviewActive);
     els.overviewTabBtn.setAttribute("aria-selected", String(overviewActive));
     els.overviewTabBtn.tabIndex = overviewActive ? 0 : -1;
-  }
-
-  if (els.sendersTabBtn) {
-    els.sendersTabBtn.classList.toggle("is-active", sendersActive);
-    els.sendersTabBtn.setAttribute("aria-selected", String(sendersActive));
-    els.sendersTabBtn.tabIndex = sendersActive ? 0 : -1;
   }
 
   if (els.leadsTabBtn) {
@@ -670,7 +646,7 @@ function isOpsTabVisible() {
 }
 
 function isSendersTabVisible() {
-  return activeDashboardTab === "senders" || wallboardMode;
+  return activeDashboardTab === "overview" || wallboardMode;
 }
 
 function isSnapshotTabVisible() {
@@ -789,7 +765,7 @@ function applyWallboardMode() {
     setNodeText(els.wallboardBtn, wallboardMode ? "Exit Wallboard" : "Wallboard");
   }
   if (wallboardMode) {
-    activeDashboardTab = "senders";
+    activeDashboardTab = "overview";
   }
   applyDashboardTab();
   document.title = wallboardMode ? "Email Automation Wallboard" : "Email Automation Live Dashboard";
@@ -809,7 +785,9 @@ function toggleWallboardMode() {
 function setDashboardTab(nextTab) {
   const normalized = nextTab === "leads"
     ? "campaigns"
-    : ["overview", "campaigns", "senders", "history", "diagnostics"].includes(nextTab)
+    : nextTab === "senders" || nextTab === "ops"
+      ? "overview"
+      : ["overview", "campaigns", "history", "diagnostics"].includes(nextTab)
       ? nextTab
       : "overview";
   activeDashboardTab = normalized;
@@ -7867,7 +7845,7 @@ function renderSummary(snapshot) {
 }
 
 function ensureSenderStatusPanel() {
-  const sendersRoot = els.sendersView;
+  const sendersRoot = els.overviewView;
   const anchor = sendersRoot?.querySelector(".sender-status-mount");
   if (!anchor?.parentNode) return null;
 
@@ -7915,6 +7893,11 @@ function ensureSenderStatusPanel() {
 
 function syncProgressDetailsToggle() {
   if (!els.opsProgressDetailsToggle || !els.opsProgressDetails) return;
+  if (!(els.opsProgressDetails instanceof HTMLDetailsElement)) {
+    setNodeText(els.opsProgressDetailsToggle, "View details");
+    els.opsProgressDetailsToggle.setAttribute("aria-expanded", "true");
+    return;
+  }
   const open = Boolean(els.opsProgressDetails.open);
   setNodeText(els.opsProgressDetailsToggle, open ? "Close details" : "View details");
   els.opsProgressDetailsToggle.setAttribute("aria-expanded", open ? "true" : "false");
@@ -11203,7 +11186,6 @@ if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/
 if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
   els.opsProgressDetailsToggle.addEventListener("click", () => {
     setDashboardTab("diagnostics");
-    els.opsProgressDetails.open = true;
     syncProgressDetailsToggle();
   });
 }
@@ -11212,7 +11194,7 @@ if (els.opsProgressDetails) {
 }
 if (els.overviewTabBtn) els.overviewTabBtn.addEventListener("click", () => setDashboardTab("overview"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("campaigns"));
-if (els.sendersTabBtn) els.sendersTabBtn.addEventListener("click", () => setDashboardTab("senders"));
+if (els.sendersTabBtn) els.sendersTabBtn.addEventListener("click", () => setDashboardTab("overview"));
 if (els.historyTabBtn) els.historyTabBtn.addEventListener("click", () => setDashboardTab("history"));
 if (els.diagnosticsTabBtn) els.diagnosticsTabBtn.addEventListener("click", () => setDashboardTab("diagnostics"));
 document.querySelectorAll("[data-leads-workflow]").forEach((link) => {
@@ -11453,7 +11435,7 @@ if (els.leadsShardConfirm) {
 if (els.leadsShardCount) els.leadsShardCount.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
 if (els.leadsShardStrategy) els.leadsShardStrategy.addEventListener("change", () => renderLeadsStatus(lastLeadsStatus || {}));
 if (els.tailSelect) els.tailSelect.addEventListener("change", () => connectSocket(true));
-if (els.sendersView) els.sendersView.addEventListener("click", handleSenderStatusClick);
+if (els.overviewView) els.overviewView.addEventListener("click", handleSenderStatusClick);
 if (els.overviewGrid) els.overviewGrid.addEventListener("click", handleOverviewClick);
 if (els.profileDetail) els.profileDetail.addEventListener("click", handleProfileDetailClick);
 if (els.detailProfileSelect) {

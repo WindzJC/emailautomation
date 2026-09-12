@@ -1366,20 +1366,16 @@ class WebDashboardAppTests(unittest.TestCase):
         tab_start = source.index("function applyDashboardTab()")
         tab_end = source.index("function isOpsTabVisible()", tab_start)
         tab_body = source[tab_start:tab_end]
-        self.assertIn('const selectedTab = wallboardMode ? "senders" : activeDashboardTab;', tab_body)
+        self.assertIn('const selectedTab = wallboardMode ? "overview" : activeDashboardTab;', tab_body)
         self.assertIn('const overviewActive = selectedTab === "overview";', tab_body)
         self.assertIn('const leadsActive = selectedTab === "campaigns";', tab_body)
-        self.assertIn('const sendersActive = selectedTab === "senders";', tab_body)
         self.assertIn('const historyActive = selectedTab === "history";', tab_body)
         self.assertIn('const diagnosticsActive = selectedTab === "diagnostics";', tab_body)
         self.assertIn("mountExclusiveDashboardPanel(selectedTab);", tab_body)
         self.assertIn("els.leadsTabBtn.classList.toggle(\"is-active\", leadsActive);", tab_body)
-        self.assertIn("els.sendersTabBtn.classList.toggle(\"is-active\", sendersActive);", tab_body)
         self.assertIn("els.leadsView.hidden = !leadsActive;", tab_body)
-        self.assertIn("els.sendersView.hidden = hidden;", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"aria-hidden\", String(!leadsActive));", tab_body)
         self.assertIn("els.leadsView.setAttribute(\"inert\", \"\");", tab_body)
-        self.assertIn("els.sendersView.setAttribute(\"inert\", \"\");", tab_body)
 
         self.assertNotIn("// --- TAB VISIBILITY GUARD ---", source)
         self.assertNotIn("// HARD TAB BODY CLASS FIX", source)
@@ -1398,7 +1394,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "ensureTabPanelMountAnchors();",
             "if (!els.overviewView?.isConnected) insertAfterAnchor(tabPanelMounts.overviewAnchor, els.overviewView);",
             "if (!els.leadsView?.isConnected) insertAfterAnchor(tabPanelMounts.leadsAnchor, els.leadsView);",
-            "if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView);",
             "if (!els.historyView?.isConnected) insertAfterAnchor(tabPanelMounts.historyAnchor, els.historyView);",
             "if (!els.diagnosticsView?.isConnected) insertAfterAnchor(tabPanelMounts.diagnosticsAnchor, els.diagnosticsView);",
         ]:
@@ -1796,7 +1791,6 @@ class WebDashboardAppTests(unittest.TestCase):
             "syncProgressDetailsToggle",
             "opsProgressDetailsToggle",
             'setDashboardTab("diagnostics")',
-            "els.opsProgressDetails.open = true",
             'sendersRoot?.querySelector(".sender-status-mount")',
             "data.auth_enabled === false",
             "is-auth-disabled",
@@ -1816,6 +1810,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Lead Inspector",
         ]:
             self.assertIn(expected, source)
+        self.assertNotIn("els.opsProgressDetails.open = true", source)
 
     def test_local_dev_auth_bypass_hides_login_without_removing_controls(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1836,10 +1831,10 @@ class WebDashboardAppTests(unittest.TestCase):
         for control_id in [
             'id="stop-btn"',
             'id="campaigns-tab-btn"',
-            'id="senders-tab-btn"',
             'id="leads-important-dispatch-preview-btn"',
         ]:
             self.assertIn(control_id, markup)
+        self.assertNotIn('id="senders-tab-btn"', markup)
 
     def test_environment_banner_reports_auth_auto_start_and_live_sender_safety(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1876,10 +1871,11 @@ class WebDashboardAppTests(unittest.TestCase):
 
         self.assertIn('setNodeText(els.overviewTabBtn, "Overview")', source)
         self.assertIn('setNodeText(els.leadsTabBtn, "Campaigns")', source)
-        self.assertIn('setNodeText(els.sendersTabBtn, "Senders")', source)
         self.assertIn('setNodeText(els.historyTabBtn, "History")', source)
         self.assertIn('setNodeText(els.diagnosticsTabBtn, "Diagnostics")', source)
         self.assertNotIn('id="ops-tab-btn"', markup)
+        self.assertNotIn('id="senders-tab-btn"', markup)
+        self.assertNotIn('setNodeText(els.sendersTabBtn, "Senders")', source)
 
     def test_warm_jc_sender_row_is_visible_but_opens_lead_ops_instead_of_starting(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1925,8 +1921,8 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("void hydrateWarmSenderLeadStatus()", source)
 
         styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
-        self.assertIn("#senders-view .sender-status-table tr.is-warm-jc td", styles)
-        self.assertIn("#senders-view .sender-status-profile-meta", styles)
+        self.assertIn("#overview-view .sender-status-table tr.is-warm-jc td", styles)
+        self.assertIn("#overview-view .sender-status-profile-meta", styles)
         self.assertIn('if (String(value || "") === "private_jc_warm") return "Warm Outreach";', source)
         self.assertNotIn("Warm Private JC${warmMax", render_body)
 
@@ -1956,7 +1952,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertEqual(render_body.count("Private JC sender"), 1)
         self.assertEqual(render_body.count('profile?.name === "private_jc_warm"'), 1)
 
-    def test_sender_panel_lookup_uses_canonical_senders_view(self) -> None:
+    def test_sender_panel_lookup_uses_canonical_overview_view(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         ensure_start = source.index("function ensureSenderStatusPanel")
         ensure_end = source.index("function syncProgressDetailsToggle", ensure_start)
@@ -1965,8 +1961,8 @@ class WebDashboardAppTests(unittest.TestCase):
         mount_end = source.index("function applyDashboardTab", mount_start)
         mount_body = source[mount_start:mount_end]
 
-        self.assertIn("if (!els.sendersView?.isConnected) insertAfterAnchor(tabPanelMounts.sendersAnchor, els.sendersView)", mount_body)
-        self.assertIn("const sendersRoot = els.sendersView", ensure_body)
+        self.assertNotIn("sendersView", mount_body)
+        self.assertIn("const sendersRoot = els.overviewView", ensure_body)
         self.assertIn('sendersRoot?.querySelector(".sender-status-mount")', ensure_body)
         self.assertIn('sendersRoot?.querySelectorAll(".sender-status-panel")', ensure_body)
 

@@ -365,15 +365,15 @@ export function EnvironmentBanner() {
 
 export function ValidationTools({ html }) {
   return (
-    <details className="react-validation-tools">
-      <summary>
+    <section className="react-validation-tools" aria-label="Validation Tools">
+      <header className="react-validation-tools-head">
         <span>Validation Tools</span>
         <span>Controlled sender tests — no production recipient queues</span>
-      </summary>
+      </header>
       <div className="react-validation-tools-body">
         <LegacyNode html={html} />
       </div>
-    </details>
+    </section>
   );
 }
 
@@ -393,27 +393,16 @@ export function OverviewDashboard({ view }) {
         <CommandBar html={view.commandBar} />
         <CompactProgress progress={view.progress} />
       </div>
+      <SenderTable />
+      <section className="react-supporting-panels react-sender-detail-panels">
+        <section id="detail-panel" className="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">
+          <LegacyNode html={view.profileDetail} />
+        </section>
+      </section>
       <section className="react-overview-next-action panel-shell" aria-label="Next action guidance">
         <p className="react-section-label">Next action</p>
         <strong>Start a qualified sender only when authorized.</strong>
         <span>Readiness means a sender is qualified to start. Runtime shows whether it is currently running or stopped.</span>
-      </section>
-    </section>
-  );
-}
-
-export function SendersDashboard({ view }) {
-  return (
-    <section id="senders-view" className="dashboard-view workspace-view react-workspace react-senders-page hidden" role="tabpanel" aria-labelledby="senders-tab-btn" hidden>
-      <PageHeading
-        eyebrow="Delivery authority"
-        title="Senders"
-        description="Sender rows show runtime separately from readiness. READY means qualified to start; STOPPED means runtime inactive."
-        aside={<StatusPill tone="live">Row controls</StatusPill>}
-      />
-      <SenderTable />
-      <section className="react-supporting-panels react-sender-detail-panels">
-        <LegacyNode html={view.profileDetail} />
       </section>
     </section>
   );
@@ -427,7 +416,9 @@ export function HistoryDashboard({ view }) {
         title="History"
         description="Recent campaign runs, previews, validations, and start activity."
       />
-      <LegacyNode html={view.history} />
+      <section className="panel panel-shell workspace-card campaign-history-panel advanced-details">
+        <LegacyNode html={view.history} />
+      </section>
     </section>
   );
 }
@@ -440,13 +431,10 @@ export function DiagnosticsDashboard({ view }) {
         title="Diagnostics"
         description="Expanded alerts, run progress, environment safety, and controlled sender validation."
       />
-      <LegacyNode html={view.progressDetails} />
-      {view.controlledTest ? <ValidationTools html={view.controlledTest} /> : null}
-      <section className="react-diagnostics-note panel-shell">
-        <p className="react-section-label">Sender diagnostics</p>
-        <strong>Profile Detail remains available on Senders.</strong>
-        <span>Use the selected sender detail panel for focused delivery flow and advanced diagnostics.</span>
+      <section id="ops-progress-details" className="panel panel-shell workspace-metric-details advanced-details">
+        <LegacyNode html={view.progressDetails} />
       </section>
+      {view.controlledTest ? <ValidationTools html={view.controlledTest} /> : null}
     </section>
   );
 }
@@ -583,7 +571,6 @@ export function AppShell({ template }) {
         <main className="app-main react-main">
           <OverviewDashboard view={template.senders} />
           <LeadOpsDashboard view={template.leadOps} />
-          <SendersDashboard view={template.senders} />
           <HistoryDashboard view={template.senders} />
           <DiagnosticsDashboard view={template.senders} />
         </main>
@@ -609,6 +596,14 @@ function outer(root, selector) {
   return node.outerHTML;
 }
 
+function bodyWithoutSummary(root, selector) {
+  const node = root.querySelector(selector);
+  if (!node) throw new Error(`Dashboard template is missing ${selector}.`);
+  const clone = node.cloneNode(true);
+  clone.querySelector(":scope > summary")?.remove();
+  return clone.innerHTML;
+}
+
 function readDashboardTemplate() {
   const template = document.getElementById("dashboard-template");
   if (!(template instanceof HTMLTemplateElement)) throw new Error("Dashboard template is missing.");
@@ -630,12 +625,12 @@ function readDashboardTemplate() {
       commandBar: outer(senders, ".workspace-status-row"),
       metrics: outer(senders, ".queue-health-section"),
       progress: outer(senders, ".ops-progress-strip"),
-      progressDetails: outer(senders, "#ops-progress-details"),
+      progressDetails: bodyWithoutSummary(senders, "#ops-progress-details"),
       controlledTest: Array.from(
         senders.querySelectorAll(".controlled-send-test-card"),
       ).map((node) => node.outerHTML).join(""),
-      profileDetail: outer(senders, ".workspace-primary"),
-      history: outer(senders, ".campaign-history-panel"),
+      profileDetail: bodyWithoutSummary(senders, "#detail-panel"),
+      history: bodyWithoutSummary(senders, ".campaign-history-panel"),
     },
     leadOps: {
       heading: outer(command, ":scope > .panel-header"),

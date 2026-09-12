@@ -1879,7 +1879,7 @@
   margin-top: 9px;
 }
 
-#senders-view .sender-status-panel {
+#overview-view .sender-status-panel {
   order: 1;
   margin: 0;
   overflow: hidden;
@@ -1889,28 +1889,28 @@
   box-shadow: none;
 }
 
-#senders-view .sender-status-head {
+#overview-view .sender-status-head {
   min-height: 42px;
   padding: 9px 12px 7px;
   border-bottom: 1px solid var(--console-line-soft);
 }
 
-#senders-view .sender-status-head .eyebrow {
+#overview-view .sender-status-head .eyebrow {
   color: #c4ceda;
 }
 
-#senders-view .sender-status-head p:last-child {
+#overview-view .sender-status-head p:last-child {
   color: #8392a6;
   font-size: .68rem;
 }
 
-#senders-view .sender-status-table-wrap {
+#overview-view .sender-status-table-wrap {
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
 }
 
-#senders-view .sender-status-table {
+#overview-view .sender-status-table {
   width: 100%;
   min-width: 940px;
   table-layout: fixed;
@@ -1918,14 +1918,14 @@
   font-size: .7rem;
 }
 
-#senders-view .sender-status-table th:nth-child(1) { width: 180px; }
-#senders-view .sender-status-table th:nth-child(2) { width: 108px; }
-#senders-view .sender-status-table th:nth-child(3),
-#senders-view .sender-status-table th:nth-child(4),
-#senders-view .sender-status-table th:nth-child(5) { width: 72px; }
-#senders-view .sender-status-table th:nth-child(7) { width: 200px; }
+#overview-view .sender-status-table th:nth-child(1) { width: 180px; }
+#overview-view .sender-status-table th:nth-child(2) { width: 108px; }
+#overview-view .sender-status-table th:nth-child(3),
+#overview-view .sender-status-table th:nth-child(4),
+#overview-view .sender-status-table th:nth-child(5) { width: 72px; }
+#overview-view .sender-status-table th:nth-child(7) { width: 200px; }
 
-#senders-view .sender-status-table th {
+#overview-view .sender-status-table th {
   height: 28px;
   padding: 5px 10px;
   color: #8999ae;
@@ -1933,26 +1933,26 @@
   font-size: .61rem;
 }
 
-#senders-view .sender-status-table td {
+#overview-view .sender-status-table td {
   height: 36px;
   padding: 6px 10px;
   border-top: 1px solid var(--console-line-soft);
 }
 
-#senders-view .sender-status-table tr {
+#overview-view .sender-status-table tr {
   background: transparent;
 }
 
-#senders-view .sender-status-table tr.is-jc {
+#overview-view .sender-status-table tr.is-jc {
   background: rgba(88,212,154,.025);
   box-shadow: inset 2px 0 var(--console-green);
 }
 
-#senders-view .sender-status-table tr.is-warm-jc td {
+#overview-view .sender-status-table tr.is-warm-jc td {
   background: rgba(129,174,242,.035);
 }
 
-#senders-view .sender-status-profile-meta {
+#overview-view .sender-status-profile-meta {
   display: block;
   margin-top: 2px;
   color: #8fa1b5;
@@ -1960,26 +1960,26 @@
   line-height: 1.25;
 }
 
-#senders-view .sender-status-table .mini-pill,
-#senders-view .sender-status-table .sender-status-action-btn {
+#overview-view .sender-status-table .mini-pill,
+#overview-view .sender-status-table .sender-status-action-btn {
   min-height: 24px;
   padding: 3px 8px;
   font-size: .61rem;
 }
 
-#senders-view .sender-status-table td:nth-child(6) {
+#overview-view .sender-status-table td:nth-child(6) {
   max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#senders-view .sender-status-table th:last-child,
-#senders-view .sender-status-table td:last-child {
+#overview-view .sender-status-table th:last-child,
+#overview-view .sender-status-table td:last-child {
   padding-inline: 6px;
 }
 
-#senders-view .sender-status-table .sender-status-action-btn {
+#overview-view .sender-status-table .sender-status-action-btn {
   max-width: 100%;
   white-space: nowrap;
 }
@@ -2172,10 +2172,10 @@
 }
 
 #diagnostics-view #ops-progress-details,
-#senders-view .react-supporting-panels > *,
+#overview-view .react-supporting-panels > *,
 #history-view .campaign-history-panel,
-#senders-view .profile-detail-panel,
-#senders-view .diagnostics-panel {
+#overview-view .profile-detail-panel,
+#overview-view .diagnostics-panel {
   min-height: 34px;
   margin: 0;
   overflow: hidden;
@@ -2185,7 +2185,7 @@
   box-shadow: none !important;
 }
 
-#senders-view details > summary,
+#overview-view details > summary,
 #history-view details > summary,
 #diagnostics-view details > summary {
   min-height: 34px;
@@ -2202,20 +2202,20 @@
   background: #0a121c;
 }
 
-.react-validation-tools > summary {
+.react-validation-tools-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  cursor: pointer;
+  padding: 7px 10px;
 }
 
-.react-validation-tools > summary > span:first-child {
+.react-validation-tools-head > span:first-child {
   color: #d7e2ee;
   font-weight: 700;
 }
 
-.react-validation-tools > summary > span:last-child {
+.react-validation-tools-head > span:last-child {
   color: #8392a6;
   font-size: .64rem;
   font-weight: 500;
@@ -3332,11 +3332,11 @@
     border-left: 2px solid rgba(88,212,154,.65) !important;
   }
 
-  #senders-view .sender-status-head {
+  #overview-view .sender-status-head {
     min-height: 38px;
   }
 
-  #senders-view .sender-status-table-wrap {
+  #overview-view .sender-status-table-wrap {
     max-height: none;
   }
 
