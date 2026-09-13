@@ -5218,6 +5218,12 @@ function renderImportantDispatch(result) {
         <section class="operator-empty-state operator-empty-state-inline dispatch-previous-summary">
           <strong>Previous dispatch</strong>
           <span>${escapeHtml(lastDispatchGeneratedAt)} · JC ${confirmedPrivateJcTotal.toLocaleString()} · SendGrid ${confirmedSendgridTotal.toLocaleString()}${Number(result.skipped_both || 0) ? ` · Skipped ${Number(result.skipped_both || 0).toLocaleString()}` : ""}</span>
+          ${sendgridZeroAddExplanation
+            ? `<details class="dispatch-previous-detail">
+                <summary>Previous SendGrid detail</summary>
+                <span><strong>SendGrid added 0 rows.</strong> ${escapeHtml(sendgridZeroAddExplanation)}</span>
+              </details>`
+            : ""}
         </section>
         ${confirmFeedbackTitle
           ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
@@ -5244,12 +5250,6 @@ function renderImportantDispatch(result) {
               </section>
             `}
         </section>
-        ${sendgridZeroAddExplanation
-          ? `<section class="operator-empty-state operator-empty-state-inline">
-              <strong>SendGrid added 0 rows.</strong>
-              <span>${escapeHtml(sendgridZeroAddExplanation)}</span>
-            </section>`
-          : ""}
       </div>
     `,
   );
@@ -7887,7 +7887,7 @@ function renderSummary(snapshot) {
       key: "private_jc",
       label: "Private JC",
       value: `${privatePending.toLocaleString()} pending`,
-      note: `${privateStatus} · ${Number(privateProgress.sent || 0).toLocaleString()} sent`,
+      note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent`,
       tone: privatePending > 0 ? "warn" : "neutral",
       detailsHtml: `
         <div class="summary-private-breakdown">
@@ -8296,7 +8296,6 @@ function privateEmailSentBreakdown(snapshot = lastSnapshot) {
 
 function renderProgressSummaryStrip(snapshot) {
   if (!els.opsProgressSummary) return;
-  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
   const items = summarizeAlertProgress(snapshot).reduce((acc, item) => {
     acc[item.key] = item;
     return acc;
@@ -8310,10 +8309,7 @@ function renderProgressSummaryStrip(snapshot) {
     ? `${Number(items.sendgrid?.active || 0).toLocaleString()} active`
     : sendgridPending > 0
       ? `${sendgridPending.toLocaleString()} pending`
-      : "complete";
-  const privateProfile = profiles.find((profile) => profile.name === "private_jc")
-    || profiles.find((profile) => profileTelemetryChannel(profile) === "private");
-  const privateStatus = privateProfile ? senderStatusBadge(privateProfile).label.toLowerCase() : "stopped";
+      : "Complete";
   const privateSent = privateEmailSentBreakdown(snapshot);
   const progressItems = [
     {
@@ -8322,15 +8318,11 @@ function renderProgressSummaryStrip(snapshot) {
     },
     {
       label: "Private Email",
-      value: `Private Email total: ${privateSent.total.toLocaleString()} · JC cold: ${privateSent.cold.toLocaleString()} · Warm JC: ${privateSent.warm.toLocaleString()} · ${privateStatus}`,
+      value: `${privateSent.total.toLocaleString()} sent · JC ${privateSent.cold.toLocaleString()} · Warm ${privateSent.warm.toLocaleString()}`,
     },
     {
       label: "Alerts",
-      value: `${blockingAlerts.toLocaleString()} blocking · ${warningAlerts.toLocaleString()} warning`,
-    },
-    {
-      label: "Awaiting outcomes",
-      value: Number(summary?.total_awaiting_outcome || 0).toLocaleString(),
+      value: `${blockingAlerts.toLocaleString()} blocking · ${warningAlerts.toLocaleString()} warning · ${Number(summary?.total_awaiting_outcome || 0).toLocaleString()} awaiting`,
     },
   ];
   setNodeHtml(

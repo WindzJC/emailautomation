@@ -1130,6 +1130,8 @@ describe("source-scoped Recontact readiness", () => {
       private_jc_added: 1615,
       sendgrid_added: 0,
       skipped_both: 7,
+      dispatch_selected_row_count: 7,
+      skipped_already_contacted: 7,
       dispatch_source_name: "Previous source",
     };
 
@@ -1143,7 +1145,12 @@ describe("source-scoped Recontact readiness", () => {
     expect(results).toHaveTextContent("Selected preview");
     expect(results).not.toHaveTextContent("Last confirmed dispatch");
     expect(results).not.toHaveTextContent("Private JC added");
-    expect(results).not.toHaveTextContent("SendGrid added");
+    const previousSummary = results.querySelector(".dispatch-previous-summary");
+    const currentPreview = results.querySelector(".dispatch-current-preview");
+    expect(previousSummary).toHaveTextContent("Previous SendGrid detail");
+    expect(previousSummary).toHaveTextContent("SendGrid added 0 rows.");
+    expect(previousSummary).toHaveTextContent("7 already contacted");
+    expect(currentPreview).not.toHaveTextContent("SendGrid added 0 rows.");
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 

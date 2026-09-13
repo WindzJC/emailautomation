@@ -1714,6 +1714,19 @@ h3 {
   color: #ffe6ad;
 }
 
+.dispatch-previous-detail {
+  margin-top: 5px;
+  color: #c8d4e4;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dispatch-previous-detail summary {
+  cursor: pointer;
+  color: #d7e2ee;
+  font-weight: 700;
+}
+
 .dispatch-next-step-failed,
 .dispatch-next-step-blocked {
   border-color: rgba(248, 113, 113, 0.46);
@@ -6498,7 +6511,7 @@ pre {
 
 #ops-view .ops-progress-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, .8fr) minmax(0, 1.35fr) minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
 }
@@ -6522,7 +6535,7 @@ pre {
 #ops-view .ops-progress-summary-item span {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 #ops-view .ops-progress-summary-action {

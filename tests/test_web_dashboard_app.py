@@ -739,10 +739,12 @@ class WebDashboardAppTests(unittest.TestCase):
         dispatch_end = source.index("function renderLeadsShardResults", dispatch_start)
         dispatch_body = source[dispatch_start:dispatch_end]
         self.assertIn("dispatch-previous-summary", dispatch_body)
+        self.assertIn("dispatch-previous-detail", dispatch_body)
         self.assertIn("<strong>Previous dispatch</strong>", dispatch_body)
         self.assertIn("JC ${confirmedPrivateJcTotal.toLocaleString()}", dispatch_body)
         self.assertIn("SendGrid ${confirmedSendgridTotal.toLocaleString()}", dispatch_body)
         self.assertIn("dispatch-current-preview", dispatch_body)
+        self.assertLess(dispatch_body.index("dispatch-previous-detail"), dispatch_body.index("dispatch-current-preview"))
         self.assertNotIn('{ label: "Last confirmed dispatch", value: lastDispatchGeneratedAt }', dispatch_body)
         self.assertNotIn('{ label: "Private JC added", value: confirmedPrivateJcTotal', dispatch_body)
         self.assertNotIn('{ label: "SendGrid added", value: confirmedSendgridTotal', dispatch_body)
@@ -2215,10 +2217,33 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("function privateEmailSentBreakdown", source)
         self.assertIn("const warm = Number(warmStatus.sent_count", source)
         self.assertIn("return { cold, warm, total: cold + warm }", source)
+        self.assertIn('note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent`', source)
+        self.assertNotIn('note: `${privateStatus} · ${Number(privateProgress.sent || 0).toLocaleString()} sent`', source)
         self.assertIn("Private Email total:", source)
         self.assertIn("JC cold:", source)
         self.assertIn("Warm JC:", source)
         self.assertIn("#overview-view .summary-private-breakdown", styles)
+
+    def test_run_progress_strip_uses_compact_three_part_desktop_contract(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8") + TAILWIND_CSS.read_text(encoding="utf-8")
+
+        render_start = source.index("function renderProgressSummaryStrip")
+        render_end = source.index("function renderAlertsProgress", render_start)
+        render_body = source[render_start:render_end]
+
+        self.assertIn('label: "SendGrid"', render_body)
+        self.assertIn('value: `${sendgridStatus} · ${Number(items.sendgrid?.sent || 0).toLocaleString()} sent`', render_body)
+        self.assertIn('label: "Private Email"', render_body)
+        self.assertIn('value: `${privateSent.total.toLocaleString()} sent · JC ${privateSent.cold.toLocaleString()} · Warm ${privateSent.warm.toLocaleString()}`', render_body)
+        self.assertIn('label: "Alerts"', render_body)
+        self.assertIn('value: `${blockingAlerts.toLocaleString()} blocking · ${warningAlerts.toLocaleString()} warning · ${Number(summary?.total_awaiting_outcome || 0).toLocaleString()} awaiting`', render_body)
+        self.assertNotIn('label: "Awaiting outcomes"', render_body)
+        self.assertIn('id="ops-progress-summary"', markup)
+        self.assertIn('id="ops-progress-details-toggle"', markup)
+        self.assertIn('grid-template-columns: auto minmax(0, 1fr) auto', styles)
+        self.assertIn("grid-template-columns: minmax(0, .8fr) minmax(0, 1.35fr) minmax(0, 1fr)", styles)
 
     def test_lead_ops_density_polish_applies_to_warm_and_cold_layouts(self) -> None:
         styles = STYLES_CSS.read_text(encoding="utf-8")

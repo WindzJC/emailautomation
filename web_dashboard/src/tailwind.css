@@ -2105,7 +2105,7 @@
 
 #overview-view .ops-progress-summary {
   display: grid;
-  grid-template-columns: minmax(130px, .8fr) minmax(250px, 1.6fr) minmax(125px, .8fr) minmax(105px, .6fr);
+  grid-template-columns: minmax(0, .8fr) minmax(0, 1.35fr) minmax(0, 1fr);
   min-width: 0;
 }
 
@@ -2133,7 +2133,7 @@
   font-size: .67rem;
   line-height: 1.25;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 #overview-view .ops-progress-summary-action {

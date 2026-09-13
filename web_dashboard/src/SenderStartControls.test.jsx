@@ -215,6 +215,59 @@ describe("individual sender Start controls", () => {
     expect(fetchMock.mock.calls.every(([, options = {}]) => !options.method || options.method === "GET")).toBe(true);
   });
 
+  it("keeps Private JC card sent count cold-only while progress shows compact private total", async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      if (String(url).startsWith("/api/snapshot")) {
+        return Promise.resolve(jsonResponse({
+          ...READY_SNAPSHOT,
+          profiles: [
+            {
+              name: "private_jc",
+              pending_count: 1615,
+              runtime_state: "stopped",
+              run_sent_display: 4929,
+              max_total: 2000,
+              message_readiness_status: "PASS",
+            },
+            { name: "private_jc_warm", pending_count: 0, runtime_state: "stopped", run_sent_display: 33 },
+            { name: "sendgrid_alison", pending_count: 0, runtime_state: "stopped", run_sent_display: 50387 },
+          ],
+          warm_private_jc_status: { sent_count: 33 },
+          summary: {
+            total_pending: 1615,
+            astra_pending: 1615,
+            sendgrid_pending: 0,
+            active_alerts: 0,
+            total_awaiting_outcome: 0,
+          },
+          alerts: [],
+        }));
+      }
+      return baseFetchMock(() => { throw new Error("Unexpected Start"); })(url, options);
+    });
+    root = await bootController(fetchMock, "ops");
+
+    const privateCard = document.querySelector(".summary-card-private_jc");
+    expect(privateCard).toHaveTextContent("Private JC");
+    expect(privateCard.querySelector(".summary-value")).toHaveTextContent("1,615 pending");
+    expect(privateCard.querySelector(".summary-note")).toHaveTextContent("Ready · 4,929 sent");
+    expect(privateCard.querySelector(".summary-note")).not.toHaveTextContent("4,962");
+    expect(privateCard).toHaveTextContent("Private Email total: 4,962");
+    expect(privateCard).toHaveTextContent("JC cold: 4,929");
+    expect(privateCard).toHaveTextContent("Warm JC: 33");
+
+    const progress = document.getElementById("ops-progress-summary");
+    const progressItems = [...progress.querySelectorAll(".ops-progress-summary-item")];
+    expect(progressItems).toHaveLength(3);
+    expect(progressItems[0]).toHaveTextContent("SendGrid");
+    expect(progressItems[0]).toHaveTextContent("Complete · 50,387 sent");
+    expect(progressItems[1]).toHaveTextContent("Private Email");
+    expect(progressItems[1]).toHaveTextContent("4,962 sent · JC 4,929 · Warm 33");
+    expect(progressItems[2]).toHaveTextContent("Alerts");
+    expect(progressItems[2]).toHaveTextContent("0 blocking · 0 warning · 0 awaiting");
+    expect(document.getElementById("ops-progress-details-toggle")).toHaveTextContent("View details");
+  });
+
   it("posts the sender-row Start exactly once and locks duplicate interaction while pending", async () => {
     const pending = deferredResponse();
     const fetchMock = baseFetchMock(() => pending.promise);
