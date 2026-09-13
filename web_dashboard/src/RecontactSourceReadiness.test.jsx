@@ -570,7 +570,7 @@ describe("source-scoped Recontact readiness", () => {
     expect(previewButton()).toHaveAttribute("title", expect.stringContaining("Active senders are running"));
   });
 
-  it("labels retained confirmed state as Last confirmed dispatch, not Active campaign", async () => {
+  it("labels retained confirmed state as Previous dispatch, not Active campaign", async () => {
     const status = leadsStatus({ checkState: "success" });
     status.active_campaign_snapshot = {
       campaign_type: "cold",
@@ -588,7 +588,7 @@ describe("source-scoped Recontact readiness", () => {
     const boot = await bootController(status);
     root = boot.root;
 
-    expect(document.getElementById("leads-important-dispatch-results")).toHaveTextContent("Last confirmed dispatch");
+    expect(document.getElementById("leads-important-dispatch-results")).toHaveTextContent("Previous dispatch");
     expect(document.body.textContent).not.toMatch(/Active campaign/i);
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
@@ -778,7 +778,7 @@ describe("source-scoped Recontact readiness", () => {
 
     const rail = document.getElementById("leads-workflow-task-list");
     expect(rail.querySelectorAll(".workflow-track-step")).toHaveLength(4);
-    expect(rail).toHaveTextContent("Source Action required");
+    expect(rail).toHaveTextContent("Source Needs input");
     expect(rail).toHaveTextContent("Campaign Locked");
     expect(rail).toHaveTextContent("Preview");
     expect(rail).toHaveTextContent("Confirm Locked");
@@ -946,6 +946,97 @@ describe("source-scoped Recontact readiness", () => {
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
+  it("shows a neutral next-campaign state when a terminal check predates latest dispatch", async () => {
+    const historicalFreshSource = {
+      ...FRESH_SOURCE,
+      dispatch_source_path: "/synthetic/runs/check_20260910_224707/leads_triaged_keep.csv",
+      dispatch_source_exists: false,
+      dispatch_source_row_count: 0,
+      dispatch_eligible_row_count: 0,
+      dispatch_block_reason: "",
+      run_id: "check_20260910_224707",
+      source_resolution: "latest_completed_staged_run",
+    };
+    const status = leadsStatus({ checkState: "failed", freshSource: historicalFreshSource });
+    status.dispatch_source = historicalFreshSource;
+    status.dispatch_source_options.triaged_keep = historicalFreshSource;
+    status.lead_check_status = {
+      ...leadCheck("failed"),
+      check_job_id: "",
+      current_run_id: "",
+      checked_source_filename: "Private_JC_Only_Leads_READY.csv",
+      selected_filename: "Private_JC_Only_Leads_READY.csv",
+      input_path: "/synthetic/runs/check_20260910_224707/Private_JC_Only_Leads_READY.csv",
+      generated_at_utc: "2026-09-10T22:47:07+00:00",
+    };
+    status.lead_ops_progress_by_workflow = { cold: {}, warm_research: {} };
+    status.latest_dispatch = {
+      generated_at_utc: "2026-09-12T00:21:24+00:00",
+      status: "completed",
+      added_astra: 1615,
+      added_sendgrid: 0,
+    };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Source Needs input");
+    expect(rail).toHaveTextContent("Upload a CSV/XLSX to begin.");
+    expect(rail).not.toHaveTextContent("Source Blocked");
+    expect(rail).not.toHaveTextContent("Source Failed");
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Not started");
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Upload a CSV/XLSX to begin.");
+    expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeDisabled();
+    expect(document.getElementById("leads-important-dispatch-confirm-btn")).toBeDisabled();
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("keeps a terminal check after latest dispatch failed and blocked", async () => {
+    const blockedFreshSource = {
+      ...FRESH_SOURCE,
+      dispatch_source_path: "/synthetic/runs/check_20260912_010500/leads_triaged_keep.csv",
+      dispatch_source_exists: false,
+      dispatch_source_row_count: 0,
+      dispatch_eligible_row_count: 0,
+      dispatch_block_reason: "",
+      run_id: "check_20260912_010500",
+      source_resolution: "latest_completed_staged_run",
+    };
+    const status = leadsStatus({ checkState: "failed", freshSource: blockedFreshSource });
+    status.dispatch_source = blockedFreshSource;
+    status.dispatch_source_options.triaged_keep = blockedFreshSource;
+    status.lead_check_status = {
+      ...leadCheck("failed"),
+      check_job_id: "",
+      current_run_id: "",
+      checked_source_filename: "Private_JC_Only_Leads_READY.csv",
+      selected_filename: "Private_JC_Only_Leads_READY.csv",
+      input_path: "/synthetic/runs/check_20260912_010500/Private_JC_Only_Leads_READY.csv",
+      generated_at_utc: "2026-09-12T01:05:00+00:00",
+    };
+    status.lead_ops_progress_by_workflow = { cold: {}, warm_research: {} };
+    status.latest_dispatch = {
+      generated_at_utc: "2026-09-12T00:21:24+00:00",
+      status: "completed",
+      added_astra: 1615,
+      added_sendgrid: 0,
+    };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const rail = document.getElementById("leads-workflow-task-list");
+    expect(rail).toHaveTextContent("Source Blocked");
+    expect(rail).toHaveTextContent("Check failed or stale: No cleaned/rejected output files were produced.");
+    expect(rail).not.toHaveTextContent("Source Needs input");
+    expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Failed");
+    expect(document.getElementById("lead-check-status-card")).not.toHaveTextContent("Not started");
+    expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeDisabled();
+    expect(document.getElementById("leads-important-dispatch-confirm-btn")).toBeDisabled();
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
   it("marks only an exactly matching Preview current and review-ready", async () => {
     const status = leadsStatus({ checkState: "success" });
     status.latest_master_check = {
@@ -1016,6 +1107,38 @@ describe("source-scoped Recontact readiness", () => {
     expect(document.querySelectorAll("[data-recontact-route]")).toHaveLength(1);
     expect(document.querySelectorAll("#leads-important-dispatch-preview-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#leads-important-dispatch-confirm-btn")).toHaveLength(1);
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
+  it("keeps previous confirmed dispatch compact under the next preview surface", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
+      cleaned_rows: 20,
+      rejected_rows: 5,
+    };
+    status.latest_lead_triage = { generated_at_utc: "2026-08-28T00:06:00Z", keep_count: 20 };
+    status.latest_dispatch = {
+      generated_at_utc: "2026-09-11T01:00:00Z",
+      private_jc_added: 1615,
+      sendgrid_added: 0,
+      skipped_both: 7,
+      dispatch_source_name: "Previous source",
+    };
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const results = document.getElementById("leads-important-dispatch-results");
+    expect(results).toHaveTextContent("Previous dispatch");
+    expect(results).toHaveTextContent("JC 1,615");
+    expect(results).toHaveTextContent("SendGrid 0");
+    expect(results).toHaveTextContent("Selected preview");
+    expect(results).not.toHaveTextContent("Last confirmed dispatch");
+    expect(results).not.toHaveTextContent("Private JC added");
+    expect(results).not.toHaveTextContent("SendGrid added");
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 

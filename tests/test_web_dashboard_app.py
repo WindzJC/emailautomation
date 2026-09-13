@@ -681,6 +681,72 @@ class WebDashboardAppTests(unittest.TestCase):
         ]:
             self.assertIn(expected, styles)
 
+    def test_next_cold_campaign_idle_state_uses_terminal_check_dispatch_chronology(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function isTerminalColdCheckState", source)
+        self.assertIn("function latestConfirmedDispatchTimestampMs", source)
+        self.assertIn("function isHistoricalTerminalColdCheckForNextCampaign", source)
+        chronology_start = source.index("function isHistoricalTerminalColdCheckForNextCampaign")
+        chronology_end = source.index("function coldCampaignLeadCheckPresentationStatus", chronology_start)
+        chronology_body = source[chronology_start:chronology_end]
+        for expected in [
+            'isActiveImportantLeadCheckJob(currentImportantCheckJob(status, "cold"))',
+            "safeTimestampMs(",
+            "check?.generated_at_utc",
+            "latestConfirmedDispatchTimestampMs(status)",
+            "checkTime <= dispatchTime",
+        ]:
+            self.assertIn(expected, chronology_body)
+
+        self.assertIn("function coldCampaignLeadCheckPresentationStatus", source)
+        presentation_start = source.index("function coldCampaignLeadCheckPresentationStatus")
+        presentation_end = source.index("function leadCheckStatusTone", presentation_start)
+        presentation_body = source[presentation_start:presentation_end]
+        for expected in [
+            'state: "not_started"',
+            'label: "Not started"',
+            'message: "Upload a CSV/XLSX to begin."',
+            'guidance: "Upload & Check a CSV/XLSX source before previewing dispatch."',
+            "isHistoricalTerminalColdCheckForNextCampaign(check, status)",
+            "!hasUsableSource",
+            "!hasCurrentPreview",
+            'checked_source_filename: ""',
+            'generated_at_utc: ""',
+        ]:
+            self.assertIn(expected, presentation_body)
+
+        workflow_start = source.index("function deriveColdCampaignWorkflowState")
+        workflow_end = source.index("function currentRunPreviewBlockMessage", workflow_start)
+        workflow_body = source[workflow_start:workflow_end]
+        for expected in [
+            "coldCampaignLeadCheckPresentationStatus(status)",
+            'status: "Needs input"',
+            'tone: "neutral"',
+            'evidence: "Upload a CSV/XLSX to begin."',
+            'checkState !== "success"',
+        ]:
+            self.assertIn(expected, workflow_body)
+
+        readiness_start = source.index("function selectedDispatchSourceReadiness")
+        readiness_end = source.index("function dispatchActionBlockReason", readiness_start)
+        readiness_body = source[readiness_start:readiness_end]
+        self.assertIn("leadCheckBlocksPreview(currentLeadCheckStatus(status))", readiness_body)
+        self.assertNotIn("coldCampaignLeadCheckPresentationStatus", readiness_body)
+
+    def test_previous_dispatch_summary_is_compact_in_next_preview_area(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        dispatch_start = source.index("function renderImportantDispatch")
+        dispatch_end = source.index("function renderLeadsShardResults", dispatch_start)
+        dispatch_body = source[dispatch_start:dispatch_end]
+        self.assertIn("dispatch-previous-summary", dispatch_body)
+        self.assertIn("<strong>Previous dispatch</strong>", dispatch_body)
+        self.assertIn("JC ${confirmedPrivateJcTotal.toLocaleString()}", dispatch_body)
+        self.assertIn("SendGrid ${confirmedSendgridTotal.toLocaleString()}", dispatch_body)
+        self.assertIn("dispatch-current-preview", dispatch_body)
+        self.assertNotIn('{ label: "Last confirmed dispatch", value: lastDispatchGeneratedAt }', dispatch_body)
+        self.assertNotIn('{ label: "Private JC added", value: confirmedPrivateJcTotal', dispatch_body)
+        self.assertNotIn('{ label: "SendGrid added", value: confirmedSendgridTotal', dispatch_body)
+
     def test_dispatch_preview_renders_backend_blocked_response(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
         for expected in [
@@ -1765,6 +1831,45 @@ class WebDashboardAppTests(unittest.TestCase):
             "Confidence",
         ]:
             self.assertIn(expected, source)
+
+        core_start = source.index("function renderDetailCoreRuntime")
+        core_end = source.index("function profileHasPaneTail", core_start)
+        core_body = source[core_start:core_end]
+        self.assertIn('const readinessLabel = String(profile?.readiness_label || "").trim() || "Ready";', core_body)
+        self.assertIn('const runtimeLabel = String(profile?.runtime_label || profile?.runtime_state || "").trim() || "Stopped";', core_body)
+        self.assertIn("<span class=\"detail-compact-label\">Readiness</span>", core_body)
+        self.assertIn("<span class=\"detail-compact-label\">Runtime</span>", core_body)
+        self.assertIn("readinessLabel", core_body)
+        self.assertIn("runtimeLabel", core_body)
+        self.assertNotIn("profileDisplayStatus(profile)", core_body)
+        self.assertIn("Runtime note", source)
+
+    def test_dashboard_alert_info_classification_is_shared(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        helper_start = source.index("function dashboardAlertGroup")
+        helper_end = source.index("function renderSummary(snapshot)", helper_start)
+        helper_body = source[helper_start:helper_end]
+        self.assertIn('["ok", "info"].includes(severity)', helper_body)
+        self.assertIn('blockingLabel === "info"', helper_body)
+
+        summary_start = source.index("function renderSummary(snapshot)")
+        summary_end = source.index("function renderSenderStatusConsole", summary_start)
+        summary_body = source[summary_start:summary_end]
+        self.assertIn('dashboardAlertGroup(alert) === "warning"', summary_body)
+        self.assertIn('dashboardAlertGroup(alert) === "info"', summary_body)
+
+        progress_start = source.index("function renderProgressSummaryStrip")
+        progress_end = source.index("function renderAlertsProgress", progress_start)
+        progress_body = source[progress_start:progress_end]
+        self.assertIn('dashboardAlertGroup(alert) === "warning"', progress_body)
+        self.assertNotIn('!["ok", "info"].includes(severity)', progress_body)
+
+        alerts_start = source.index("function renderAlerts(snapshot)")
+        alerts_end = source.index("function sparklineSvg", alerts_start)
+        alerts_body = source[alerts_start:alerts_end]
+        self.assertIn('dashboardAlertGroup(alert) === "blocking"', alerts_body)
+        self.assertIn('dashboardAlertGroup(alert) === "warning"', alerts_body)
+        self.assertIn('dashboardAlertGroup(alert) === "info"', alerts_body)
 
     def test_profile_detail_wording_distinguishes_recovered_vs_active_failure(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

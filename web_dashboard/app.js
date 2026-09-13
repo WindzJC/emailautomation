@@ -1689,6 +1689,86 @@ function leadCheckBlocksPreview(check = currentLeadCheckStatus()) {
   return String(check.preview_block_reason || check.message || "Lead check is not ready for preview.");
 }
 
+function isTerminalColdCheckState(state) {
+  return ["failed", "stale", "mismatch", "not_ready"].includes(String(state || "").toLowerCase());
+}
+
+function latestConfirmedDispatchTimestampMs(status = lastLeadsStatus) {
+  const dispatch = status?.latest_confirmed_dispatch || status?.latest_dispatch || lastImportantDispatch || {};
+  const statusLabel = String(dispatch?.status || "").trim().toLowerCase();
+  const dispatchTime = safeTimestampMs(
+    dispatch?.generated_at_utc
+    || dispatch?.confirmed_at_utc
+    || dispatch?.confirmed_at,
+  );
+  if (!dispatchTime) return 0;
+  if (statusLabel && ["failed", "blocked", "cancelled", "canceled", "previewed"].includes(statusLabel)) return 0;
+  return dispatchTime;
+}
+
+function isHistoricalTerminalColdCheckForNextCampaign(check = currentLeadCheckStatus(), status = lastLeadsStatus) {
+  if (isActiveImportantLeadCheckJob(currentImportantCheckJob(status, "cold"))) return false;
+  const state = String(check?.state || "").toLowerCase();
+  if (!isTerminalColdCheckState(state)) return false;
+  const checkTime = safeTimestampMs(
+    check?.generated_at_utc
+    || check?.completed_at_utc
+    || check?.updated_at_utc,
+  );
+  const dispatchTime = latestConfirmedDispatchTimestampMs(status);
+  return Boolean(checkTime && dispatchTime && checkTime <= dispatchTime);
+}
+
+function coldCampaignLeadCheckPresentationStatus(status = lastLeadsStatus) {
+  const check = currentLeadCheckStatus(status);
+  const selectedCampaign = selectedImportantDispatchCampaignType();
+  if (selectedCampaign !== "cold") return check;
+  const state = String(check?.state || "").toLowerCase();
+  const dispatchSource = dispatchSourceForSelectedMode().source || {};
+  const sourcePath = String(dispatchSource.dispatch_source_path || "").trim();
+  const hasUsableSource = Boolean(
+    sourcePath
+    && dispatchSource.dispatch_source_exists === true
+    && Number(dispatchSource.dispatch_source_row_count || dispatchSource.dispatch_eligible_row_count || 0) > 0
+  );
+  const hasCurrentPreview = Boolean(lastImportantDispatchPreview?.preview_id && dispatchPreviewMatchesCurrentSelection());
+  if (
+    isTerminalColdCheckState(state)
+    && isHistoricalTerminalColdCheckForNextCampaign(check, status)
+    && !hasUsableSource
+    && !hasCurrentPreview
+  ) {
+    return {
+      ...check,
+      state: "not_started",
+      label: "Not started",
+      message: "Upload a CSV/XLSX to begin.",
+      guidance: "Upload & Check a CSV/XLSX source before previewing dispatch.",
+      preview_label: "Not ready for preview",
+      preview_ready: false,
+      preview_state: "not_ready",
+      preview_block_reason: "No current check is ready for the selected upload type.",
+      checked_source_filename: "",
+      selected_filename: "",
+      input_path: "",
+      current_input_path: "",
+      input_label: "",
+      check_job_id: "",
+      job_id: "",
+      current_run_id: "",
+      run_id: "",
+      generated_at_utc: "",
+      output_exists: false,
+      rejected_exists: false,
+      latest_master_check_matches_current_run: false,
+      cleaned_rows: 0,
+      rejected_rows: 0,
+      tone: "wait",
+    };
+  }
+  return check;
+}
+
 function leadCheckStatusTone(check = currentLeadCheckStatus()) {
   const tone = String(check?.tone || "").toLowerCase();
   if (["good", "bad", "warn", "active", "wait"].includes(tone)) return tone;
@@ -1702,7 +1782,7 @@ function leadCheckStatusTone(check = currentLeadCheckStatus()) {
 
 function renderLeadCheckStatusCard(status = lastLeadsStatus) {
   if (!els.leadCheckStatusCard) return;
-  const check = currentLeadCheckStatus(status);
+  const check = coldCampaignLeadCheckPresentationStatus(status);
   const state = String(check.state || "not_started");
   const tone = leadCheckStatusTone(check);
   const workflowState = leadCheckWorkflowStatus(check);
@@ -5126,17 +5206,10 @@ function renderImportantDispatch(result) {
     els.leadsImportantDispatchResults,
     `
       <div class="dispatch-shell dispatch-shell-confirmed">
-        ${renderOperatorMetricStrip([
-          { label: "Last confirmed dispatch", value: lastDispatchGeneratedAt },
-          {
-            label: "Eligible for selected source",
-            value: Number(dispatchSource.dispatch_eligible_row_count || result.dispatch_eligible_row_count || 0),
-            note: `Source: ${sourceLabel}`,
-          },
-          { label: "Private JC added", value: confirmedPrivateJcTotal, tone: "good" },
-          { label: "SendGrid added", value: confirmedSendgridTotal, tone: "good" },
-          { label: "Skipped", value: Number(result.skipped_both || 0), tone: Number(result.skipped_both || 0) ? "warn" : "" },
-        ], "dispatch-metrics")}
+        <section class="operator-empty-state operator-empty-state-inline dispatch-previous-summary">
+          <strong>Previous dispatch</strong>
+          <span>${escapeHtml(lastDispatchGeneratedAt)} · JC ${confirmedPrivateJcTotal.toLocaleString()} · SendGrid ${confirmedSendgridTotal.toLocaleString()}${Number(result.skipped_both || 0) ? ` · Skipped ${Number(result.skipped_both || 0).toLocaleString()}` : ""}</span>
+        </section>
         ${confirmFeedbackTitle
           ? `<section class="operator-empty-state operator-empty-state-inline dispatch-confirm-feedback dispatch-confirm-feedback-${escapeHtml(confirmFeedbackState)}"><strong>${escapeHtml(confirmFeedbackTitle)}</strong><span>${escapeHtml(confirmFeedbackMessage)}</span></section>`
           : ""}
@@ -5477,7 +5550,7 @@ function currentRunWorkflowState(status = lastLeadsStatus) {
 }
 
 function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = currentRunWorkflowState(status)) {
-  const leadCheck = currentLeadCheckStatus(status);
+  const leadCheck = coldCampaignLeadCheckPresentationStatus(status);
   const selectedCampaign = selectedImportantDispatchCampaignType();
   const recontactSelected = selectedCampaign === "recontact_cold";
   const dispatchSource = dispatchSourceForSelectedMode().source || {};
@@ -5485,7 +5558,7 @@ function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = curre
   const checkState = String(leadCheck?.state || "not_started").toLowerCase();
   const processing = ["processing", "upload_received"].includes(checkState) || state.checkStatus === "running";
   const sourceFailed = ["failed", "stale", "mismatch", "not_ready"].includes(checkState);
-  const sourceComplete = recontactSelected ? sourceReadiness.ready : state.checkStatus === "completed";
+  const sourceComplete = recontactSelected ? sourceReadiness.ready : checkState === "success";
   const currentSourceReady = !processing && sourceComplete && sourceReadiness.ready;
   const sourceFilename = String(leadCheck?.checked_source_filename || "").trim();
   const latestCheck = state.latestCheck || {};
@@ -5543,11 +5616,11 @@ function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = curre
   } else {
     source = {
       label: "Source",
-      status: "Action required",
-      tone: "warn",
+      status: "Needs input",
+      tone: "neutral",
       detailLabel: "Source",
       detail: "No current checked source",
-      evidence: "Upload & Check a source file.",
+      evidence: "Upload a CSV/XLSX to begin.",
     };
   }
 
@@ -5628,10 +5701,10 @@ function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = curre
   let nextAction;
   if (processing) {
     nextAction = { prefix: "Next", message: "Wait for lead check", tone: "active" };
-  } else if (!recontactSelected && state.checkStatus !== "completed") {
+  } else if (!recontactSelected && checkState !== "success") {
     nextAction = sourceFailed
       ? { prefix: "Blocked", message: source.evidence, tone: "bad" }
-      : { prefix: "Next", message: "Upload & Check source", tone: "warn" };
+      : { prefix: "Next", message: "Upload & Check source", tone: "neutral" };
   } else if (!recontactSelected && state.triageStatus === "running") {
     nextAction = { prefix: "Next", message: "Wait for Fast Triage", tone: "active" };
   } else if (!recontactSelected && state.triageStatus !== "completed") {
@@ -7677,6 +7750,14 @@ function updateSelectOptionNode(node, value, label) {
   setNodeText(node, label);
 }
 
+function dashboardAlertGroup(alert = {}) {
+  if (Boolean(alert?.blocks_sending)) return "blocking";
+  const severity = String(alert?.severity || "").trim().toLowerCase();
+  const blockingLabel = String(alert?.blocking_label || "").trim().toLowerCase();
+  if (["ok", "info"].includes(severity) || blockingLabel === "info") return "info";
+  return "warning";
+}
+
 function renderSummary(snapshot) {
   const summary = snapshot.summary;
   const total_awaiting_outcome = Number(summary?.total_awaiting_outcome || 0);
@@ -7687,12 +7768,10 @@ function renderSummary(snapshot) {
     || profiles.find((profile) => profileTelemetryChannel(profile) === "private");
   const activeStates = new Set(["starting", "running", "sleeping", "cooldown", "paused"]);
   const sendgridRunning = sendgridProfiles.filter((profile) => activeStates.has(String(profile?.runtime_state || ""))).length;
-  const alertIsInfo = (alert) => ["ok", "info"].includes(String(alert?.severity || "").trim().toLowerCase())
-    || String(alert?.blocking_label || "").trim().toLowerCase() === "info";
   const alertGroups = {
-    blocking: alerts.filter((alert) => Boolean(alert?.blocks_sending)),
-    warning: alerts.filter((alert) => !Boolean(alert?.blocks_sending) && !alertIsInfo(alert)),
-    info: alerts.filter((alert) => !Boolean(alert?.blocks_sending) && alertIsInfo(alert)),
+    blocking: alerts.filter((alert) => dashboardAlertGroup(alert) === "blocking"),
+    warning: alerts.filter((alert) => dashboardAlertGroup(alert) === "warning"),
+    info: alerts.filter((alert) => dashboardAlertGroup(alert) === "info"),
   };
   const blockingAlerts = alertGroups.blocking.length;
   const warningAlerts = alertGroups.warning.length;
@@ -8216,11 +8295,7 @@ function renderProgressSummaryStrip(snapshot) {
   const summary = snapshot?.summary || {};
   const alerts = Array.isArray(snapshot?.alerts) ? snapshot.alerts : [];
   const blockingAlerts = alerts.filter((alert) => Boolean(alert?.blocks_sending)).length;
-  const warningAlerts = alerts.filter((alert) => {
-    const severity = String(alert?.severity || "").trim().toLowerCase();
-    const label = String(alert?.blocking_label || "").trim().toLowerCase();
-    return !Boolean(alert?.blocks_sending) && !["ok", "info"].includes(severity) && label !== "info";
-  }).length;
+  const warningAlerts = alerts.filter((alert) => dashboardAlertGroup(alert) === "warning").length;
   const sendgridPending = Number(summary?.sendgrid_pending || 0);
   const sendgridStatus = Number(items.sendgrid?.active || 0) > 0
     ? `${Number(items.sendgrid?.active || 0).toLocaleString()} active`
@@ -8321,7 +8396,7 @@ function renderAlerts(snapshot) {
       title: "Blocking",
       badge: "Blocked",
       tone: "bad",
-      alerts: activeAlerts.filter((alert) => Boolean(alert?.blocks_sending)),
+      alerts: activeAlerts.filter((alert) => dashboardAlertGroup(alert) === "blocking"),
       empty: "No blocking alerts.",
     },
     {
@@ -8329,7 +8404,7 @@ function renderAlerts(snapshot) {
       title: "Warning",
       badge: "Warning",
       tone: "warn",
-      alerts: activeAlerts.filter((alert) => !Boolean(alert?.blocks_sending) && String(alert?.severity || "warn") !== "ok"),
+      alerts: activeAlerts.filter((alert) => dashboardAlertGroup(alert) === "warning"),
       empty: "No warnings.",
     },
     {
@@ -8337,7 +8412,7 @@ function renderAlerts(snapshot) {
       title: "Info",
       badge: "Info",
       tone: "neutral",
-      alerts: activeAlerts.filter((alert) => !Boolean(alert?.blocks_sending) && String(alert?.severity || "warn") === "ok"),
+      alerts: activeAlerts.filter((alert) => dashboardAlertGroup(alert) === "info"),
       empty: "No informational alerts.",
     },
   ];
@@ -8384,7 +8459,7 @@ function renderAlerts(snapshot) {
     }).join(""),
   );
   if (els.alertsCaption) {
-    const blockingCount = activeAlerts.filter((alert) => Boolean(alert?.blocks_sending)).length;
+    const blockingCount = activeAlerts.filter((alert) => dashboardAlertGroup(alert) === "blocking").length;
     const nonBlockingCount = Math.max(0, activeAlerts.length - blockingCount);
     setNodeText(
       els.alertsCaption,
@@ -9768,7 +9843,8 @@ function renderDetailCoreRuntime(profile) {
     : "No recent sender log line";
   const acceptedCount = profileRunSentDisplay(profile);
   const cooldownDisplay = profileCooldownDisplay(profile);
-  const displayStatus = profileDisplayStatus(profile);
+  const readinessLabel = String(profile?.readiness_label || "").trim() || "Ready";
+  const runtimeLabel = String(profile?.runtime_label || profile?.runtime_state || "").trim() || "Stopped";
   const items = [
     { label: "Pending", value: profile.pending_count, tone: Number(profile.pending_count || 0) > 0 ? "warn" : "neutral" },
     { label: "Accepted", value: acceptedCount, tone: acceptedCount > 0 ? "good" : "neutral" },
@@ -9791,7 +9867,11 @@ function renderDetailCoreRuntime(profile) {
     <div class="detail-core-activity">
       <div class="detail-compact-row">
         <span class="detail-compact-label">Readiness</span>
-        <span class="detail-compact-value">${escapeHtml(displayStatus.label || "Stopped")}</span>
+        <span class="detail-compact-value">${escapeHtml(readinessLabel)}</span>
+      </div>
+      <div class="detail-compact-row">
+        <span class="detail-compact-label">Runtime</span>
+        <span class="detail-compact-value">${escapeHtml(runtimeLabel)}</span>
       </div>
       <div class="detail-compact-row">
         <span class="detail-compact-label">Last activity</span>
@@ -9873,7 +9953,7 @@ function createProfileDetailNode() {
         <div class="detail-core-runtime"></div>
         <div class="detail-core-meta">
           <div class="detail-core-meta-row">
-            <span class="detail-compact-label">Runtime</span>
+            <span class="detail-compact-label">Runtime note</span>
             <span class="detail-compact-value detail-runtime-note"></span>
           </div>
           <div class="detail-core-meta-row">
