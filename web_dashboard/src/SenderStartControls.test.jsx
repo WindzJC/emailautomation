@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DashboardApp } from "./main.jsx";
+import { DashboardApp, SenderStartControls } from "./main.jsx";
 
 const INDEX_HTML = fs.readFileSync(
   path.resolve(process.cwd(), "web_dashboard/index.html"),
@@ -70,6 +70,18 @@ async function flushMicrotasks(turns = 8) {
 }
 
 async function bootController(fetchMock, tab = "senders") {
+  if (tab === "start-ready") {
+    document.body.innerHTML = '<button id="refresh-btn" type="button">Refresh</button><div id="dashboard-root"></div>';
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const rootNode = document.getElementById("dashboard-root");
+    const root = createRoot(rootNode);
+    await act(async () => {
+      root.render(<SenderStartControls />);
+      await flushMicrotasks();
+    });
+    return root;
+  }
   installDashboardDocument();
   window.history.replaceState({}, "", `/?tab=${tab}`);
   vi.stubGlobal("fetch", fetchMock);
@@ -352,7 +364,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     expect(startReadyButton()).toHaveTextContent("Start Ready Senders");
     fireEvent.click(startReadyButton());
@@ -378,7 +390,7 @@ describe("Start Ready Senders controls", () => {
       () => Promise.resolve(jsonResponse({ ok: true })),
       () => Promise.resolve(jsonResponse(plan)),
     );
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -398,7 +410,7 @@ describe("Start Ready Senders controls", () => {
       () => Promise.resolve(jsonResponse({ ok: true })),
       () => pending.promise,
     );
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     fireEvent.click(startReadyButton());
@@ -422,7 +434,7 @@ describe("Start Ready Senders controls", () => {
     let responsePlan = { ok: true, ready_profiles: [], skipped_profiles: plan.skipped_profiles };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })),
       () => Promise.resolve(jsonResponse(responsePlan)));
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(16));
     expect(startReadyButton()).toBeDisabled();
@@ -445,7 +457,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -457,7 +469,7 @@ describe("Start Ready Senders controls", () => {
     expect(startReadyPosts(fetchMock)).toHaveLength(1);
 
     await act(async () => {
-      root.render(<DashboardApp />);
+      root.render(<SenderStartControls />);
       await flushMicrotasks();
     });
     fireEvent.click(startReadyButton());
@@ -481,7 +493,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -532,7 +544,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -571,7 +583,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -597,7 +609,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));
@@ -631,7 +643,7 @@ describe("Start Ready Senders controls", () => {
       return Promise.resolve(jsonResponse(plan));
     };
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
-    root = await bootController(fetchMock);
+    root = await bootController(fetchMock, "start-ready");
 
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(12));

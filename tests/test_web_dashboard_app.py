@@ -991,6 +991,9 @@ class WebDashboardAppTests(unittest.TestCase):
             "campaign_run_history",
             "campaignHistoryEventLabel",
             "campaignHistoryReason",
+            "Recent ${records.length.toLocaleString()}",
+            "Filtering the loaded history window only.",
+            "data-history-filter",
             "Readiness",
             "Validation",
             "Result / Reason",
@@ -1361,7 +1364,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("white-space: normal;", styles)
         self.assertIn("text-overflow: clip;", styles)
         self.assertNotIn("leads-current-live-dispatch-card", leads_html)
-        self.assertNotIn("current-live-dispatch-card", styles)
+        self.assertIn("current-live-dispatch-card", styles)
 
         tab_start = source.index("function applyDashboardTab()")
         tab_end = source.index("function isOpsTabVisible()", tab_start)
@@ -1535,17 +1538,25 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_sender_status_badge_prefers_active_runtime_before_blocked_queue(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
+        start = source.index("function senderRuntimeBadge(profile")
+        end = source.index("function senderStatusBadge", start)
+        runtime_body = source[start:end]
+        readiness_start = source.index("function senderReadinessBadge(profile")
+        readiness_end = source.index("function senderRuntimeBadge", readiness_start)
+        readiness_body = source[readiness_start:readiness_end]
         start = source.index("function senderStatusBadge(profile)")
         end = source.index("function renderSenderStatusConsole", start)
         body = source[start:end]
-        self.assertLess(body.index('["running", "starting", "sleeping"]'), body.index("queueSafetyBlockedForProfile(profile)"))
-        self.assertLess(body.index('["cooldown", "paused"]'), body.index("queueSafetyBlockedForProfile(profile)"))
-        self.assertIn('return { label: "Running", tone: "good" };', body)
-        self.assertIn('return { label: "Complete", tone: "good" };', body)
-        self.assertIn('return { label: "Resume", tone: "good" };', body)
-        self.assertIn('return { label: "Ready", tone: "good" };', body)
-        self.assertIn('return { label: "Blocked", tone: "bad" };', body)
-        self.assertLess(body.index('return { label: "Complete", tone: "good" };'), body.index("queueSafetyBlockedForProfile(profile)"))
+        self.assertIn('return { label: "Running", tone: "good" };', runtime_body)
+        self.assertIn('return { label: "Cooldown", tone: "warn" };', runtime_body)
+        self.assertIn('return { label: "Stopped", tone: "neutral" };', runtime_body)
+        self.assertIn('return { label: "Complete", tone: "good" };', readiness_body)
+        self.assertIn('return { label: "Resume", tone: "good" };', readiness_body)
+        self.assertIn('return { label: runtimeState === "paused" ? "Resume" : "Ready", tone: "good" };', readiness_body)
+        self.assertIn('return { label: "Blocked", tone: "bad" };', readiness_body)
+        self.assertLess(readiness_body.index('return { label: "Complete", tone: "good" };'), readiness_body.index("queueSafetyBlockedForProfile(profile)"))
+        self.assertIn("senderRuntimeBadge(profile)", body)
+        self.assertIn("senderReadinessBadge(profile)", body)
 
     def test_manual_sender_start_warns_and_requires_confirmation(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
@@ -1565,7 +1576,8 @@ class WebDashboardAppTests(unittest.TestCase):
         source = APP_JS.read_text(encoding="utf-8")
         self.assertIn("Start unavailable — no pending leads.", source)
         self.assertIn('noPendingQueue ? "No queue" : "Start"', source)
-        self.assertIn("|| noPendingQueue", source)
+        self.assertIn('action === "no_queue" || (!pendingAction && actionDisabled && noPendingQueue)', source)
+        self.assertIn("sender-status-action-empty", source)
         self.assertIn(
             "|| (!warmProfile && !stopAvailable && !previewSyncAvailable && !startAvailable)",
             source,
@@ -1842,11 +1854,14 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             "dashboard-environment-banner",
-            "Local / dev mode",
-            "Live mode",
+            "LOCAL",
+            "LIVE OPERATIONS",
+            "MANUAL START",
             "Auth disabled",
             "Auto-start disabled",
-            "Manual Start/Resume can launch real workers and consume queues.",
+            "active sender",
+            "awaiting outcome",
+            "blocking alert",
         ]:
             self.assertIn(expected, source + component)
 
@@ -1889,15 +1904,15 @@ class WebDashboardAppTests(unittest.TestCase):
         for expected in [
             'warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"',
             'action === "open_lead_ops"',
-            'status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
+            'readiness.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops"',
             "private_jc_warm",
             "Private JC sender",
             "same limits as JC",
             'warmMax > 0 ? `max ${warmMax.toLocaleString()}` : "no run cap"',
-            "No activity yet",
+            "senderLastActivityDisplay",
             "warmDraftPreviewCount",
             "warmHasDraftPreview",
-            "No queue",
+            "sender-status-action-empty",
             "is-warm-jc",
         ]:
             self.assertIn(expected, render_body)
@@ -2082,7 +2097,8 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("year: \"numeric\"", body)
         self.assertIn("minute: \"2-digit\"", body)
         self.assertNotIn("second:", body)
-        self.assertIn("formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)", source)
+        self.assertIn("senderLastActivityDisplay(profile, warmProfile ? warmStatus : null)", source)
+        self.assertIn("warmStatus?.last_sent_timestamp", source)
         self.assertIn("formatWarmActivity(lane.last_sent_timestamp)", source)
         self.assertIn('href="mailto:${escapeHtml(lane.last_sent_email)}"', source)
         self.assertIn('formatWarmActivity(event.timestamp || "")', source)

@@ -607,7 +607,7 @@
 }
 
 .react-sender-console .sender-status-table {
-  min-width: 850px;
+  min-width: 980px;
   border-collapse: collapse;
 }
 
@@ -658,12 +658,12 @@
   box-shadow: inset 0 1px rgba(255,255,255,.025);
 }
 
-.react-sender-console .sender-status-table th:nth-child(3),
 .react-sender-console .sender-status-table th:nth-child(4),
 .react-sender-console .sender-status-table th:nth-child(5),
-.react-sender-console .sender-status-table td:nth-child(3),
+.react-sender-console .sender-status-table th:nth-child(6),
 .react-sender-console .sender-status-table td:nth-child(4),
-.react-sender-console .sender-status-table td:nth-child(5) { text-align: right; }
+.react-sender-console .sender-status-table td:nth-child(5),
+.react-sender-console .sender-status-table td:nth-child(6) { text-align: right; }
 
 .react-sender-console .sender-status-table th:last-child,
 .react-sender-console .sender-status-table td:last-child { text-align: center; }
@@ -674,6 +674,14 @@
   color: #aab5c3;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.react-sender-console .sender-status-action-empty {
+  display: inline-flex;
+  min-width: 32px;
+  justify-content: center;
+  color: #758296;
+  font-weight: 700;
 }
 
 .react-supporting-panels {
@@ -1642,7 +1650,7 @@
   white-space: nowrap;
 }
 
-.react-environment-banner {
+.react-sidebar-context .react-environment-banner {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1655,16 +1663,22 @@
   box-shadow: none;
 }
 
-.react-environment-primary {
+.react-sidebar-context .react-environment-primary {
+  display: flex;
+  gap: 0;
+}
+
+.react-sidebar-context .react-environment-primary p,
+.react-sidebar-context .react-environment-dot {
   display: none;
 }
 
-.react-environment-flags {
-  display: flex;
+.react-sidebar-context .react-environment-flags {
+  display: none;
   gap: 5px;
 }
 
-.react-environment-flags > span {
+.react-sidebar-context .react-environment-flags > span {
   min-height: 24px;
   padding: 3px 7px;
   color: #8290a3;
@@ -1675,7 +1689,7 @@
   white-space: nowrap;
 }
 
-.react-environment-banner > p {
+.react-sidebar-context .react-environment-banner > p {
   display: none;
 }
 
@@ -1912,18 +1926,20 @@
 
 #overview-view .sender-status-table {
   width: 100%;
-  min-width: 940px;
+  min-width: 980px;
   table-layout: fixed;
   border-collapse: collapse;
   font-size: .7rem;
 }
 
 #overview-view .sender-status-table th:nth-child(1) { width: 180px; }
-#overview-view .sender-status-table th:nth-child(2) { width: 108px; }
-#overview-view .sender-status-table th:nth-child(3),
+#overview-view .sender-status-table th:nth-child(2),
+#overview-view .sender-status-table th:nth-child(3) { width: 108px; }
 #overview-view .sender-status-table th:nth-child(4),
-#overview-view .sender-status-table th:nth-child(5) { width: 72px; }
-#overview-view .sender-status-table th:nth-child(7) { width: 200px; }
+#overview-view .sender-status-table th:nth-child(5),
+#overview-view .sender-status-table th:nth-child(6) { width: 72px; }
+#overview-view .sender-status-table th:nth-child(7) { width: 150px; }
+#overview-view .sender-status-table th:nth-child(8) { width: 128px; }
 
 #overview-view .sender-status-table th {
   height: 28px;
@@ -1967,7 +1983,7 @@
   font-size: .61rem;
 }
 
-#overview-view .sender-status-table td:nth-child(6) {
+#overview-view .sender-status-table td:nth-child(7) {
   max-width: none;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2239,6 +2255,34 @@
   margin: 0;
 }
 
+.current-live-dispatch-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: rgba(255,255,255,.018);
+}
+
+.current-live-dispatch-card strong,
+.current-live-dispatch-card span {
+  display: block;
+}
+
+.current-live-dispatch-card strong {
+  color: #e1ebf5;
+  font-size: .78rem;
+}
+
+.current-live-dispatch-card > div > span {
+  margin-top: 2px;
+  color: #8795a8;
+  font-size: .68rem;
+}
+
 .react-current-staged-legend {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2248,6 +2292,53 @@
   border: 1px solid var(--console-line);
   border-radius: 6px;
   background: #0a121c;
+}
+
+.campaign-history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--console-line);
+}
+
+.campaign-history-scope-note {
+  display: grid;
+  gap: 2px;
+  min-width: 170px;
+  margin-right: auto;
+  color: #8795a8;
+  font-size: .68rem;
+}
+
+.campaign-history-scope-note strong {
+  color: #d7e2ee;
+  font-size: .72rem;
+}
+
+.campaign-history-filters label {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  color: #8392a6;
+  font-size: .62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.campaign-history-filters select {
+  min-height: 30px;
+  color: #d7e2ee;
+  border: 1px solid var(--console-line);
+  border-radius: 5px;
+  background: #0d1621;
+  font-size: .72rem;
+  text-transform: none;
+}
+
+.campaign-history-empty-filter {
+  margin: 8px;
 }
 
 .react-current-staged-legend > div {
@@ -3705,6 +3796,10 @@
 
 .react-sidebar-context .auth-chip {
   width: 100%;
+}
+
+.is-auth-disabled .react-sidebar-context > .app-rail-status {
+  display: none;
 }
 
 .react-sidebar-context .react-environment-flags {

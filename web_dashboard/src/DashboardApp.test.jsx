@@ -46,8 +46,8 @@ describe("DashboardApp", () => {
     render(<DashboardApp template={template} />);
     expect(screen.queryByText("Start All")).not.toBeInTheDocument();
     expect(screen.getByText("Refresh")).toBeInTheDocument();
-    expect(screen.getByText("Checking dashboard mode...")).toBeInTheDocument();
-    expect(screen.getByText("Manual Start/Resume can launch real workers and consume queues.")).toBeInTheDocument();
+    expect(screen.getAllByText("Checking dashboard mode...").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Manual Start/Resume can launch real workers and consume queues.").length).toBeGreaterThan(0);
     expect(document.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeInTheDocument();
     expect(document.querySelector('[data-leads-workflow="cold"]')).toHaveAttribute("href", "/?tab=campaigns&workflow=cold");
@@ -94,7 +94,7 @@ describe("DashboardApp", () => {
     expect(document.getElementById("ops-view")).not.toBeInTheDocument();
     expect(overview).toHaveTextContent("Overview");
     expect(overview.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
-    expect(overview.querySelector("#start-ready-btn")).toBeInTheDocument();
+    expect(overview.querySelector("#start-ready-btn")).not.toBeInTheDocument();
     expect(overview.querySelector("#stop-btn")).toBeInTheDocument();
     expect(overview.querySelector(".sender-status-mount")).toBeInTheDocument();
     expect(overview.querySelector("#profile-detail")).toBeInTheDocument();
@@ -108,7 +108,6 @@ describe("DashboardApp", () => {
     expect(diagnostics.querySelector("#ops-progress-details")).toBeInTheDocument();
     expect(diagnostics.querySelector("details#ops-progress-details")).not.toBeInTheDocument();
     for (const id of [
-      "start-ready-btn",
       "stop-btn",
       "leads-important-dispatch-preview-btn",
       "leads-important-dispatch-confirm-btn",
@@ -271,7 +270,7 @@ describe("Warm Outreach controller layout", () => {
     expect(document.getElementById("leads-view")).toHaveAttribute("hidden");
     expect(document.querySelectorAll("#senders-table-panel")).toHaveLength(1);
     expect(overview.querySelector("#senders-table-panel")).toBeInTheDocument();
-    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(0);
     expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
     expect(Array.from(overview.querySelectorAll(".controlled-send-test-card"))).toHaveLength(0);
 
@@ -285,7 +284,7 @@ describe("Warm Outreach controller layout", () => {
     fireEvent.click(document.getElementById("overview-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(window.location.search).toContain("tab=overview");
-    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(0);
     expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
 
     window.history.replaceState({}, "", "/?tab=ops");

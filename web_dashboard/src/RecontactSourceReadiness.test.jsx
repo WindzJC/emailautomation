@@ -965,7 +965,7 @@ describe("source-scoped Recontact readiness", () => {
     const rail = document.getElementById("leads-workflow-task-list");
     expect(rail).toHaveTextContent("Preview Ready");
     expect(rail).toHaveTextContent("20 planned");
-    expect(rail).toHaveTextContent("Confirm Review required");
+    expect(rail).toHaveTextContent("Confirm Ready");
     expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Review Preview and Confirm");
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
@@ -1010,8 +1010,9 @@ describe("source-scoped Recontact readiness", () => {
     const boot = await bootController(status);
     root = boot.root;
 
-    expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Confirm Confirmed");
-    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Complete Dispatch confirmed");
+    expect(document.getElementById("leads-workflow-task-list")).not.toHaveTextContent("Confirm Confirmed");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Current / Live");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Last confirmed dispatch");
     expect(document.querySelectorAll("[data-recontact-route]")).toHaveLength(1);
     expect(document.querySelectorAll("#leads-important-dispatch-preview-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#leads-important-dispatch-confirm-btn")).toHaveLength(1);

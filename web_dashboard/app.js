@@ -332,16 +332,25 @@ function renderEnvironmentStatus(overrides = {}) {
   const authEnabled = Boolean(overrides.authEnabled ?? authState.authEnabled);
   const authDisabled = Boolean(overrides.authDisabled ?? authState.authDisabled);
   const autoStartAllowed = Boolean(overrides.autoStartAllowed ?? authState.autoStartAllowed);
-  if (els.environmentBanner) {
-    els.environmentBanner.className = `react-environment-banner react-environment-banner-${localDev ? "local" : "live"}`;
-  }
-  setNodeText(els.environmentMode, localDev ? "Local / dev mode" : "Live mode");
-  setNodeText(els.environmentAuthMode, authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured");
-  setNodeText(els.environmentAutoStartMode, autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled");
-  setNodeText(
-    els.environmentNote,
-    "Manual Start/Resume can launch real workers and consume queues.",
-  );
+  const activeProfiles = Array.isArray(lastSnapshot?.profiles)
+    ? lastSnapshot.profiles.filter((profile) => isProfileActive(profile)).length
+    : 0;
+  const awaiting = Number(lastSnapshot?.summary?.total_awaiting_outcome || 0);
+  const blockingAlerts = Array.isArray(lastSnapshot?.alerts)
+    ? lastSnapshot.alerts.filter((alert) => Boolean(alert?.blocks_sending)).length
+    : 0;
+  const modeLabel = localDev ? "LOCAL" : "LIVE OPERATIONS";
+  const startLabel = autoStartAllowed ? "AUTO START" : "MANUAL START";
+  const authText = authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured";
+  const autoStartText = autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled";
+  const noteText = `${activeProfiles.toLocaleString()} active sender${activeProfiles === 1 ? "" : "s"} · ${awaiting.toLocaleString()} awaiting outcome · ${blockingAlerts.toLocaleString()} blocking alert${blockingAlerts === 1 ? "" : "s"}`;
+  document.querySelectorAll(".react-environment-banner").forEach((banner) => {
+    banner.className = `react-environment-banner react-environment-banner-${localDev ? "local" : "live"}`;
+  });
+  document.querySelectorAll("[data-environment-mode]").forEach((node) => setNodeText(node, `${modeLabel} · ${startLabel}`));
+  document.querySelectorAll("[data-environment-auth-mode]").forEach((node) => setNodeText(node, authText));
+  document.querySelectorAll("[data-environment-auto-start-mode]").forEach((node) => setNodeText(node, autoStartText));
+  document.querySelectorAll("[data-environment-note]").forEach((node) => setNodeText(node, noteText));
 }
 
 function showAuthOverlay(message = "") {
@@ -5598,20 +5607,14 @@ function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = curre
     };
   }
 
-  const confirmedCurrent = Boolean(
-    status?.latest_confirmed_dispatch_current === true
-    && (status?.latest_dispatch?.generated_at_utc || lastImportantDispatch?.generated_at_utc),
-  );
   const confirmSafety = dispatchConfirmSafetyState(dispatchSource, previewCurrent ? lastImportantDispatchPreview : null);
   let confirm;
   if (processing) {
     confirm = { label: "Confirm", status: "Locked", tone: "neutral", detail: "Waiting for the current source check.", evidence: "A previous confirmation cannot authorize the new upload." };
-  } else if (confirmedCurrent) {
-    confirm = { label: "Confirm", status: "Confirmed", tone: "good", detail: "Dispatch confirmation is current.", evidence: "Queue plan is bound to the confirmed dispatch." };
   } else if (importantLeadDispatchConfirmLoading || state.confirmStatus === "running") {
     confirm = { label: "Confirm", status: "Processing", tone: "warn", detail: "Confirmation is in progress.", evidence: "Wait for the current operation." };
   } else if (previewCurrent && confirmSafety.ready) {
-    confirm = { label: "Confirm", status: "Review required", tone: "warn", detail: "Review the current Preview before confirming.", evidence: "Confirm is the queue-write boundary." };
+    confirm = { label: "Confirm", status: "Ready", tone: "good", detail: "Current Preview is ready for explicit confirmation.", evidence: "Confirm is the queue-write boundary." };
   } else {
     confirm = {
       label: "Confirm",
@@ -5637,12 +5640,10 @@ function deriveColdCampaignWorkflowState(status = lastLeadsStatus, state = curre
     nextAction = { prefix: "Blocked", message: previewBlocked || sourceReadiness.block_reason || "Current source is not ready.", tone: "bad" };
   } else if (!previewCurrent) {
     nextAction = { prefix: "Next", message: "Preview Dispatch", tone: "warn" };
-  } else if (!confirmedCurrent) {
+  } else {
     nextAction = confirmSafety.ready
       ? { prefix: "Next", message: "Review Preview and Confirm", tone: "warn" }
       : { prefix: "Blocked", message: confirm.evidence, tone: "bad" };
-  } else {
-    nextAction = { prefix: "Complete", message: "Dispatch confirmed", tone: "good" };
   }
 
   return { source, campaign, preview, confirm, nextAction };
@@ -5767,6 +5768,35 @@ function currentLiveDispatchState(status = lastLeadsStatus) {
         ? "Start remaining sender(s) from Dashboard"
         : "No live queue action",
   };
+}
+
+function renderCurrentLiveDispatchCard(status = lastLeadsStatus) {
+  const live = currentLiveDispatchState(status);
+  const pendingTotal = live.privatePending + live.sendgridPending;
+  const title = live.hasLiveQueue
+    ? live.privatePending > 0 && live.sendgridPending > 0
+      ? `JC ${live.privatePending.toLocaleString()} · SendGrid ${live.sendgridPending.toLocaleString()} pending`
+      : live.privatePending > 0
+        ? `JC ${live.privatePending.toLocaleString()} pending`
+        : `SendGrid ${live.sendgridPending.toLocaleString()} pending`
+    : live.active
+      ? "Last confirmed dispatch"
+      : "No active live queue";
+  const detail = live.hasLiveQueue
+    ? `${live.privateStatus} · ${live.sendgridStatus}`
+    : live.active
+      ? `Confirmed JC ${live.privateAdded.toLocaleString()} · SG ${live.sendgridAdded.toLocaleString()}`
+      : "Prepare the next staged campaign below.";
+  return `
+    <section class="current-live-dispatch-card" aria-label="Current live dispatch state">
+      <div>
+        <p class="eyebrow">Current / Live</p>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(detail)}</span>
+      </div>
+      <span class="mini-pill">${pendingTotal > 0 ? "Ready queue" : live.active ? "Confirmed queue" : "Idle"}</span>
+    </section>
+  `;
 }
 
 function dispatchSourceComparisonWarning(status = lastLeadsStatus) {
@@ -6264,7 +6294,7 @@ function renderLeadsWorkflowTaskList(status = lastLeadsStatus) {
     els.leadsWorkflowTaskList,
     `
       <div class="workflow-tracker-head">
-        <p class="eyebrow">Current Cold Workflow</p>
+        <p class="eyebrow">Next Cold Campaign</p>
       </div>
       <ol class="workflow-tracker-row" aria-label="Cold campaign workflow status">
         ${tasks.map((task, index) => `
@@ -6332,6 +6362,7 @@ function renderLeadsWorkflowStatusBanner(status = lastLeadsStatus) {
   setNodeHtml(
     els.leadsWorkflowStatusBanner,
     `
+      ${renderCurrentLiveDispatchCard(status)}
       <div class="workflow-banner-inline workflow-next-action workflow-next-action-${escapeHtml(nextAction.tone)}">
         <span class="eyebrow">${escapeHtml(nextAction.prefix)}</span>
         <strong>${escapeHtml(nextAction.message)}</strong>
@@ -7874,9 +7905,10 @@ function ensureSenderStatusPanel() {
           <thead>
             <tr>
               <th>Sender</th>
-              <th>State</th>
+              <th>Readiness</th>
+              <th>Runtime</th>
               <th>Pending</th>
-              <th>Accepted</th>
+              <th>Sent</th>
               <th>Awaiting</th>
               <th>Last Activity</th>
               <th>Action</th>
@@ -7915,17 +7947,14 @@ function warmSenderDisplayState(profile, snapshot = lastSnapshot) {
   const lane = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
   const label = String(lane.state || "No queue");
   const tone = label === "Blocked" ? "bad" : ["Running", "Ready", "Complete"].includes(label) ? "good" : label === "Partial" || label === "Not confirmed" ? "warn" : "neutral";
-  return { label, tone };
+  return { label: label === "Running" ? "Ready" : label, tone };
 }
 
-function senderStatusBadge(profile) {
+function senderReadinessBadge(profile, snapshot = lastSnapshot) {
   const runtimeState = String(profile?.runtime_state || "").trim();
   const pendingCount = profilePendingCount(profile);
-  const queueSafety = providerQueueSafetyForProfile(profile);
-  if (profile?.name === "private_jc_warm") return warmSenderDisplayState(profile, lastSnapshot);
-  if (["running", "starting", "sleeping"].includes(runtimeState)) return { label: "Running", tone: "good" };
-  if (["cooldown", "paused"].includes(runtimeState)) return { label: runtimeState === "paused" ? "Paused" : "Cooldown", tone: "warn" };
-  if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
+  const queueSafety = providerQueueSafetyForProfile(profile, snapshot);
+  if (profile?.name === "private_jc_warm") return warmSenderDisplayState(profile, snapshot);
   if (pendingCount <= 0 && (profileTelemetryChannel(profile) === "sendgrid" || queueSafetyComplete(queueSafety))) {
     return { label: "Complete", tone: "good" };
   }
@@ -7939,9 +7968,46 @@ function senderStatusBadge(profile) {
     return { label: "Sync Required", tone: "warn" };
   }
   if (pendingCount > 0 && queueSafetyVerifiedSubset(queueSafety)) return { label: "Resume", tone: "good" };
-  if (canStartProfile(profile, lastSnapshot)) return { label: "Ready", tone: "good" };
+  if (canStartProfile(profile, snapshot)) return { label: runtimeState === "paused" ? "Resume" : "Ready", tone: "good" };
   if (pendingCount <= 0) return { label: "Complete", tone: "good" };
-  return { label: "Stopped", tone: "bad" };
+  return { label: "Blocked", tone: "bad" };
+}
+
+function senderRuntimeBadge(profile, snapshot = lastSnapshot) {
+  if (profile?.name === "private_jc_warm") {
+    const lane = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
+    if (lane.running) return { label: "Running", tone: "good" };
+  }
+  const runtimeState = String(profile?.runtime_state || "").trim().toLowerCase();
+  if (runtimeState === "starting") return { label: "Starting", tone: "good" };
+  if (runtimeState === "running") return { label: "Running", tone: "good" };
+  if (runtimeState === "sleeping") return { label: "Sleeping", tone: "good" };
+  if (runtimeState === "cooldown") return { label: "Cooldown", tone: "warn" };
+  if (runtimeState === "paused") return { label: "Paused", tone: "warn" };
+  if (runtimeState === "stalled") return { label: "Stalled", tone: "warn" };
+  return { label: "Stopped", tone: "neutral" };
+}
+
+function senderStatusBadge(profile) {
+  const runtime = senderRuntimeBadge(profile);
+  if (runtime.label !== "Stopped") return runtime;
+  return senderReadinessBadge(profile);
+}
+
+function senderLastActivityDisplay(profile, warmStatus = null) {
+  const rawTimestamp = warmStatus?.last_sent_timestamp || profile?.last_timestamp || "";
+  const rawEmail = warmStatus?.last_sent_email || profile?.last_email || "";
+  const title = [rawTimestamp, rawEmail].filter(Boolean).join(" · ");
+  if (rawTimestamp) {
+    return {
+      label: formatReadinessTime(rawTimestamp),
+      title,
+    };
+  }
+  return {
+    label: profileLastAgeText(profile),
+    title,
+  };
 }
 
 function renderSenderStatusConsole(snapshot, selectedProfile) {
@@ -7955,7 +8021,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     ))
     : [];
   if (!profiles.length) {
-    setNodeHtml(tbody, `<tr><td colspan="7" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
+    setNodeHtml(tbody, `<tr><td colspan="8" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
     return;
   }
   setNodeHtml(
@@ -7963,7 +8029,8 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     profiles.map((profile) => {
       const warmProfile = profile?.name === "private_jc_warm";
       const warmStatus = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
-      const status = senderStatusBadge(profile);
+      const readiness = senderReadinessBadge(profile, snapshot);
+      const runtime = senderRuntimeBadge(profile, snapshot);
       const pendingAction = pendingProfileActions.get(profile.name) || "";
       const previewSyncState = profilePreviewValidationState.get(profile.name) || {};
       const previewSyncPending = previewSyncState.kind === "loading";
@@ -7978,8 +8045,8 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         : Number(profileRunSentDisplay(profile) || 0);
       const warmHasDraftPreview = warmDraftPreviewCount(snapshot) > 0;
       const warmCanOpenLeadOps = warmProfile
-        && status.label !== "Complete"
-        && (pendingCount > 0 || warmHasDraftPreview || ["Partial", "Blocked", "Ready", "Not confirmed"].includes(status.label));
+        && readiness.label !== "Complete"
+        && (pendingCount > 0 || warmHasDraftPreview || ["Partial", "Blocked", "Ready", "Not confirmed"].includes(readiness.label));
       const noPendingQueue = !stopAvailable && pendingCount <= 0;
       const action = stopAvailable
         ? "stop"
@@ -7988,7 +8055,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           : previewSyncAvailable ? "preview_sync" : "start";
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : action === "stop" ? "Stop" : action === "preview_sync" ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview" : action === "open_lead_ops" ? status.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : status.label === "Complete" ? "Complete" : action === "no_queue" || noPendingQueue ? "No queue" : "Start";
+        : action === "stop" ? "Stop" : action === "preview_sync" ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview" : action === "open_lead_ops" ? readiness.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : "Start";
       const actionDisabled = Boolean(pendingAction)
         || previewSyncPending
         || action === "no_queue"
@@ -7998,13 +8065,19 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
       const warmMetadata = warmProfile
         ? `<span class="sender-status-profile-meta">Private JC sender · same limits as JC · ${warmMax > 0 ? `max ${warmMax.toLocaleString()}` : "no run cap"}</span>`
         : "";
-      const lastActivity = warmProfile && warmStatus.last_sent_timestamp
-        ? formatWarmActivity(warmStatus.last_sent_timestamp, warmStatus.last_sent_email)
-        : warmProfile
-        ? "No activity yet"
-        : profile.last_timestamp
-        ? `${profile.last_timestamp}${profile.last_email ? ` · ${truncateMiddle(profile.last_email, 34)}` : ""}`
-        : profileLastAgeText(profile);
+      const lastActivity = senderLastActivityDisplay(profile, warmProfile ? warmStatus : null);
+      const renderAction = action === "no_queue" || (!pendingAction && actionDisabled && noPendingQueue)
+        ? `<span class="sender-status-action-empty" aria-label="No row action available">—</span>`
+        : `
+            <button
+              class="btn ${action === "stop" ? "btn-danger" : "btn-secondary"} btn-sm sender-status-action-btn"
+              type="button"
+              data-profile="${escapeHtml(profile.name || "")}"
+              data-action="${escapeHtml(action)}"
+              title="${action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
+              ${actionDisabled ? "disabled" : ""}
+            >${escapeHtml(actionLabelText)}</button>
+          `;
       return `
         <tr class="${[
           selectedProfile?.name === profile.name ? "is-selected" : "",
@@ -8020,22 +8093,16 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               ${warmMetadata}
             </div>
           </td>
-          <td>${status.label === "Sync Required"
-            ? `<button class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)} sender-status-sync-details-btn" type="button" data-profile="${escapeHtml(profile.name || "")}" title="Show Why Blocked preview details">${escapeHtml(status.label)}</button>`
-            : `<span class="sender-status-pill sender-status-pill-${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>`}</td>
+          <td>${readiness.label === "Sync Required"
+            ? `<button class="sender-status-pill sender-status-pill-${escapeHtml(readiness.tone)} sender-status-sync-details-btn" type="button" data-profile="${escapeHtml(profile.name || "")}" title="Show Why Blocked preview details">${escapeHtml(readiness.label)}</button>`
+            : `<span class="sender-status-pill sender-status-pill-${escapeHtml(readiness.tone)}">${escapeHtml(readiness.label)}</span>`}</td>
+          <td><span class="sender-status-pill sender-status-pill-${escapeHtml(runtime.tone)}">${escapeHtml(runtime.label)}</span></td>
           <td>${pendingCount.toLocaleString()}</td>
           <td>${acceptedCount.toLocaleString()}</td>
           <td>${Number(profile.awaiting_outcome || 0).toLocaleString()}</td>
-          <td class="sender-status-activity" title="${escapeHtml(profile.last_email || profile.last_timestamp || "")}">${escapeHtml(lastActivity)}</td>
+          <td class="sender-status-activity" title="${escapeHtml(lastActivity.title || "")}">${escapeHtml(lastActivity.label)}</td>
           <td>
-            <button
-              class="btn ${action === "stop" ? "btn-danger" : "btn-secondary"} btn-sm sender-status-action-btn"
-              type="button"
-              data-profile="${escapeHtml(profile.name || "")}"
-              data-action="${escapeHtml(action)}"
-              title="${action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : action === "no_queue" || noPendingQueue ? "No pending leads." : ""}"
-              ${actionDisabled ? "disabled" : ""}
-            >${escapeHtml(actionLabelText)}</button>
+            ${renderAction}
           </td>
         </tr>
       `;
@@ -8871,6 +8938,38 @@ function renderCampaignRunHistory(snapshot) {
   setNodeHtml(
     els.campaignRunHistory,
     `
+      <div class="campaign-history-filters" aria-label="History filters">
+        <div class="campaign-history-scope-note">
+          <strong>Recent ${records.length.toLocaleString()}</strong>
+          <span>Filtering the loaded history window only.</span>
+        </div>
+        <label>
+          <span>Sender</span>
+          <select data-history-filter="profile">
+            <option value="">All senders</option>
+            ${Array.from(new Set(records.map((record) => String(record.profile || "").trim()).filter(Boolean))).sort().map((profile) => (
+              `<option value="${escapeHtml(profile)}">${escapeHtml(formatProfileName(profile))}</option>`
+            )).join("")}
+          </select>
+        </label>
+        <label>
+          <span>Event</span>
+          <select data-history-filter="event">
+            <option value="">All events</option>
+            ${Array.from(new Set(records.map((record) => campaignHistoryEventLabel(record.event_type)).filter(Boolean))).sort().map((eventLabel) => (
+              `<option value="${escapeHtml(eventLabel)}">${escapeHtml(eventLabel)}</option>`
+            )).join("")}
+          </select>
+        </label>
+        <label>
+          <span>Time</span>
+          <select data-history-filter="scope">
+            <option value="">Loaded recent</option>
+            <option value="24h">Last 24h</option>
+            <option value="7d">Last 7d</option>
+          </select>
+        </label>
+      </div>
       <div class="table-shell campaign-history-table">
         <table>
           <thead>
@@ -8887,7 +8986,7 @@ function renderCampaignRunHistory(snapshot) {
           </thead>
           <tbody>
             ${records.map((record) => `
-              <tr>
+              <tr data-history-profile="${escapeHtml(String(record.profile || "").trim())}" data-history-event="${escapeHtml(campaignHistoryEventLabel(record.event_type))}" data-history-timestamp="${escapeHtml(record.timestamp || "")}">
                 <td>${escapeHtml(formatReadinessTime(record.timestamp))}</td>
                 <td>${escapeHtml(campaignHistoryEventLabel(record.event_type))}</td>
                 <td>${escapeHtml(record.profile || "-")}</td>
@@ -8901,8 +9000,42 @@ function renderCampaignRunHistory(snapshot) {
           </tbody>
         </table>
       </div>
+      <p class="campaign-history-empty-filter muted hidden">No history rows match the current filters.</p>
     `,
   );
+  applyCampaignHistoryFilters();
+}
+
+function applyCampaignHistoryFilters() {
+  const root = els.campaignRunHistory;
+  if (!root) return;
+  const table = root.querySelector(".campaign-history-table table");
+  if (!table) return;
+  const filters = {
+    profile: root.querySelector('[data-history-filter="profile"]')?.value || "",
+    event: root.querySelector('[data-history-filter="event"]')?.value || "",
+    scope: root.querySelector('[data-history-filter="scope"]')?.value || "",
+  };
+  const now = Date.now();
+  const maxAgeMs = filters.scope === "24h"
+    ? 24 * 60 * 60 * 1000
+    : filters.scope === "7d"
+      ? 7 * 24 * 60 * 60 * 1000
+      : 0;
+  let visible = 0;
+  table.querySelectorAll("tbody tr").forEach((row) => {
+    const profile = row.getAttribute("data-history-profile") || "";
+    const event = row.getAttribute("data-history-event") || "";
+    const timestamp = row.getAttribute("data-history-timestamp") || "";
+    const parsedTime = Date.parse(timestamp);
+    const withinScope = !maxAgeMs || (Number.isFinite(parsedTime) && now - parsedTime <= maxAgeMs);
+    const show = (!filters.profile || profile === filters.profile)
+      && (!filters.event || event === filters.event)
+      && withinScope;
+    row.hidden = !show;
+    if (show) visible += 1;
+  });
+  root.querySelector(".campaign-history-empty-filter")?.classList.toggle("hidden", visible > 0);
 }
 
 function renderWebhookHealth(snapshot) {
@@ -11191,6 +11324,11 @@ if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
 }
 if (els.opsProgressDetails) {
   els.opsProgressDetails.addEventListener("toggle", () => syncProgressDetailsToggle());
+}
+if (els.campaignRunHistory) {
+  els.campaignRunHistory.addEventListener("change", (event) => {
+    if (event.target?.matches?.("[data-history-filter]")) applyCampaignHistoryFilters();
+  });
 }
 if (els.overviewTabBtn) els.overviewTabBtn.addEventListener("click", () => setDashboardTab("overview"));
 if (els.leadsTabBtn) els.leadsTabBtn.addEventListener("click", () => setDashboardTab("campaigns"));

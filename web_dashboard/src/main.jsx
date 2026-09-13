@@ -288,7 +288,7 @@ export function CommandBar({ html }) {
   const controls = parse(html, {
     replace(node) {
       if (node?.attribs?.id === "start-ready-btn") {
-        return <SenderStartControls />;
+        return <React.Fragment />;
       }
       if (node?.attribs?.id === "start-ready-status") {
         return <React.Fragment />;
@@ -344,21 +344,22 @@ export function EmptyState({ title, description }) {
   );
 }
 
-export function EnvironmentBanner() {
+export function EnvironmentBanner({ variant = "sidebar" } = {}) {
+  const diagnostics = variant === "diagnostics";
   return (
-    <section id="dashboard-environment-banner" className="react-environment-banner react-environment-banner-checking" aria-label="Dashboard environment and sender safety">
+    <section id={diagnostics ? "dashboard-diagnostics-environment-banner" : "dashboard-environment-banner"} className="react-environment-banner react-environment-banner-checking" aria-label="Dashboard environment and sender safety">
       <div className="react-environment-primary">
         <span className="react-environment-dot" aria-hidden="true" />
         <div>
           <p>Environment &amp; sender safety</p>
-          <strong id="dashboard-environment-mode">Checking dashboard mode...</strong>
+          <strong id={diagnostics ? undefined : "dashboard-environment-mode"} data-environment-mode>Checking dashboard mode...</strong>
         </div>
       </div>
       <div className="react-environment-flags">
-        <span id="dashboard-auth-mode">Auth: checking</span>
-        <span id="dashboard-auto-start-mode">Auto-start: checking</span>
+        <span id={diagnostics ? undefined : "dashboard-auth-mode"} data-environment-auth-mode>Auth: checking</span>
+        <span id={diagnostics ? undefined : "dashboard-auto-start-mode"} data-environment-auto-start-mode>Auto-start: checking</span>
       </div>
-      <p id="dashboard-environment-note">Manual Start/Resume can launch real workers and consume queues.</p>
+      <p id={diagnostics ? undefined : "dashboard-environment-note"} data-environment-note>Manual Start/Resume can launch real workers and consume queues.</p>
     </section>
   );
 }
@@ -399,11 +400,6 @@ export function OverviewDashboard({ view }) {
           <LegacyNode html={view.profileDetail} />
         </section>
       </section>
-      <section className="react-overview-next-action panel-shell" aria-label="Next action guidance">
-        <p className="react-section-label">Next action</p>
-        <strong>Start a qualified sender only when authorized.</strong>
-        <span>Readiness means a sender is qualified to start. Runtime shows whether it is currently running or stopped.</span>
-      </section>
     </section>
   );
 }
@@ -431,6 +427,7 @@ export function DiagnosticsDashboard({ view }) {
         title="Diagnostics"
         description="Expanded alerts, run progress, environment safety, and controlled sender validation."
       />
+      <EnvironmentBanner variant="diagnostics" />
       <section id="ops-progress-details" className="panel panel-shell workspace-metric-details advanced-details">
         <LegacyNode html={view.progressDetails} />
       </section>
