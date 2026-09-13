@@ -5110,17 +5110,32 @@ def humanized_cooldown_sleep_seconds(base_seconds: int, sent_total: int, human_s
 
 
 def append_suppressed_email(suppress_csv_path: Path, email_addr: str) -> None:
-    if not email_addr:
+    email = norm_email(email_addr)
+    if not email:
         return
-    if not suppress_csv_path.exists():
-        with suppress_csv_path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["Email"])
-            w.writeheader()
-            w.writerow({"Email": email_addr})
-    else:
+    suppress_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_files([suppress_csv_path]):
+        if not suppress_csv_path.exists() or suppress_csv_path.stat().st_size == 0:
+            with suppress_csv_path.open("w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["Email"], lineterminator="\n")
+                w.writeheader()
+                w.writerow({"Email": email})
+            return
+
+        with suppress_csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            if list(reader.fieldnames or []) != ["Email"]:
+                raise ValueError(
+                    f"Incompatible suppression CSV schema for {suppress_csv_path}: "
+                    "expected Email"
+                )
+            existing = {norm_email(row.get("Email") or "") for row in reader}
+        if email in existing:
+            return
+
         with suppress_csv_path.open("a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["Email"])
-            w.writerow({"Email": email_addr})
+            w = csv.DictWriter(f, fieldnames=["Email"], lineterminator="\n")
+            w.writerow({"Email": email})
 
 
 def controlled_sendgrid_profile_error(
@@ -6344,6 +6359,7 @@ def main() -> int | None:
     provider_recovery_pending = bool(provider_guard.get("recovery_pending"))
     last_success_sent_at_utc: datetime | None = None
     submission_attempts_this_run = 0
+    accepted_send_settlement_failed = False
 
     def audit_sleep(seconds: float, action: str = "SLEEP") -> None:
         remaining_sleep = max(0.0, float(seconds or 0))
@@ -6540,6 +6556,8 @@ def main() -> int | None:
         send_info: str,
         idempotency_reserved: bool,
     ) -> bool:
+        nonlocal accepted_send_settlement_failed
+        accepted_send_settlement_failed = False
         log_row(
             log_path,
             email,
@@ -6560,6 +6578,8 @@ def main() -> int | None:
                 outcome="sent",
                 info=send_info,
             )
+            if not idempotency_ok:
+                accepted_send_settlement_failed = True
 
         domain_ok = finalize_domain_attempt_slot(
             reservation_token,
@@ -6567,9 +6587,11 @@ def main() -> int | None:
             "sent",
             send_info,
         )
+        if not domain_ok:
+            accepted_send_settlement_failed = False
         if idempotency_ok and domain_ok:
             clear_queue_claim(queue_claim_receipt)
-        return domain_ok
+        return idempotency_ok and domain_ok
 
     def settle_retryable_attempt(
         *,
@@ -7280,6 +7302,22 @@ def main() -> int | None:
                             send_info=send_info,
                             idempotency_reserved=idempotency_reserved,
                         )
+                        provider_submission_active = False
+                        if not domain_finalized:
+                            if accepted_send_settlement_failed:
+                                print(
+                                    "STOP: accepted-send bookkeeping failed "
+                                    "after provider submission; recipient "
+                                    "will not be retried"
+                                )
+                                stop_reason = "accepted_send_bookkeeping_failed"
+                            else:
+                                print(
+                                    "STOP: domain_finalize_failed after accepted send; "
+                                    "recipient will not be retried"
+                                )
+                                stop_reason = "domain_finalize_failed"
+                            break
                         print(f"[{i}/{len(pending)}] SENT {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
@@ -7327,16 +7365,6 @@ def main() -> int | None:
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
-
-                        provider_submission_active = False
-
-                        if not domain_finalized:
-                            print(
-                                "STOP: domain_finalize_failed after accepted send; "
-                                "recipient will not be retried"
-                            )
-                            stop_reason = "domain_finalize_failed"
-                            break
 
                         honor_deferred_stop()
 
@@ -7444,6 +7472,22 @@ def main() -> int | None:
                                 send_info=send_info,
                                 idempotency_reserved=idempotency_reserved,
                             )
+                            provider_submission_active = False
+                            if not domain_finalized:
+                                if accepted_send_settlement_failed:
+                                    print(
+                                        "STOP: accepted-send bookkeeping failed "
+                                        "after auth retry provider submission; "
+                                        "recipient will not be retried"
+                                    )
+                                    stop_reason = "accepted_send_bookkeeping_failed"
+                                else:
+                                    print(
+                                        "STOP: domain_finalize_failed after accepted send; "
+                                        "recipient will not be retried"
+                                    )
+                                    stop_reason = "domain_finalize_failed"
+                                break
                             print(f"[{i}/{len(pending)}] SENT (auth retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
@@ -7464,16 +7508,6 @@ def main() -> int | None:
                                 gmail_messages_24h += 1
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
-
-                            provider_submission_active = False
-
-                            if not domain_finalized:
-                                print(
-                                    "STOP: domain_finalize_failed after accepted send; "
-                                    "recipient will not be retried"
-                                )
-                                stop_reason = "domain_finalize_failed"
-                                break
 
                             honor_deferred_stop()
 
@@ -7725,6 +7759,22 @@ def main() -> int | None:
                             send_info=send_info,
                             idempotency_reserved=idempotency_reserved,
                         )
+                        provider_submission_active = False
+                        if not domain_finalized:
+                            if accepted_send_settlement_failed:
+                                print(
+                                    "STOP: accepted-send bookkeeping failed "
+                                    "after reconnect retry provider submission; "
+                                    "recipient will not be retried"
+                                )
+                                stop_reason = "accepted_send_bookkeeping_failed"
+                            else:
+                                print(
+                                    "STOP: domain_finalize_failed after accepted send; "
+                                    "recipient will not be retried"
+                                )
+                                stop_reason = "domain_finalize_failed"
+                            break
                         print(f"[{i}/{len(pending)}] SENT (reconnect) {to_email}")
                         sent_this_run += 1
                         sent_this_run_emails.add(to_email)
@@ -7745,16 +7795,6 @@ def main() -> int | None:
                             gmail_messages_24h += 1
                             if is_external(to_email, my_domains):
                                 gmail_unique_ext.add(to_email)
-
-                        provider_submission_active = False
-
-                        if not domain_finalized:
-                            print(
-                                "STOP: domain_finalize_failed after accepted send; "
-                                "recipient will not be retried"
-                            )
-                            stop_reason = "domain_finalize_failed"
-                            break
 
                         honor_deferred_stop()
 
@@ -7940,6 +7980,22 @@ def main() -> int | None:
                                 send_info=send_info,
                                 idempotency_reserved=idempotency_reserved,
                             )
+                            provider_submission_active = False
+                            if not domain_finalized:
+                                if accepted_send_settlement_failed:
+                                    print(
+                                        "STOP: accepted-send bookkeeping failed "
+                                        "after provider submission; recipient "
+                                        "will not be retried"
+                                    )
+                                    stop_reason = "accepted_send_bookkeeping_failed"
+                                else:
+                                    print(
+                                        "STOP: domain_finalize_failed after accepted send; "
+                                        "recipient will not be retried"
+                                    )
+                                    stop_reason = "domain_finalize_failed"
+                                break
                             print(f"[{i}/{len(pending)}] SENT (retry) {to_email}")
                             sent_this_run += 1
                             sent_this_run_emails.add(to_email)
@@ -7960,16 +8016,6 @@ def main() -> int | None:
                                 gmail_messages_24h += 1
                                 if is_external(to_email, my_domains):
                                     gmail_unique_ext.add(to_email)
-
-                            provider_submission_active = False
-
-                            if not domain_finalized:
-                                print(
-                                    "STOP: domain_finalize_failed after accepted send; "
-                                    "recipient will not be retried"
-                                )
-                                stop_reason = "domain_finalize_failed"
-                                break
 
                             honor_deferred_stop()
 

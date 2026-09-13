@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import important_leads_workflow as workflow
 
@@ -127,30 +129,42 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
         )
 
         preview_dir = tmp / "previews"
+        idempotency_db = tmp / "send_idempotency.sqlite3"
+        with sqlite3.connect(idempotency_db) as conn:
+            conn.execute(
+                "CREATE TABLE send_reservations "
+                "(email TEXT, status TEXT, outcome TEXT)"
+            )
 
-        preview = workflow.preview_dispatch_master_leads(
-            master_path=master_path,
-            triaged_keep_path=triaged_path,
-            rejected_path=rejected_path,
-            dispatch_source_mode=source_mode,
-            jc_queue_path=jc_queue,
-            sendgrid_queue_paths=sg_queues,
-            jc_log_path=logs[0],
-            sendgrid_log_paths=logs[1:],
-            suppressed_path=suppressed,
-            unsubscribed_path=unsubscribed,
-            sendgrid_suppressions_path=sendgrid_suppressions,
-            sendgrid_events_path=sendgrid_events,
-            lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
-            campaign_type=campaign_type,
-            preview_dir=preview_dir,
-        )
+        with patch.object(
+            workflow,
+            "send_idempotency_db_path",
+            return_value=idempotency_db,
+        ):
+            preview = workflow.preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode=source_mode,
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                suppressed_path=suppressed,
+                unsubscribed_path=unsubscribed,
+                sendgrid_suppressions_path=sendgrid_suppressions,
+                sendgrid_events_path=sendgrid_events,
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                campaign_type=campaign_type,
+                preview_dir=preview_dir,
+            )
 
         return {
             "preview": preview,
             "preview_dir": preview_dir,
             "jc_queue": jc_queue,
             "sg_queues": sg_queues,
+            "idempotency_db": idempotency_db,
         }
 
     def test_required_fields_are_campaign_specific(self) -> None:
@@ -350,15 +364,20 @@ class FullRecontactSchemaHotfixTests(unittest.TestCase):
 
             preview = fixture["preview"]
 
-            confirmed = workflow.confirm_dispatch_preview(
-                preview["preview_id"],
-                recontact_route=preview["recontact_route"],
-                require_stopped=False,
-                backup_root=tmp / "backups",
-                report_dir=tmp / "reports",
-                persist_state=False,
-                preview_dir=fixture["preview_dir"],
-            )
+            with patch.object(
+                workflow,
+                "send_idempotency_db_path",
+                return_value=fixture["idempotency_db"],
+            ):
+                confirmed = workflow.confirm_dispatch_preview(
+                    preview["preview_id"],
+                    recontact_route=preview["recontact_route"],
+                    require_stopped=False,
+                    backup_root=tmp / "backups",
+                    report_dir=tmp / "reports",
+                    persist_state=False,
+                    preview_dir=fixture["preview_dir"],
+                )
 
             self.assertEqual(
                 preview["campaign_id"],

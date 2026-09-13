@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -250,21 +251,33 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            preview = important_leads_workflow.preview_dispatch_master_leads(
-                master_path=master_path,
-                triaged_keep_path=triaged_keep_path,
-                rejected_path=rejected_path,
-                dispatch_source_mode="triaged_keep",
-                jc_queue_path=queues[0],
-                sendgrid_queue_paths=queues[1:],
-                jc_log_path=logs[0],
-                sendgrid_log_paths=logs[1:],
-                sendgrid_suppressions_path=sendgrid_suppressions,
-                suppressed_path=suppressed,
-                unsubscribed_path=unsubscribed,
-                lead_ledger_db_path=root / "lead_ledger.sqlite3",
-                preview_dir=preview_dir,
-            )
+            idempotency_db = root / "send_idempotency.sqlite3"
+            with sqlite3.connect(idempotency_db) as conn:
+                conn.execute(
+                    "CREATE TABLE send_reservations "
+                    "(email TEXT, status TEXT, outcome TEXT)"
+                )
+
+            with patch.object(
+                important_leads_workflow,
+                "send_idempotency_db_path",
+                return_value=idempotency_db,
+            ):
+                preview = important_leads_workflow.preview_dispatch_master_leads(
+                    master_path=master_path,
+                    triaged_keep_path=triaged_keep_path,
+                    rejected_path=rejected_path,
+                    dispatch_source_mode="triaged_keep",
+                    jc_queue_path=queues[0],
+                    sendgrid_queue_paths=queues[1:],
+                    jc_log_path=logs[0],
+                    sendgrid_log_paths=logs[1:],
+                    sendgrid_suppressions_path=sendgrid_suppressions,
+                    suppressed_path=suppressed,
+                    unsubscribed_path=unsubscribed,
+                    lead_ledger_db_path=root / "lead_ledger.sqlite3",
+                    preview_dir=preview_dir,
+                )
 
             self.assertEqual(
                 "previewed",
@@ -296,6 +309,11 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
                     important_leads_workflow,
                     "validate_dispatch_preview",
                     return_value=preview,
+                ),
+                patch.object(
+                    important_leads_workflow,
+                    "send_idempotency_db_path",
+                    return_value=idempotency_db,
                 ),
                 self.assertRaisesRegex(
                     RuntimeError,

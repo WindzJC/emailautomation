@@ -642,6 +642,85 @@ class SendShardInterruptSafetyTests(unittest.TestCase):
                 ),
             )
 
+    def test_accepted_send_idempotency_false_stops_with_claim_evidence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self.build_fixture(tmpdir)
+            fixture["queue"].write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "interrupt-test@example.com,Interrupt,Safe Test,"
+                "accepted-settlement-false\n",
+                encoding="utf-8",
+            )
+            outcomes = []
+
+            def outcome_side_effect(**kwargs):
+                outcomes.append(kwargs.get("outcome"))
+                return False
+
+            with patch.object(
+                send_shard,
+                "record_send_idempotency_outcome",
+                side_effect=outcome_side_effect,
+            ):
+                result = self.run_sender(fixture)
+
+            self.assertEqual(1, result["send_mock"].call_count)
+            self.assertEqual(["sent"], outcomes)
+            self.assertIn(
+                "STOP: accepted-send bookkeeping failed "
+                "after provider submission; recipient "
+                "will not be retried",
+                result["stdout"],
+            )
+            self.assertNotIn("ambiguous", result["stdout"].lower())
+
+            rows = self.read_recipient_rows(fixture)
+            self.assertEqual(
+                1,
+                sum(
+                    1
+                    for row in rows
+                    if row["Status"] == "SENT"
+                    and row["Email"] == "interrupt-test@example.com"
+                ),
+            )
+            with fixture["queue"].open(newline="", encoding="utf-8-sig") as handle:
+                self.assertEqual([], list(csv.DictReader(handle)))
+
+            db_path = fixture["state"] / "send_idempotency.sqlite3"
+            with send_shard.sqlite3.connect(db_path) as conn:
+                reservation = conn.execute(
+                    """
+                    SELECT status, outcome
+                    FROM send_reservations
+                    WHERE campaign_id = ?
+                    AND provider = ?
+                    AND email = ?
+                    """,
+                    (
+                        "accepted-settlement-false",
+                        "sendgrid",
+                        "interrupt-test@example.com",
+                    ),
+                ).fetchone()
+                claim_count = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM queue_claims
+                    WHERE campaign_id = ?
+                    AND provider = ?
+                    AND email = ?
+                    """,
+                    (
+                        "accepted-settlement-false",
+                        "sendgrid",
+                        "interrupt-test@example.com",
+                    ),
+                ).fetchone()[0]
+
+            self.assertEqual(("reserved", ""), reservation)
+            self.assertEqual(1, claim_count)
+
 
 if __name__ == "__main__":
     unittest.main()

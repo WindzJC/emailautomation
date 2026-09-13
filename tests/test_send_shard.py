@@ -69,6 +69,41 @@ class SendShardTests(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
+    def test_append_suppressed_email_locks_normalizes_and_dedupes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            suppress = Path(tmpdir) / "suppressed.csv"
+            real_lock_files = send_shard.lock_files
+            locked_paths = []
+
+            def lock_spy(paths):
+                locked_paths.append([Path(path) for path in paths])
+                return real_lock_files(paths)
+
+            with patch.object(send_shard, "lock_files", side_effect=lock_spy):
+                send_shard.append_suppressed_email(suppress, "  Person@Example.TEST  ")
+                send_shard.append_suppressed_email(suppress, "person@example.test")
+                send_shard.append_suppressed_email(suppress, " PERSON@example.TEST ")
+
+            self.assertEqual([[suppress], [suppress], [suppress]], locked_paths)
+            with suppress.open(newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(["Email"], reader.fieldnames)
+                self.assertEqual(
+                    [{"Email": "person@example.test"}],
+                    list(reader),
+                )
+
+    def test_append_suppressed_email_rejects_incompatible_schema_without_corrupting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            suppress = Path(tmpdir) / "suppressed.csv"
+            original = "Email,Reason\nexisting@example.test,manual\n"
+            suppress.write_text(original, encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                send_shard.append_suppressed_email(suppress, "new@example.test")
+
+            self.assertEqual(original, suppress.read_text(encoding="utf-8"))
+
     def _call_fake_sendgrid(self, response_or_error, phase_callback):
         class Value:
             def __init__(self, *args):
