@@ -5030,10 +5030,17 @@ function renderImportantDispatch(result) {
     dispatchSource,
     lastLeadsStatus,
   );
+  const historicalTerminalColdCheckWithoutPreview = Boolean(
+    selectedCampaignType === "cold"
+    && !dispatchPreview
+    && isHistoricalTerminalColdCheckForNextCampaign(currentLeadCheckStatus(lastLeadsStatus), lastLeadsStatus)
+  );
   const selectedSourcePreviewRequiredMessage = selectedCampaignType === "recontact_cold"
     ? "Preview required for the selected Checked Recontact source."
     : "Preview required for the selected Fresh Cold source.";
-  const noPreviewTitle = dispatchBlockReason
+  const noPreviewTitle = historicalTerminalColdCheckWithoutPreview
+    ? "Preview not ready"
+    : dispatchBlockReason
     ? "Preview locked."
     : previewFeedbackState === "blocked"
     ? "Preview blocked."
@@ -5042,7 +5049,9 @@ function renderImportantDispatch(result) {
       : stalePreviewMismatch
         ? "Preview/source/campaign mismatch. Retry Preview Dispatch."
         : "No preview yet.";
-  const noPreviewMessage = dispatchBlockReason
+  const noPreviewMessage = historicalTerminalColdCheckWithoutPreview
+    ? "Upload and check a new source to create the next campaign preview."
+    : dispatchBlockReason
     || previewFeedbackMessage
     || (stalePreviewMismatch
       ? `${selectedSourcePreviewRequiredMessage} The stored preview does not match the selected source or campaign.`
@@ -5132,7 +5141,7 @@ function renderImportantDispatch(result) {
               <span class="mini-pill mini-pill-${escapeHtml(confirmSafety.tone === "good" ? "good" : confirmSafety.tone === "bad" ? "bad" : "warn")}">${escapeHtml(dispatchPreview ? (confirmSafety.state === "empty" ? "Nothing to confirm" : confirmSafety.ready ? "Ready to confirm" : "Review required") : "Preview needed")}</span>
             </div>
             <section class="dispatch-status-banner dispatch-status-banner-${escapeHtml(confirmSafety.tone === "neutral" ? "warn" : confirmSafety.tone)}">
-              <strong>${escapeHtml(confirmSafety.title)}</strong>
+              <strong>${escapeHtml(dispatchPreview || !historicalTerminalColdCheckWithoutPreview ? confirmSafety.title : noPreviewTitle)}</strong>
               <span>${escapeHtml(dispatchPreview ? confirmSafety.message : noPreviewMessage)}</span>
             </section>
             ${previewMetricsMarkup}

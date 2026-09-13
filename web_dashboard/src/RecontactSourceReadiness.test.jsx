@@ -987,6 +987,10 @@ describe("source-scoped Recontact readiness", () => {
     expect(rail).not.toHaveTextContent("Source Failed");
     expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Not started");
     expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Upload a CSV/XLSX to begin.");
+    const previewSurface = document.querySelector(".dispatch-current-preview");
+    expect(previewSurface).toHaveTextContent("Preview not ready");
+    expect(previewSurface).toHaveTextContent("Upload and check a new source to create the next campaign preview.");
+    expect(previewSurface).not.toHaveTextContent("Check failed or stale");
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeDisabled();
     expect(document.getElementById("leads-important-dispatch-confirm-btn")).toBeDisabled();
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
@@ -1032,6 +1036,7 @@ describe("source-scoped Recontact readiness", () => {
     expect(rail).not.toHaveTextContent("Source Needs input");
     expect(document.getElementById("lead-check-status-card")).toHaveTextContent("Failed");
     expect(document.getElementById("lead-check-status-card")).not.toHaveTextContent("Not started");
+    expect(document.querySelector(".dispatch-current-preview")).toHaveTextContent("Check failed or stale");
     expect(document.getElementById("leads-important-dispatch-preview-btn")).toBeDisabled();
     expect(document.getElementById("leads-important-dispatch-confirm-btn")).toBeDisabled();
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
