@@ -1727,6 +1727,29 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("stopped", body["snapshot"]["profiles"][0]["runtime_state"])
         self.assertEqual(8, body["snapshot"]["profiles"][0]["pending_count"])
 
+    def test_failed_stop_returns_conflict_status_and_keeps_running_snapshot(self) -> None:
+        snapshot = {
+            "profiles": [{
+                "name": "private_jc",
+                "runtime_state": "running",
+                "runtime_label": "Running",
+                "pending_count": 8,
+            }],
+        }
+        with patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True), patch.object(
+            live_dashboard.runtime_control,
+            "stop_sender",
+            return_value=(False, "Stop requested for private_jc, but the worker is still active."),
+        ), patch.object(
+            live_dashboard, "_load_or_build_live_snapshot", return_value=snapshot
+        ):
+            response = live_dashboard.stop_profile("private_jc")
+
+        body = json.loads(response.body)
+        self.assertEqual(409, response.status_code)
+        self.assertFalse(body["ok"])
+        self.assertEqual("running", body["snapshot"]["profiles"][0]["runtime_state"])
+
     def test_start_profile_precondition_block_reuses_request_snapshot(self) -> None:
         snapshot = {"profiles": []}
         preconditions = {

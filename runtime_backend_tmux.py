@@ -50,32 +50,32 @@ def start_all_senders() -> tuple[bool, str]:
 
 
 def stop_all_senders(session: str = dashboard_core.TMUX_SESSION_NAME) -> tuple[bool, str]:
+    """Stop active profiles cooperatively without destroying their tmux sessions."""
+    active = sorted(
+        dashboard_core.active_or_locked_sender_profiles(
+            dashboard_core.DASHBOARD_PROFILES
+        )
+    )
+    if not active:
+        return True, "No sender workers are running."
+
     messages: List[str] = []
     ok = True
-    sessions = {dashboard_core.profile_session_name(name) for name in dashboard_core.DASHBOARD_PROFILES}
-    tmux_messages: List[str] = []
-    for profile_session in sorted(sessions):
-        stopped, message = dashboard_core.stop_sendgrid_session(session=profile_session)
-        if stopped:
-            tmux_messages.append(message)
-        elif "is not running" not in message.lower():
-            tmux_messages.append(message)
+    for profile_name in active:
+        stopped, message = stop_sender(profile_name, session=session)
+        ok = ok and stopped
+        messages.append(message)
 
-    direct = dashboard_core.stop_sender_processes(dashboard_core.DASHBOARD_PROFILES)
-    found = len(direct.get("found", []))
-    stopped = len(direct.get("stopped", []))
-    killed = len(direct.get("killed", []))
-    still_running = len(direct.get("still_running", []))
-    if still_running:
-        ok = False
-
-    tmux_result = "; ".join(tmux_messages) if tmux_messages else "No dashboard tmux sender sessions were running."
-    direct_result = (
-        f"Direct sender process stop: found={found}, stopped={stopped}, "
-        f"sigkill={killed}, still_running={still_running}."
+    remaining = sorted(
+        dashboard_core.active_or_locked_sender_profiles(
+            dashboard_core.DASHBOARD_PROFILES
+        )
     )
-    messages.append(f"tmux stop: {tmux_result}")
-    messages.append(direct_result)
+    if remaining:
+        ok = False
+        messages.append(
+            "Still active after safe stop verification: " + ", ".join(remaining) + "."
+        )
     return ok, " | ".join(messages)
 
 

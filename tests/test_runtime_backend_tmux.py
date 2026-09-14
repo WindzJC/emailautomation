@@ -63,5 +63,32 @@ class RuntimeBackendTmuxTests(unittest.TestCase):
         start_private_profile.assert_called_once_with("private_jc", session="private_jc")
 
 
+    def test_stop_all_senders_uses_verified_profile_stop_without_killing_tmux_sessions(self) -> None:
+        with patch.object(
+            runtime_backend_tmux.dashboard_core,
+            "DASHBOARD_PROFILES",
+            ["private_jc"],
+        ), patch.object(
+            runtime_backend_tmux.dashboard_core,
+            "active_or_locked_sender_profiles",
+            side_effect=[{"private_jc"}, set()],
+        ), patch.object(
+            runtime_backend_tmux,
+            "stop_sender",
+            return_value=(True, "Stopped and verified private_jc."),
+        ) as stop_sender, patch.object(
+            runtime_backend_tmux.dashboard_core,
+            "stop_sendgrid_session",
+        ) as kill_session:
+            ok, message = runtime_backend_tmux.stop_all_senders()
+
+        self.assertTrue(ok)
+        self.assertIn("Stopped and verified private_jc", message)
+        stop_sender.assert_called_once_with(
+            "private_jc", session=runtime_backend_tmux.dashboard_core.TMUX_SESSION_NAME
+        )
+        kill_session.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

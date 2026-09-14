@@ -3909,5 +3909,78 @@ class DashboardCoreTests(unittest.TestCase):
                 handle.write(json.dumps(event) + "\n")
 
 
+    def test_stop_profile_reports_success_only_after_worker_is_verified_gone(self) -> None:
+        tmux_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(dashboard_core.subprocess, "run", return_value=tmux_result), patch.object(
+            dashboard_core,
+            "_wait_for_sender_stop",
+            return_value=([], set()),
+        ) as wait_for_stop, patch.object(
+            dashboard_core,
+            "stop_sender_processes",
+        ) as direct_stop:
+            ok, message = dashboard_core.stop_sendgrid_profile(
+                "private_jc", 0, session="private_jc"
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("Stopped and verified", message)
+        wait_for_stop.assert_called_once_with(["private_jc"], timeout_seconds=3.0)
+        direct_stop.assert_not_called()
+
+    def test_stop_profile_fails_closed_when_worker_survives_safe_shutdown(self) -> None:
+        tmux_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        worker = {"pid": 1234, "profile": "private_jc", "command": "python send_shard.py --profile private_jc"}
+        with patch.object(dashboard_core.subprocess, "run", return_value=tmux_result), patch.object(
+            dashboard_core,
+            "_wait_for_sender_stop",
+            return_value=([worker], {"private_jc"}),
+        ), patch.object(
+            dashboard_core,
+            "stop_sender_processes",
+            return_value={
+                "found": [worker],
+                "stopped": [],
+                "killed": [],
+                "still_running": [worker],
+                "locked_profiles": ["private_jc"],
+            },
+        ) as direct_stop:
+            ok, message = dashboard_core.stop_sendgrid_profile(
+                "private_jc", 0, session="private_jc"
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("still active", message)
+        self.assertIn("No SIGKILL was used", message)
+        direct_stop.assert_called_once_with(
+            ["private_jc"], terminate_wait_seconds=75.0, force_kill=False
+        )
+
+    def test_direct_sender_stop_does_not_sigkill_by_default(self) -> None:
+        worker = {"pid": 1234, "profile": "private_jc", "command": "python send_shard.py --profile private_jc"}
+        with patch.object(
+            dashboard_core,
+            "_running_sender_processes",
+            return_value=[worker],
+        ), patch.object(
+            dashboard_core,
+            "locked_sender_profiles",
+            return_value={"private_jc"},
+        ), patch.object(
+            dashboard_core,
+            "_wait_for_sender_stop",
+            return_value=([worker], {"private_jc"}),
+        ), patch.object(dashboard_core.os, "kill") as kill:
+            result = dashboard_core.stop_sender_processes(
+                ["private_jc"], terminate_wait_seconds=0.1
+            )
+
+        kill.assert_called_once_with(1234, dashboard_core.signal.SIGTERM)
+        self.assertEqual([], result["killed"])
+        self.assertEqual([worker], result["still_running"])
+        self.assertEqual(["private_jc"], result["locked_profiles"])
+
+
 if __name__ == "__main__":
     unittest.main()

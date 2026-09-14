@@ -6878,7 +6878,10 @@ def start_profile(profile_name: str) -> JSONResponse:
 def stop() -> JSONResponse:
     ok, message = runtime_control.stop_all_senders()
     snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": snapshot})
+    return JSONResponse(
+        {"ok": ok, "message": message, "snapshot": snapshot},
+        status_code=200 if ok else 409,
+    )
 
 
 @app.post("/api/stop/{profile_name}")
@@ -6887,7 +6890,10 @@ def stop_profile(profile_name: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     ok, message = runtime_control.stop_sender(profile_name)
     snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
-    return JSONResponse({"ok": ok, "message": message, "snapshot": snapshot})
+    return JSONResponse(
+        {"ok": ok, "message": message, "snapshot": snapshot},
+        status_code=200 if ok else 409,
+    )
 
 
 @app.post("/api/archive-reset-logs")

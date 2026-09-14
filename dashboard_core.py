@@ -1433,15 +1433,45 @@ def protected_sendgrid_credential_error(profile_name: str) -> str:
     return ""
 
 
+def _wait_for_sender_stop(
+    profile_names: Iterable[str],
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.1,
+) -> tuple[List[Dict[str, object]], set[str]]:
+    """Wait until exact sender processes and profile runtime locks are gone."""
+    profiles = {str(name) for name in profile_names if str(name)}
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        running = _running_sender_processes(profiles, include_preview=False)
+        locked = locked_sender_profiles(profiles)
+        if not running and not locked:
+            return [], set()
+        now = time.monotonic()
+        if now >= deadline:
+            return running, locked
+        time.sleep(max(0.0, min(poll_seconds, deadline - now)))
+
+
 def stop_sender_processes(
     profile_names: Optional[Iterable[str]] = None,
     *,
-    terminate_wait_seconds: float = 2.0,
+    terminate_wait_seconds: float = 75.0,
+    force_kill: bool = False,
 ) -> Dict[str, object]:
-    """Stop only known dashboard send_shard.py profile processes."""
-    found = _running_sender_processes(profile_names)
-    if not found:
-        return {"found": [], "stopped": [], "killed": [], "still_running": []}
+    """Cooperatively stop known sender workers and verify their final state.
+
+    SIGTERM is handled by send_shard.py as a deferred, bookkeeping-safe stop.
+    SIGKILL is disabled by default because it can interrupt the provider boundary.
+    """
+    profiles = set(profile_names or DASHBOARD_PROFILES)
+    found = _running_sender_processes(profiles, include_preview=False)
+    locked_before = locked_sender_profiles(profiles)
+    if not found and not locked_before:
+        return {
+            "found": [], "stopped": [], "killed": [], "still_running": [],
+            "locked_profiles": [],
+        }
 
     for proc in found:
         try:
@@ -1451,30 +1481,32 @@ def stop_sender_processes(
         except Exception as exc:
             proc["term_error"] = str(exc)
 
-    deadline = time.monotonic() + max(0.1, terminate_wait_seconds)
-    remaining = list(found)
-    while remaining and time.monotonic() < deadline:
-        time.sleep(0.1)
-        remaining = [proc for proc in remaining if _process_exists(int(proc["pid"]))]
+    remaining, locked_after = _wait_for_sender_stop(
+        profiles, timeout_seconds=terminate_wait_seconds
+    )
 
     killed: List[Dict[str, object]] = []
-    for proc in remaining:
-        try:
-            os.kill(int(proc["pid"]), signal.SIGKILL)
-            killed.append(proc)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            proc["kill_error"] = str(exc)
+    if force_kill and remaining:
+        for proc in remaining:
+            try:
+                os.kill(int(proc["pid"]), signal.SIGKILL)
+                killed.append(proc)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                proc["kill_error"] = str(exc)
+        remaining, locked_after = _wait_for_sender_stop(
+            profiles, timeout_seconds=1.0
+        )
 
-    time.sleep(0.2)
-    still_running = [proc for proc in found if _process_exists(int(proc["pid"]))]
-    stopped = [proc for proc in found if proc not in still_running]
+    still_pids = {int(proc.get("pid") or 0) for proc in remaining}
+    stopped = [proc for proc in found if int(proc.get("pid") or 0) not in still_pids]
     return {
         "found": found,
         "stopped": stopped,
         "killed": killed,
-        "still_running": still_running,
+        "still_running": remaining,
+        "locked_profiles": sorted(locked_after),
     }
 
 
@@ -1601,26 +1633,49 @@ def stop_sendgrid_session(session: str = "sendgrid") -> tuple[bool, str]:
     return False, output or f"tmux session {session} is not running."
 
 
-def stop_sendgrid_profile(profile_name: str, pane_index: int, session: str = "sendgrid") -> tuple[bool, str]:
-    proc = subprocess.run(
+def stop_sendgrid_profile(
+    profile_name: str,
+    pane_index: int,
+    session: str = "sendgrid",
+    *,
+    graceful_wait_seconds: float = 3.0,
+    terminate_wait_seconds: float = 75.0,
+) -> tuple[bool, str]:
+    """Stop one profile and report success only after the worker is actually gone."""
+    tmux_proc = subprocess.run(
         ["tmux", "send-keys", "-t", f"{session}:run.{pane_index}", "C-c"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    if proc.returncode == 0:
-        return True, f"Stop signal sent to {profile_name} (pane {pane_index})."
-    output = "\n".join(part for part in [proc.stdout.strip(), proc.stderr.strip()] if part).strip()
-    direct = stop_sender_processes([profile_name])
-    found = len(direct.get("found", []))
-    stopped = len(direct.get("stopped", []))
-    still_running = len(direct.get("still_running", []))
-    if stopped and not still_running:
-        return True, f"{output or f'Unable to stop {profile_name} via tmux.'} Direct process stop: found={found}, stopped={stopped}."
-    if found:
-        return False, f"{output or f'Unable to stop {profile_name} via tmux.'} Direct process stop: found={found}, stopped={stopped}, still_running={still_running}."
-    return False, output or f"Unable to stop {profile_name}."
+    tmux_output = "\n".join(
+        part for part in [tmux_proc.stdout.strip(), tmux_proc.stderr.strip()] if part
+    ).strip()
+
+    remaining, locked = _wait_for_sender_stop(
+        [profile_name], timeout_seconds=graceful_wait_seconds
+    )
+    if not remaining and not locked:
+        return True, f"Stopped and verified {profile_name}."
+
+    direct = stop_sender_processes(
+        [profile_name],
+        terminate_wait_seconds=terminate_wait_seconds,
+        force_kill=False,
+    )
+    still_running = list(direct.get("still_running", []))
+    locked_profiles = list(direct.get("locked_profiles", []))
+    if not still_running and not locked_profiles:
+        return True, f"Stopped and verified {profile_name}."
+
+    detail = tmux_output or "Graceful Ctrl+C was delivered."
+    return (
+        False,
+        f"Stop requested for {profile_name}, but the worker is still active after the safe "
+        f"shutdown window. {detail} No SIGKILL was used; forced termination is intentionally "
+        "blocked at the provider boundary. Do not start another sender until this worker exits.",
+    )
 
 
 def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
