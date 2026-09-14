@@ -1854,14 +1854,12 @@ When someone looks up a book or author, what they find next often shapes whether
 
 At Astra Productions, we look at the full reader journey—from how the book is introduced, to the author presence behind it, to how easily someone can explore further or purchase.
 
-If you're open to it, I can take a closer look at {{BookTitle}} and send you the three areas I would prioritize first, along with why I think they matter.
+If you're open to it, I can take a closer look at how {{BookTitle}} fits into your overall author presence and send you the three areas I would prioritize first, along with why I think they matter.
 
 There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
-
 Founder & CEO, Astra Productions
-
 astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
@@ -1880,9 +1878,7 @@ If you're open to it, I can take a closer look at your current author presence a
 There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
 
 Windelle JC
-
 Founder & CEO, Astra Productions
-
 astraproductions.co
 
 P.S. If you would rather not hear from me again, reply “unsubscribe.”
