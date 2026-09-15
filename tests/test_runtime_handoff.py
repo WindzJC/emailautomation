@@ -469,6 +469,54 @@ def legacy_compatibility_case(repos, tmp_path: Path, monkeypatch):
     }
 
 
+def test_runtime_files_include_active_campaign_lineage_under_backups(tmp_path: Path) -> None:
+    staged = tmp_path / "data/state/backups/staged_batches/dispatch_test"
+    staged.mkdir(parents=True, exist_ok=True)
+    checked = staged / "leads.csv"
+    keep = staged / "leads_triaged_keep.csv"
+    reject = staged / "leads_triaged_reject.csv"
+    unrelated = staged.parent / "old_dispatch" / "unrelated.csv"
+    unrelated.parent.mkdir(parents=True, exist_ok=True)
+    for path in (checked, keep, reject, unrelated):
+        path.write_text("Email\nreader@example.test\n", encoding="utf-8")
+
+    snapshot = tmp_path / runtime_handoff.QUEUE_SAFETY_MANIFEST
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps({
+            "checked_path": str(checked),
+            "intended_source_path": str(keep),
+            "triaged_keep_path": str(keep),
+            "triaged_reject_path": str(reject),
+        }),
+        encoding="utf-8",
+    )
+
+    names = {
+        path.relative_to(tmp_path).as_posix()
+        for path in runtime_handoff.runtime_files(tmp_path)
+    }
+
+    assert checked.relative_to(tmp_path).as_posix() in names
+    assert keep.relative_to(tmp_path).as_posix() in names
+    assert reject.relative_to(tmp_path).as_posix() in names
+    assert unrelated.relative_to(tmp_path).as_posix() not in names
+
+
+def test_runtime_files_fail_closed_when_active_lineage_is_missing(tmp_path: Path) -> None:
+    snapshot = tmp_path / runtime_handoff.QUEUE_SAFETY_MANIFEST
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps({
+            "checked_path": str(tmp_path / "data/state/backups/staged_batches/missing/leads.csv"),
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(runtime_handoff.HandoffError, match="lineage file is missing"):
+        runtime_handoff.runtime_files(tmp_path)
+
+
 @pytest.mark.parametrize(
     "relative",
     [

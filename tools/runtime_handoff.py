@@ -540,17 +540,60 @@ def excluded(repo: Path, path: Path) -> bool:
     return False
 
 
+def _required_queue_safety_lineage_files(repo: Path) -> list[Path]:
+    """Include active campaign lineage even when it lives under excluded backups."""
+    manifest_path = repo / QUEUE_SAFETY_MANIFEST
+    if not manifest_path.is_file():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HandoffError(f"Unreadable queue safety state: {manifest_path}") from exc
+    if not isinstance(manifest, dict):
+        raise HandoffError(f"Queue safety state is not an object: {manifest_path}")
+
+    raw_paths: list[str] = []
+    for key in ("checked_path", "intended_source_path", "triaged_keep_path", "triaged_reject_path"):
+        value = str(manifest.get(key) or "").strip()
+        if value:
+            raw_paths.append(value)
+    files = manifest.get("files")
+    if isinstance(files, dict):
+        for value in files.values():
+            if isinstance(value, dict):
+                path_value = str(value.get("path") or "").strip()
+                if path_value:
+                    raw_paths.append(path_value)
+
+    required: set[Path] = set()
+    for raw in raw_paths:
+        resolved = _resolve_runtime_path(repo, raw)
+        if resolved is None:
+            raise HandoffError(f"Queue safety lineage path cannot be rebased into runtime: {raw}")
+        relative = resolved.resolve(strict=False).relative_to(repo.resolve())
+        if _contains_secret_name(relative):
+            raise HandoffError(f"Sensitive queue safety lineage path is forbidden: {relative}")
+        if not resolved.is_file():
+            raise HandoffError(f"Queue safety lineage file is missing: {relative}")
+        required.add(resolved)
+    return sorted(required, key=lambda path: path.relative_to(repo).as_posix())
+
+
 def runtime_files(repo: Path) -> list[Path]:
-    files: list[Path] = []
+    files: set[Path] = set()
     for root_name in ("data", "_important"):
         root = repo / root_name
         if not root.exists():
             continue
-        files.extend(
+        files.update(
             path
             for path in root.rglob("*")
             if path.is_file() and not excluded(repo, path)
         )
+    # Backups are excluded in general, but the active campaign snapshot may point
+    # at immutable staged-batch lineage under data/state/backups. Those exact
+    # files are required to re-prove queue safety on the receiving machine.
+    files.update(_required_queue_safety_lineage_files(repo))
     return sorted(files, key=lambda path: path.relative_to(repo).as_posix())
 
 
