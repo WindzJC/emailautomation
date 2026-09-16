@@ -1881,9 +1881,23 @@
 
 .react-overview-live-grid {
   display: grid;
-  grid-template-columns: minmax(260px, .75fr) minmax(0, 1.25fr);
+  grid-template-columns: minmax(620px, 1.45fr) minmax(420px, .55fr);
   gap: 8px;
   margin-top: 9px;
+}
+
+@media (max-width: 1180px) {
+  .react-overview-live-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .react-command-bar {
+    order: 2;
+  }
+
+  .react-senders-progress {
+    order: 1;
+  }
 }
 
 .react-sender-console {
@@ -2119,12 +2133,15 @@
 }
 
 #overview-view .ops-progress-summary-item strong {
+  overflow: hidden;
   color: #94a4b8;
   font-size: .58rem;
   font-weight: 700;
   letter-spacing: .035em;
   line-height: 1.15;
+  text-overflow: ellipsis;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 #overview-view .ops-progress-summary-item span {
@@ -2133,7 +2150,7 @@
   font-size: .67rem;
   line-height: 1.25;
   text-overflow: ellipsis;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 #overview-view .ops-progress-summary-action {
