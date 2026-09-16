@@ -1590,6 +1590,24 @@ def clear_queue_claim(receipt: dict[str, object] | None) -> bool:
         return False
 
 
+def _portable_queue_claim_suffix(path_value: object) -> str:
+    """Return a repo-stable queue identity for cross-machine runtime handoffs."""
+    parts = [part for part in str(path_value or "").replace("\\", "/").split("/") if part]
+    for index in range(max(0, len(parts) - 2)):
+        if parts[index:index + 2] == ["data", "shards"]:
+            return "/".join(parts[index:])
+    return ""
+
+
+def _queue_claim_path_matches_runtime(stored_queue: object, current_queue: str) -> bool:
+    stored = str(stored_queue or "")
+    if stored == current_queue:
+        return True
+    stored_suffix = _portable_queue_claim_suffix(stored)
+    current_suffix = _portable_queue_claim_suffix(current_queue)
+    return bool(stored_suffix and current_suffix and stored_suffix == current_suffix)
+
+
 def reconcile_queue_claims(csv_path: Path, *, provider: str, profile: str,
                            db_path: Path | None = None) -> dict[str, int]:
     """Queue lock -> DB transaction, matching the claim writer's lock order."""
@@ -1606,7 +1624,9 @@ def reconcile_queue_claims(csv_path: Path, *, provider: str, profile: str,
         for claim in claims:
             ident, campaign, stored_provider, email, stored_profile, stored_queue, index, fields, row = claim
             fields, row = json.loads(fields), json.loads(row)
-            if (stored_queue != queue_file or stored_provider != provider
+            portable_relocation = stored_queue != queue_file
+            if (not _queue_claim_path_matches_runtime(stored_queue, queue_file)
+                    or stored_provider != provider
                     or stored_profile != str(profile or "").strip()
                     or not isinstance(index, int) or index < 0
                     or not isinstance(fields, list) or not fields
@@ -1622,9 +1642,16 @@ def reconcile_queue_claims(csv_path: Path, *, provider: str, profile: str,
             ).fetchone()
             if reservation not in (None, ("sent", "sent"), ("reserved", ""), ("ambiguous", "ambiguous")):
                 raise RuntimeError("queue_claim_inconsistent_reservation_manual_review")
-            validated.append((ident, reservation, dict(email=email, row=row, index=index, fieldnames=fields)))
-        result = {"restored": 0, "sent": 0, "protected": 0}
-        for ident, reservation, receipt in validated:
+            validated.append((
+                ident, reservation,
+                dict(email=email, row=row, index=index, fieldnames=fields),
+                portable_relocation,
+            ))
+        result = {"restored": 0, "sent": 0, "protected": 0, "relocated": 0}
+        for ident, reservation, receipt, portable_relocation in validated:
+            if portable_relocation:
+                conn.execute("UPDATE queue_claims SET queue_file = ? WHERE id = ?", (queue_file, ident))
+                result["relocated"] += 1
             if reservation is None:
                 if not _restore_claimed_queue_row_locked(csv_path, receipt):
                     raise RuntimeError("queue_claim_restore_failed")

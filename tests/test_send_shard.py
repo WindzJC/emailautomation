@@ -2223,6 +2223,49 @@ finished_path.write_text(
                     self.assertEqual(reservation, conn.execute("SELECT * FROM send_reservations").fetchall())
                     self.assertEqual(0 if outcome == "sent" else 1, conn.execute("SELECT COUNT(*) FROM queue_claims").fetchone()[0])
 
+    def test_patch6_cross_machine_queue_claim_path_is_rebound_without_resend(self):
+        legacy_paths = (
+            "/home/jc/src/emailautomation/data/shards/recipients_private_jc.csv",
+            r"C:\Users\jc\emailautomation\data\shards\recipients_private_jc.csv",
+        )
+        for legacy_path in legacy_paths:
+            with self.subTest(legacy_path=legacy_path), tempfile.TemporaryDirectory() as tmpdir:
+                queue_dir = Path(tmpdir) / "mac" / "emailautomation" / "data" / "shards"
+                queue_dir.mkdir(parents=True)
+                queue = queue_dir / "recipients_private_jc.csv"
+                db = Path(tmpdir) / "idempotency.sqlite3"
+                fields = ["AuthorEmail", "BookTitle"]
+                with queue.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fields)
+                    writer.writeheader()
+                    writer.writerow({"AuthorEmail": "target@example.test", "BookTitle": "Target"})
+                metadata = dict(campaign_id="cold", provider="private", profile="private_jc", db_path=db)
+                send_shard.claim_queue_row_with_receipt(queue, "target@example.test", **metadata)
+                key = dict(campaign_id="cold", provider="private", email="target@example.test", db_path=db)
+                self.assertTrue(send_shard.reserve_send_idempotency(
+                    **key, profile="private_jc", queue_file=queue.name,
+                )[0])
+                before = queue.read_bytes()
+                with send_shard.sqlite3.connect(db) as conn:
+                    conn.execute("UPDATE queue_claims SET queue_file = ?", (legacy_path,))
+                    conn.commit()
+
+                result = send_shard.reconcile_queue_claims(
+                    queue, provider="private", profile="private_jc", db_path=db,
+                )
+
+                self.assertEqual(1, result["protected"])
+                self.assertEqual(1, result["relocated"])
+                self.assertEqual(before, queue.read_bytes())
+                with send_shard.sqlite3.connect(db) as conn:
+                    claim = conn.execute("SELECT queue_file FROM queue_claims").fetchone()
+                    reservation = conn.execute(
+                        "SELECT status, outcome FROM send_reservations WHERE email = ?",
+                        ("target@example.test",),
+                    ).fetchone()
+                self.assertEqual((str(queue.resolve()),), claim)
+                self.assertEqual(("reserved", ""), reservation)
+
     def test_patch6_already_restored_row_not_duplicated_after_cleanup_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             queue, db, _, rows, metadata = self._patch6_queue(tmpdir)
