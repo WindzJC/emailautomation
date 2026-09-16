@@ -226,6 +226,7 @@ let authState = {
   username: "",
   dashboardMode: "live",
   autoStartAllowed: false,
+  liveActionsEnabled: false,
 };
 const profileActionState = new Map();
 const IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY = "emailautomation.activeImportantCheckJobId";
@@ -332,6 +333,7 @@ function renderEnvironmentStatus(overrides = {}) {
   const authEnabled = Boolean(overrides.authEnabled ?? authState.authEnabled);
   const authDisabled = Boolean(overrides.authDisabled ?? authState.authDisabled);
   const autoStartAllowed = Boolean(overrides.autoStartAllowed ?? authState.autoStartAllowed);
+  const liveActionsEnabled = Boolean(overrides.liveActionsEnabled ?? authState.liveActionsEnabled);
   const activeProfiles = Array.isArray(lastSnapshot?.profiles)
     ? lastSnapshot.profiles.filter((profile) => isProfileActive(profile)).length
     : 0;
@@ -340,7 +342,7 @@ function renderEnvironmentStatus(overrides = {}) {
     ? lastSnapshot.alerts.filter((alert) => Boolean(alert?.blocks_sending)).length
     : 0;
   const modeLabel = localDev ? "LOCAL" : "LIVE OPERATIONS";
-  const startLabel = autoStartAllowed ? "AUTO START" : "MANUAL START";
+  const startLabel = autoStartAllowed ? "AUTO START" : liveActionsEnabled ? "MANUAL START" : "MANUAL ACTIONS OFF";
   const authText = authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured";
   const autoStartText = autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled";
   const noteText = `${activeProfiles.toLocaleString()} active sender${activeProfiles === 1 ? "" : "s"} · ${awaiting.toLocaleString()} awaiting outcome · ${blockingAlerts.toLocaleString()} blocking alert${blockingAlerts === 1 ? "" : "s"}`;
@@ -401,6 +403,7 @@ function setAuthState(nextState = {}) {
     username: String(nextState.username || ""),
     dashboardMode: String(nextState.dashboardMode ?? authState.dashboardMode ?? "live"),
     autoStartAllowed: Boolean(nextState.autoStartAllowed ?? authState.autoStartAllowed),
+    liveActionsEnabled: Boolean(nextState.liveActionsEnabled ?? authState.liveActionsEnabled),
   };
   renderAuthUi();
   if (authState.authenticated) {
@@ -423,6 +426,7 @@ async function fetchAuthStatus() {
     username: data.username || "",
     dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
     autoStartAllowed: Boolean(data.auto_start_allowed),
+    liveActionsEnabled: Boolean(data.live_actions_enabled),
   });
   return data;
 }
@@ -452,6 +456,7 @@ async function submitAuthLogin() {
       username: data.username || username,
       dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
       autoStartAllowed: Boolean(data.auto_start_allowed),
+      liveActionsEnabled: Boolean(data.live_actions_enabled),
     });
     showMessage(data.auth_disabled ? "Local dev auth disabled." : "Signed in.", "success");
     await bootstrapAuthenticatedDashboard();
@@ -7825,6 +7830,18 @@ function renderSummary(snapshot) {
         detail: "Resolve blocking alerts before starting senders.",
       };
     }
+    if (!authState.liveActionsEnabled && totalPending > 0) {
+      const privateReady = privatePending > 0 && privateProfile && canStartProfile(privateProfile, snapshot);
+      const sendgridReady = sendgridPending > 0 && sendgridRunning === 0;
+      if (privateReady || sendgridReady) {
+        return {
+          value: "Manual actions disabled",
+          note: "Sender ready · controls locked",
+          tone: "warn",
+          detail: "Manual Start/Resume is disabled on this dashboard. Automatic startup remains disabled separately.",
+        };
+      }
+    }
     if (privatePending > 0 && privateVerifiedPartial && privateProfile && canStartProfile(privateProfile, snapshot)) {
       return {
         value: "Resume Private JC",
@@ -8141,11 +8158,14 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         : warmProfile
           ? warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"
           : previewSyncAvailable ? "preview_sync" : "start";
+      const manualLiveActionBlocked = !authState.liveActionsEnabled && ["start", "preview_sync"].includes(action);
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
+        : manualLiveActionBlocked ? "Manual actions disabled"
         : action === "stop" ? "Stop" : action === "preview_sync" ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview" : action === "open_lead_ops" ? readiness.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : "Start";
       const actionDisabled = Boolean(pendingAction)
         || previewSyncPending
+        || manualLiveActionBlocked
         || action === "no_queue"
         || (!warmProfile && noPendingQueue)
         || (!warmProfile && !stopAvailable && !previewSyncAvailable && !startAvailable);
@@ -8162,7 +8182,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
-              title="${action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
+              title="${manualLiveActionBlocked ? "Manual Start/Resume actions are disabled on this dashboard. Automatic startup remains off." : action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           `;
@@ -10165,7 +10185,8 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const previewSyncAvailable = profilePreviewSyncActionAvailable(profile, snapshot);
   const pendingCount = Number(profile.pending_count || 0);
   const noPendingQueue = !canStopProfile(profile) && pendingCount <= 0;
-  const startDisabled = Boolean(pendingAction) || !canStartProfile(profile, snapshot);
+  const manualLiveActionBlocked = !authState.liveActionsEnabled;
+  const startDisabled = Boolean(pendingAction) || manualLiveActionBlocked || !canStartProfile(profile, snapshot);
   const stopDisabled = Boolean(pendingAction) || !canStopProfile(profile);
   const effectiveSpacing = Number(profile.effective_spacing_seconds || 0);
   const effectivePace = Number(profile.effective_pace_per_hour || 0);
@@ -10236,22 +10257,28 @@ function updateProfileDetailNode(node, snapshot, profile) {
       ? buildProfileActionNote(profile, snapshot)
       : profileQueueBlocked
         ? `NOT READY / BLOCKED: ${queueSafetyBlockMessageForProfile(profile, snapshot)}`
-        : "",
+        : manualLiveActionBlocked && canStartProfile(profile, snapshot)
+          ? "READY: Manual Start/Resume controls are disabled on this dashboard. Automatic startup remains off."
+          : "",
   );
 
   refs.startButton.dataset.profile = profile.name || "";
   refs.startButton.classList.toggle("start-profile-btn", !previewSyncAvailable);
   refs.startButton.classList.toggle("preview-validate-profile-btn", previewSyncAvailable);
   refs.startButton.dataset.action = previewSyncAvailable ? "preview_sync" : "start";
-  refs.startButton.disabled = previewSyncAvailable ? previewSyncPending : startDisabled;
-  refs.startButton.title = previewSyncAvailable
-    ? "Regenerate and validate the current preview without starting the sender."
-    : noPendingQueue ? "Start unavailable — no pending leads." : "";
+  refs.startButton.disabled = previewSyncAvailable ? (previewSyncPending || manualLiveActionBlocked) : startDisabled;
+  refs.startButton.title = manualLiveActionBlocked
+    ? "Manual Start/Resume actions are disabled on this dashboard. Automatic startup remains off."
+    : previewSyncAvailable
+      ? "Regenerate and validate the current preview without starting the sender."
+      : noPendingQueue ? "Start unavailable — no pending leads." : "";
   setNodeText(
     refs.startButton,
-    previewSyncAvailable
-      ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview"
-      : pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start",
+    manualLiveActionBlocked && (previewSyncAvailable || canStartProfile(profile, snapshot))
+      ? "Manual actions disabled"
+      : previewSyncAvailable
+        ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview"
+        : pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start",
   );
 
   refs.stopButton.dataset.profile = profile.name || "";

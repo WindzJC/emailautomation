@@ -124,6 +124,7 @@ function fetchMockFor(initialSnapshot, syncHandler = null) {
         auth_enabled: false,
         auth_disabled: true,
         dashboard_mode: "local_dev",
+        live_actions_enabled: true,
       }));
     }
     if (requestPath.startsWith("/api/snapshot")) {

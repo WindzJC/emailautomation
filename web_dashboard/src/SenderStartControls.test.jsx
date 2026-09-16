@@ -117,6 +117,7 @@ function baseFetchMock(startHandler, startReadyHandler = null) {
         auth_enabled: false,
         auth_disabled: true,
         dashboard_mode: "local_dev",
+        live_actions_enabled: true,
       }));
     }
     if (pathName.startsWith("/api/snapshot")) {
@@ -158,6 +159,40 @@ function profileDetailStartButton() {
 
 describe("individual sender Start controls", () => {
   let root;
+
+  it("disables Start in the UI when the backend reports manual live actions off", async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      const pathName = String(url);
+      if (pathName === "/api/auth/status") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          authenticated: true,
+          auth_enabled: false,
+          auth_disabled: true,
+          dashboard_mode: "local_dev",
+          auto_start_allowed: false,
+          live_actions_enabled: false,
+        }));
+      }
+      if (pathName.startsWith("/api/snapshot")) {
+        return Promise.resolve(jsonResponse(READY_SNAPSHOT));
+      }
+      if (pathName.startsWith("/api/start/")) {
+        throw new Error("Start endpoint must not be called while manual actions are disabled");
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+
+    root = await bootController(fetchMock, "ops");
+
+    const startButton = senderRowStartButton();
+    expect(startButton).not.toBeNull();
+    expect(startButton).toBeDisabled();
+    expect(startButton).toHaveTextContent("Manual actions disabled");
+    expect(startButton.title).toContain("Automatic startup remains off");
+    expect(document.querySelector(".summary-card-next_action .summary-value")).toHaveTextContent("Manual actions disabled");
+    expect(startCalls(fetchMock)).toHaveLength(0);
+  });
 
   beforeEach(() => {
     vi.useFakeTimers();
