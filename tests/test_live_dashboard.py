@@ -488,7 +488,7 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertFalse(status["auto_start_allowed"])
         self.assertIn("DASHBOARD_ALLOW_AUTO_START=1", status["auto_start_note"])
 
-    def test_manual_profile_start_is_allowed_in_local_dev_when_live_actions_explicitly_enabled(self) -> None:
+    def test_manual_profile_start_is_allowed_when_authorized_and_live_actions_explicitly_enabled(self) -> None:
         preconditions = {"ok": True, "blocked": False, "warning_reasons": []}
         with patch.dict(
             os.environ,
@@ -498,6 +498,10 @@ class LiveDashboardTests(unittest.TestCase):
                 "DASHBOARD_ENABLE_LIVE_ACTIONS": "1",
             },
             clear=False,
+        ), patch.object(
+            live_dashboard,
+            "_dashboard_runtime_identity_response",
+            return_value={"production_authorized": True, "authorized_machine": "mac"},
         ), patch.object(
             live_dashboard.runtime_control,
             "is_known_profile",
@@ -7678,7 +7682,7 @@ class LiveDashboardTests(unittest.TestCase):
             ):
                 live_dashboard._run_important_dispatch_job("dispatch_worker_test")
 
-            self.assertEqual(preview_path.parent, confirmer.call_args.kwargs["preview_dir"])
+            self.assertEqual(preview_path.parent.resolve(), confirmer.call_args.kwargs["preview_dir"].resolve())
             saved = json.loads((jobs / "dispatch_worker_test.json").read_text(encoding="utf-8"))
             self.assertEqual("completed", saved["status"])
 
@@ -10714,7 +10718,9 @@ class StartReadySendersTests(unittest.TestCase):
             "job_id": "existing-job",
             "status": "RUNNING",
         }
-        with patch.object(live_dashboard._SENDER_START_EXECUTOR, "submit") as submit:
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
+            live_dashboard._SENDER_START_EXECUTOR, "submit"
+        ) as submit:
             response = asyncio.run(live_dashboard.start_ready_endpoint())
 
         self.assertEqual(409, response.status_code)
@@ -10723,7 +10729,7 @@ class StartReadySendersTests(unittest.TestCase):
 
     def test_post_accepts_no_browser_profile_list_and_recomputes_in_worker(self) -> None:
         submitted: list[tuple[object, str]] = []
-        with patch.object(
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
             live_dashboard._SENDER_START_EXECUTOR,
             "submit",
             side_effect=lambda action, job_id: submitted.append((action, job_id)),
@@ -10739,7 +10745,9 @@ class StartReadySendersTests(unittest.TestCase):
         self.assertEqual(0, len(inspect.signature(live_dashboard.start_ready_endpoint).parameters))
 
     def test_health_remains_async_while_start_ready_job_is_queued(self) -> None:
-        with patch.object(live_dashboard._SENDER_START_EXECUTOR, "submit", return_value=object()):
+        with patch.object(live_dashboard, "_manual_live_action_block_response", return_value=None), patch.object(
+            live_dashboard._SENDER_START_EXECUTOR, "submit", return_value=object()
+        ):
             response = asyncio.run(live_dashboard.start_ready_endpoint())
 
         self.assertEqual(202, response.status_code)

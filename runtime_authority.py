@@ -79,7 +79,7 @@ def _open_protected_json(path: Path, *, label: str) -> int:
         raise
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise AuthorityError(f"{label} is unsafe: {path}")
-    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+    if before.st_uid != os.geteuid():
         raise AuthorityError(f"{label} has the wrong owner: {path}")
     if stat.S_IMODE(before.st_mode) != 0o600:
         raise AuthorityError(f"{label} must use mode 0600: {path}")
@@ -104,7 +104,7 @@ def _atomic_json_write(path: Path, payload: dict[str, Any], mode: int = 0o600) -
     if stat.S_ISLNK(parent_metadata.st_mode) or not stat.S_ISDIR(parent_metadata.st_mode):
         raise AuthorityError(f"Authority parent must be a regular directory: {path.parent}")
     if private_parent:
-        if parent_metadata.st_uid != os.geteuid() or parent_metadata.st_gid != os.getegid():
+        if parent_metadata.st_uid != os.geteuid():
             raise AuthorityError("Machine-local authority state has the wrong owner")
         if stat.S_IMODE(parent_metadata.st_mode) != 0o700:
             raise AuthorityError("Machine-local authority state must use mode 0700")
@@ -115,7 +115,7 @@ def _atomic_json_write(path: Path, payload: dict[str, Any], mode: int = 0o600) -
     if existing is not None:
         if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
             raise AuthorityError(f"Authority path must be a regular file: {path}")
-        if existing.st_uid != os.geteuid() or existing.st_gid != os.getegid():
+        if existing.st_uid != os.geteuid():
             raise AuthorityError(f"Authority path has the wrong owner: {path}")
         if stat.S_IMODE(existing.st_mode) != mode:
             raise AuthorityError(

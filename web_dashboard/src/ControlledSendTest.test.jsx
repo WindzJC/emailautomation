@@ -47,7 +47,7 @@ async function boot(controlledHandler) {
   window.history.replaceState({}, "", "/?tab=senders");
   const fetchMock = vi.fn((url, options = {}) => {
     const pathname = String(url);
-    if (pathname === "/api/auth/status") return Promise.resolve(response({ ok: true, authenticated: true, auth_enabled: false, auth_disabled: true }));
+    if (pathname === "/api/auth/status") return Promise.resolve(response({ ok: true, authenticated: true, auth_enabled: false, auth_disabled: true, machine_id: "mac", authorized_machine: "mac", authority_status: "active", authority_generation: 1, production_authorized: true }));
     if (pathname.startsWith("/api/snapshot")) return Promise.resolve(response(SNAPSHOT));
     if (pathname === "/api/sendgrid/controlled-test") return controlledHandler(pathname, options);
     return Promise.resolve(response({ ok: true }));

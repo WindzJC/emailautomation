@@ -1060,7 +1060,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "campaignHistoryEventLabel",
             "campaignHistoryReason",
             "Recent ${records.length.toLocaleString()}",
-            "Filtering the loaded history window only.",
+            "Loaded history only · Times shown in ${escapeHtml(displayTimeZone)}.",
             "data-history-filter",
             "Readiness",
             "Validation",
@@ -1318,7 +1318,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "Counts below describe the current checked and triaged source only.",
             "Source rows 0 · Not ready for preview until Upload & Check completes.",
             "leadsControlCheckResult",
-            "Current live queue: Private JC has unfinished recipients.",
+            "Current JC Cold campaign still has live recipients. You can prepare the next source and preview, but Confirm remains locked until the current queue is finished.",
             "Reason ledger and queues",
             "Selected source has",
             "broader than the confirmed safe source",
@@ -1566,7 +1566,7 @@ class WebDashboardAppTests(unittest.TestCase):
             "summary-alert-counts",
             "summary-inline-details",
             "Start JC",
-            "Use the Private JC sender row below.",
+            "Use the JC Cold sender row below.",
             "fleetProfileStatus",
             "renderFleetProfileStrip",
             "renderSummaryInsightList",
@@ -1634,8 +1634,9 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertNotIn('path === "/api/start"', source)
         self.assertIn("LIVE SENDER ACTION", source)
         self.assertIn("This starts or resumes real sender workers and can consume pending queue rows", source)
-        self.assertIn("Use only on the live Windows/WSL machine", source)
-        self.assertIn("Dashboard auto-start may be disabled", source)
+        self.assertIn("Authorized production machine:", source)
+        self.assertIn("Runtime authority:", source)
+        self.assertIn("The backend will re-check authority, queue safety, and sender preconditions before launch.", source)
         self.assertIn("Manual Start/Resume cancelled. No sender workers were started.", source)
         self.assertIn("Manual Start/Resume can launch real workers and consume queues.", html)
         self.assertIn("Auto-start remains separate.", html)
@@ -1667,9 +1668,9 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_dashboard_next_action_prefers_active_private_jc_monitoring(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        self.assertIn('value: "Monitor Private JC"', source)
-        self.assertIn("Private JC is running. Remaining recipients are verified against the confirmed preview.", source)
-        self.assertIn('value: "Resume Private JC"', source)
+        self.assertIn('value: "Monitor JC Cold"', source)
+        self.assertIn("JC Cold is running. Remaining recipients are verified against the confirmed preview.", source)
+        self.assertIn('value: "Resume JC Cold"', source)
         self.assertIn("Queue partially consumed — remaining recipients verified safe.", source)
 
     def test_sendgrid_metric_disclaimer_and_bounce_warnings_render_from_existing_metrics(self) -> None:
@@ -1961,11 +1962,11 @@ class WebDashboardAppTests(unittest.TestCase):
 
         for expected in [
             "dashboard-environment-banner",
-            "LOCAL",
-            "LIVE OPERATIONS",
+            "MAC",
+            "PRODUCTION AUTHORIZED",
             "MANUAL START",
-            "Auth disabled",
-            "Auto-start disabled",
+            "Local auth bypass",
+            "Auto-start OFF",
             "active sender",
             "awaiting outcome",
             "blocking alert",
@@ -2217,7 +2218,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertIn("function privateEmailSentBreakdown", source)
         self.assertIn("const warm = Number(warmStatus.sent_count", source)
         self.assertIn("return { cold, warm, total: cold + warm }", source)
-        self.assertIn('note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent`', source)
+        self.assertIn('note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent · ${privatePending.toLocaleString()} remaining`', source)
         self.assertNotIn('note: `${privateStatus} · ${Number(privateProgress.sent || 0).toLocaleString()} sent`', source)
         self.assertIn("Private Email total:", source)
         self.assertIn("JC cold:", source)

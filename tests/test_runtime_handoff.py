@@ -2554,6 +2554,13 @@ def test_authority_and_generation_metadata_require_private_owner_and_mode(
         runtime_authority.load_generation_floor(repo)
     floor.chmod(0o600)
 
+    # macOS temp directories can inherit group wheel even for user-owned 0700/0600 state.
+    # Group identity is irrelevant when group permissions are zero; UID ownership remains mandatory.
+    current_gid = authority.stat().st_gid
+    monkeypatch.setattr(runtime_authority.os, "getegid", lambda: current_gid + 1)
+    assert runtime_authority.load_authority(repo)["authorized_machine"] == "windows-wsl"
+    assert runtime_authority.load_generation_floor(repo) >= 1
+
     owner = authority.stat().st_uid
     monkeypatch.setattr(runtime_authority.os, "geteuid", lambda: owner + 1)
     with pytest.raises(runtime_authority.AuthorityError, match="wrong owner"):

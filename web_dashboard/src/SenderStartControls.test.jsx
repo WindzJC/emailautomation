@@ -117,6 +117,11 @@ function baseFetchMock(startHandler, startReadyHandler = null) {
         auth_enabled: false,
         auth_disabled: true,
         dashboard_mode: "local_dev",
+        machine_id: "mac",
+        authorized_machine: "mac",
+        authority_status: "active",
+        authority_generation: 1,
+        production_authorized: true,
         live_actions_enabled: true,
       }));
     }
@@ -170,6 +175,11 @@ describe("individual sender Start controls", () => {
           auth_enabled: false,
           auth_disabled: true,
           dashboard_mode: "local_dev",
+        machine_id: "mac",
+        authorized_machine: "mac",
+        authority_status: "active",
+        authority_generation: 1,
+        production_authorized: true,
           auto_start_allowed: false,
           live_actions_enabled: false,
         }));
@@ -191,6 +201,46 @@ describe("individual sender Start controls", () => {
     expect(startButton).toHaveTextContent("Manual actions disabled");
     expect(startButton.title).toContain("Automatic startup remains off");
     expect(document.querySelector(".summary-card-next_action .summary-value")).toHaveTextContent("Manual actions disabled");
+    expect(startCalls(fetchMock)).toHaveLength(0);
+  });
+
+
+  it("keeps a standby machine read-only even when live actions are enabled", async () => {
+    const fetchMock = vi.fn((url, options = {}) => {
+      const pathName = String(url);
+      if (pathName === "/api/auth/status") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          authenticated: true,
+          auth_enabled: false,
+          auth_disabled: true,
+          dashboard_mode: "local_dev",
+          auto_start_allowed: false,
+          live_actions_enabled: true,
+          machine_id: "mac",
+          authorized_machine: "windows-wsl",
+          authority_status: "active",
+          authority_generation: 2,
+          production_authorized: false,
+        }));
+      }
+      if (pathName.startsWith("/api/snapshot")) {
+        return Promise.resolve(jsonResponse(READY_SNAPSHOT));
+      }
+      if (pathName.startsWith("/api/start/")) {
+        throw new Error("Start endpoint must not be called from a standby host");
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+
+    root = await bootController(fetchMock, "ops");
+
+    const startButton = senderRowStartButton();
+    expect(startButton).not.toBeNull();
+    expect(startButton).toBeDisabled();
+    expect(startButton).toHaveTextContent("Machine not authorized");
+    expect(startButton.title).toContain("WINDOWS / WSL holds runtime authority");
+    expect(document.querySelector(".summary-card-next_action .summary-value")).toHaveTextContent("Standby host");
     expect(startCalls(fetchMock)).toHaveLength(0);
   });
 
@@ -283,7 +333,7 @@ describe("individual sender Start controls", () => {
     root = await bootController(fetchMock, "ops");
 
     const privateCard = document.querySelector(".summary-card-private_jc");
-    expect(privateCard).toHaveTextContent("Private JC");
+    expect(privateCard).toHaveTextContent("JC Cold");
     expect(privateCard.querySelector(".summary-value")).toHaveTextContent("1,615 pending");
     expect(privateCard.querySelector(".summary-note")).toHaveTextContent("Ready · 4,929 sent");
     expect(privateCard.querySelector(".summary-note")).not.toHaveTextContent("4,962");

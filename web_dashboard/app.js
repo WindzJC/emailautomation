@@ -204,6 +204,7 @@ let socketLive = false;
 let snapshotFallbackHealthy = false;
 let selectedProfileName = "";
 let senderStatusPanel = null;
+let showCompletedSenderRows = false;
 let warmSenderLeadStatusRequested = false;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
@@ -227,6 +228,13 @@ let authState = {
   dashboardMode: "live",
   autoStartAllowed: false,
   liveActionsEnabled: false,
+  machineId: "unknown",
+  authorizedMachine: "",
+  authorityStatus: "missing",
+  authorityGeneration: 0,
+  authorityExpectedGitCommit: "",
+  productionAuthorized: false,
+  authorityError: "",
 };
 const profileActionState = new Map();
 const IMPORTANT_LEAD_CHECK_JOB_STORAGE_KEY = "emailautomation.activeImportantCheckJobId";
@@ -327,13 +335,25 @@ function renderAuthUi() {
   renderEnvironmentStatus();
 }
 
+function runtimeMachineLabel(machineId = authState.machineId) {
+  const normalized = String(machineId || "").trim().toLowerCase();
+  if (normalized === "mac") return "MAC";
+  if (normalized === "windows-wsl") return "WINDOWS / WSL";
+  if (normalized === "cloud") return "CLOUD";
+  return "UNKNOWN HOST";
+}
+
 function renderEnvironmentStatus(overrides = {}) {
-  const dashboardMode = String(overrides.dashboardMode ?? authState.dashboardMode ?? "live");
-  const localDev = dashboardMode === "local_dev";
   const authEnabled = Boolean(overrides.authEnabled ?? authState.authEnabled);
   const authDisabled = Boolean(overrides.authDisabled ?? authState.authDisabled);
   const autoStartAllowed = Boolean(overrides.autoStartAllowed ?? authState.autoStartAllowed);
   const liveActionsEnabled = Boolean(overrides.liveActionsEnabled ?? authState.liveActionsEnabled);
+  const machineId = String(overrides.machineId ?? authState.machineId ?? "unknown");
+  const authorizedMachine = String(overrides.authorizedMachine ?? authState.authorizedMachine ?? "");
+  const authorityStatus = String(overrides.authorityStatus ?? authState.authorityStatus ?? "missing");
+  const authorityGeneration = Number(overrides.authorityGeneration ?? authState.authorityGeneration ?? 0);
+  const expectedCommit = String(overrides.authorityExpectedGitCommit ?? authState.authorityExpectedGitCommit ?? "");
+  const productionAuthorized = Boolean(overrides.productionAuthorized ?? authState.productionAuthorized);
   const activeProfiles = Array.isArray(lastSnapshot?.profiles)
     ? lastSnapshot.profiles.filter((profile) => isProfileActive(profile)).length
     : 0;
@@ -341,17 +361,27 @@ function renderEnvironmentStatus(overrides = {}) {
   const blockingAlerts = Array.isArray(lastSnapshot?.alerts)
     ? lastSnapshot.alerts.filter((alert) => Boolean(alert?.blocks_sending)).length
     : 0;
-  const modeLabel = localDev ? "LOCAL" : "LIVE OPERATIONS";
+  const machineLabel = runtimeMachineLabel(machineId);
+  const authorizedLabel = runtimeMachineLabel(authorizedMachine);
+  const authorityLabel = productionAuthorized
+    ? "PRODUCTION AUTHORIZED"
+    : authorityStatus === "active" && authorizedMachine
+      ? `${authorizedLabel} AUTHORIZED`
+      : "SENDING DISABLED";
   const startLabel = autoStartAllowed ? "AUTO START" : liveActionsEnabled ? "MANUAL START" : "MANUAL ACTIONS OFF";
-  const authText = authDisabled ? "Auth disabled" : authEnabled ? "Auth enabled" : "Auth not configured";
-  const autoStartText = autoStartAllowed ? "Auto-start enabled" : "Auto-start disabled";
-  const noteText = `${activeProfiles.toLocaleString()} active sender${activeProfiles === 1 ? "" : "s"} · ${awaiting.toLocaleString()} awaiting outcome · ${blockingAlerts.toLocaleString()} blocking alert${blockingAlerts === 1 ? "" : "s"}`;
+  const authText = authDisabled ? "Local auth bypass" : authEnabled ? "Dashboard auth ON" : "Auth not configured";
+  const autoStartText = autoStartAllowed ? "Auto-start ON" : "Auto-start OFF";
+  const liveActionText = liveActionsEnabled ? "Live actions ON" : "Live actions OFF";
+  const commitText = expectedCommit ? expectedCommit.slice(0, 8) : "unknown";
+  const generationText = authorityGeneration > 0 ? `Gen ${authorityGeneration}` : "Generation unknown";
+  const noteText = `${authText} · Git ${commitText} · ${generationText} · ${activeProfiles.toLocaleString()} active · ${awaiting.toLocaleString()} awaiting · ${blockingAlerts.toLocaleString()} blocking`;
   document.querySelectorAll(".react-environment-banner").forEach((banner) => {
-    banner.className = `react-environment-banner react-environment-banner-${localDev ? "local" : "live"}`;
+    banner.className = `react-environment-banner react-environment-banner-${productionAuthorized ? "live" : "local"}`;
   });
-  document.querySelectorAll("[data-environment-mode]").forEach((node) => setNodeText(node, `${modeLabel} · ${startLabel}`));
-  document.querySelectorAll("[data-environment-auth-mode]").forEach((node) => setNodeText(node, authText));
+  document.querySelectorAll("[data-environment-mode]").forEach((node) => setNodeText(node, `${machineLabel} · ${authorityLabel} · ${startLabel}`));
+  document.querySelectorAll("[data-environment-auth-mode]").forEach((node) => setNodeText(node, productionAuthorized ? "Authority active" : authorityLabel));
   document.querySelectorAll("[data-environment-auto-start-mode]").forEach((node) => setNodeText(node, autoStartText));
+  document.querySelectorAll("[data-environment-live-actions-mode]").forEach((node) => setNodeText(node, liveActionText));
   document.querySelectorAll("[data-environment-note]").forEach((node) => setNodeText(node, noteText));
 }
 
@@ -404,6 +434,13 @@ function setAuthState(nextState = {}) {
     dashboardMode: String(nextState.dashboardMode ?? authState.dashboardMode ?? "live"),
     autoStartAllowed: Boolean(nextState.autoStartAllowed ?? authState.autoStartAllowed),
     liveActionsEnabled: Boolean(nextState.liveActionsEnabled ?? authState.liveActionsEnabled),
+    machineId: String(nextState.machineId ?? authState.machineId ?? "unknown"),
+    authorizedMachine: String(nextState.authorizedMachine ?? authState.authorizedMachine ?? ""),
+    authorityStatus: String(nextState.authorityStatus ?? authState.authorityStatus ?? "missing"),
+    authorityGeneration: Number(nextState.authorityGeneration ?? authState.authorityGeneration ?? 0),
+    authorityExpectedGitCommit: String(nextState.authorityExpectedGitCommit ?? authState.authorityExpectedGitCommit ?? ""),
+    productionAuthorized: Boolean(nextState.productionAuthorized ?? authState.productionAuthorized),
+    authorityError: String(nextState.authorityError ?? authState.authorityError ?? ""),
   };
   renderAuthUi();
   if (authState.authenticated) {
@@ -427,6 +464,13 @@ async function fetchAuthStatus() {
     dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
     autoStartAllowed: Boolean(data.auto_start_allowed),
     liveActionsEnabled: Boolean(data.live_actions_enabled),
+    machineId: data.machine_id || "unknown",
+    authorizedMachine: data.authorized_machine || "",
+    authorityStatus: data.authority_status || "missing",
+    authorityGeneration: Number(data.authority_generation || 0),
+    authorityExpectedGitCommit: data.authority_expected_git_commit || "",
+    productionAuthorized: Boolean(data.production_authorized),
+    authorityError: data.authority_error || "",
   });
   return data;
 }
@@ -457,6 +501,13 @@ async function submitAuthLogin() {
       dashboardMode: data.dashboard_mode || (data.auth_disabled ? "local_dev" : "live"),
       autoStartAllowed: Boolean(data.auto_start_allowed),
       liveActionsEnabled: Boolean(data.live_actions_enabled),
+      machineId: data.machine_id || "unknown",
+      authorizedMachine: data.authorized_machine || "",
+      authorityStatus: data.authority_status || "missing",
+      authorityGeneration: Number(data.authority_generation || 0),
+      authorityExpectedGitCommit: data.authority_expected_git_commit || "",
+      productionAuthorized: Boolean(data.production_authorized),
+      authorityError: data.authority_error || "",
     });
     showMessage(data.auth_disabled ? "Local dev auth disabled." : "Signed in.", "success");
     await bootstrapAuthenticatedDashboard();
@@ -908,6 +959,7 @@ function formatWarmActivity(timestamp, email = "") {
 }
 
 function formatProfileName(value) {
+  if (String(value || "") === "private_jc") return "JC Cold";
   if (String(value || "") === "private_jc_warm") return "Warm Outreach";
   const raw = String(value || "")
     .replace(/^sendgrid_/, "")
@@ -5088,7 +5140,7 @@ function renderImportantDispatch(result) {
     setNodeText(
       els.leadsDispatchCurrentQueueNote,
       currentJcQueuePending
-        ? "Current live queue: Private JC has unfinished recipients. Next dispatch/campaign blocked until current queue is finished."
+        ? "Current JC Cold campaign still has live recipients. You can prepare the next source and preview, but Confirm remains locked until the current queue is finished."
         : "",
     );
   }
@@ -7816,10 +7868,10 @@ function renderSummary(snapshot) {
   const nextAction = (() => {
     if (privateRunning) {
       return {
-        value: "Monitor Private JC",
+        value: "Monitor JC Cold",
         note: `${privatePending.toLocaleString()} remaining`,
         tone: "good",
-        detail: "Private JC is running. Remaining recipients are verified against the confirmed preview.",
+        detail: "JC Cold is running. Remaining recipients are verified against the confirmed preview.",
       };
     }
     if (blockingAlerts > 0) {
@@ -7830,21 +7882,22 @@ function renderSummary(snapshot) {
         detail: "Resolve blocking alerts before starting senders.",
       };
     }
-    if (!authState.liveActionsEnabled && totalPending > 0) {
+    const manualActionBlock = manualLiveActionBlockReason();
+    if (manualActionBlock && totalPending > 0) {
       const privateReady = privatePending > 0 && privateProfile && canStartProfile(privateProfile, snapshot);
       const sendgridReady = sendgridPending > 0 && sendgridRunning === 0;
       if (privateReady || sendgridReady) {
         return {
-          value: "Manual actions disabled",
-          note: "Sender ready · controls locked",
+          value: authState.liveActionsEnabled ? "Standby host" : "Manual actions disabled",
+          note: authState.liveActionsEnabled ? "Sender ready · authority elsewhere" : "Sender ready · controls locked",
           tone: "warn",
-          detail: "Manual Start/Resume is disabled on this dashboard. Automatic startup remains disabled separately.",
+          detail: `${manualActionBlock} Automatic startup remains disabled separately.`,
         };
       }
     }
     if (privatePending > 0 && privateVerifiedPartial && privateProfile && canStartProfile(privateProfile, snapshot)) {
       return {
-        value: "Resume Private JC",
+        value: "Resume JC Cold",
         note: `${privatePending.toLocaleString()} remaining`,
         tone: "good",
         detail: "Queue partially consumed — remaining recipients verified safe.",
@@ -7853,9 +7906,9 @@ function renderSummary(snapshot) {
     if (privatePending > 0 && privateProfile && canStartProfile(privateProfile, snapshot)) {
       return {
         value: "Start JC",
-        note: sendgridPending > 0 ? "Private JC ready" : "SendGrid complete · Private JC ready",
+        note: sendgridPending > 0 ? "JC Cold ready" : "SendGrid complete · JC Cold ready",
         tone: "good",
-        detail: "Use the Private JC sender row below.",
+        detail: "Use the JC Cold sender row below.",
       };
     }
     if (sendgridPending > 0 && sendgridRunning === 0) {
@@ -7902,9 +7955,9 @@ function renderSummary(snapshot) {
   const cards = [
     {
       key: "private_jc",
-      label: "Private JC",
+      label: "JC Cold",
       value: `${privatePending.toLocaleString()} pending`,
-      note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent`,
+      note: `${privateStatus} · ${privateSent.cold.toLocaleString()} sent · ${privatePending.toLocaleString()} remaining`,
       tone: privatePending > 0 ? "warn" : "neutral",
       detailsHtml: `
         <div class="summary-private-breakdown">
@@ -7947,7 +8000,7 @@ function renderSummary(snapshot) {
       key: "next_action",
       label: "Next Action",
       value: nextAction.value,
-      note: nextAction.value === "Start JC" ? "Use JC sender row below" : nextAction.note,
+      note: nextAction.value === "Start JC" ? "Use JC Cold sender row below" : nextAction.note,
       tone: nextAction.tone,
       detailsHtml: `<div class="summary-small-note">${escapeHtml(nextAction.detail)}</div>`,
     },
@@ -8129,9 +8182,18 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     setNodeHtml(tbody, `<tr><td colspan="8" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
     return;
   }
+  const isSecondaryCompleted = (profile) => profileTelemetryChannel(profile) === "sendgrid"
+    && profilePendingCount(profile) <= 0
+    && !isProfileActive(profile)
+    && selectedProfile?.name !== profile.name;
+  const hiddenCompletedCount = profiles.filter(isSecondaryCompleted).length;
+  const visibleProfiles = showCompletedSenderRows ? profiles : profiles.filter((profile) => !isSecondaryCompleted(profile));
+  const completedSummaryRow = hiddenCompletedCount > 0
+    ? `<tr class="sender-status-completed-summary"><td colspan="8"><button class="sender-status-completed-toggle" type="button">${showCompletedSenderRows ? "Hide" : "Show"} ${hiddenCompletedCount.toLocaleString()} completed SendGrid sender${hiddenCompletedCount === 1 ? "" : "s"}</button><span>Completed providers are collapsed to keep active work prominent.</span></td></tr>`
+    : "";
   setNodeHtml(
     tbody,
-    profiles.map((profile) => {
+    visibleProfiles.map((profile) => {
       const warmProfile = profile?.name === "private_jc_warm";
       const warmStatus = currentWarmPrivateJcStatus(lastLeadsStatus, snapshot);
       const readiness = senderReadinessBadge(profile, snapshot);
@@ -8158,10 +8220,11 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
         : warmProfile
           ? warmCanOpenLeadOps ? "open_lead_ops" : "no_queue"
           : previewSyncAvailable ? "preview_sync" : "start";
-      const manualLiveActionBlocked = !authState.liveActionsEnabled && ["start", "preview_sync"].includes(action);
+      const manualLiveActionBlock = ["start", "preview_sync"].includes(action) ? manualLiveActionBlockReason() : "";
+      const manualLiveActionBlocked = Boolean(manualLiveActionBlock);
       const actionLabelText = pendingAction
         ? actionLabel(pendingAction)
-        : manualLiveActionBlocked ? "Manual actions disabled"
+        : manualLiveActionBlocked ? (authState.liveActionsEnabled ? "Machine not authorized" : "Manual actions disabled")
         : action === "stop" ? "Stop" : action === "preview_sync" ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview" : action === "open_lead_ops" ? readiness.label === "Partial" ? "Resume in Lead Ops" : "Open Lead Ops" : "Start";
       const actionDisabled = Boolean(pendingAction)
         || previewSyncPending
@@ -8182,7 +8245,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
               type="button"
               data-profile="${escapeHtml(profile.name || "")}"
               data-action="${escapeHtml(action)}"
-              title="${manualLiveActionBlocked ? "Manual Start/Resume actions are disabled on this dashboard. Automatic startup remains off." : action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
+              title="${manualLiveActionBlocked ? `${manualLiveActionBlock} Automatic startup remains off.` : action === "preview_sync" ? "Regenerate and validate the current preview without starting the sender." : warmProfile && action === "open_lead_ops" ? "Warm confirmation and start controls are available in Lead Ops only." : ""}"
               ${actionDisabled ? "disabled" : ""}
             >${escapeHtml(actionLabelText)}</button>
           `;
@@ -8214,7 +8277,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           </td>
         </tr>
       `;
-    }).join(""),
+    }).join("") + completedSummaryRow,
   );
 }
 
@@ -9024,6 +9087,23 @@ function campaignHistoryReason(record) {
   return "-";
 }
 
+function campaignHistorySeverity(record = {}) {
+  const event = String(record?.event_type || "").trim().toLowerCase();
+  const readiness = String(record?.message_readiness_status || "").trim().toLowerCase();
+  const validation = String(record?.validation_status || "").trim().toLowerCase();
+  const reason = campaignHistoryReason(record).trim().toLowerCase();
+  const bad = [event, readiness, validation, reason].some((value) => /fail|error|block|refus|unsafe/.test(value));
+  if (bad) return "bad";
+  const warn = [readiness, validation, reason].some((value) => /stale|partial|warn|cooldown|pause/.test(value));
+  if (warn) return "warn";
+  return "good";
+}
+
+function campaignHistoryStatusPill(value, tone = "neutral") {
+  const text = String(value || "-").trim() || "-";
+  return `<span class="history-status-pill history-status-pill-${escapeHtml(tone)}">${escapeHtml(text)}</span>`;
+}
+
 function renderCampaignRunHistory(snapshot) {
   if (!els.campaignRunHistory) return;
   const records = Array.isArray(snapshot?.campaign_run_history) ? snapshot.campaign_run_history.slice(0, 25) : [];
@@ -9037,8 +9117,12 @@ function renderCampaignRunHistory(snapshot) {
       <div class="campaign-history-filters" aria-label="History filters">
         <div class="campaign-history-scope-note">
           <strong>Recent ${records.length.toLocaleString()}</strong>
-          <span>Filtering the loaded history window only.</span>
+          <span>Loaded history only · Times shown in ${escapeHtml(displayTimeZone)}.</span>
         </div>
+        <label class="campaign-history-search">
+          <span>Search</span>
+          <input data-history-filter="search" type="search" placeholder="Profile, event, result" autocomplete="off" />
+        </label>
         <label>
           <span>Sender</span>
           <select data-history-filter="profile">
@@ -9081,18 +9165,24 @@ function renderCampaignRunHistory(snapshot) {
             </tr>
           </thead>
           <tbody>
-            ${records.map((record) => `
-              <tr data-history-profile="${escapeHtml(String(record.profile || "").trim())}" data-history-event="${escapeHtml(campaignHistoryEventLabel(record.event_type))}" data-history-timestamp="${escapeHtml(record.timestamp || "")}">
+            ${records.map((record) => {
+              const severity = campaignHistorySeverity(record);
+              const eventLabel = campaignHistoryEventLabel(record.event_type);
+              const reason = campaignHistoryReason(record);
+              const searchText = [eventLabel, record.profile || "", record.message_readiness_status || "", record.validation_status || "", reason].join(" ").toLowerCase();
+              return `
+              <tr class="history-row history-row-${severity}" data-history-profile="${escapeHtml(String(record.profile || "").trim())}" data-history-event="${escapeHtml(eventLabel)}" data-history-timestamp="${escapeHtml(record.timestamp || "")}" data-history-search="${escapeHtml(searchText)}">
                 <td>${escapeHtml(formatReadinessTime(record.timestamp))}</td>
-                <td>${escapeHtml(campaignHistoryEventLabel(record.event_type))}</td>
-                <td>${escapeHtml(record.profile || "-")}</td>
-                <td>${escapeHtml(record.message_readiness_status || "-")}</td>
-                <td>${escapeHtml(record.validation_status || "-")}</td>
+                <td>${escapeHtml(eventLabel)}</td>
+                <td>${escapeHtml(formatProfileName(record.profile || "-"))}</td>
+                <td>${campaignHistoryStatusPill(record.message_readiness_status || "-", String(record.message_readiness_status || "").toLowerCase() === "pass" ? "good" : severity)}</td>
+                <td>${campaignHistoryStatusPill(record.validation_status || "-", String(record.validation_status || "").toLowerCase() === "pass" ? "good" : severity)}</td>
                 <td>${Number(record.recipient_row_count || 0).toLocaleString()}</td>
                 <td>${Number(record.sent_count || 0).toLocaleString()}</td>
-                <td>${escapeHtml(campaignHistoryReason(record))}</td>
+                <td class="history-result-cell">${campaignHistoryStatusPill(reason, severity)}</td>
               </tr>
-            `).join("")}
+            `;
+            }).join("")}
           </tbody>
         </table>
       </div>
@@ -9108,6 +9198,7 @@ function applyCampaignHistoryFilters() {
   const table = root.querySelector(".campaign-history-table table");
   if (!table) return;
   const filters = {
+    search: String(root.querySelector('[data-history-filter="search"]')?.value || "").trim().toLowerCase(),
     profile: root.querySelector('[data-history-filter="profile"]')?.value || "",
     event: root.querySelector('[data-history-filter="event"]')?.value || "",
     scope: root.querySelector('[data-history-filter="scope"]')?.value || "",
@@ -9123,9 +9214,11 @@ function applyCampaignHistoryFilters() {
     const profile = row.getAttribute("data-history-profile") || "";
     const event = row.getAttribute("data-history-event") || "";
     const timestamp = row.getAttribute("data-history-timestamp") || "";
+    const searchText = row.getAttribute("data-history-search") || "";
     const parsedTime = Date.parse(timestamp);
     const withinScope = !maxAgeMs || (Number.isFinite(parsedTime) && now - parsedTime <= maxAgeMs);
-    const show = (!filters.profile || profile === filters.profile)
+    const show = (!filters.search || searchText.includes(filters.search))
+      && (!filters.profile || profile === filters.profile)
       && (!filters.event || event === filters.event)
       && withinScope;
     row.hidden = !show;
@@ -9321,6 +9414,17 @@ function queueSafetyBlockedForProfile(profile, snapshot = lastSnapshot) {
 function queueSafetyBlockMessageForProfile(profile, snapshot = lastSnapshot) {
   const queueSafety = providerQueueSafetyForProfile(profile, snapshot);
   return String(queueSafety.message || "Recipient queue needs review before starting this sender.").trim();
+}
+
+function manualLiveActionBlockReason() {
+  if (!authState.liveActionsEnabled) {
+    return "Manual Start/Resume actions are disabled on this dashboard.";
+  }
+  if (!authState.productionAuthorized) {
+    const authorized = authState.authorizedMachine ? runtimeMachineLabel(authState.authorizedMachine) : "another host";
+    return `This machine is not production-authorized. ${authorized} holds runtime authority.`;
+  }
+  return "";
 }
 
 function canStartProfile(profile, snapshot = lastSnapshot) {
@@ -10185,7 +10289,8 @@ function updateProfileDetailNode(node, snapshot, profile) {
   const previewSyncAvailable = profilePreviewSyncActionAvailable(profile, snapshot);
   const pendingCount = Number(profile.pending_count || 0);
   const noPendingQueue = !canStopProfile(profile) && pendingCount <= 0;
-  const manualLiveActionBlocked = !authState.liveActionsEnabled;
+  const manualLiveActionBlock = manualLiveActionBlockReason();
+  const manualLiveActionBlocked = Boolean(manualLiveActionBlock);
   const startDisabled = Boolean(pendingAction) || manualLiveActionBlocked || !canStartProfile(profile, snapshot);
   const stopDisabled = Boolean(pendingAction) || !canStopProfile(profile);
   const effectiveSpacing = Number(profile.effective_spacing_seconds || 0);
@@ -10258,7 +10363,7 @@ function updateProfileDetailNode(node, snapshot, profile) {
       : profileQueueBlocked
         ? `NOT READY / BLOCKED: ${queueSafetyBlockMessageForProfile(profile, snapshot)}`
         : manualLiveActionBlocked && canStartProfile(profile, snapshot)
-          ? "READY: Manual Start/Resume controls are disabled on this dashboard. Automatic startup remains off."
+          ? `READY: ${manualLiveActionBlock} Automatic startup remains off.`
           : "",
   );
 
@@ -10268,14 +10373,14 @@ function updateProfileDetailNode(node, snapshot, profile) {
   refs.startButton.dataset.action = previewSyncAvailable ? "preview_sync" : "start";
   refs.startButton.disabled = previewSyncAvailable ? (previewSyncPending || manualLiveActionBlocked) : startDisabled;
   refs.startButton.title = manualLiveActionBlocked
-    ? "Manual Start/Resume actions are disabled on this dashboard. Automatic startup remains off."
+    ? `${manualLiveActionBlock} Automatic startup remains off.`
     : previewSyncAvailable
       ? "Regenerate and validate the current preview without starting the sender."
       : noPendingQueue ? "Start unavailable — no pending leads." : "";
   setNodeText(
     refs.startButton,
     manualLiveActionBlocked && (previewSyncAvailable || canStartProfile(profile, snapshot))
-      ? "Manual actions disabled"
+      ? authState.liveActionsEnabled ? "Machine not authorized" : "Manual actions disabled"
       : previewSyncAvailable
         ? previewSyncPending ? "Syncing..." : "Regenerate & Validate Preview"
         : pendingAction === "start" ? "Starting..." : noPendingQueue ? "No queue" : "Start",
@@ -10551,6 +10656,12 @@ async function handleProfileDetailClick(event) {
 }
 
 async function handleSenderStatusClick(event) {
+  const completedToggle = event.target.closest(".sender-status-completed-toggle");
+  if (completedToggle && senderStatusPanel?.contains(completedToggle)) {
+    showCompletedSenderRows = !showCompletedSenderRows;
+    if (lastSnapshot) renderSenderStatusConsole(lastSnapshot, resolveSelectedProfile(lastSnapshot));
+    return;
+  }
   const syncDetailsButton = event.target.closest(".sender-status-sync-details-btn[data-profile]");
   if (syncDetailsButton && senderStatusPanel?.contains(syncDetailsButton)) {
     selectProfileByName(syncDetailsButton.getAttribute("data-profile") || "");
@@ -10984,9 +11095,11 @@ async function postAction(path, options = {}) {
   const manualSenderStart = path.startsWith("/api/start/");
   if (manualSenderStart && !window.confirm(
     "LIVE SENDER ACTION\n\n"
-    + "This starts or resumes real sender workers and can consume pending queue rows. "
-    + "Use only on the live Windows/WSL machine. Dashboard auto-start may be disabled, "
-    + "but this manual Start/Resume action still works.\n\nContinue?",
+    + "This starts or resumes real sender workers and can consume pending queue rows.\n\n"
+    + `Authorized production machine: ${authState.authorizedMachine ? runtimeMachineLabel(authState.authorizedMachine) : "UNKNOWN"}. `
+    + `Runtime authority: ${authState.productionAuthorized ? "ACTIVE on this machine" : "NOT ACTIVE on this machine"}.\n`
+    + `Auto-start: ${authState.autoStartAllowed ? "ON" : "OFF"}. Manual live actions: ${authState.liveActionsEnabled ? "ON" : "OFF"}.\n\n`
+    + "The backend will re-check authority, queue safety, and sender preconditions before launch.\n\nContinue?",
   )) {
     showMessage("Manual Start/Resume cancelled. No sender workers were started.", "info");
     return;
@@ -11436,6 +11549,9 @@ if (els.opsProgressDetails) {
 if (els.campaignRunHistory) {
   els.campaignRunHistory.addEventListener("change", (event) => {
     if (event.target?.matches?.("[data-history-filter]")) applyCampaignHistoryFilters();
+  });
+  els.campaignRunHistory.addEventListener("input", (event) => {
+    if (event.target?.matches?.('[data-history-filter="search"]')) applyCampaignHistoryFilters();
   });
 }
 if (els.overviewTabBtn) els.overviewTabBtn.addEventListener("click", () => setDashboardTab("overview"));

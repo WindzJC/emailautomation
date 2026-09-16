@@ -356,8 +356,9 @@ export function EnvironmentBanner({ variant = "sidebar" } = {}) {
         </div>
       </div>
       <div className="react-environment-flags">
-        <span id={diagnostics ? undefined : "dashboard-auth-mode"} data-environment-auth-mode>Auth: checking</span>
+        <span id={diagnostics ? undefined : "dashboard-auth-mode"} data-environment-auth-mode>Authority: checking</span>
         <span id={diagnostics ? undefined : "dashboard-auto-start-mode"} data-environment-auto-start-mode>Auto-start: checking</span>
+        <span id={diagnostics ? undefined : "dashboard-live-actions-mode"} data-environment-live-actions-mode>Live actions: checking</span>
       </div>
       <p id={diagnostics ? undefined : "dashboard-environment-note"} data-environment-note>Manual Start/Resume can launch real workers and consume queues.</p>
     </section>

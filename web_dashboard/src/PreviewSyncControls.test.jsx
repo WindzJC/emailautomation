@@ -124,6 +124,11 @@ function fetchMockFor(initialSnapshot, syncHandler = null) {
         auth_enabled: false,
         auth_disabled: true,
         dashboard_mode: "local_dev",
+        machine_id: "mac",
+        authorized_machine: "mac",
+        authority_status: "active",
+        authority_generation: 1,
+        production_authorized: true,
         live_actions_enabled: true,
       }));
     }

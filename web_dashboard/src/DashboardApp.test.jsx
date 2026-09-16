@@ -167,7 +167,7 @@ describe("Warm Outreach controller layout", () => {
     const fetchMock = vi.fn(async (url, options = {}) => {
       if (options.method && options.method !== "GET") throw new Error("Unexpected mutation");
       let payload = { ok: true };
-      if (String(url) === "/api/auth/status") payload = { ok: true, authenticated: true, auth_disabled: true, dashboard_mode: "local_dev" };
+      if (String(url) === "/api/auth/status") payload = { ok: true, authenticated: true, auth_disabled: true, dashboard_mode: "local_dev", machine_id: "mac", authorized_machine: "mac", authority_status: "active", authority_generation: 1, production_authorized: true };
       if (String(url).startsWith("/api/snapshot")) payload = {
         profiles: [], summary: {}, controls: {}, automation: {}, alerts: [],
         queue_safety: { safe: true }, domain_breakdown: [], campaign_run_history: [], latest_failures: [],

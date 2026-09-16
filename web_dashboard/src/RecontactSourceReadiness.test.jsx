@@ -333,6 +333,11 @@ async function bootController(status, { activeSender = false, previewHandler = n
         auth_enabled: false,
         auth_disabled: true,
         dashboard_mode: "local_dev",
+        machine_id: "mac",
+        authorized_machine: "mac",
+        authority_status: "active",
+        authority_generation: 1,
+        production_authorized: true,
       }));
     }
     if (requestPath.startsWith("/api/snapshot")) return Promise.resolve(jsonResponse(snapshot(activeSender)));

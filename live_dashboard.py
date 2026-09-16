@@ -69,7 +69,7 @@ from controlled_sendgrid_test import (
     controlled_test_public_config,
     execute_controlled_sendgrid_test,
 )
-from runtime_authority import AuthorityError, assert_send_authorized, current_machine
+from runtime_authority import AuthorityError, assert_send_authorized, current_machine, load_authority
 from dashboard_security import (
     DashboardSecurityStatus,
     require_dashboard_startup_security,
@@ -4841,6 +4841,42 @@ def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
     return bool(session.get(_AUTH_SESSION_KEY))
 
 
+def _dashboard_runtime_identity_response() -> dict[str, object]:
+    machine = "unknown"
+    machine_error = ""
+    try:
+        machine = current_machine()
+    except AuthorityError as exc:
+        machine_error = str(exc)
+
+    authority: dict[str, object] = {}
+    authority_error = ""
+    try:
+        authority = load_authority(settings.APP_ROOT)
+    except AuthorityError as exc:
+        authority_error = str(exc)
+
+    production_authorized = False
+    if machine != "unknown":
+        try:
+            authority = assert_send_authorized(settings.APP_ROOT, machine=machine)
+            production_authorized = True
+        except AuthorityError as exc:
+            if not authority_error:
+                authority_error = str(exc)
+
+    return {
+        "machine_id": machine,
+        "machine_error": machine_error,
+        "authorized_machine": str(authority.get("authorized_machine") or ""),
+        "authority_status": str(authority.get("status") or "missing"),
+        "authority_generation": int(authority.get("generation") or 0),
+        "authority_expected_git_commit": str(authority.get("expected_git_commit") or ""),
+        "production_authorized": production_authorized,
+        "authority_error": authority_error,
+    }
+
+
 def _dashboard_auth_response() -> dict[str, object]:
     security = _dashboard_security_status()
     auth_disabled = security.no_auth_allowed
@@ -4867,6 +4903,7 @@ def _dashboard_auth_response() -> dict[str, object]:
             else False
         ),
         "live_actions_env_var": DASHBOARD_LIVE_ACTIONS_ENV_VAR,
+        **_dashboard_runtime_identity_response(),
     }
 
 
@@ -5354,6 +5391,27 @@ async def snapshot(
 
 
 def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
+    runtime_identity = _dashboard_runtime_identity_response()
+    if not bool(runtime_identity.get("production_authorized")):
+        authorized_machine = str(runtime_identity.get("authorized_machine") or "").strip().lower()
+        authorized_label = {
+            "mac": "Mac",
+            "windows-wsl": "Windows/WSL",
+            "cloud": "Cloud",
+        }.get(authorized_machine, "the authorized production host")
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "production_authority_required",
+                "profile": str(profile_name or ""),
+                "message": (
+                    "Live sender Start/Resume actions are read-only on this standby host. "
+                    f"Use {authorized_label} for production Start/Resume actions."
+                ),
+            },
+            status_code=403,
+        )
     if _dashboard_auth_enabled() or (
         _dashboard_auth_disabled() and _dashboard_live_actions_enabled()
     ):
@@ -6724,6 +6782,9 @@ async def start_ready_plan_endpoint() -> JSONResponse:
 @app.post("/api/start-ready")
 async def start_ready_endpoint() -> JSONResponse:
     global _START_READY_ACTIVE_JOB_ID
+    live_action_block = _manual_live_action_block_response()
+    if live_action_block is not None:
+        return live_action_block
     with _START_READY_JOB_LOCK:
         active_job = _START_READY_JOBS.get(_START_READY_ACTIVE_JOB_ID)
         if isinstance(active_job, dict) and str(active_job.get("status") or "") in {"PLANNING", "RUNNING"}:

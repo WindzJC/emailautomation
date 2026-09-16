@@ -241,7 +241,7 @@ def _secure_directory(
         raise HandoffError(f"Private handoff directory is missing: {path}") from exc
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
         raise HandoffError(f"Private handoff path must be a regular directory: {path}")
-    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+    if before.st_uid != os.geteuid():
         raise HandoffError(f"Private handoff directory has the wrong owner: {path}")
     if stat.S_IMODE(before.st_mode) != 0o700:
         raise HandoffError(f"Private handoff directory must use mode 0700: {path}")
@@ -271,7 +271,7 @@ def _private_handoff_layout(repo: Path) -> dict[str, Path]:
         raise HandoffError(f"Repository path is missing: {repo}") from exc
     if stat.S_ISLNK(repo_stat.st_mode) or not stat.S_ISDIR(repo_stat.st_mode):
         raise HandoffError("Repository path must be a regular directory, not a symlink")
-    if repo_stat.st_uid != os.geteuid() or repo_stat.st_gid != os.getegid():
+    if repo_stat.st_uid != os.geteuid():
         raise HandoffError("Repository must be owned by the handoff service account")
     root = repo / LOCAL_STATE_DIR
     if not root.exists():
@@ -308,7 +308,7 @@ def _open_private_file(
         return None
     if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
         raise HandoffError(f"Private handoff path must be a regular file: {path}")
-    if before.st_uid != os.geteuid() or before.st_gid != os.getegid():
+    if before.st_uid != os.geteuid():
         raise HandoffError(f"Private handoff file has the wrong owner: {path}")
     if stat.S_IMODE(before.st_mode) != 0o600:
         raise HandoffError(f"Private handoff file must use mode 0600: {path}")

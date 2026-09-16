@@ -3964,3 +3964,118 @@
     padding: 16px 10px 28px !important;
   }
 }
+
+/* Operator upgrade: portable production identity, focused active work, and clearer history. */
+.react-environment-banner-local {
+  box-shadow: inset 3px 0 0 rgba(238,190,103,.58), 0 14px 32px rgba(0,0,0,.18);
+}
+
+#diagnostics-view .react-environment-banner {
+  grid-template-columns: minmax(300px, .9fr) auto minmax(360px, 1.2fr);
+}
+
+#diagnostics-view .react-environment-flags {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sender-status-completed-summary td {
+  padding: 8px 12px !important;
+  background: rgba(255,255,255,.012) !important;
+  text-align: center;
+}
+
+.sender-status-completed-toggle {
+  padding: 4px 8px;
+  border: 1px solid var(--console-line);
+  border-radius: 5px;
+  color: #a9bbd0;
+  background: #101a26;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sender-status-completed-summary span {
+  margin-left: 9px;
+  color: #74859a;
+  font-size: .64rem;
+}
+
+.react-leads-page.warm-research-mode .operator-flow-line {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--console-line);
+  border-radius: 6px;
+  background: #0a121c;
+}
+
+.react-leads-page.warm-research-mode .operator-flow-line li {
+  min-height: 28px;
+}
+
+.campaign-history-filters input[type="search"] {
+  min-height: 30px;
+  padding: 5px 8px;
+  color: #d7e2ee;
+  border: 1px solid var(--console-line);
+  border-radius: 5px;
+  background: #0d1621;
+  font-size: .72rem;
+  text-transform: none;
+}
+
+.campaign-history-search {
+  min-width: 210px !important;
+}
+
+.history-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 6px;
+  border: 1px solid var(--console-line);
+  border-radius: 999px;
+  color: #c8d4e3;
+  background: rgba(255,255,255,.025);
+  font-size: .62rem;
+  font-weight: 700;
+}
+
+.history-status-pill-good {
+  color: #baf1d1;
+  border-color: rgba(103,211,157,.2);
+  background: rgba(103,211,157,.08);
+}
+
+.history-status-pill-warn {
+  color: #eed69f;
+  border-color: rgba(223,186,105,.22);
+  background: rgba(223,186,105,.08);
+}
+
+.history-status-pill-bad {
+  color: #ffc5cb;
+  border-color: rgba(239,135,146,.24);
+  background: rgba(239,135,146,.08);
+}
+
+.history-row-bad td:first-child { box-shadow: inset 2px 0 0 rgba(239,135,146,.6); }
+.history-row-warn td:first-child { box-shadow: inset 2px 0 0 rgba(223,186,105,.5); }
+.history-result-cell { max-width: 320px; }
+.history-result-cell .history-status-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#controlled-send-test-all-btn {
+  color: #f5dfae;
+  border-color: rgba(223,186,105,.36);
+  background: rgba(223,186,105,.12);
+}
+
+#controlled-send-test-all-btn:hover:not(:disabled) {
+  background: rgba(223,186,105,.2);
+}
+
+#overview-view .sender-status-profile-meta,
+#leads-view .muted,
+#diagnostics-view .controlled-send-test-copy p {
+  font-size: max(.64rem, 11px);
+}

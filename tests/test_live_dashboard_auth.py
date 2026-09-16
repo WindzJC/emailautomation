@@ -129,6 +129,19 @@ class LiveDashboardAuthTests(unittest.TestCase):
             live_dashboard,
             "_build_live_snapshot",
             return_value={"ok": True},
+        ), patch.object(
+            live_dashboard,
+            "_dashboard_runtime_identity_response",
+            return_value={
+                "machine_id": "mac",
+                "machine_error": "",
+                "authorized_machine": "mac",
+                "authority_status": "active",
+                "authority_generation": 1,
+                "authority_expected_git_commit": "a" * 40,
+                "production_authorized": True,
+                "authority_error": "",
+            },
         ):
             with TestClient(live_dashboard.app) as client:
                 status = client.get("/api/auth/status")
@@ -147,6 +160,14 @@ class LiveDashboardAuthTests(unittest.TestCase):
                         "auto_start_env_var": "DASHBOARD_ALLOW_AUTO_START",
                         "live_actions_enabled": False,
                         "live_actions_env_var": "DASHBOARD_ENABLE_LIVE_ACTIONS",
+                        "machine_id": "mac",
+                        "machine_error": "",
+                        "authorized_machine": "mac",
+                        "authority_status": "active",
+                        "authority_generation": 1,
+                        "authority_expected_git_commit": "a" * 40,
+                        "production_authorized": True,
+                        "authority_error": "",
                     },
                     status.json(),
                 )
@@ -229,6 +250,100 @@ class LiveDashboardAuthTests(unittest.TestCase):
         self.assertEqual("configuration_error", status["dashboard_mode"])
         self.assertFalse(status["auto_start_allowed"])
         self.assertFalse(status["live_actions_enabled"])
+
+    def test_runtime_identity_reports_authorized_machine_portably(self) -> None:
+        authority = {
+            "authorized_machine": "mac",
+            "generation": 3,
+            "bundle_id": "bundle",
+            "source_machine": "windows-wsl",
+            "target_machine": "mac",
+            "created_utc": "2026-09-16T00:00:00+00:00",
+            "expected_git_commit": "a" * 40,
+            "runtime_manifest_hash": "b" * 64,
+            "status": "active",
+        }
+        with patch.object(live_dashboard, "current_machine", return_value="mac"), patch.object(
+            live_dashboard, "load_authority", return_value=authority
+        ), patch.object(live_dashboard, "assert_send_authorized", return_value=authority):
+            status = live_dashboard._dashboard_runtime_identity_response()
+
+        self.assertEqual("mac", status["machine_id"])
+        self.assertEqual("mac", status["authorized_machine"])
+        self.assertEqual("active", status["authority_status"])
+        self.assertEqual(3, status["authority_generation"])
+        self.assertTrue(status["production_authorized"])
+
+    def test_runtime_identity_marks_standby_host_read_only(self) -> None:
+        authority = {
+            "authorized_machine": "windows-wsl",
+            "generation": 4,
+            "bundle_id": "bundle",
+            "source_machine": "mac",
+            "target_machine": "windows-wsl",
+            "created_utc": "2026-09-16T00:00:00+00:00",
+            "expected_git_commit": "c" * 40,
+            "runtime_manifest_hash": "d" * 64,
+            "status": "active",
+        }
+        with patch.object(live_dashboard, "current_machine", return_value="mac"), patch.object(
+            live_dashboard, "load_authority", return_value=authority
+        ), patch.object(
+            live_dashboard, "assert_send_authorized", side_effect=live_dashboard.AuthorityError("Runtime is authorized for windows-wsl, not mac")
+        ):
+            status = live_dashboard._dashboard_runtime_identity_response()
+
+        self.assertEqual("mac", status["machine_id"])
+        self.assertEqual("windows-wsl", status["authorized_machine"])
+        self.assertEqual("active", status["authority_status"])
+        self.assertFalse(status["production_authorized"])
+        self.assertIn("windows-wsl", status["authority_error"])
+
+    def test_manual_start_is_read_only_on_standby_even_when_dashboard_auth_is_enabled(self) -> None:
+        with patch.object(
+            live_dashboard,
+            "_dashboard_runtime_identity_response",
+            return_value={
+                "production_authorized": False,
+                "authorized_machine": "windows-wsl",
+            },
+        ), patch.object(live_dashboard, "_dashboard_auth_enabled", return_value=True), patch.object(
+            live_dashboard.runtime_control,
+            "is_known_profile",
+            return_value=True,
+        ), patch.object(live_dashboard.runtime_control, "start_sender") as start_sender:
+            response = live_dashboard.start_profile("sendgrid_annette")
+
+        payload = live_dashboard._response_json_payload(response)
+        self.assertEqual(403, response.status_code)
+        self.assertEqual("production_authority_required", payload["error"])
+        self.assertEqual("sendgrid_annette", payload["profile"])
+        self.assertIn("Windows/WSL", payload["message"])
+        start_sender.assert_not_called()
+
+    def test_start_ready_is_read_only_on_standby_before_job_creation(self) -> None:
+        live_dashboard._reset_start_ready_jobs_for_tests()
+        try:
+            with patch.object(
+                live_dashboard,
+                "_dashboard_runtime_identity_response",
+                return_value={
+                    "production_authorized": False,
+                    "authorized_machine": "windows-wsl",
+                },
+            ), patch.object(live_dashboard, "_dashboard_auth_enabled", return_value=True), patch.object(
+                live_dashboard._SENDER_START_EXECUTOR,
+                "submit",
+            ) as submit:
+                response = asyncio.run(live_dashboard.start_ready_endpoint())
+
+            payload = live_dashboard._response_json_payload(response)
+            self.assertEqual(403, response.status_code)
+            self.assertEqual("production_authority_required", payload["error"])
+            self.assertEqual({}, live_dashboard._START_READY_JOBS)
+            submit.assert_not_called()
+        finally:
+            live_dashboard._reset_start_ready_jobs_for_tests()
 
     def test_missing_password_fails_closed(self) -> None:
         status = dashboard_security.validate_dashboard_security(
