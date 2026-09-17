@@ -13,7 +13,7 @@ from leads_workflow import iso_utc
 from sendgrid_hygiene import norm_email
 
 
-LEAD_LEDGER_SCHEMA_VERSION = 4
+LEAD_LEDGER_SCHEMA_VERSION = 5
 LEAD_LEDGER_DB_PATH = settings.LEAD_LEDGER_DB_PATH
 
 LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL = """
@@ -446,6 +446,18 @@ def ensure_lead_ledger_schema(conn: sqlite3.Connection) -> None:
                 WHERE {LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL}
                 """
             )
+        if current_version < 5:
+            ledger_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(lead_ledger)").fetchall()
+            }
+            if {"current_status", "score", "updated_at", "lead_id"}.issubset(ledger_columns):
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_lead_ledger_quarantine_score
+                    ON lead_ledger(current_status, score DESC, updated_at DESC, lead_id DESC)
+                    """
+                )
         conn.execute(f"PRAGMA user_version = {LEAD_LEDGER_SCHEMA_VERSION}")
 
 
@@ -813,49 +825,97 @@ def list_quarantine_review_leads(
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, object]:
-    review_rows = _quarantine_review_rows(
-        conn,
-        reason_code=reason_code,
-        stage=stage,
-        status=status,
-        sort=sort,
-    )
+    """Return a paged quarantine inbox without materializing the full ledger.
+
+    Earlier versions converted every quarantined lead into a rich Python payload
+    twice before applying pagination. On larger ledgers this made a read-only UI
+    request take many seconds. Filtering/counting now stays in SQLite and only
+    the requested page is expanded into review payloads.
+    """
     base_status = _strip(status) or QUARANTINE_STATUS
     selected_reason_code = _strip(reason_code)
-    total_filtered = len(review_rows)
-    start = max(0, int(offset or 0))
-    stop = start + max(1, min(500, int(limit or 100)))
-    visible_rows = review_rows[start:stop]
+    selected_stage = _strip(stage)
+    page_limit = max(1, min(500, int(limit or 100)))
+    page_offset = max(0, int(offset or 0))
 
-    all_quarantine_rows = [
-        _lead_review_payload(dict(row))
+    clauses: list[str] = []
+    params: list[object] = []
+    if base_status:
+        clauses.append("current_status = ?")
+        params.append(base_status)
+    if selected_stage:
+        clauses.append("current_stage = ?")
+        params.append(selected_stage)
+    if selected_reason_code:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(lead_ledger.reason_codes) reason WHERE reason.value = ?)"
+        )
+        params.append(selected_reason_code)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    direction = "ASC" if sort == "score_asc" else "DESC"
+
+    total_filtered = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM lead_ledger {where_sql}",
+            tuple(params),
+        ).fetchone()[0]
+    )
+    visible_rows = conn.execute(
+        f"""
+        SELECT * FROM lead_ledger
+        {where_sql}
+        ORDER BY score {direction}, updated_at {direction}, lead_id {direction}
+        LIMIT ? OFFSET ?
+        """,
+        (*params, page_limit, page_offset),
+    ).fetchall()
+
+    quarantine_params = (QUARANTINE_STATUS,)
+    total_quarantined = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM lead_ledger WHERE current_status = ?",
+            quarantine_params,
+        ).fetchone()[0]
+    )
+    stage_counts = {
+        _strip(row[0]) or "(none)": int(row[1])
         for row in conn.execute(
-            "SELECT * FROM lead_ledger WHERE current_status = ?",
-            (QUARANTINE_STATUS,),
+            """
+            SELECT current_stage, COUNT(*)
+            FROM lead_ledger
+            WHERE current_status = ?
+            GROUP BY current_stage
+            """,
+            quarantine_params,
         ).fetchall()
-    ]
-    reason_counts: dict[str, int] = {}
-    stage_counts: dict[str, int] = {}
-    status_counts: dict[str, int] = {}
-    for row in all_quarantine_rows:
-        stage_key = _strip(row.get("current_stage")) or "(none)"
-        status_key = _strip(row.get("current_status")) or "(none)"
-        stage_counts[stage_key] = int(stage_counts.get(stage_key, 0) or 0) + 1
-        status_counts[status_key] = int(status_counts.get(status_key, 0) or 0) + 1
-        for code in row.get("reason_codes") or []:
-            reason_counts[code] = int(reason_counts.get(code, 0) or 0) + 1
+    }
+    status_counts = ({QUARANTINE_STATUS: total_quarantined} if total_quarantined else {})
+    reason_counts = {
+        _strip(row[0]): int(row[1])
+        for row in conn.execute(
+            """
+            SELECT reason.value, COUNT(*)
+            FROM lead_ledger
+            JOIN json_each(lead_ledger.reason_codes) AS reason
+            WHERE current_status = ? AND TRIM(CAST(reason.value AS TEXT)) <> ''
+            GROUP BY reason.value
+            """,
+            quarantine_params,
+        ).fetchall()
+        if _strip(row[0])
+    }
 
     return {
         "filters": {
             "reason_code": selected_reason_code,
-            "stage": _strip(stage),
+            "stage": selected_stage,
             "status": base_status,
             "sort": "score_asc" if sort == "score_asc" else "score_desc",
-            "limit": max(1, min(500, int(limit or 100))),
-            "offset": start,
+            "limit": page_limit,
+            "offset": page_offset,
         },
         "counts": {
-            "total_quarantined": len(all_quarantine_rows),
+            "total_quarantined": total_quarantined,
             "filtered": total_filtered,
             "displayed": len(visible_rows),
         },
@@ -865,7 +925,7 @@ def list_quarantine_review_leads(
         "stage_options": sorted(stage_counts.keys()),
         "status_options": sorted(status_counts.keys()),
         "reason_code_options": sorted(reason_counts.keys()),
-        "leads": visible_rows,
+        "leads": [_lead_review_payload(dict(row)) for row in visible_rows],
     }
 
 

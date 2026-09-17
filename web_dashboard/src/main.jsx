@@ -310,6 +310,14 @@ export function CommandBar({ html }) {
   );
 }
 
+export function PrimaryOperation() {
+  return (
+    <section id="primary-operation-hero" className="react-primary-operation" aria-label="Primary sender operation">
+      <div className="react-primary-operation-loading">Loading primary operation…</div>
+    </section>
+  );
+}
+
 export function FleetSummary({ children }) {
   return (
     <section className="react-metric-region react-fleet-summary" aria-label="Fleet operations summary">
@@ -368,13 +376,15 @@ export function EnvironmentBanner({ variant = "sidebar" } = {}) {
 export function ValidationTools({ html }) {
   return (
     <section className="react-validation-tools" aria-label="Validation Tools">
-      <header className="react-validation-tools-head">
-        <span>Validation Tools</span>
-        <span>Controlled sender tests — no production recipient queues</span>
-      </header>
-      <div className="react-validation-tools-body">
-        <LegacyNode html={html} />
-      </div>
+      <details>
+        <summary className="react-validation-tools-head">
+          <span>Validation Tools</span>
+          <span>Controlled tests only · no production recipient queues</span>
+        </summary>
+        <div className="react-validation-tools-body">
+          <LegacyNode html={html} />
+        </div>
+      </details>
     </section>
   );
 }
@@ -385,9 +395,10 @@ export function OverviewDashboard({ view }) {
       <PageHeading
         eyebrow="Operations"
         title="Overview"
-        description="Current queue health, live runtime, and the next authorized action."
+        description="One primary operation, the next authorized action, and secondary fleet state."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
+      <PrimaryOperation />
       <FleetSummary>
         <LegacyNode html={view.metrics} />
       </FleetSummary>
@@ -396,11 +407,15 @@ export function OverviewDashboard({ view }) {
         <CompactProgress progress={view.progress} />
       </div>
       <SenderTable />
-      <section className="react-supporting-panels react-sender-detail-panels">
+      <details className="react-supporting-panels react-sender-detail-panels react-sender-detail-disclosure">
+        <summary className="react-sender-detail-summary">
+          <span>Sender details</span>
+          <span>Deep telemetry, pacing, queue metadata, and profile diagnostics</span>
+        </summary>
         <section id="detail-panel" className="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">
           <LegacyNode html={view.profileDetail} />
         </section>
-      </section>
+      </details>
     </section>
   );
 }
@@ -426,7 +441,7 @@ export function DiagnosticsDashboard({ view }) {
       <PageHeading
         eyebrow="System"
         title="Diagnostics"
-        description="Expanded alerts, run progress, environment safety, and controlled sender validation."
+        description="Runtime authority, queue integrity, provider health, and deeper validation tools."
       />
       <EnvironmentBanner variant="diagnostics" />
       <section id="ops-progress-details" className="panel panel-shell workspace-metric-details advanced-details">

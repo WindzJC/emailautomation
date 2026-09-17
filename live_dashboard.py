@@ -253,7 +253,10 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     {"ok": False, "message": "Authentication required."},
                     status_code=401,
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and path.startswith("/api/leads/"):
+            _invalidate_local_leads_status_cache()
+        return response
 
 
 app.add_middleware(DashboardAuthMiddleware)
@@ -2953,9 +2956,7 @@ def _warm_check_job_is_current(
         if not str(raw_path or "").strip():
             return False
         try:
-            path = Path(str(raw_path))
-            if not path.is_absolute():
-                path = settings.APP_ROOT / path
+            path = _portable_repo_artifact_path(raw_path)
             if not path.exists():
                 return False
         except OSError:
@@ -2993,21 +2994,60 @@ def _warm_check_status_payload(
     }
 
 
+_PORTABLE_REPO_ARTIFACT_ROOTS = {"_important", "data"}
+
+
+def _portable_repo_artifact_identity(value: object) -> tuple[str, ...]:
+    """Return a repo-relative identity for persisted cross-host artifact paths.
+
+    Runtime/job metadata may outlive the machine that wrote it. Only known
+    repository-owned roots are portable; arbitrary absolute paths remain exact.
+    """
+    text = _normalize_dashboard_path_text(value)
+    if not text:
+        return ()
+    parts = tuple(part for part in text.split("/") if part)
+    for index, part in enumerate(parts):
+        if part in _PORTABLE_REPO_ARTIFACT_ROOTS:
+            return parts[index:]
+    return ()
+
+
+def _portable_repo_artifact_path(value: object, *, fallback: Path | None = None) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback if fallback is not None else settings.APP_ROOT
+    normalized = _normalize_dashboard_path_text(raw)
+    identity = _portable_repo_artifact_identity(normalized)
+    path = Path(normalized)
+    windows_absolute = bool(re.match(r"^[A-Za-z]:/", normalized))
+    if not path.is_absolute() and not windows_absolute:
+        return settings.APP_ROOT / path
+    try:
+        if path.exists():
+            return path
+    except OSError:
+        pass
+    if identity:
+        candidate = settings.APP_ROOT.joinpath(*identity)
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            pass
+    return path
+
+
 def _staged_run_dir_for_job(job: dict[str, object]) -> Path:
-    staged_dir = Path(str(job.get("staged_run_dir") or "")) if job.get("staged_run_dir") else IMPORTANT_LEADS_RUNS / str(job.get("job_id") or "")
-    if not staged_dir.is_absolute():
-        staged_dir = settings.APP_ROOT / staged_dir
-    return staged_dir
+    default = IMPORTANT_LEADS_RUNS / str(job.get("job_id") or "")
+    return _portable_repo_artifact_path(job.get("staged_run_dir"), fallback=default)
 
 
 def _staged_triage_paths_for_job(job: dict[str, object]) -> dict[str, Path]:
     staged_dir = _staged_run_dir_for_job(job)
 
     def path_from_job(key: str, filename: str) -> Path:
-        path = Path(str(job.get(key) or staged_dir / filename))
-        if not path.is_absolute():
-            path = settings.APP_ROOT / path
-        return path
+        return _portable_repo_artifact_path(job.get(key), fallback=staged_dir / filename)
 
     return {
         "input": path_from_job("output_path", "leads.csv"),
@@ -3056,6 +3096,10 @@ def _dashboard_paths_match(left: object, right: object) -> bool:
     right_text = _normalize_dashboard_path_text(right)
     if not left_text or not right_text:
         return False
+    left_identity = _portable_repo_artifact_identity(left_text)
+    right_identity = _portable_repo_artifact_identity(right_text)
+    if left_identity and right_identity and left_identity == right_identity:
+        return True
     try:
         return Path(left_text).resolve(strict=False) == Path(right_text).resolve(strict=False)
     except Exception:
@@ -4430,21 +4474,9 @@ def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict
         tail_lines=tail_lines,
         profile_snapshots=profile_snapshots,
     )
+    # Manual-start mode is intentional configuration, not an operational alert.
+    # The environment banner already exposes auto-start state explicitly.
     snapshot["automation"] = _build_automation_status()
-    if not bool(snapshot["automation"].get("auto_start_allowed")):
-        alerts = snapshot.setdefault("alerts", [])
-        if not isinstance(alerts, list):
-            alerts = []
-            snapshot["alerts"] = alerts
-        alerts.append(
-            {
-                "severity": "info",
-                "title": "Automatic sender startup disabled",
-                "message": f"Set {DASHBOARD_AUTO_START_ENV_VAR}=1 to enable scheduled startup and recovery. Manual Start and Resume controls remain available.",
-                "blocks_sending": False,
-                "blocking_label": "Info",
-            }
-        )
     warm_status = build_warm_private_jc_live_status()
     snapshot["warm_private_jc_status"] = warm_status
     snapshot["warm_private_jc_lane"] = warm_status
@@ -4749,6 +4781,7 @@ async def _startup_background_automation() -> None:
     runtime_audit.write_app_start()
     if getattr(app.state, "automation_task", None) is None:
         app.state.automation_task = asyncio.create_task(_background_automation_loop())
+    _schedule_local_leads_status_refresh()
     _resume_pending_important_check_jobs()
 
 
@@ -4996,6 +5029,14 @@ _SNAPSHOT_FILE_CACHE_SIGNATURE: tuple[int, int, int, int] | None = None
 _SNAPSHOT_FILE_CACHE_PAYLOAD: dict[str, object] | None = None
 _LEADS_STATUS_FILE_CACHE_SIGNATURE: tuple[int, int, int, int] | None = None
 _LEADS_STATUS_FILE_CACHE_PAYLOAD: dict[str, object] | None = None
+_LOCAL_LEADS_STATUS_CACHE_LOCK = threading.Lock()
+_LOCAL_LEADS_STATUS_CACHE_PAYLOAD: dict[str, object] | None = None
+_LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT = 0.0
+_LOCAL_LEADS_STATUS_CACHE_REFRESHING = False
+_LOCAL_LEADS_STATUS_CACHE_GENERATION = 0
+LOCAL_LEADS_STATUS_CACHE_TTL_SECONDS = float(
+    max(5, min(60, _int_env("DASHBOARD_LOCAL_LEADS_STATUS_TTL_SECONDS", 15)))
+)
 
 # WebSocket clients used to each reconcile and JSON-serialize a full snapshot
 # every ten seconds.  This small in-process fan-out cache makes one caller the
@@ -5016,6 +5057,7 @@ _SNAPSHOT_FANOUT_REVISION = 0
 _SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-snapshot")
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-webhook")
 _AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-automation")
+_LEADS_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-leads-status")
 # Start requests perform fresh queue/readiness checks before issuing exactly one
 # runtime-control action. Keep that complete transaction off the event loop and
 # serialize it so concurrent clicks cannot multiply full snapshot scans or race
@@ -5077,12 +5119,21 @@ def _reset_snapshot_caches_for_tests() -> None:
     global _SNAPSHOT_FILE_CACHE_PAYLOAD
     global _LEADS_STATUS_FILE_CACHE_SIGNATURE
     global _LEADS_STATUS_FILE_CACHE_PAYLOAD
+    global _LOCAL_LEADS_STATUS_CACHE_PAYLOAD
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHING
+    global _LOCAL_LEADS_STATUS_CACHE_GENERATION
     global _SNAPSHOT_FANOUT_REVISION
     with _SNAPSHOT_FILE_CACHE_LOCK:
         _SNAPSHOT_FILE_CACHE_SIGNATURE = None
         _SNAPSHOT_FILE_CACHE_PAYLOAD = None
         _LEADS_STATUS_FILE_CACHE_SIGNATURE = None
         _LEADS_STATUS_FILE_CACHE_PAYLOAD = None
+    with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+        _LOCAL_LEADS_STATUS_CACHE_PAYLOAD = None
+        _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT = 0.0
+        _LOCAL_LEADS_STATUS_CACHE_REFRESHING = False
+        _LOCAL_LEADS_STATUS_CACHE_GENERATION += 1
     with _SNAPSHOT_FANOUT_LOCK:
         _SNAPSHOT_FANOUT_CACHE.clear()
         waiters = list(_SNAPSHOT_FANOUT_INFLIGHT.values())
@@ -5167,31 +5218,127 @@ def _load_cached_leads_status() -> dict[str, object] | None:
     return dict(cached_status)
 
 
+def _refresh_local_leads_status_cache(expected_generation: int | None = None) -> dict[str, object]:
+    global _LOCAL_LEADS_STATUS_CACHE_PAYLOAD
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHING
+    try:
+        payload = dict(_combined_leads_status())
+        with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+            if expected_generation is None or expected_generation == _LOCAL_LEADS_STATUS_CACHE_GENERATION:
+                _LOCAL_LEADS_STATUS_CACHE_PAYLOAD = dict(payload)
+                _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT = time.monotonic()
+        return payload
+    finally:
+        with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+            if expected_generation is None or expected_generation == _LOCAL_LEADS_STATUS_CACHE_GENERATION:
+                _LOCAL_LEADS_STATUS_CACHE_REFRESHING = False
+
+
+def _schedule_local_leads_status_refresh() -> None:
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHING
+    if runtime_control.backend_name() == "systemd":
+        return
+    with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+        if _LOCAL_LEADS_STATUS_CACHE_REFRESHING:
+            return
+        _LOCAL_LEADS_STATUS_CACHE_REFRESHING = True
+        generation = _LOCAL_LEADS_STATUS_CACHE_GENERATION
+    _LEADS_STATUS_EXECUTOR.submit(_refresh_local_leads_status_cache, generation)
+
+def _invalidate_local_leads_status_cache() -> None:
+    global _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT
+    if runtime_control.backend_name() == "systemd":
+        return
+    with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+        _LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT = 0.0
+    _schedule_local_leads_status_refresh()
+
+
+def _overlay_live_lead_jobs(status: dict[str, object]) -> dict[str, object]:
+    """Overlay mutation-sensitive Lead Ops job state without degrading cached truth."""
+    merged = dict(status)
+    current_check_jobs = {
+        "cold": _find_active_important_check_job("cold"),
+        "warm_research": _find_active_important_check_job("warm_research"),
+    }
+    current_check = _find_active_important_check_job()
+    current_verify = _find_active_dashboard_job(IMPORTANT_LEADS_VERIFY_JOBS)
+    current_dispatch = _find_active_dashboard_job(IMPORTANT_LEADS_DISPATCH_JOBS)
+    previous = (
+        merged.get("active_important_check_job"),
+        merged.get("active_important_check_jobs"),
+        merged.get("active_important_verify_job"),
+        merged.get("active_important_dispatch_job"),
+    )
+    current = (current_check, current_check_jobs, current_verify, current_dispatch)
+    jobs_changed = previous != current and any(
+        key in merged
+        for key in (
+            "active_important_check_job",
+            "active_important_check_jobs",
+            "active_important_verify_job",
+            "active_important_dispatch_job",
+        )
+    )
+    has_live_job = bool(current_check or current_verify or current_dispatch or any(current_check_jobs.values()))
+    if has_live_job or jobs_changed:
+        merged["active_important_check_job"] = current_check
+        merged["active_important_check_jobs"] = current_check_jobs
+        merged["active_important_verify_job"] = current_verify
+        merged["active_important_dispatch_job"] = current_dispatch
+        try:
+            merged["lead_ops_progress"] = _current_lead_ops_progress(merged)
+            merged["lead_ops_progress_by_workflow"] = {
+                "cold": _current_lead_ops_progress(merged, "cold"),
+                "warm_research": _current_lead_ops_progress(merged, "warm_research"),
+            }
+        except Exception:
+            pass
+        try:
+            merged["lead_check_status"] = _build_lead_check_status(merged, load_state())
+        except Exception:
+            pass
+        try:
+            merged["pipeline"] = _build_leads_pipeline_status(merged)
+        except Exception:
+            pass
+    return merged
+
 def _display_leads_status() -> dict[str, object]:
     """Fast status payload for dashboard/UI responses.
 
-    Production must never run the expensive full Lead Ops reconstruction in
-    an HTTP polling request. The systemd cache-refresh service performs that
-    work outside the request path and persists the last known-good result.
-
-    Non-systemd development retains the historical synchronous fallback so
-    local development does not require the production timer.
+    Systemd production consumes the externally refreshed persisted cache. Local
+    tmux/Mac operation uses a short-lived in-process stale-while-refresh cache so
+    it never trusts a persisted cache written by another runtime host. Live job
+    metadata is overlaid on both paths on every request.
     """
-    cached_status = _load_cached_leads_status()
-    if cached_status is not None:
-        return cached_status
+    backend = runtime_control.backend_name()
+    if backend == "systemd":
+        cached_status = _load_cached_leads_status()
+        if cached_status is not None:
+            return _overlay_live_lead_jobs(cached_status)
+        return _overlay_live_lead_jobs({
+            "status_cache_ready": False,
+            "status_cache_source": "persisted_dashboard_refresh",
+            "status_cache_message": (
+                "Lead Ops status cache is warming up. "
+                "No synchronous production rebuild was attempted."
+            ),
+        })
 
-    if runtime_control.backend_name() != "systemd":
-        return _combined_leads_status()
-
-    return {
-        "status_cache_ready": False,
-        "status_cache_source": "persisted_dashboard_refresh",
-        "status_cache_message": (
-            "Lead Ops status cache is warming up. "
-            "No synchronous production rebuild was attempted."
-        ),
-    }
+    with _LOCAL_LEADS_STATUS_CACHE_LOCK:
+        local_cached = (
+            dict(_LOCAL_LEADS_STATUS_CACHE_PAYLOAD)
+            if isinstance(_LOCAL_LEADS_STATUS_CACHE_PAYLOAD, dict)
+            else None
+        )
+        age = time.monotonic() - float(_LOCAL_LEADS_STATUS_CACHE_REFRESHED_AT or 0.0)
+    if local_cached is not None:
+        if age > LOCAL_LEADS_STATUS_CACHE_TTL_SECONDS:
+            _schedule_local_leads_status_refresh()
+        return _overlay_live_lead_jobs(local_cached)
+    return _overlay_live_lead_jobs(_refresh_local_leads_status_cache())
 
 
 def _reconcile_snapshot_runtime(snapshot: dict[str, object]) -> dict[str, object]:
@@ -5516,10 +5663,7 @@ def _state_label_path(value: object) -> Path | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    path = Path(raw)
-    if not path.is_absolute():
-        path = settings.APP_ROOT / path
-    return path
+    return _portable_repo_artifact_path(raw)
 
 
 def _path_is_temp_artifact(path: Path) -> bool:
@@ -5543,10 +5687,7 @@ def _queue_safety_report_path(value: object) -> Path | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    path = Path(raw)
-    if not path.is_absolute():
-        path = settings.APP_ROOT / path
-    return path
+    return _portable_repo_artifact_path(raw)
 
 
 def _path_exists_nonempty(path: Path | None) -> bool:
@@ -6078,6 +6219,11 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
             status_code=409,
         )
 
+    _append_campaign_history(
+        "preview_sync_requested",
+        profile=profile_name,
+        snapshot=_build_live_snapshot(),
+    )
     try:
         try:
             queue_before = _protected_queue_snapshot(profile_name)
@@ -6225,6 +6371,17 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
             "timestamp_utc": iso_utc(),
         }
         if not validation_passed:
+            failed_snapshot = _build_live_snapshot()
+            _append_campaign_history(
+                "preview_sync_failed",
+                profile=profile_name,
+                snapshot=failed_snapshot,
+                queue_safety=queue_safety,
+                preview_file=preview_path.name,
+                preview_row_count=int(result["preview_row_count"]),
+                validation_status="FAIL",
+                blocked_reasons=reason_counts or ["Preview validation failed."],
+            )
             return JSONResponse(
                 {
                     "ok": False,
@@ -6232,7 +6389,7 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
                     "profile": profile_name,
                     "message": f"Preview generated but validation failed for {profile_name}.",
                     "result": result,
-                    "snapshot": _build_live_snapshot(),
+                    "snapshot": failed_snapshot,
                 },
                 status_code=422,
             )
@@ -6310,6 +6467,26 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
         result["ready"] = ready
         snapshot = _build_live_snapshot()
         if not ready:
+            postcheck_reasons = [
+                reason
+                for reason in (
+                    "Preview alignment failed." if not alignment_passed else "",
+                    "Queue safety failed." if not bool(queue_safety.get("safe")) else "",
+                    "Deployment verification failed." if not deployment_verify_passed else "",
+                    "Sender preflight failed." if not preflight_passed else "",
+                )
+                if reason
+            ]
+            _append_campaign_history(
+                "preview_sync_postcheck_failed",
+                profile=profile_name,
+                snapshot=snapshot,
+                queue_safety=queue_safety,
+                preview_file=preview_path.name,
+                preview_row_count=int(result["preview_row_count"]),
+                validation_status="PASS",
+                blocked_reasons=postcheck_reasons,
+            )
             return JSONResponse(
                 {
                     "ok": False,
@@ -6322,6 +6499,15 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
                 },
                 status_code=409,
             )
+        _append_campaign_history(
+            "preview_sync_completed",
+            profile=profile_name,
+            snapshot=snapshot,
+            queue_safety=queue_safety,
+            preview_file=preview_path.name,
+            preview_row_count=int(result["preview_row_count"]),
+            validation_status="PASS",
+        )
         return JSONResponse(
             {
                 "ok": True,
@@ -6939,6 +7125,12 @@ def start_profile(profile_name: str) -> JSONResponse:
 def stop() -> JSONResponse:
     ok, message = runtime_control.stop_all_senders()
     snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
+    _append_campaign_history(
+        "stop_all_completed" if ok else "stop_all_failed",
+        profile="all",
+        snapshot=snapshot,
+        blocked_reasons=[] if ok else [message],
+    )
     return JSONResponse(
         {"ok": ok, "message": message, "snapshot": snapshot},
         status_code=200 if ok else 409,
@@ -6951,6 +7143,12 @@ def stop_profile(profile_name: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": f"Unknown profile: {profile_name}"}, status_code=404)
     ok, message = runtime_control.stop_sender(profile_name)
     snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
+    _append_campaign_history(
+        "stop_profile_completed" if ok else "stop_profile_failed",
+        profile=profile_name,
+        snapshot=snapshot,
+        blocked_reasons=[] if ok else [message],
+    )
     return JSONResponse(
         {"ok": ok, "message": message, "snapshot": snapshot},
         status_code=200 if ok else 409,

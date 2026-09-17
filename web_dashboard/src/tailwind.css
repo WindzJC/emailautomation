@@ -4079,3 +4079,319 @@
 #diagnostics-view .controlled-send-test-copy p {
   font-size: max(.64rem, 11px);
 }
+
+/* Dashboard UX v2: primary-operation hierarchy */
+.react-primary-operation {
+  margin-bottom: 12px;
+  padding: 18px 20px 14px;
+  border: 1px solid rgba(96,165,250,.34);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(33,52,79,.94), rgba(17,28,45,.96));
+  box-shadow: 0 14px 36px rgba(0,0,0,.18);
+}
+.react-primary-operation-loading,
+.react-primary-operation-empty { color: #9fb0c4; }
+.primary-operation-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px;
+}
+.primary-operation-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+.primary-operation-title-row h3 {
+  margin: 0 8px 0 0;
+  font-size: 1.55rem;
+  line-height: 1.05;
+  letter-spacing: -.025em;
+}
+.primary-operation-guidance {
+  margin: 7px 0 0;
+  color: #afbdd0;
+  font-size: .82rem;
+}
+.primary-operation-action {
+  min-width: 148px;
+  min-height: 46px;
+  padding-inline: 20px;
+  font-size: .86rem !important;
+  font-weight: 800 !important;
+}
+.primary-operation-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: 1px;
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  background: rgba(255,255,255,.04);
+}
+.primary-operation-stat {
+  display: grid;
+  gap: 3px;
+  padding: 11px 13px;
+  background: rgba(5,12,23,.26);
+}
+.primary-operation-stat span {
+  color: #8293a9;
+  font-size: .64rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.primary-operation-stat strong {
+  color: #edf5ff;
+  font-size: 1.12rem;
+  line-height: 1.1;
+}
+.primary-operation-stat-remaining strong { font-size: 1.42rem; }
+.primary-operation-progress {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  color: #8999ae;
+  font-size: .66rem;
+}
+.primary-operation-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+}
+.primary-operation-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #78aef7;
+}
+#overview-view .react-fleet-summary { margin-bottom: 10px; }
+#overview-view .summary-card-private_jc { display: none !important; }
+#overview-view .workspace-summary-strip.summary-grid,
+#overview-view #summary-grid.workspace-summary-strip.summary-grid {
+  grid-template-columns: repeat(4, minmax(0,1fr)) !important;
+}
+#overview-view .summary-card {
+  min-height: 64px !important;
+  padding: 9px 12px !important;
+}
+#overview-view .summary-value { font-size: 1.12rem !important; }
+#overview-view .react-overview-live-grid { margin-top: 0; }
+#overview-view .react-command-bar {
+  border-color: rgba(255,255,255,.07);
+  background: rgba(255,255,255,.015);
+}
+#overview-view #stop-btn:disabled {
+  opacity: .42;
+  cursor: not-allowed;
+}
+#overview-view .sender-status-panel { border-radius: 10px; }
+#overview-view .sender-status-head { padding: 11px 14px 9px; }
+#overview-view .sender-status-head .eyebrow::after {
+  content: " · secondary sender detail";
+  color: #65758a;
+  font-weight: 500;
+  text-transform: none;
+}
+.react-validation-tools {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--console-line);
+  border-radius: 10px;
+  background: var(--console-surface);
+}
+.react-validation-tools-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 16px;
+  cursor: pointer;
+  list-style: none;
+  color: #c8d5e5;
+  font-size: .78rem;
+  font-weight: 700;
+}
+.react-validation-tools-head::-webkit-details-marker { display: none; }
+.react-validation-tools-head::after {
+  content: "+";
+  color: #8395aa;
+  font-size: 1rem;
+}
+.react-validation-tools[open] .react-validation-tools-head::after { content: "−"; }
+.react-validation-tools-head > span:last-child {
+  color: #7f90a5;
+  font-size: .67rem;
+  font-weight: 500;
+}
+.react-validation-tools-body {
+  padding: 12px;
+  border-top: 1px solid var(--console-line-soft);
+}
+#leads-view .react-current-staged-legend {
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  border-radius: 10px;
+  overflow: hidden;
+}
+#leads-view .react-current-staged-legend > div { padding: 12px 14px; }
+#leads-view .operator-step { border-radius: 10px; }
+#leads-view .operator-step-heading h3 { font-size: 1rem; }
+#leads-view .operator-flow-line {
+  padding: 8px 10px;
+  border: 1px solid var(--console-line);
+  border-radius: 9px;
+  background: rgba(255,255,255,.015);
+}
+.react-history-page .campaign-history-panel {
+  overflow: hidden;
+  border-radius: 10px;
+}
+.react-history-page .campaign-history-filters {
+  padding: 12px;
+  border-bottom: 1px solid var(--console-line-soft);
+  background: rgba(255,255,255,.015);
+}
+.react-history-page .campaign-history-table tbody tr { position: relative; }
+.react-history-page .campaign-history-table tbody tr::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #50647b;
+}
+.react-history-page .campaign-history-table tbody tr.history-row-good::before { background: #58d49a; }
+.react-history-page .campaign-history-table tbody tr.history-row-warn::before { background: #e7b95d; }
+.react-history-page .campaign-history-table tbody tr.history-row-bad::before { background: #ef7f7f; }
+
+@media (max-width: 820px) {
+  .react-primary-operation { padding: 14px; border-radius: 10px; }
+  .primary-operation-head { display: grid; gap: 13px; }
+  .primary-operation-action { width: 100%; }
+  .primary-operation-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .primary-operation-progress { grid-template-columns: 1fr; gap: 6px; }
+  #overview-view .workspace-summary-strip.summary-grid,
+  #overview-view #summary-grid.workspace-summary-strip.summary-grid {
+    grid-template-columns: repeat(2,minmax(0,1fr)) !important;
+  }
+  #overview-view .sender-status-table-wrap { overflow: visible; }
+  #overview-view .sender-status-table {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  #overview-view .sender-status-table thead { display: none; }
+  #overview-view .sender-status-table tbody {
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+  }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) {
+    display: grid;
+    grid-template-columns: repeat(2,minmax(0,1fr));
+    overflow: hidden;
+    border: 1px solid var(--console-line-soft);
+    border-radius: 8px;
+    background: rgba(255,255,255,.018);
+  }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td {
+    display: grid;
+    grid-template-columns: 86px minmax(0,1fr);
+    align-items: center;
+    min-width: 0;
+    height: auto;
+    padding: 7px 9px;
+    border: 0;
+    border-bottom: 1px solid var(--console-line-soft);
+    text-align: left !important;
+  }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td:first-child,
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td:last-child {
+    grid-column: 1 / -1;
+  }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td::before {
+    color: #6f8299;
+    font-size: .58rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+  #overview-view .sender-status-table td:nth-child(2)::before { content: "Readiness"; }
+  #overview-view .sender-status-table td:nth-child(3)::before { content: "Runtime"; }
+  #overview-view .sender-status-table td:nth-child(4)::before { content: "Pending"; }
+  #overview-view .sender-status-table td:nth-child(5)::before { content: "Sent"; }
+  #overview-view .sender-status-table td:nth-child(6)::before { content: "Awaiting"; }
+  #overview-view .sender-status-table td:nth-child(7)::before { content: "Activity"; }
+  #overview-view .sender-status-table td:first-child::before,
+  #overview-view .sender-status-table td:last-child::before { content: none; }
+  #overview-view .sender-status-action-btn { width: 100%; min-width: 0; }
+  #overview-view .sender-status-completed-summary { display: block; }
+  #overview-view .sender-status-completed-summary td { display: block; width: 100%; }
+  #leads-view .react-current-staged-legend { grid-template-columns: 1fr; }
+  .react-validation-tools-head { align-items: flex-start; }
+  .react-validation-tools-head > span:last-child { text-align: right; }
+}
+
+@media (max-width: 480px) {
+  .primary-operation-stats { grid-template-columns: 1fr 1fr; }
+  .primary-operation-stat { padding: 9px 10px; }
+  .primary-operation-title-row h3 { font-size: 1.35rem; }
+  #overview-view .workspace-summary-strip.summary-grid,
+  #overview-view #summary-grid.workspace-summary-strip.summary-grid {
+    grid-template-columns: 1fr !important;
+  }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) { grid-template-columns: 1fr; }
+  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td { grid-column: 1 !important; }
+}
+
+/* UX v2: deep sender telemetry is progressive disclosure, not first-screen content. */
+.react-sender-detail-disclosure {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--console-line);
+  border-radius: 10px;
+  background: var(--console-surface);
+}
+.react-sender-detail-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+.react-sender-detail-summary::-webkit-details-marker { display: none; }
+.react-sender-detail-summary > span:first-child {
+  color: #cad7e7;
+  font-size: .78rem;
+  font-weight: 700;
+}
+.react-sender-detail-summary > span:last-child {
+  color: #7d8fa5;
+  font-size: .66rem;
+}
+.react-sender-detail-summary::after {
+  content: "+";
+  color: #8395aa;
+  font-size: 1rem;
+}
+.react-sender-detail-disclosure[open] .react-sender-detail-summary::after { content: "−"; }
+.react-sender-detail-disclosure #detail-panel {
+  margin: 0;
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+@media (max-width: 820px) {
+  .react-sender-detail-summary { align-items: flex-start; }
+  .react-sender-detail-summary > span:last-child { max-width: 58%; text-align: right; }
+}

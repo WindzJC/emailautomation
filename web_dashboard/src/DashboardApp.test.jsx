@@ -98,7 +98,8 @@ describe("DashboardApp", () => {
     expect(overview.querySelector("#stop-btn")).toBeInTheDocument();
     expect(overview.querySelector(".sender-status-mount")).toBeInTheDocument();
     expect(overview.querySelector("#profile-detail")).toBeInTheDocument();
-    expect(overview.querySelector("details#detail-panel")).not.toBeInTheDocument();
+    expect(overview.querySelector("details.react-sender-detail-disclosure")).toBeInTheDocument();
+    expect(overview.querySelector("details.react-sender-detail-disclosure")).not.toHaveAttribute("open");
     expect(history.querySelector("#campaign-run-history")).toBeInTheDocument();
     expect(history.querySelector("details.campaign-history-panel")).not.toBeInTheDocument();
     const validationTools = diagnostics.querySelector("section.react-validation-tools");

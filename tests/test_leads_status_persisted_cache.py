@@ -56,6 +56,10 @@ def test_display_leads_status_uses_persisted_cache_without_full_rebuild(
         "DASHBOARD_SNAPSHOT_CACHE_PATH",
         cache_path,
     ), patch.object(
+        live_dashboard.runtime_control,
+        "backend_name",
+        return_value="systemd",
+    ), patch.object(
         live_dashboard,
         "_combined_leads_status",
         side_effect=AssertionError(

@@ -181,6 +181,9 @@ def test_dashboard_runtime_fixture_prevents_live_runtime_writes() -> None:
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        live_dashboard._reset_snapshot_caches_for_tests()
+
     def _write_csv(self, path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -230,6 +233,7 @@ class LiveDashboardTests(unittest.TestCase):
         stack.enter_context(patch.object(live_dashboard, "detect_running_preview_profiles", return_value=set()))
         stack.enter_context(patch.object(live_dashboard, "_preview_sync_runtime_job", return_value=None))
         stack.enter_context(patch.object(live_dashboard, "_build_live_snapshot", return_value={"profiles": []}))
+        stack.enter_context(patch.object(live_dashboard, "append_campaign_run_history"))
         stack.enter_context(patch.object(live_dashboard, "message_preview_path_for_profile", return_value=preview_path))
         stack.enter_context(
             patch.object(
@@ -3948,6 +3952,30 @@ class LiveDashboardTests(unittest.TestCase):
             self.assertEqual(2, status["dispatch_source_row_count"])
             self.assertEqual("latest_completed_staged_run", status["dispatch_source"]["source_resolution"])
             self.assertEqual(2044, legacy_status["latest_master_check"]["input_rows"])
+
+    def test_persisted_repo_artifact_paths_rebind_across_runtime_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            local = root / "_important" / "runs" / "check_portable" / "leads_triaged_keep.csv"
+            local.parent.mkdir(parents=True)
+            self._write_csv(
+                local,
+                ["Email", "Status"],
+                [{"Email": "portable@example.test", "Status": "KEEP"}],
+            )
+            old_wsl = "/home/jc/src/emailautomation/_important/runs/check_portable/leads_triaged_keep.csv"
+            old_windows = r"C:\Users\jc\emailautomation\_important\runs\check_portable\leads_triaged_keep.csv"
+            with patch.object(live_dashboard.settings, "APP_ROOT", root):
+                self.assertEqual(local, live_dashboard._portable_repo_artifact_path(old_wsl))
+                self.assertEqual(local, live_dashboard._portable_repo_artifact_path(old_windows))
+                self.assertTrue(live_dashboard._dashboard_paths_match(old_wsl, local))
+                self.assertTrue(live_dashboard._dashboard_paths_match(old_windows, local))
+                self.assertFalse(
+                    live_dashboard._dashboard_paths_match(
+                        "/home/jc/src/emailautomation/_important/runs/other/leads_triaged_keep.csv",
+                        local,
+                    )
+                )
 
     def test_combined_leads_status_preserves_checked_recontact_source_across_preview_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory(dir=live_dashboard.settings.APP_ROOT) as tmpdir:
