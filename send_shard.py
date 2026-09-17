@@ -405,10 +405,10 @@ PROFILES: dict[str, dict[str, object]] = {
         "pitch": "pitch_jc",
         "from_email": "jc@astraproductions.co",
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
-        "interval": 60,
+        "interval": 18,
         "batch_size": 1,
-        "cooldown_seconds": 60,
-        "max_messages_1h": 30,
+        "cooldown_seconds": 18,
+        "max_messages_1h": 200,
         "repeat": True,
         "human_mode": True,
         "max_total": 0,
@@ -431,10 +431,10 @@ PROFILES: dict[str, dict[str, object]] = {
         "pitch": "pitch_warm",
         "from_email": "jc@astraproductions.co",
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
-        "interval": 60,
+        "interval": 18,
         "batch_size": 1,
-        "cooldown_seconds": 60,
-        "max_messages_1h": 30,
+        "cooldown_seconds": 18,
+        "max_messages_1h": 200,
         "repeat": True,
         "human_mode": True,
         "max_total": 0,
@@ -4733,9 +4733,13 @@ def profile_aggregate_spacing_seconds(
     provider: str,
     max_messages_1h: int,
 ) -> float:
-    if provider != "sendgrid" or profile_name not in PRODUCTION_SENDGRID_PROFILES:
-        return 0.0
-    return aggregate_spacing_seconds(max_messages_1h)
+    normalized_profile = str(profile_name or "").strip().lower()
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "sendgrid" and normalized_profile in PRODUCTION_SENDGRID_PROFILES:
+        return aggregate_spacing_seconds(max_messages_1h)
+    if normalized_provider == "private" and get_sender_family(normalized_profile) == SENDER_FAMILY_PRIVATE_JC:
+        return aggregate_spacing_seconds(max_messages_1h)
+    return 0.0
 
 
 def _sendgrid_rate_connection(path: Path) -> sqlite3.Connection:

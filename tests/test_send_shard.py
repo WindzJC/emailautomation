@@ -730,11 +730,11 @@ class SendShardTests(unittest.TestCase):
             stdout.getvalue(),
         )
 
-    def test_private_jc_pacing_remains_unchanged(self) -> None:
+    def test_private_jc_pacing_uses_paid_launch_200_per_hour(self) -> None:
         profile = send_shard.PROFILES["private_jc"]
-        self.assertEqual(60, profile["interval"])
-        self.assertEqual(60, profile["cooldown_seconds"])
-        self.assertEqual(30, profile["max_messages_1h"])
+        self.assertEqual(18, profile["interval"])
+        self.assertEqual(18, profile["cooldown_seconds"])
+        self.assertEqual(200, profile["max_messages_1h"])
         self.assertTrue(profile["human_mode"])
         self.assertEqual("12:00", profile["stop_at_local"])
 
@@ -5105,9 +5105,24 @@ finished_path.write_text(
             ),
         )
         self.assertEqual(
-            0.0,
-            send_shard.profile_aggregate_spacing_seconds("private_jc", "private", 30),
+            18.0,
+            send_shard.profile_aggregate_spacing_seconds("private_jc", "private", 200),
         )
+        self.assertEqual(
+            18.0,
+            send_shard.profile_aggregate_spacing_seconds("private_jc_warm", "private", 200),
+        )
+
+    def test_private_jc_profiles_use_paid_launch_200_per_hour_pacing(self) -> None:
+        for profile_name in ("private_jc", "private_jc_warm"):
+            profile = send_shard.PROFILES[profile_name]
+            self.assertEqual(200, profile["max_messages_1h"])
+            self.assertEqual(18, profile["interval"])
+            self.assertEqual(18, profile["cooldown_seconds"])
+            self.assertEqual(
+                send_shard.SENDER_FAMILY_PRIVATE_JC,
+                send_shard.get_sender_family(profile_name),
+            )
 
     def test_concurrent_sendgrid_slots_form_one_smooth_shared_sqlite_stream(self) -> None:
         class FakeClock:
