@@ -395,10 +395,9 @@ export function OverviewDashboard({ view }) {
       <PageHeading
         eyebrow="Operations"
         title="Overview"
-        description="One primary operation, the next authorized action, and secondary fleet state."
+        description="Current queues, sender state, and the next authorized action."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
-      <PrimaryOperation />
       <FleetSummary>
         <LegacyNode html={view.metrics} />
       </FleetSummary>
