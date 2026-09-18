@@ -1857,59 +1857,52 @@ Best regards,
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
 # Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.
+
 PRIVATE_JC_BOOK_TITLE_OPENING = (
-    "I came across {BookTitle} and thought there may be an opportunity to strengthen how the book "
-    "and your wider author presence come together online—so someone discovering your work can "
-    "quickly understand what makes it worth exploring and know where to go next."
+    "I came across {BookTitle} and took a look at how it’s currently presented online."
 )
 
 PRIVATE_JC_GENERIC_OPENING = (
-    "I came across your work and thought there may be an opportunity to strengthen how your author "
-    "presence comes together online—so someone discovering you can quickly understand your work, "
-    "what makes it worth exploring, and where to go next."
+    "I came across your author profile and took a look at how your work is currently presented online."
 )
 
-PITCH_JC_SUBJECT = "One idea for {BookTitle}"
-
-PITCH_JC_SUBJECT_FALLBACK = "One idea for your author platform"
+PITCH_JC_SUBJECT = "About {BookTitle}"
+PITCH_JC_SUBJECT_FALLBACK = "About your author platform"
 
 PITCH_JC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_BOOK_TITLE_OPENING}
 
-When someone looks up a book or author, what they find next often shapes whether they keep exploring.
+A book can catch someone’s attention, but if the next step isn’t clear—what it’s about, why it matters, or what to do next—that interest can disappear quickly.
 
-At Astra Productions, we look at the full reader journey—from how the book is introduced, to the author presence behind it, to how easily someone can explore further or purchase.
+That’s the part I help authors strengthen. If you’re open to it, I can take a closer look at {{BookTitle}} and send you the few areas I’d prioritize first, along with why they matter and what a stronger version could look like.
 
-If you're open to it, I can take a closer look at how {{BookTitle}} fits into your overall author presence and send you the three areas I would prioritize first, along with why I think they matter.
-
-There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
+No call needed. Would it be useful if I sent that over?
 
 Windelle JC
-Founder & CEO, Astra Productions
+Founder, Astra Productions
 astraproductions.co
 
-P.S. If you would rather not hear from me again, reply “unsubscribe.”
+P.S. If you’d rather not hear from me again, just reply “unsubscribe.”
 """
 
 PITCH_JC_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {PRIVATE_JC_GENERIC_OPENING}
 
-When someone looks an author up, what they find next often shapes whether they keep exploring.
+An author’s work can catch someone’s attention, but if the next step isn’t clear—what the books are about, why they matter, or what to do next—that interest can disappear quickly.
 
-At Astra Productions, we look at the full reader journey—from how the work is introduced, to the author presence behind it, to how easily someone can explore further or purchase.
+That’s the part I help authors strengthen. If you’re open to it, I can take a closer look at your current author presence and send you the few areas I’d prioritize first, along with why they matter and what a stronger version could look like.
 
-If you're open to it, I can take a closer look at your current author presence and send you the three areas I would prioritize first, along with why I think they matter.
-
-There’s no charge for the initial direction, and no meeting is needed. I can send it directly by email.
+No call needed. Would it be useful if I sent that over?
 
 Windelle JC
-Founder & CEO, Astra Productions
+Founder, Astra Productions
 astraproductions.co
 
-P.S. If you would rather not hear from me again, reply “unsubscribe.”
+P.S. If you’d rather not hear from me again, just reply “unsubscribe.”
 """
+
 PITCH_WARM_SUBJECT = "About {BookTitleOrProject}"
 PITCH_WARM_SUBJECT_FALLBACK = "About your author project"
 
@@ -2639,7 +2632,13 @@ def validate_book_title_queue_contract(
             normalized_book_title, normalization_notes = normalize_render_field_value(book_title)
             email_addr = resolve_recipient_email(row)
             raw_author = get_personalization_name(row)
-            author = choose_salutation_name(raw_author, email_addr)
+            author = choose_salutation_name(
+                raw_author,
+                email_addr,
+                validated_first_name=(
+                    profile_name == "private_jc" and row_has_validated_first_name(row)
+                ),
+            )
             first_name = author.split()[0] if author else GENERIC_SALUTATION
             merge_fields = row_merge_fields(row, email_addr, first_name, normalized_book_title)
             normalized_book_title = merge_fields.get("BookTitle", normalized_book_title)
@@ -2714,7 +2713,12 @@ def clean_name_token(value: str) -> str:
     return token
 
 
-def choose_salutation_name(author_name: str, email_addr: str) -> str:
+def choose_salutation_name(
+    author_name: str,
+    email_addr: str,
+    *,
+    validated_first_name: bool = False,
+) -> str:
     raw_name = (author_name or "").strip()
     if not raw_name:
         return GENERIC_SALUTATION
@@ -2727,6 +2731,13 @@ def choose_salutation_name(author_name: str, email_addr: str) -> str:
     token_low = first_token.lower()
     if token_low in NONPERSON_NAME_TOKENS:
         return GENERIC_SALUTATION
+
+    # A queue row that explicitly passed first-name validation is stronger
+    # evidence than a business-like token embedded in the email local-part
+    # (for example, authorfrankviola@...). Preserve the conservative
+    # local-part heuristic for all unvalidated/legacy rows.
+    if validated_first_name:
+        return first_token
 
     localpart = ""
     if "@" in (email_addr or ""):
@@ -3151,6 +3162,12 @@ def get_personalization_name(row: dict[str, str]) -> str:
         row,
         ["first_name_clean", "firstname", "first_name", "first name", "authorname", "author_name", "author", "name"],
     )
+
+
+def row_has_validated_first_name(row: dict[str, str]) -> bool:
+    status = get_row_value_ci(row, ["first_name_status"]).strip().lower()
+    allowed = get_row_value_ci(row, ["personalization_allowed"]).strip().lower()
+    return status == "valid" and allowed in {"true", "1", "yes"}
 
 
 def resolve_book_title(row: dict[str, str], explicit_book_title: str = "") -> str:
@@ -7066,7 +7083,13 @@ def main() -> int | None:
                         break
 
                 raw_author = get_personalization_name(r)
-                author = choose_salutation_name(raw_author, to_email)
+                author = choose_salutation_name(
+                    raw_author,
+                    to_email,
+                    validated_first_name=(
+                        profile_name == "private_jc" and row_has_validated_first_name(r)
+                    ),
+                )
                 book_title = get_row_value_ci(r, ["BookTitle"])
                 first_name = author.split()[0] if author else GENERIC_SALUTATION
                 merge_fields = row_merge_fields(r, to_email, first_name, book_title)

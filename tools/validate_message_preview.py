@@ -78,12 +78,13 @@ BAD_BOOK_VALUES = BAD_AUTHOR_NAMES | {
 }
 ASTRA_VISUAL_REQUIRED_TERMS = (
     "astra productions",
-    "reader journey",
-    "author presence",
-    "three areas",
-    "no meeting is needed",
+    "took a look at how",
+    "interest can disappear quickly",
+    "few areas i’d prioritize first",
+    "what a stronger version could look like",
+    "no call needed",
     "windelle jc",
-    "founder & ceo, astra productions",
+    "founder, astra productions",
     "astraproductions.co",
     "reply “unsubscribe.”",
 )

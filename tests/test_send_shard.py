@@ -283,6 +283,32 @@ class SendShardTests(unittest.TestCase):
 
         self.assertEqual(get_personalization_name(row), "José")
 
+    def test_salutation_business_localpart_remains_conservative_without_validation(self) -> None:
+        self.assertEqual(
+            "there",
+            send_shard.choose_salutation_name(
+                "Frank",
+                "authorfrankviola@gmail.com",
+            ),
+        )
+
+    def test_salutation_uses_explicitly_validated_first_name_for_jc_style_row(self) -> None:
+        row = {
+            "Email": "authorfrankviola@gmail.com",
+            "first_name_clean": "Frank",
+            "first_name_status": "valid",
+            "personalization_allowed": "true",
+        }
+        self.assertTrue(send_shard.row_has_validated_first_name(row))
+        self.assertEqual(
+            "Frank",
+            send_shard.choose_salutation_name(
+                get_personalization_name(row),
+                row["Email"],
+                validated_first_name=True,
+            ),
+        )
+
     def test_personalization_name_keeps_old_safe_rows_without_guard_fields(self) -> None:
         old_row = {"Email": "safe@example.com", "FirstName": "Alice"}
         blocked_new_row = {
@@ -5867,8 +5893,8 @@ finished_path.write_text(
             body_fallback=pitch["body_fallback"],
         )
 
-        self.assertEqual("One idea for your author platform", subject_text)
-        self.assertIn("I came across your work", body_text)
+        self.assertEqual("About your author platform", subject_text)
+        self.assertIn("I came across your author profile and took a look at how your work is currently presented online.", body_text)
         self.assertNotIn("My team came across", body_text)
         self.assertNotIn("Our team came across", body_text)
         self.assertNotIn("{BookTitle}", body_text)
@@ -5907,11 +5933,11 @@ finished_path.write_text(
         )
 
         self.assertEqual(
-            "One idea for your author platform",
+            "About your author platform",
             subject_text,
         )
         self.assertIn(
-            "I came across your work",
+            "I came across your author profile and took a look at how your work is currently presented online.",
             body_text,
         )
         self.assertNotIn("{BookTitle}", body_text)
@@ -5931,11 +5957,11 @@ finished_path.write_text(
             subject_fallback=pitch["subject_fallback"],
         )
 
-        self.assertEqual("One idea for The Quiet Harbor", subject_text)
+        self.assertEqual("About The Quiet Harbor", subject_text)
         self.assertIn("I came across The Quiet Harbor", body_text)
         self.assertNotIn("My team came across The Quiet Harbor", body_text)
         self.assertNotIn("Our team came across The Quiet Harbor", body_text)
-        self.assertNotIn("I came across your work", body_text)
+        self.assertNotIn("I came across your author profile", body_text)
         self.assertNotIn("{BookTitle}", body_text)
 
     def test_generated_pitch_jc_message_passes_astra_visual_validation(self) -> None:
@@ -5969,12 +5995,13 @@ finished_path.write_text(
         body_lower = body_text.lower()
         for required_term in (
             "astra productions",
-            "reader journey",
-            "author presence",
-            "three areas",
-            "no meeting is needed",
+            "took a look at how",
+            "interest can disappear quickly",
+            "few areas i’d prioritize first",
+            "what a stronger version could look like",
+            "no call needed",
             "windelle jc",
-            "founder & ceo, astra productions",
+            "founder, astra productions",
             "astraproductions.co",
             "reply “unsubscribe.”",
         ):
@@ -5999,8 +6026,8 @@ finished_path.write_text(
             "astra_visual",
         )
 
-        self.assertIn("astra_visual_missing_service_term:reader journey", failures)
-        self.assertIn("astra_visual_missing_service_term:three areas", failures)
+        self.assertIn("astra_visual_missing_service_term:interest can disappear quickly", failures)
+        self.assertIn("astra_visual_missing_service_term:few areas i’d prioritize first", failures)
         self.assertIn("astra_visual_missing_service_term:reply “unsubscribe.”", failures)
 
     def test_non_astra_consignment_message_fails_astra_visual_validation(self) -> None:
