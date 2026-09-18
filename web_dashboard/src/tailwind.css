@@ -3979,29 +3979,6 @@
   justify-content: flex-end;
 }
 
-.sender-status-completed-summary td {
-  padding: 8px 12px !important;
-  background: rgba(255,255,255,.012) !important;
-  text-align: center;
-}
-
-.sender-status-completed-toggle {
-  padding: 4px 8px;
-  border: 1px solid var(--console-line);
-  border-radius: 5px;
-  color: #a9bbd0;
-  background: #101a26;
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.sender-status-completed-summary span {
-  margin-left: 9px;
-  color: #74859a;
-  font-size: .64rem;
-}
-
 .react-leads-page.warm-research-mode .operator-flow-line {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   border: 1px solid var(--console-line);
@@ -4194,12 +4171,6 @@
 }
 #overview-view .sender-status-panel { border-radius: 10px; }
 #overview-view .sender-status-head { padding: 11px 14px 9px; }
-#overview-view .sender-status-head .eyebrow::after {
-  content: " · secondary sender detail";
-  color: #65758a;
-  font-weight: 500;
-  text-transform: none;
-}
 .react-validation-tools {
   margin-top: 12px;
   overflow: hidden;
@@ -4294,7 +4265,7 @@
     gap: 8px;
     padding: 8px;
   }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) {
+  #overview-view .sender-status-table tbody tr {
     display: grid;
     grid-template-columns: repeat(2,minmax(0,1fr));
     overflow: hidden;
@@ -4302,7 +4273,7 @@
     border-radius: 8px;
     background: rgba(255,255,255,.018);
   }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td {
+  #overview-view .sender-status-table tbody tr td {
     display: grid;
     grid-template-columns: 86px minmax(0,1fr);
     align-items: center;
@@ -4313,11 +4284,11 @@
     border-bottom: 1px solid var(--console-line-soft);
     text-align: left !important;
   }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td:first-child,
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td:last-child {
+  #overview-view .sender-status-table tbody tr td:first-child,
+  #overview-view .sender-status-table tbody tr td:last-child {
     grid-column: 1 / -1;
   }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td::before {
+  #overview-view .sender-status-table tbody tr td::before {
     color: #6f8299;
     font-size: .58rem;
     font-weight: 700;
@@ -4333,8 +4304,6 @@
   #overview-view .sender-status-table td:first-child::before,
   #overview-view .sender-status-table td:last-child::before { content: none; }
   #overview-view .sender-status-action-btn { width: 100%; min-width: 0; }
-  #overview-view .sender-status-completed-summary { display: block; }
-  #overview-view .sender-status-completed-summary td { display: block; width: 100%; }
   #leads-view .react-current-staged-legend { grid-template-columns: 1fr; }
   .react-validation-tools-head { align-items: flex-start; }
   .react-validation-tools-head > span:last-child { text-align: right; }
@@ -4348,50 +4317,24 @@
   #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     grid-template-columns: 1fr !important;
   }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) { grid-template-columns: 1fr; }
-  #overview-view .sender-status-table tbody tr:not(.sender-status-completed-summary) td { grid-column: 1 !important; }
+  #overview-view .sender-status-table tbody tr { grid-template-columns: 1fr; }
+  #overview-view .sender-status-table tbody tr td { grid-column: 1 !important; }
 }
 
-/* UX v2: deep sender telemetry is progressive disclosure, not first-screen content. */
-.react-sender-detail-disclosure {
+/* Selected sender details are a permanent first-class section. */
+.react-sender-detail-panels {
   margin-top: 10px;
-  overflow: hidden;
-  border: 1px solid var(--console-line);
-  border-radius: 10px;
-  background: var(--console-surface);
 }
-.react-sender-detail-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 48px;
-  padding: 10px 14px;
-  cursor: pointer;
-  list-style: none;
-}
-.react-sender-detail-summary::-webkit-details-marker { display: none; }
-.react-sender-detail-summary > span:first-child {
-  color: #cad7e7;
-  font-size: .78rem;
-  font-weight: 700;
-}
-.react-sender-detail-summary > span:last-child {
-  color: #7d8fa5;
-  font-size: .66rem;
-}
-.react-sender-detail-summary::after {
-  content: "+";
-  color: #8395aa;
-  font-size: 1rem;
-}
-.react-sender-detail-disclosure[open] .react-sender-detail-summary::after { content: "−"; }
-.react-sender-detail-disclosure #detail-panel {
+
+.react-sender-detail-panels #detail-panel {
   margin: 0;
-  border-width: 1px 0 0;
-  border-radius: 0;
+  border-radius: 10px;
 }
-@media (max-width: 820px) {
-  .react-sender-detail-summary { align-items: flex-start; }
-  .react-sender-detail-summary > span:last-child { max-width: 58%; text-align: right; }
+
+#overview-view .sender-status-table tr.is-complete:not(.is-live):not(.is-selected) {
+  color: #a8b5c5;
+}
+
+#overview-view .sender-status-table tr.is-complete:not(.is-live):not(.is-selected) td {
+  background: rgba(255,255,255,.008);
 }

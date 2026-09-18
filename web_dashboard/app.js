@@ -205,7 +205,6 @@ let socketLive = false;
 let snapshotFallbackHealthy = false;
 let selectedProfileName = "";
 let senderStatusPanel = null;
-let showCompletedSenderRows = false;
 let warmSenderLeadStatusRequested = false;
 let displayTimeZone = "America/Los_Angeles";
 let wallboardMode = false;
@@ -8262,15 +8261,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     setNodeHtml(tbody, `<tr><td colspan="8" class="sender-status-empty muted">No sender profiles available.</td></tr>`);
     return;
   }
-  const isSecondaryCompleted = (profile) => profileTelemetryChannel(profile) === "sendgrid"
-    && profilePendingCount(profile) <= 0
-    && !isProfileActive(profile)
-    && selectedProfile?.name !== profile.name;
-  const hiddenCompletedCount = profiles.filter(isSecondaryCompleted).length;
-  const visibleProfiles = showCompletedSenderRows ? profiles : profiles.filter((profile) => !isSecondaryCompleted(profile));
-  const completedSummaryRow = hiddenCompletedCount > 0
-    ? `<tr class="sender-status-completed-summary"><td colspan="8"><button class="sender-status-completed-toggle" type="button">${showCompletedSenderRows ? "Hide" : "Show"} ${hiddenCompletedCount.toLocaleString()} completed SendGrid sender${hiddenCompletedCount === 1 ? "" : "s"}</button><span>Completed providers are collapsed to keep active work prominent.</span></td></tr>`
-    : "";
+  const visibleProfiles = profiles;
   setNodeHtml(
     tbody,
     visibleProfiles.map((profile) => {
@@ -8357,7 +8348,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           </td>
         </tr>
       `;
-    }).join("") + completedSummaryRow,
+    }).join(""),
   );
 }
 
@@ -10739,12 +10730,6 @@ async function handleProfileDetailClick(event) {
 }
 
 async function handleSenderStatusClick(event) {
-  const completedToggle = event.target.closest(".sender-status-completed-toggle");
-  if (completedToggle && senderStatusPanel?.contains(completedToggle)) {
-    showCompletedSenderRows = !showCompletedSenderRows;
-    if (lastSnapshot) renderSenderStatusConsole(lastSnapshot, resolveSelectedProfile(lastSnapshot));
-    return;
-  }
   const syncDetailsButton = event.target.closest(".sender-status-sync-details-btn[data-profile]");
   if (syncDetailsButton && senderStatusPanel?.contains(syncDetailsButton)) {
     selectProfileByName(syncDetailsButton.getAttribute("data-profile") || "");

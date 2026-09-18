@@ -406,15 +406,11 @@ export function OverviewDashboard({ view }) {
         <CompactProgress progress={view.progress} />
       </div>
       <SenderTable />
-      <details className="react-supporting-panels react-sender-detail-panels react-sender-detail-disclosure">
-        <summary className="react-sender-detail-summary">
-          <span>Sender details</span>
-          <span>Deep telemetry, pacing, queue metadata, and profile diagnostics</span>
-        </summary>
+      <section className="react-supporting-panels react-sender-detail-panels" aria-label="Selected sender details">
         <section id="detail-panel" className="panel panel-shell workspace-card workspace-card-detail workspace-card-detail-main advanced-details">
           <LegacyNode html={view.profileDetail} />
         </section>
-      </details>
+      </section>
     </section>
   );
 }
