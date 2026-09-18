@@ -417,7 +417,7 @@ PROFILES: dict[str, dict[str, object]] = {
         "suppress_invalid": True,
         "global_dedupe": False,
         "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
+        "always_send": "",
         "prune_sent": True,
         "password_env": "PRIVATE_JC_PASSWORD",
         "dashboard_enabled": True,
@@ -6397,6 +6397,7 @@ def main() -> int | None:
     last_success_sent_at_utc: datetime | None = None
     submission_attempts_this_run = 0
     accepted_send_settlement_failed = False
+    deferred_retry_emails_this_run: set[str] = set()
 
     def audit_sleep(seconds: float, action: str = "SLEEP") -> None:
         remaining_sleep = max(0.0, float(seconds or 0))
@@ -6807,6 +6808,10 @@ def main() -> int | None:
     def backoff_seconds() -> int:
         base = max(180, int(args.interval) * 4)
         return base + random.randint(0, 45)
+
+    def pre_submit_transient_backoff_seconds() -> int:
+        base = max(15, int(args.interval or 0))
+        return base + random.randint(0, 15)
 
     def note_error(is_throttle: bool = False) -> str | None:
         nonlocal consecutive_errors, consecutive_throttle_errors
@@ -8229,13 +8234,25 @@ def main() -> int | None:
                             f"[{i}/{len(pending)}] ERROR ({settlement_outcome}) "
                             f"{to_email} :: {single_line(err_text)}"
                         )
-                        stop_reason = (
-                            "pre_submit_failure"
-                            if settled and delivery_phase == DELIVERY_PRE_SUBMIT
-                            else "provider_rejected"
-                            if settled
-                            else "settlement_failed"
-                        )
+                        if settled and delivery_phase == DELIVERY_PRE_SUBMIT:
+                            deferred_retry_emails_this_run.add(to_email)
+                            circuit_reason = note_error()
+                            if circuit_reason:
+                                print(f"STOP: {circuit_reason} after pre-submit failures")
+                                stop_reason = circuit_reason
+                                honor_deferred_stop()
+                                break
+                            wait_s = pre_submit_transient_backoff_seconds()
+                            print(
+                                "DEFER: definitely-not-submitted recipient restored; "
+                                f"continuing after {wait_s}s backoff"
+                            )
+                            honor_deferred_stop()
+                            if stop_reason:
+                                break
+                            audit_sleep(wait_s, action="PRE_SUBMIT_TRANSIENT_BACKOFF")
+                            continue
+                        stop_reason = "provider_rejected" if settled else "settlement_failed"
                         honor_deferred_stop()
                         break
                     code, text = extract_code_text_from_exception(e)
@@ -8409,6 +8426,7 @@ def main() -> int | None:
                     )
 
                     blocked_unresolved_count = 0
+                    blocked_deferred_count = 0
                     sendable_refreshed_pending: list[dict[str, str]] = []
 
                     for refreshed_row in refreshed_pending:
@@ -8417,6 +8435,14 @@ def main() -> int | None:
                             in unresolved_idempotency_keys
                         ):
                             blocked_unresolved_count += 1
+                            continue
+                        refreshed_email = norm_email(
+                            refreshed_row.get("Email")
+                            or refreshed_row.get("AuthorEmail")
+                            or ""
+                        )
+                        if refreshed_email in deferred_retry_emails_this_run:
+                            blocked_deferred_count += 1
                             continue
                         sendable_refreshed_pending.append(refreshed_row)
 
@@ -8443,6 +8469,12 @@ def main() -> int | None:
                             "STOP: unresolved idempotency reservations "
                             "require manual review; no sendable work "
                             "remains after repeat refresh."
+                        )
+                    elif blocked_deferred_count > 0:
+                        stop_reason = "deferred_retry_only"
+                        print(
+                            "DONE: only safely deferred pre-submit retry rows remain; "
+                            "leaving them queued for the next run."
                         )
 
                 if (

@@ -89,11 +89,13 @@ from dashboard_core import (
     load_dashboard_run_settings,
     message_preview_output_paths,
     message_preview_path_for_profile,
+    message_preview_approval_path,
     private_jc_authoritative_blocked_emails,
     private_jc_removal_accounting_reason,
     protected_sendgrid_credential_error,
     profile_expected_pitch_mode,
     save_dashboard_send_cap_per_profile,
+    save_message_preview_approval,
 )
 from important_leads_verify import (
     TRIAGE_MODE_FAST,
@@ -4444,11 +4446,14 @@ def _build_automation_status() -> dict[str, object]:
             "target_local_label": _format_local_label(recovery_target_utc.astimezone()) if recovery_target_utc else "",
             "target_local_clock": _format_local_clock(recovery_target_utc.astimezone()) if recovery_target_utc else "",
             "remaining_seconds": recovery_remaining_seconds,
-            "note": str(
-                jc_pacing.get("recovery_reason")
-                or jc_pacing.get("last_throttle_reason")
-                or timer_state.get("private_jc_recovery_note")
-                or ""
+            "note": (
+                str(
+                    jc_pacing.get("recovery_reason")
+                    or timer_state.get("private_jc_recovery_note")
+                    or ""
+                )
+                if recovery_active
+                else ""
             ),
         },
     }
@@ -4477,6 +4482,15 @@ def _build_live_snapshot(activity_hours: int = 24, tail_lines: int = 12) -> dict
     # Manual-start mode is intentional configuration, not an operational alert.
     # The environment banner already exposes auto-start state explicitly.
     snapshot["automation"] = _build_automation_status()
+    runtime_identity = _dashboard_runtime_identity_response()
+    snapshot["runtime_identity"] = runtime_identity
+    if bool(runtime_identity.get("dashboard_version_mismatch")):
+        snapshot["health"] = {
+            "state": "red",
+            "message": (
+                "Dashboard restart required: loaded commit does not match the deployed checkout."
+            ),
+        }
     warm_status = build_warm_private_jc_live_status()
     snapshot["warm_private_jc_status"] = warm_status
     snapshot["warm_private_jc_lane"] = warm_status
@@ -4874,6 +4888,27 @@ def _dashboard_is_authenticated(scope: Request | WebSocket) -> bool:
     return bool(session.get(_AUTH_SESSION_KEY))
 
 
+def _current_dashboard_git_commit() -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=settings.APP_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    value = str(proc.stdout or "").strip()
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+DASHBOARD_LOADED_GIT_COMMIT = _current_dashboard_git_commit()
+
+
 def _dashboard_runtime_identity_response() -> dict[str, object]:
     machine = "unknown"
     machine_error = ""
@@ -4898,6 +4933,25 @@ def _dashboard_runtime_identity_response() -> dict[str, object]:
             if not authority_error:
                 authority_error = str(exc)
 
+    deployed_git_commit = _current_dashboard_git_commit()
+    loaded_git_commit = str(DASHBOARD_LOADED_GIT_COMMIT or "")
+    loaded_commit_matches_deployed = bool(
+        loaded_git_commit
+        and deployed_git_commit
+        and loaded_git_commit == deployed_git_commit
+    )
+    dashboard_version_mismatch = bool(
+        loaded_git_commit
+        and deployed_git_commit
+        and loaded_git_commit != deployed_git_commit
+    )
+    if dashboard_version_mismatch:
+        production_authorized = False
+        authority_error = (
+            "Dashboard process is running an older loaded Git commit than the current checkout. "
+            "Restart the dashboard before using sender controls."
+        )
+
     return {
         "machine_id": machine,
         "machine_error": machine_error,
@@ -4905,6 +4959,10 @@ def _dashboard_runtime_identity_response() -> dict[str, object]:
         "authority_status": str(authority.get("status") or "missing"),
         "authority_generation": int(authority.get("generation") or 0),
         "authority_expected_git_commit": str(authority.get("expected_git_commit") or ""),
+        "loaded_git_commit": loaded_git_commit,
+        "deployed_git_commit": deployed_git_commit,
+        "loaded_commit_matches_deployed": loaded_commit_matches_deployed,
+        "dashboard_version_mismatch": dashboard_version_mismatch,
         "production_authorized": production_authorized,
         "authority_error": authority_error,
     }
@@ -5539,6 +5597,22 @@ async def snapshot(
 
 def _manual_live_action_block_response(profile_name: str = "") -> JSONResponse | None:
     runtime_identity = _dashboard_runtime_identity_response()
+    if bool(runtime_identity.get("dashboard_version_mismatch")):
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "dashboard_version_mismatch",
+                "profile": str(profile_name or ""),
+                "message": (
+                    "Dashboard restart required: the loaded code version does not match "
+                    "the deployed checkout. Sender controls remain disabled."
+                ),
+                "loaded_git_commit": str(runtime_identity.get("loaded_git_commit") or ""),
+                "deployed_git_commit": str(runtime_identity.get("deployed_git_commit") or ""),
+            },
+            status_code=409,
+        )
     if not bool(runtime_identity.get("production_authorized")):
         authorized_machine = str(runtime_identity.get("authorized_machine") or "").strip().lower()
         authorized_label = {
@@ -6499,6 +6573,24 @@ def preview_validate_profile(profile_name: str) -> JSONResponse:
                 },
                 status_code=409,
             )
+        if profile_name == "private_jc":
+            try:
+                approval = save_message_preview_approval(profile_name)
+                result["approval_manifest"] = message_preview_approval_path(profile_name).name
+                result["approval_row_count"] = int(approval.get("approved_row_count") or 0)
+            except Exception as exc:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "error": "preview_approval_persist_failed",
+                        "profile": profile_name,
+                        "message": f"Validated preview could not be bound to an approval manifest: {exc}",
+                        "result": result,
+                        "snapshot": snapshot,
+                    },
+                    status_code=500,
+                )
         _append_campaign_history(
             "preview_sync_completed",
             profile=profile_name,

@@ -216,6 +216,130 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("consignment", readiness["pitch_mode_expected"])
         self.assertEqual("consignment", readiness["actual_profile_mode"])
 
+    def test_private_jc_readiness_accepts_only_accounted_approved_remainder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "shards"
+            previews = base / "previews"
+            approvals = base / "approvals"
+            logs = base / "logs"
+            shards.mkdir()
+            previews.mkdir()
+            logs.mkdir()
+            queue = shards / "recipients_private_jc.csv"
+            log = logs / "private_jc_log.csv"
+            original_rows = [
+                ("one@example.test", "One", "Author One", "Book One"),
+                ("two@example.test", "Two", "Author Two", "Book Two"),
+                ("three@example.test", "Three", "Author Three", "Book Three"),
+            ]
+
+            def write_queue(rows):
+                with queue.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(
+                        handle,
+                        fieldnames=["Email", "AuthorEmail", "AuthorName", "FirstName", "BookTitle"],
+                    )
+                    writer.writeheader()
+                    for email, first, author, book in rows:
+                        writer.writerow(
+                            {
+                                "Email": email,
+                                "AuthorEmail": email,
+                                "AuthorName": author,
+                                "FirstName": first,
+                                "BookTitle": book,
+                            }
+                        )
+
+            write_queue(original_rows)
+            preview_text = (
+                "Email,AuthorEmail,AuthorName,FirstName,BookTitle,Subject,Body\n"
+                + "".join(
+                    f"{email},{email},{author},{first},{book},Subject,Body\n"
+                    for email, first, author, book in original_rows
+                )
+            )
+            (previews / "private_jc_message_preview.csv").write_text(
+                preview_text, encoding="utf-8"
+            )
+            (previews / "private_jc_message_preview_validated.csv").write_text(
+                preview_text.replace(
+                    "Email,AuthorEmail,AuthorName,FirstName,BookTitle,Subject,Body",
+                    "Email,AuthorEmail,AuthorName,FirstName,BookTitle,Subject,Body",
+                ),
+                encoding="utf-8",
+            )
+            (previews / "private_jc_message_preview_failed.csv").write_text(
+                "Email\n", encoding="utf-8"
+            )
+            (previews / "private_jc_message_preview_summary.txt").write_text(
+                "failed rows: 0\n", encoding="utf-8"
+            )
+            log.write_text(
+                "TimestampUTC,Email,Status,Info\n"
+                "2026-09-18T00:00:00+00:00,one@example.test,SENT,campaign_type=cold\n",
+                encoding="utf-8",
+            )
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": str(queue),
+                    "log": str(log),
+                    "pitch": "pitch_jc",
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                SHARDS_DIR=shards,
+                MESSAGE_PREVIEW_DIR=previews,
+                MESSAGE_PREVIEW_APPROVAL_DIR=approvals,
+                PROFILES=profiles,
+                authoritative_send_log_paths=lambda **kwargs: [log],
+                private_jc_authoritative_blocked_emails=lambda invalid_outcomes=None: set(),
+            ):
+                dashboard_core.save_message_preview_approval("private_jc")
+                write_queue(original_rows[1:])
+                readiness = dashboard_core.build_profile_message_readiness("private_jc")
+
+                self.assertEqual("PASS", readiness["status"])
+                self.assertTrue(readiness["resume_approval_safe"])
+                self.assertEqual("approved_remainder", readiness["resume_approval_reason"])
+                self.assertEqual(1, readiness["resume_approval"]["removed_count"])
+                self.assertFalse(readiness["preview_sync_required"])
+
+                write_queue([original_rows[2], original_rows[1]])
+                reordered = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", reordered["status"])
+                self.assertFalse(reordered["resume_approval_safe"])
+                self.assertEqual(
+                    "current_queue_order_changed",
+                    reordered["resume_approval_reason"],
+                )
+
+                changed = [
+                    ("two@example.test", "Changed", "Author Two", "Book Two"),
+                    original_rows[2],
+                ]
+                write_queue(changed)
+                modified = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", modified["status"])
+                self.assertEqual(
+                    "current_queue_content_changed",
+                    modified["resume_approval_reason"],
+                )
+
+                added = original_rows[1:] + [
+                    ("new@example.test", "New", "Author New", "Book New")
+                ]
+                write_queue(added)
+                extra = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", extra["status"])
+                self.assertEqual(
+                    "current_queue_has_unapproved_recipients",
+                    extra["resume_approval_reason"],
+                )
+
     def test_controlled_sendgrid_readiness_requires_matching_recipient_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -2831,6 +2955,67 @@ class DashboardCoreTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("Startup verification failed", message)
+        launches = [
+            call
+            for call in run_mock.call_args_list
+            if call.args[0][:3] == ["tmux", "send-keys", "-t"]
+            and "--profile private_jc" in " ".join(call.args[0])
+        ]
+        self.assertEqual(1, len(launches))
+
+    def test_start_private_profile_reports_started_late_without_second_launch(self) -> None:
+        profile = {
+            "provider": "private",
+            "csv": "recipients_private_jc.csv",
+            "log": "private_jc_log.csv",
+            "from_email": "jc@astraproductions.co",
+            "cooldown_seconds": 0,
+            "max_total": 0,
+            "password_env": "PRIVATE_JC_PASSWORD",
+            "dashboard_enabled": True,
+            "dashboard_manual_only": True,
+            "tmux_session": "private_jc",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            python_bin = Path(tmpdir) / "python"
+            python_bin.write_text("", encoding="utf-8")
+            with patch.multiple(
+                dashboard_core,
+                ROOT=Path(tmpdir),
+                PROFILES={"private_jc": profile},
+                DASHBOARD_PROFILES=["private_jc"],
+                active_or_locked_sender_profiles=lambda profile_names=None: set(),
+                provider_pacing_status=lambda *args, **kwargs: {"cooldown_remaining_seconds": 0},
+                load_dashboard_recovery_timer=lambda: {},
+                resolve_canonical_jc_credential=Mock(
+                    return_value=("synthetic-not-transported", "private_jc.env")
+                ),
+                _python_runtime_bin=lambda: python_bin,
+                ensure_single_profile_session=lambda session: (True, "ready"),
+                profile_pane_index=lambda profile_name: 0,
+                tmux_pane_map=lambda session: {"0": {"cmd": "bash"}},
+                wait_for_profile_worker_started=Mock(return_value=None),
+                late_profile_worker_evidence=Mock(
+                    return_value={
+                        "alive": True,
+                        "process_alive": True,
+                        "process_pid": 9876,
+                        "lock_alive": True,
+                        "pane_alive": True,
+                        "pane_command": "Python",
+                    }
+                ),
+            ), patch.object(
+                dashboard_core.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_mock:
+                ok, message = dashboard_core.start_private_profile(
+                    "private_jc", session="private_jc"
+                )
+
+        self.assertTrue(ok)
+        self.assertIn("STARTED_LATE", message)
         launches = [
             call
             for call in run_mock.call_args_list

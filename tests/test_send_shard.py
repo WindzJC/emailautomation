@@ -3169,6 +3169,53 @@ finished_path.write_text(
             send_shard.main()
         return stdout.getvalue()
 
+    def test_private_pre_submit_timeout_defers_row_and_continues_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fixture = self._build_sendgrid_runtime_fixture(tmpdir)
+            queue = fixture[1] / "recipients_private_jc.csv"
+            queue.write_text(
+                "Email,FirstName,BookTitle,campaign_id\n"
+                "defer@example.test,Defer,Book A,defer-campaign\n"
+                "continue@example.test,Continue,Book B,continue-campaign\n",
+                encoding="utf-8",
+            )
+            (fixture[2] / "private_jc_log.csv").write_text(
+                "TimestampUTC,Email,Status,Info\n",
+                encoding="utf-8",
+            )
+            smtp = Mock()
+            smtp.send_message.return_value = {}
+            login_results = [
+                TimeoutError("synthetic handshake timeout"),
+                smtp,
+            ]
+
+            def login_side_effect(*_args, **_kwargs):
+                value = login_results.pop(0)
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+
+            output = self._run_synthetic_private(
+                fixture,
+                smtp,
+                smtp_login_side_effect=login_side_effect,
+            )
+
+            self.assertEqual(1, smtp.send_message.call_count)
+            self.assertIn("DEFER: definitely-not-submitted recipient restored", output)
+            self.assertIn("SENT continue@example.test", output)
+            with queue.open(newline="", encoding="utf-8-sig") as handle:
+                queued = [row["Email"] for row in csv.DictReader(handle)]
+            self.assertEqual(["defer@example.test"], queued)
+            with (fixture[2] / "private_jc_log.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+            first_error = next(row for row in rows if row["Status"] == "ERROR")
+            self.assertIn("event_type=DEFINITELY_NOT_SUBMITTED", first_error["Info"])
+            self.assertIn("restored=true", first_error["Info"])
+
     def test_private_jc_sender_self_resolves_protected_credential_without_env_or_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fixture = self._build_sendgrid_runtime_fixture(tmpdir)
@@ -5124,6 +5171,8 @@ finished_path.write_text(
             self.assertEqual(0, profile["interval"])
             self.assertEqual(0, profile["cooldown_seconds"])
             self.assertFalse(profile["human_mode"])
+            if profile_name == "private_jc":
+                self.assertEqual("", profile["always_send"])
             self.assertEqual(
                 18.0,
                 send_shard.profile_aggregate_spacing_seconds(profile_name, "private", 200),

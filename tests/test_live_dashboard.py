@@ -181,6 +181,29 @@ def test_dashboard_runtime_fixture_prevents_live_runtime_writes() -> None:
 
 
 class LiveDashboardTests(unittest.TestCase):
+
+    def test_dashboard_version_mismatch_blocks_live_sender_controls(self) -> None:
+        loaded = "a" * 40
+        deployed = "b" * 40
+        with patch.object(live_dashboard, "DASHBOARD_LOADED_GIT_COMMIT", loaded), patch.object(
+            live_dashboard, "_current_dashboard_git_commit", return_value=deployed
+        ), patch.object(
+            live_dashboard,
+            "_dashboard_runtime_identity_response",
+            return_value={
+                "production_authorized": False,
+                "dashboard_version_mismatch": True,
+                "loaded_git_commit": loaded,
+                "deployed_git_commit": deployed,
+            },
+        ):
+            response = live_dashboard._manual_live_action_block_response("private_jc")
+        self.assertIsNotNone(response)
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("dashboard_version_mismatch", body["error"])
+        self.assertIn("restart required", body["message"].lower())
+
     def setUp(self) -> None:
         live_dashboard._reset_snapshot_caches_for_tests()
 
@@ -491,6 +514,70 @@ class LiveDashboardTests(unittest.TestCase):
 
         self.assertFalse(status["auto_start_allowed"])
         self.assertIn("DASHBOARD_ALLOW_AUTO_START=1", status["auto_start_note"])
+
+    def test_automation_status_hides_stale_historical_throttle_note(self) -> None:
+        with patch.dict(os.environ, {live_dashboard.DASHBOARD_AUTO_START_ENV_VAR: "0"}), patch.object(
+            live_dashboard,
+            "load_dashboard_run_settings",
+            return_value={
+                "auto_start_sendgrid_enabled": True,
+                "auto_start_sendgrid_local_time": "18:00",
+                "auto_start_private_jc_enabled": True,
+                "auto_start_private_jc_local_time": "18:00",
+            },
+        ), patch.object(
+            live_dashboard,
+            "_load_dashboard_auto_start_state",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "_load_dashboard_timer_state",
+            return_value={
+                "private_jc_recovery_start_at_utc": "",
+                "private_jc_recovery_note": "old timer note",
+            },
+        ), patch.object(
+            live_dashboard,
+            "provider_pacing_status",
+            return_value={
+                "recovery_pending": False,
+                "cooldown_until_utc": "",
+                "recovery_reason": "",
+                "last_throttle_reason": "450 4.7.1 old sending limit reached",
+            },
+        ), patch.object(
+            live_dashboard,
+            "_profile_runtime_active",
+            return_value=False,
+        ):
+            status = live_dashboard._build_automation_status()
+
+        self.assertFalse(status["private_jc_recovery"]["active"])
+        self.assertEqual("", status["private_jc_recovery"]["note"])
+
+    def test_snapshot_health_is_red_on_dashboard_version_mismatch(self) -> None:
+        with patch.object(
+            live_dashboard.runtime_control, "backend_name", return_value="tmux"
+        ), patch.object(
+            live_dashboard,
+            "build_dashboard_snapshot",
+            return_value={"health": {"state": "yellow", "message": "Idle"}, "profiles": []},
+        ), patch.object(
+            live_dashboard,
+            "_build_automation_status",
+            return_value={},
+        ), patch.object(
+            live_dashboard,
+            "_dashboard_runtime_identity_response",
+            return_value={"dashboard_version_mismatch": True},
+        ), patch.object(
+            live_dashboard,
+            "build_warm_private_jc_live_status",
+            return_value={},
+        ):
+            snapshot = live_dashboard._build_live_snapshot()
+        self.assertEqual("red", snapshot["health"]["state"])
+        self.assertIn("restart required", snapshot["health"]["message"].lower())
 
     def test_manual_profile_start_is_allowed_when_authorized_and_live_actions_explicitly_enabled(self) -> None:
         preconditions = {"ok": True, "blocked": False, "warning_reasons": []}

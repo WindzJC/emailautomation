@@ -40,11 +40,18 @@ from send_shard import (
     CONTROLLED_SENDGRID_RECIPIENT,
     DOMAIN_SLOT_TTL_SECONDS,
     PROFILES,
+    PITCHES,
     PROVIDER_LIMIT_DEFAULTS,
     aggregate_spacing_seconds,
     authoritative_send_log_paths,
     load_authoritative_history_email_sets,
     load_bad_sendgrid_event_emails,
+    choose_salutation_name,
+    get_personalization_name,
+    get_row_value_ci,
+    resolve_book_title,
+    resolve_recipient_email,
+    row_merge_fields,
     profile_send_available,
     profile_send_unavailable_reason,
     profile_runtime_lock_status,
@@ -585,6 +592,201 @@ def _recipient_fingerprint(rows: Sequence[Dict[str, str]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+MESSAGE_PREVIEW_APPROVAL_DIR = STATE_DIR / "message_preview_approvals"
+MESSAGE_PREVIEW_APPROVAL_FIELDS = (
+    "email",
+    "authoremail",
+    "authorname",
+    "firstname",
+    "booktitle",
+)
+
+
+def _approval_content_fingerprint(row: Dict[str, str]) -> str:
+    email = resolve_recipient_email(row)
+    raw_author = get_personalization_name(row)
+    author = choose_salutation_name(raw_author, email)
+    first_name = author.split()[0] if author else "there"
+    explicit_book_title = get_row_value_ci(
+        row,
+        ["BookTitle", "book_title", "book title", "Title", "title"],
+    )
+    book_title = resolve_book_title(row, explicit_book_title)
+    merge_fields = row_merge_fields(
+        row,
+        email,
+        first_name,
+        book_title,
+    )
+    payload = {
+        "email": email,
+        "authoremail": str(merge_fields.get("AuthorEmail") or "").strip(),
+        "authorname": str(merge_fields.get("AuthorName") or "").strip(),
+        "firstname": str(merge_fields.get("FirstName") or "").strip(),
+        "booktitle": str(merge_fields.get("BookTitle") or "").strip(),
+        "personalizedopeningline": str(
+            merge_fields.get("PersonalizedOpeningLine") or ""
+        ).strip(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def profile_message_template_fingerprint(profile_name: str) -> str:
+    cfg = PROFILES.get(profile_name, {})
+    pitch_name = str(cfg.get("pitch") or "").strip()
+    payload = {
+        "pitch": pitch_name,
+        "mode": profile_expected_pitch_mode(profile_name),
+        "template": PITCHES.get(pitch_name, {}),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def message_preview_approval_path(profile_name: str) -> Path:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(profile_name or "").strip())
+    return MESSAGE_PREVIEW_APPROVAL_DIR / f"{safe_name}.json"
+
+
+def load_message_preview_approval(profile_name: str) -> Dict[str, object]:
+    path = message_preview_approval_path(profile_name)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_message_preview_approval(profile_name: str) -> Dict[str, object]:
+    preview_path = message_preview_path_for_profile(profile_name)
+    validated_path, failed_path, summary_path = message_preview_output_paths(preview_path)
+    _fields, validated_count, validated_rows = _csv_row_count_with_fieldnames(validated_path)
+    failed_count = _validation_failed_count(failed_path, summary_path)
+    if not validated_path.exists() or validated_count <= 0:
+        raise RuntimeError("Validated preview is unavailable for approval persistence.")
+    if failed_count not in (0, None):
+        raise RuntimeError("Validated preview contains failed rows.")
+    approved_rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in validated_rows:
+        email = _normalized_email_for_readiness(row)
+        if not email or email in seen:
+            raise RuntimeError("Validated preview contains invalid or duplicate recipients.")
+        seen.add(email)
+        approved_rows.append(
+            {
+                "email": email,
+                "content_fingerprint": _approval_content_fingerprint(row),
+            }
+        )
+    payload: Dict[str, object] = {
+        "schema_version": 1,
+        "profile": profile_name,
+        "approved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "pitch": str(PROFILES.get(profile_name, {}).get("pitch") or ""),
+        "template_fingerprint": profile_message_template_fingerprint(profile_name),
+        "approved_row_count": len(approved_rows),
+        "approved_recipient_fingerprint": _recipient_fingerprint(validated_rows),
+        "approved_rows": approved_rows,
+    }
+    path = message_preview_approval_path(profile_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return payload
+
+
+def _resume_approval_status(
+    profile_name: str,
+    rows: Sequence[Dict[str, str]],
+) -> Dict[str, object]:
+    approval = load_message_preview_approval(profile_name)
+    if not approval:
+        return {"safe": False, "reason": "approval_manifest_missing"}
+    if str(approval.get("profile") or "") != profile_name:
+        return {"safe": False, "reason": "approval_profile_mismatch"}
+    if str(approval.get("template_fingerprint") or "") != profile_message_template_fingerprint(profile_name):
+        return {"safe": False, "reason": "approved_template_changed"}
+
+    approved_rows_raw = approval.get("approved_rows")
+    if not isinstance(approved_rows_raw, list) or not approved_rows_raw:
+        return {"safe": False, "reason": "approval_rows_missing"}
+    approved_order: list[str] = []
+    approved_content: dict[str, str] = {}
+    for item in approved_rows_raw:
+        if not isinstance(item, dict):
+            return {"safe": False, "reason": "approval_rows_invalid"}
+        email = str(item.get("email") or "").strip().lower()
+        fingerprint = str(item.get("content_fingerprint") or "").strip()
+        if not email or not fingerprint or email in approved_content:
+            return {"safe": False, "reason": "approval_rows_invalid"}
+        approved_order.append(email)
+        approved_content[email] = fingerprint
+
+    current_emails = [_normalized_email_for_readiness(row) for row in rows]
+    if any(not email for email in current_emails):
+        return {"safe": False, "reason": "current_queue_invalid_email"}
+    extra = [email for email in current_emails if email not in approved_content]
+    if extra:
+        return {
+            "safe": False,
+            "reason": "current_queue_has_unapproved_recipients",
+            "extra_count": len(extra),
+        }
+    positions = {email: index for index, email in enumerate(approved_order)}
+    current_positions = [positions[email] for email in current_emails]
+    if current_positions != sorted(current_positions):
+        return {"safe": False, "reason": "current_queue_order_changed"}
+    for row, email in zip(rows, current_emails):
+        if _approval_content_fingerprint(row) != approved_content[email]:
+            return {
+                "safe": False,
+                "reason": "current_queue_content_changed",
+                "content_mismatch_email": email,
+            }
+
+    removed = set(approved_order) - set(current_emails)
+    cfg = PROFILES.get(profile_name, {})
+    csv_path = _profile_csv_path(cfg)
+    history_paths = authoritative_send_log_paths(
+        profile_name=profile_name,
+        provider=str(cfg.get("provider") or ""),
+        current_csv=csv_path,
+    )
+    loaded = load_authoritative_history_email_sets(history_paths)
+    sent: set[str] = set()
+    invalid: set[str] = set()
+    for data in loaded.values():
+        sent |= set(data.get("sent") or set())
+        invalid |= set(data.get("invalid") or set())
+    blocked: set[str] = set()
+    if str(cfg.get("provider") or "").strip().lower() == "private":
+        blocked = private_jc_authoritative_blocked_emails(invalid_outcomes=invalid)
+    accounted = sent | blocked
+    unaccounted = removed - accounted
+    if unaccounted:
+        return {
+            "safe": False,
+            "reason": "removed_recipients_unaccounted",
+            "removed_count": len(removed),
+            "unaccounted_removed_count": len(unaccounted),
+        }
+    return {
+        "safe": True,
+        "reason": "approved_remainder",
+        "approved_row_count": len(approved_order),
+        "current_row_count": len(current_emails),
+        "removed_count": len(removed),
+        "accounted_removed_count": len(removed),
+    }
+
+
 def build_controlled_sendgrid_queue_safety_report(
     profile_name: str = CONTROLLED_SENDGRID_PROFILE,
 ) -> Dict[str, object]:
@@ -683,6 +885,14 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     failed_alignment_predicates = [
         predicate for predicate, passed in alignment_checks.items() if not passed
     ]
+    resume_approval = (
+        _resume_approval_status(profile_name, rows)
+        if profile_name == "private_jc"
+        and not pre_rendered_message
+        and bool(failed_alignment_predicates)
+        else {"safe": False, "reason": "exact_alignment"}
+    )
+    resume_safe = bool(resume_approval.get("safe"))
     preview_exists = preview_path.exists() or (pre_rendered_message and row_count > 0)
     validated_exists = validated_path.exists() or (pre_rendered_message and row_count > 0)
     validation_artifacts = [path for path in (validated_path, failed_path, summary_path) if path.exists()]
@@ -752,7 +962,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     if status == "PASS" and validation_status == "NOT RUN":
         status = "NOT RUN"
         reasons.append("Preview validation has not run.")
-    if status == "PASS" and not pre_rendered_message and failed_alignment_predicates:
+    if status == "PASS" and not pre_rendered_message and failed_alignment_predicates and not resume_safe:
         status = "STALE"
         if not generated_row_count_matches_queue:
             reasons.append(
@@ -766,7 +976,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
             reasons.append("Preview recipient email sets do not match the current queue.")
         if not generated_fingerprint_matches_queue or not validated_fingerprint_matches_queue:
             reasons.append("Preview recipient fingerprints do not match the current queue.")
-    if status == "PASS" and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
+    if status == "PASS" and not resume_safe and preview_exists and queue_mtime and preview_mtime and preview_mtime < queue_mtime:
         status = "STALE"
         reasons.append("Preview CSV is older than the recipient queue.")
     if status == "PASS" and validation_mtime and preview_mtime and validation_mtime < preview_mtime:
@@ -807,6 +1017,9 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         ),
         **alignment_checks,
         "failed_alignment_predicates": failed_alignment_predicates,
+        "resume_approval_safe": resume_safe,
+        "resume_approval_reason": str(resume_approval.get("reason") or ""),
+        "resume_approval": resume_approval,
         "preview_sync_required": preview_sync_required,
         "reasons": reasons,
     }
@@ -1349,7 +1562,7 @@ def _compact_launcher_output(text: str, limit: int = 600) -> str:
 def wait_for_profile_worker_started(
     profile_name: str,
     *,
-    timeout_seconds: float = 5.0,
+    timeout_seconds: float = 10.0,
     stable_seconds: float = 1.0,
     poll_seconds: float = 0.1,
 ) -> Dict[str, object] | None:
@@ -1381,6 +1594,37 @@ def wait_for_profile_worker_started(
         if now >= deadline:
             return None
         time.sleep(max(0.0, min(poll_seconds, deadline - now)))
+
+
+def late_profile_worker_evidence(
+    profile_name: str,
+    *,
+    session: str,
+) -> Dict[str, object]:
+    processes = [
+        proc
+        for proc in _running_sender_processes([profile_name], include_preview=False)
+        if str(proc.get("profile") or "") == profile_name
+    ]
+    process_alive = bool(processes)
+    process_pid = int(processes[0].get("pid") or 0) if processes else 0
+    try:
+        lock_status = profile_runtime_lock_status(profile_name)
+    except Exception:
+        lock_status = {}
+    lock_alive = bool(lock_status.get("locked"))
+    pane_index = profile_pane_index(profile_name)
+    pane = tmux_pane_map(session).get(str(pane_index), {})
+    pane_command = str(pane.get("cmd") or "").strip()
+    pane_alive = bool(pane_command and pane_command not in SHELL_COMMANDS)
+    return {
+        "alive": process_alive or lock_alive or pane_alive,
+        "process_alive": process_alive,
+        "process_pid": process_pid,
+        "lock_alive": lock_alive,
+        "pane_alive": pane_alive,
+        "pane_command": pane_command,
+    }
 
 
 def _wait_for_started_profiles(
@@ -1774,6 +2018,13 @@ def start_private_profile(profile_name: str, session: str) -> tuple[bool, str]:
         return False, output or f"Unable to start {profile_name} in pane {pane_index}."
     worker = wait_for_profile_worker_started(profile_name)
     if worker is None:
+        evidence = late_profile_worker_evidence(profile_name, session=session)
+        if bool(evidence.get("alive")):
+            return (
+                True,
+                f"STARTED_LATE: {profile_name} became active after the primary startup verification window; "
+                "duplicate restart is blocked.",
+            )
         return False, f"Startup verification failed for {profile_name}; the expected worker did not remain active."
     return True, f"Started and verified {profile_name} in pane {pane_index}."
 
@@ -1862,6 +2113,13 @@ def start_sendgrid_profile(profile_name: str, pane_index: int, session: str = TM
         return False, output or f"Unable to start {profile_name} in pane {pane_index}."
     worker = wait_for_profile_worker_started(profile_name)
     if worker is None:
+        evidence = late_profile_worker_evidence(profile_name, session=session)
+        if bool(evidence.get("alive")):
+            return (
+                True,
+                f"STARTED_LATE: {profile_name} became active after the primary startup verification window; "
+                "duplicate restart is blocked.",
+            )
         return False, f"Startup verification failed for {profile_name}; the expected worker did not remain active."
     return True, f"Started and verified {profile_name} in pane {pane_index}."
 
