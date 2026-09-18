@@ -405,12 +405,12 @@ PROFILES: dict[str, dict[str, object]] = {
         "pitch": "pitch_jc",
         "from_email": "jc@astraproductions.co",
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
-        "interval": 18,
+        "interval": 0,
         "batch_size": 1,
-        "cooldown_seconds": 18,
+        "cooldown_seconds": 0,
         "max_messages_1h": 200,
         "repeat": True,
-        "human_mode": True,
+        "human_mode": False,
         "max_total": 0,
         "stop_at_local": "12:00",
         "domain_log": "private_domain_log.csv",
@@ -431,12 +431,12 @@ PROFILES: dict[str, dict[str, object]] = {
         "pitch": "pitch_warm",
         "from_email": "jc@astraproductions.co",
         "my_domains": "astraproductions.co,astraproductionsbyjc.com",
-        "interval": 18,
+        "interval": 0,
         "batch_size": 1,
-        "cooldown_seconds": 18,
+        "cooldown_seconds": 0,
         "max_messages_1h": 200,
         "repeat": True,
-        "human_mode": True,
+        "human_mode": False,
         "max_total": 0,
         "stop_at_local": "12:00",
         "domain_log": "private_domain_log.csv",
@@ -6180,20 +6180,30 @@ def main() -> int | None:
             f" total_temp_active={sendgrid_suppressed_temp_active}"
             f" skipped={skipped_sendgrid_suppressed}"
         )
-    if str(args.profile or "").strip() == "private_jc":
-        preflight_effective_spacing_seconds = (
+    if str(args.profile or "").strip() in JC_PROFILE_NAMES and str(args.provider or "").strip().lower() == "private":
+        preflight_local_spacing_seconds = (
             max(0, int(getattr(args, "cooldown_seconds", 0) or 0))
             if bool(getattr(args, "repeat", False)) and int(getattr(args, "cooldown_seconds", 0) or 0) > 0
             else max(0, int(getattr(args, "interval", 0) or 0))
         )
+        limiter_spacing_seconds = profile_aggregate_spacing_seconds(
+            str(args.profile or ""),
+            str(args.provider or ""),
+            int(getattr(args, "max_messages_1h", 0) or 0),
+        )
+        preflight_effective_spacing_seconds = max(
+            float(preflight_local_spacing_seconds),
+            float(limiter_spacing_seconds),
+        )
         if preflight_effective_spacing_seconds > 0:
             preflight_pace_per_hour = max(1, round(3600 / preflight_effective_spacing_seconds))
             print(
-                "PACE RESOLVED: profile=private_jc"
+                f"PACE RESOLVED: profile={str(args.profile or '').strip()}"
                 f" configured_interval={configured_interval_seconds}s"
                 f" configured_cooldown={configured_cooldown_seconds}s"
                 f" provider_recommended={max(0, int(provider_guard.get('recommended_cooldown_seconds') or 0))}s"
-                f" effective_spacing={preflight_effective_spacing_seconds}s (~{preflight_pace_per_hour}/h)"
+                f" limiter_spacing={limiter_spacing_seconds:.1f}s"
+                f" effective_spacing={preflight_effective_spacing_seconds:.1f}s (~{preflight_pace_per_hour}/h)"
             )
     elif args.provider == "sendgrid":
         preflight_effective_spacing_seconds = (
@@ -6417,16 +6427,23 @@ def main() -> int | None:
             f"microbreak={int(getattr(args, 'human_break_seconds_min', 6) or 0)}-{int(getattr(args, 'human_break_seconds_max', 18) or 0)}s "
             f"every {every_min}-{every_max} sends, first≈#{human_state['next_break_at']})"
         )
-    if str(args.profile or "").strip() == "private_jc":
-        effective_spacing_seconds = cooldown_seconds if repeat_mode and cooldown_seconds > 0 else max(0, int(getattr(args, "interval", 0) or 0))
+    if str(args.profile or "").strip() in JC_PROFILE_NAMES and str(args.provider or "").strip().lower() == "private":
+        local_spacing_seconds = cooldown_seconds if repeat_mode and cooldown_seconds > 0 else max(0, int(getattr(args, "interval", 0) or 0))
+        limiter_spacing_seconds = profile_aggregate_spacing_seconds(
+            str(args.profile or ""),
+            str(args.provider or ""),
+            int(getattr(args, "max_messages_1h", 0) or 0),
+        )
+        effective_spacing_seconds = max(float(local_spacing_seconds), float(limiter_spacing_seconds))
         if effective_spacing_seconds > 0:
             pace_per_hour = max(1, round(3600 / effective_spacing_seconds))
             print(
-                "PACE RESOLVED: profile=private_jc"
+                f"PACE RESOLVED: profile={str(args.profile or '').strip()}"
                 f" configured_interval={configured_interval_seconds}s"
                 f" configured_cooldown={configured_cooldown_seconds}s"
                 f" provider_recommended={max(0, int(provider_guard.get('recommended_cooldown_seconds') or 0))}s"
-                f" effective_spacing={effective_spacing_seconds}s (~{pace_per_hour}/h)"
+                f" limiter_spacing={limiter_spacing_seconds:.1f}s"
+                f" effective_spacing={effective_spacing_seconds:.1f}s (~{pace_per_hour}/h)"
             )
     elif args.provider == "sendgrid":
         effective_spacing_seconds = cooldown_seconds if repeat_mode and cooldown_seconds > 0 else max(0, int(getattr(args, "interval", 0) or 0))

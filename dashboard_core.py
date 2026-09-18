@@ -2096,13 +2096,20 @@ def load_profile_snapshot(
     effective_max_total = dashboard_send_cap_per_profile() if profile_name in SENDGRID_PROFILES else configured_max_total
     interval_seconds = max(0, int(cfg.get("interval") or 0))
     cooldown_seconds = max(0, int(cfg.get("cooldown_seconds") or 0))
+    provider_name = str(cfg.get("provider") or "").strip().lower()
     effective_spacing_seconds = cooldown_seconds if bool(cfg.get("repeat")) and cooldown_seconds > 0 else interval_seconds
     if profile_name in SENDGRID_PROFILES:
         effective_spacing_seconds = max(
             1,
             math.ceil(aggregate_spacing_seconds(sendgrid_hourly_cap_limit())),
         )
-    provider_name = str(cfg.get("provider") or "").strip().lower()
+    elif provider_name == "private" and profile_name in JC_PROFILE_NAMES:
+        jc_hourly_cap = max(0, int(cfg.get("max_messages_1h") or 0))
+        if jc_hourly_cap > 0:
+            effective_spacing_seconds = max(
+                1,
+                math.ceil(aggregate_spacing_seconds(jc_hourly_cap)),
+            )
     pacing = provider_pacing_status(profile_name, provider_name, cooldown_seconds)
     effective_cooldown_seconds = max(cooldown_seconds, int(pacing.get("recommended_cooldown_seconds") or 0))
     start, end = local_today_bounds()
