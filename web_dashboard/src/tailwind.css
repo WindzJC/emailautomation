@@ -4057,98 +4057,7 @@
   font-size: max(.64rem, 11px);
 }
 
-/* Dashboard UX v2: primary-operation hierarchy */
-.react-primary-operation {
-  margin-bottom: 12px;
-  padding: 18px 20px 14px;
-  border: 1px solid rgba(96,165,250,.34);
-  border-radius: 12px;
-  background: linear-gradient(135deg, rgba(33,52,79,.94), rgba(17,28,45,.96));
-  box-shadow: 0 14px 36px rgba(0,0,0,.18);
-}
-.react-primary-operation-loading,
-.react-primary-operation-empty { color: #9fb0c4; }
-.primary-operation-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 22px;
-}
-.primary-operation-title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 3px;
-}
-.primary-operation-title-row h3 {
-  margin: 0 8px 0 0;
-  font-size: 1.55rem;
-  line-height: 1.05;
-  letter-spacing: -.025em;
-}
-.primary-operation-guidance {
-  margin: 7px 0 0;
-  color: #afbdd0;
-  font-size: .82rem;
-}
-.primary-operation-action {
-  min-width: 148px;
-  min-height: 46px;
-  padding-inline: 20px;
-  font-size: .86rem !important;
-  font-weight: 800 !important;
-}
-.primary-operation-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0,1fr));
-  gap: 1px;
-  margin-top: 18px;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 8px;
-  background: rgba(255,255,255,.04);
-}
-.primary-operation-stat {
-  display: grid;
-  gap: 3px;
-  padding: 11px 13px;
-  background: rgba(5,12,23,.26);
-}
-.primary-operation-stat span {
-  color: #8293a9;
-  font-size: .64rem;
-  font-weight: 700;
-  letter-spacing: .07em;
-  text-transform: uppercase;
-}
-.primary-operation-stat strong {
-  color: #edf5ff;
-  font-size: 1.12rem;
-  line-height: 1.1;
-}
-.primary-operation-stat-remaining strong { font-size: 1.42rem; }
-.primary-operation-progress {
-  display: grid;
-  grid-template-columns: minmax(0,1fr) auto;
-  align-items: center;
-  gap: 12px;
-  margin-top: 10px;
-  color: #8999ae;
-  font-size: .66rem;
-}
-.primary-operation-progress-track {
-  height: 5px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255,255,255,.08);
-}
-.primary-operation-progress-track > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: #78aef7;
-}
+/* Dashboard UX v2: overview hierarchy */
 #overview-view .react-fleet-summary { margin-bottom: 10px; }
 #overview-view .summary-card-private_jc { display: none !important; }
 #overview-view .workspace-summary-strip.summary-grid,
@@ -4244,11 +4153,6 @@
 .react-history-page .campaign-history-table tbody tr.history-row-bad::before { background: #ef7f7f; }
 
 @media (max-width: 820px) {
-  .react-primary-operation { padding: 14px; border-radius: 10px; }
-  .primary-operation-head { display: grid; gap: 13px; }
-  .primary-operation-action { width: 100%; }
-  .primary-operation-stats { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .primary-operation-progress { grid-template-columns: 1fr; gap: 6px; }
   #overview-view .workspace-summary-strip.summary-grid,
   #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     grid-template-columns: repeat(2,minmax(0,1fr)) !important;
@@ -4310,9 +4214,6 @@
 }
 
 @media (max-width: 480px) {
-  .primary-operation-stats { grid-template-columns: 1fr 1fr; }
-  .primary-operation-stat { padding: 9px 10px; }
-  .primary-operation-title-row h3 { font-size: 1.35rem; }
   #overview-view .workspace-summary-strip.summary-grid,
   #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     grid-template-columns: 1fr !important;
@@ -4494,100 +4395,6 @@ body {
   border-color: rgba(98,215,163,.18);
   background: rgba(98,215,163,.075);
   color: #aee8cc;
-}
-
-.react-primary-operation {
-  position: relative;
-  margin: 0 0 12px;
-  padding: 22px 24px 18px;
-  overflow: hidden;
-  border: 1px solid rgba(120,173,247,.22);
-  border-radius: 15px;
-  background:
-    radial-gradient(circle at 88% 0%, rgba(120,173,247,.15), transparent 31%),
-    linear-gradient(135deg, #13253a 0%, #0d1a29 58%, #0b1724 100%);
-  box-shadow: 0 20px 54px rgba(0,0,0,.22), inset 0 1px rgba(255,255,255,.035);
-}
-
-.react-primary-operation::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: linear-gradient(180deg, var(--astra-green), var(--astra-blue));
-  content: "";
-}
-
-.primary-operation-title-row {
-  gap: 7px;
-  margin-top: 5px;
-}
-
-.primary-operation-title-row h3 {
-  margin-right: 10px;
-  color: #f5f9ff;
-  font-size: 1.78rem;
-  font-weight: 720;
-  letter-spacing: -.045em;
-}
-
-.primary-operation-guidance {
-  margin-top: 8px;
-  color: #a4b3c6;
-  font-size: .82rem;
-}
-
-.primary-operation-action {
-  min-width: 152px;
-  min-height: 44px;
-  border-radius: 9px !important;
-  font-size: .82rem !important;
-}
-
-.primary-operation-stats {
-  gap: 8px;
-  margin-top: 19px;
-  overflow: visible;
-  border: 0;
-  background: transparent;
-}
-
-.primary-operation-stat {
-  padding: 11px 13px;
-  border: 1px solid rgba(255,255,255,.065);
-  border-radius: 10px;
-  background: rgba(3,11,20,.25);
-}
-
-.primary-operation-stat span {
-  color: #768ba3;
-  font-size: .59rem;
-  letter-spacing: .06em;
-}
-
-.primary-operation-stat strong {
-  color: #eaf2fc;
-  font-size: 1.12rem;
-  font-weight: 690;
-}
-
-.primary-operation-stat-remaining strong {
-  color: #f7fbff;
-  font-size: 1.5rem;
-}
-
-.primary-operation-progress {
-  margin-top: 12px;
-  color: #7f90a6;
-  font-size: .64rem;
-}
-
-.primary-operation-progress-track {
-  height: 5px;
-  background: rgba(255,255,255,.065);
-}
-
-.primary-operation-progress-track > span {
-  background: linear-gradient(90deg, var(--astra-green), var(--astra-blue));
 }
 
 #overview-view .react-fleet-summary {
@@ -4965,14 +4772,6 @@ body {
   .react-main.app-main { padding: 18px 12px 34px !important; }
   .react-page-heading { align-items: flex-start; }
 
-  .react-primary-operation {
-    padding: 17px;
-    border-radius: 12px;
-  }
-
-  .primary-operation-title-row h3 { font-size: 1.5rem; }
-  .primary-operation-stats { gap: 6px; }
-
   #overview-view .workspace-summary-strip.summary-grid,
   #overview-view #summary-grid.workspace-summary-strip.summary-grid {
     gap: 6px !important;
@@ -4987,7 +4786,6 @@ body {
 @media (max-width: 560px) {
   .react-page-heading h2 { font-size: 1.55rem; }
   .react-page-heading .react-status-pill { display: none; }
-  .primary-operation-stats { grid-template-columns: 1fr 1fr; }
   #overview-view .detail-card { padding: 13px; }
   #overview-view .detail-switcher { width: 100%; }
   #overview-view .detail-switcher select { width: 100%; }

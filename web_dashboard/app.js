@@ -21,7 +21,6 @@ const els = {
   opsProgressDetailsToggle: document.getElementById("ops-progress-details-toggle"),
   alertsCaption: document.getElementById("alerts-caption"),
   summaryGrid: document.getElementById("summary-grid"),
-  primaryOperationHero: document.getElementById("primary-operation-hero"),
   trendsGrid: document.getElementById("trends-grid"),
   webhookHealth: document.getElementById("webhook-health"),
   webhookHealthCaption: document.getElementById("webhook-health-caption"),
@@ -8168,85 +8167,6 @@ function senderLastActivityDisplay(profile, warmStatus = null) {
   };
 }
 
-function renderPrimaryOperation(snapshot) {
-  if (!els.primaryOperationHero) return;
-  const profiles = Array.isArray(snapshot?.profiles) ? snapshot.profiles : [];
-  const profile = profiles.find((candidate) => candidate?.name === "private_jc");
-  if (!profile) {
-    setNodeHtml(els.primaryOperationHero, `
-      <div class="react-primary-operation-empty">
-        <p class="react-section-label">Primary operation</p>
-        <strong>JC Cold unavailable</strong>
-        <span>No JC Cold profile was present in the live snapshot.</span>
-      </div>
-    `);
-    return;
-  }
-  const readiness = senderReadinessBadge(profile, snapshot);
-  const runtime = senderRuntimeBadge(profile, snapshot);
-  const pending = profilePendingCount(profile);
-  const sent = Number(profileRunSentDisplay(profile) || 0);
-  const awaiting = Number(profile.awaiting_outcome || 0);
-  const total = Math.max(0, pending + sent);
-  const completion = total > 0 ? Math.min(100, Math.max(0, (sent / total) * 100)) : 100;
-  const lastActivity = senderLastActivityDisplay(profile);
-  const pendingAction = pendingProfileActions.get(profile.name) || "";
-  const previewSyncState = profilePreviewValidationState.get(profile.name) || {};
-  const previewSyncPending = previewSyncState.kind === "loading";
-  const stopAvailable = canStopProfile(profile);
-  const previewSyncAvailable = profilePreviewSyncActionAvailable(profile, snapshot);
-  const startAvailable = canStartProfile(profile, snapshot);
-  const action = stopAvailable ? "stop" : previewSyncAvailable ? "preview_sync" : "start";
-  const liveActionBlock = ["start", "preview_sync"].includes(action) ? manualLiveActionBlockReason() : "";
-  const actionDisabled = Boolean(pendingAction)
-    || previewSyncPending
-    || Boolean(liveActionBlock)
-    || (!stopAvailable && pending <= 0)
-    || (!stopAvailable && !previewSyncAvailable && !startAvailable);
-  const actionLabelText = pendingAction
-    ? actionLabel(pendingAction)
-    : liveActionBlock ? (authState.liveActionsEnabled ? "Machine not authorized" : "Manual actions disabled")
-    : action === "stop" ? "Stop JC"
-    : action === "preview_sync" ? (previewSyncPending ? "Synchronizing…" : "Sync Preview")
-    : "Start JC";
-  const actionClass = action === "stop" ? "btn-danger" : action === "start" ? "btn-primary" : "btn-secondary";
-  const nextAction = actionDisabled
-    ? readiness.label === "Complete" ? "Campaign complete" : readiness.label
-    : action === "stop" ? "JC is live — stop only when needed"
-    : action === "preview_sync" ? "Synchronize the preview before sending"
-    : "Ready for manual start";
-  setNodeHtml(els.primaryOperationHero, `
-    <div class="primary-operation-head">
-      <div>
-        <p class="react-section-label">Primary operation</p>
-        <div class="primary-operation-title-row">
-          <h3>JC Cold</h3>
-          <span class="sender-status-pill sender-status-pill-${escapeHtml(readiness.tone)}">${escapeHtml(readiness.label)}</span>
-          <span class="sender-status-pill sender-status-pill-${escapeHtml(runtime.tone)}">${escapeHtml(runtime.label)}</span>
-        </div>
-        <p class="primary-operation-guidance">${escapeHtml(nextAction)}</p>
-      </div>
-      <button
-        class="btn ${actionClass} primary-operation-action"
-        type="button"
-        data-profile="private_jc"
-        data-action="${escapeHtml(action)}"
-        ${actionDisabled ? "disabled" : ""}
-      >${escapeHtml(actionLabelText)}</button>
-    </div>
-    <div class="primary-operation-stats">
-      <div class="primary-operation-stat primary-operation-stat-remaining"><span>Remaining</span><strong>${pending.toLocaleString()}</strong></div>
-      <div class="primary-operation-stat"><span>Sent</span><strong>${sent.toLocaleString()}</strong></div>
-      <div class="primary-operation-stat"><span>Awaiting</span><strong>${awaiting.toLocaleString()}</strong></div>
-      <div class="primary-operation-stat"><span>Last activity</span><strong>${escapeHtml(lastActivity.label || "—")}</strong></div>
-    </div>
-    <div class="primary-operation-progress" aria-label="JC Cold run completion ${completion.toFixed(1)}%">
-      <div class="primary-operation-progress-track"><span style="width:${completion.toFixed(2)}%"></span></div>
-      <span>${completion.toFixed(1)}% of current run sent</span>
-    </div>
-  `);
-}
-
 function renderSenderStatusConsole(snapshot, selectedProfile) {
   const panel = ensureSenderStatusPanel();
   if (!panel) return;
@@ -10569,7 +10489,6 @@ function renderSnapshot(snapshot) {
   renderControls(snapshot);
   renderHealth(snapshot);
   renderAlerts(snapshot);
-  renderPrimaryOperation(snapshot);
   renderSummary(snapshot);
   renderSenderStatusConsole(snapshot, selectedProfile);
   if ((snapshot?.profiles || []).some((profile) => profile?.name === "private_jc_warm")) {
@@ -10738,9 +10657,8 @@ async function handleSenderStatusClick(event) {
     selectProfileByName(syncDetailsButton.getAttribute("data-profile") || "");
     return;
   }
-  const actionButton = event.target.closest(".sender-status-action-btn[data-profile][data-action]")
-    || event.target.closest(".primary-operation-action[data-profile][data-action]");
-  if (actionButton && (senderStatusPanel?.contains(actionButton) || els.primaryOperationHero?.contains(actionButton))) {
+  const actionButton = event.target.closest(".sender-status-action-btn[data-profile][data-action]");
+  if (actionButton && senderStatusPanel?.contains(actionButton)) {
     if (actionButton.disabled) return;
     const profile = actionButton.getAttribute("data-profile") || "";
     const action = actionButton.getAttribute("data-action") || "";

@@ -310,14 +310,6 @@ export function CommandBar({ html }) {
   );
 }
 
-export function PrimaryOperation() {
-  return (
-    <section id="primary-operation-hero" className="react-primary-operation" aria-label="Primary sender operation">
-      <div className="react-primary-operation-loading">Loading primary operation…</div>
-    </section>
-  );
-}
-
 export function FleetSummary({ children }) {
   return (
     <section className="react-metric-region react-fleet-summary" aria-label="Fleet operations summary">
@@ -398,7 +390,6 @@ export function OverviewDashboard({ view }) {
         description="Current queues, sender state, and the next authorized action."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
-      <PrimaryOperation />
       <FleetSummary>
         <LegacyNode html={view.metrics} />
       </FleetSummary>
