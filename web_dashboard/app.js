@@ -8262,6 +8262,8 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
     return;
   }
   const visibleProfiles = profiles;
+  const showAwaitingColumn = profiles.some((profile) => Number(profile?.awaiting_outcome || 0) > 0);
+  panel.classList.toggle("hide-awaiting-column", !showAwaitingColumn);
   setNodeHtml(
     tbody,
     visibleProfiles.map((profile) => {
@@ -8325,6 +8327,7 @@ function renderSenderStatusConsole(snapshot, selectedProfile) {
           selectedProfile?.name === profile.name ? "is-selected" : "",
           (warmProfile ? Boolean(warmStatus.running) : isProfileActive(profile)) ? "is-live" : "",
           pendingCount <= 0 ? "is-complete" : "",
+          profile?.name === "private_jc" ? "is-jc" : "",
           warmProfile ? "is-warm-jc" : "",
         ].filter(Boolean).join(" ")}" data-profile="${escapeHtml(profile.name || "")}">
           <td>

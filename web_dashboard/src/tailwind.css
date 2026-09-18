@@ -4338,3 +4338,658 @@
 #overview-view .sender-status-table tr.is-complete:not(.is-live):not(.is-selected) td {
   background: rgba(255,255,255,.008);
 }
+/* Astra visual system v4 — premium operations hierarchy. */
+:root {
+  --astra-canvas: #07101a;
+  --astra-sidebar: #09131f;
+  --astra-surface: #0d1824;
+  --astra-surface-raised: #111f2d;
+  --astra-surface-soft: #0a141f;
+  --astra-border: rgba(160, 181, 207, .105);
+  --astra-border-strong: rgba(160, 181, 207, .18);
+  --astra-text: #edf4fc;
+  --astra-muted: #8292a7;
+  --astra-blue: #78adf7;
+  --astra-green: #62d7a3;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--astra-canvas);
+}
+
+.react-dashboard.page {
+  background:
+    radial-gradient(circle at 68% -12%, rgba(69, 122, 196, .105), transparent 34%),
+    linear-gradient(180deg, #08121d 0, var(--astra-canvas) 360px);
+}
+
+.react-app-shell.app-shell,
+.react-app-shell.app-shell.warm-research-shell {
+  grid-template-columns: 220px minmax(0, 1fr) !important;
+}
+
+.react-sidebar.app-rail {
+  width: 220px !important;
+  padding: 24px 16px 18px;
+  border-right: 1px solid var(--astra-border);
+  background: linear-gradient(180deg, #0a1521 0%, var(--astra-sidebar) 100%);
+}
+
+.react-sidebar-brand {
+  grid-template-columns: 1fr;
+  gap: 7px;
+  padding: 0 7px 22px;
+}
+
+.react-brand-mark {
+  display: block;
+  width: auto;
+  height: auto;
+  color: #f4f8fd;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 1.45rem;
+  font-weight: 760;
+  letter-spacing: -.04em;
+}
+
+.react-sidebar-brand .app-rail-top { gap: 3px; }
+
+.react-sidebar-brand .eyebrow {
+  color: #708198;
+  font-size: .64rem;
+}
+
+.react-sidebar-brand .app-rail-title {
+  max-width: none;
+  color: #cfd9e6;
+  font-size: .88rem !important;
+  font-weight: 560;
+}
+
+.react-sidebar-nav {
+  padding-top: 14px;
+  border-top-color: rgba(160,181,207,.075);
+}
+
+.react-sidebar-nav .app-rail-tabs { gap: 4px; }
+
+.react-sidebar-nav .tab-btn {
+  height: 42px;
+  padding-inline: 12px;
+  border-radius: 8px;
+  color: #8392a6;
+  font-size: .78rem;
+}
+
+.react-sidebar-nav .tab-btn:hover {
+  color: #dce6f2;
+  background: rgba(255,255,255,.035);
+  transform: none;
+}
+
+.react-sidebar-nav .tab-btn.is-active {
+  color: #f5f8fc;
+  border-color: rgba(120,173,247,.13);
+  background: linear-gradient(90deg, rgba(120,173,247,.13), rgba(120,173,247,.055));
+  box-shadow: inset 2px 0 0 var(--astra-blue);
+}
+
+.react-sidebar-context {
+  padding: 15px 5px 0;
+  border-top-color: rgba(160,181,207,.075);
+}
+
+.react-sidebar-context .app-rail-status {
+  gap: 6px;
+  border-color: rgba(160,181,207,.075);
+  border-radius: 9px;
+  background: rgba(255,255,255,.018);
+}
+
+.react-sidebar-context > .react-environment-banner { display: none; }
+
+.react-main.app-main {
+  padding: 26px clamp(22px, 2.4vw, 40px) 52px !important;
+  background: transparent;
+}
+
+.react-workspace {
+  max-width: 1460px;
+  margin-inline: auto;
+}
+
+.react-page-heading {
+  min-height: 58px;
+  margin-bottom: 14px;
+  padding: 0 1px;
+}
+
+.react-page-heading .react-kicker {
+  display: block;
+  margin-bottom: 5px;
+  color: #687a91;
+  font-size: .62rem;
+  letter-spacing: .055em !important;
+  text-transform: uppercase;
+}
+
+.react-page-heading h2 {
+  color: var(--astra-text);
+  font-size: clamp(1.75rem, 2vw, 2.05rem);
+  font-weight: 700;
+  letter-spacing: -.04em;
+}
+
+.react-page-heading > div > p:last-child {
+  margin-top: 5px;
+  color: #8595a9;
+  font-size: .82rem;
+}
+
+.react-page-heading .react-status-pill {
+  border-color: rgba(98,215,163,.18);
+  background: rgba(98,215,163,.075);
+  color: #aee8cc;
+}
+
+.react-primary-operation {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 22px 24px 18px;
+  overflow: hidden;
+  border: 1px solid rgba(120,173,247,.22);
+  border-radius: 15px;
+  background:
+    radial-gradient(circle at 88% 0%, rgba(120,173,247,.15), transparent 31%),
+    linear-gradient(135deg, #13253a 0%, #0d1a29 58%, #0b1724 100%);
+  box-shadow: 0 20px 54px rgba(0,0,0,.22), inset 0 1px rgba(255,255,255,.035);
+}
+
+.react-primary-operation::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--astra-green), var(--astra-blue));
+  content: "";
+}
+
+.primary-operation-title-row {
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.primary-operation-title-row h3 {
+  margin-right: 10px;
+  color: #f5f9ff;
+  font-size: 1.78rem;
+  font-weight: 720;
+  letter-spacing: -.045em;
+}
+
+.primary-operation-guidance {
+  margin-top: 8px;
+  color: #a4b3c6;
+  font-size: .82rem;
+}
+
+.primary-operation-action {
+  min-width: 152px;
+  min-height: 44px;
+  border-radius: 9px !important;
+  font-size: .82rem !important;
+}
+
+.primary-operation-stats {
+  gap: 8px;
+  margin-top: 19px;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+}
+
+.primary-operation-stat {
+  padding: 11px 13px;
+  border: 1px solid rgba(255,255,255,.065);
+  border-radius: 10px;
+  background: rgba(3,11,20,.25);
+}
+
+.primary-operation-stat span {
+  color: #768ba3;
+  font-size: .59rem;
+  letter-spacing: .06em;
+}
+
+.primary-operation-stat strong {
+  color: #eaf2fc;
+  font-size: 1.12rem;
+  font-weight: 690;
+}
+
+.primary-operation-stat-remaining strong {
+  color: #f7fbff;
+  font-size: 1.5rem;
+}
+
+.primary-operation-progress {
+  margin-top: 12px;
+  color: #7f90a6;
+  font-size: .64rem;
+}
+
+.primary-operation-progress-track {
+  height: 5px;
+  background: rgba(255,255,255,.065);
+}
+
+.primary-operation-progress-track > span {
+  background: linear-gradient(90deg, var(--astra-green), var(--astra-blue));
+}
+
+#overview-view .react-fleet-summary {
+  margin-bottom: 12px;
+  border: 0;
+  background: transparent;
+}
+
+#overview-view .workspace-summary-strip.summary-grid,
+#overview-view #summary-grid.workspace-summary-strip.summary-grid {
+  gap: 8px !important;
+  overflow: visible;
+  border-radius: 0;
+}
+
+#overview-view .summary-card,
+#overview-view .workspace-summary-strip .summary-card {
+  min-height: 72px !important;
+  padding: 11px 13px !important;
+  border: 1px solid var(--astra-border) !important;
+  border-radius: 10px !important;
+  background: rgba(13,24,36,.74) !important;
+}
+
+#overview-view .summary-card:last-child {
+  border-right: 1px solid var(--astra-border) !important;
+}
+
+#overview-view .summary-label {
+  margin-bottom: 6px;
+  color: #76889e;
+  font-size: .61rem;
+  font-weight: 680;
+}
+
+#overview-view .summary-value,
+#overview-view .summary-card-total_pending .summary-value {
+  color: #eaf1fa;
+  font-size: 1.16rem !important;
+  font-weight: 690;
+}
+
+#overview-view .summary-meta,
+#overview-view .summary-subline {
+  margin-top: 4px;
+  color: #71839a;
+  font-size: .63rem;
+}
+
+.react-overview-live-grid {
+  grid-template-columns: minmax(0, 1.35fr) minmax(330px, .65fr);
+  gap: 9px;
+  margin: 0 0 12px;
+}
+
+.react-senders-progress { order: 1; }
+.react-command-bar { order: 2; }
+
+#overview-view .react-command-bar {
+  min-height: 100%;
+  border: 1px solid var(--astra-border);
+  border-radius: 10px;
+  background: rgba(10,20,31,.72);
+}
+
+#overview-view .react-command-bar .react-section-heading { margin-bottom: 8px; }
+#overview-view .react-command-bar .react-section-state { color: #65778e; }
+#overview-view .react-command-bar .manual-start-warning { color: #9baabd; }
+
+#overview-view .react-senders-progress .ops-progress-strip {
+  min-height: 100%;
+  border: 1px solid var(--astra-border);
+  border-radius: 10px;
+  background: rgba(10,20,31,.72);
+}
+
+.react-sender-console { margin-top: 0; }
+
+#overview-view .sender-status-panel {
+  overflow: hidden;
+  border: 1px solid var(--astra-border);
+  border-radius: 13px;
+  background: rgba(11,21,32,.84);
+  box-shadow: 0 18px 44px rgba(0,0,0,.16);
+}
+
+#overview-view .sender-status-head {
+  min-height: 52px;
+  padding: 13px 16px 11px;
+  border-bottom-color: rgba(160,181,207,.075);
+}
+
+#overview-view .sender-status-head .eyebrow {
+  color: #d1dbe7;
+  font-size: .78rem;
+  font-weight: 690;
+}
+
+#overview-view .sender-status-head p:last-child {
+  margin-top: 2px;
+  color: #71839a;
+  font-size: .66rem;
+}
+
+#overview-view .sender-status-table {
+  min-width: 900px;
+  font-size: .72rem;
+}
+
+#overview-view .sender-status-table th {
+  height: 35px;
+  padding: 7px 12px;
+  color: #6f8299;
+  background: rgba(255,255,255,.018);
+  font-size: .58rem;
+  font-weight: 730;
+  letter-spacing: .055em !important;
+  text-transform: uppercase;
+}
+
+#overview-view .sender-status-table td {
+  height: 49px;
+  padding: 8px 12px;
+  border-top-color: rgba(160,181,207,.06);
+}
+
+#overview-view .sender-status-table tbody tr:hover td {
+  background: rgba(120,173,247,.035);
+}
+
+#overview-view .sender-status-table tr.is-jc td {
+  background: linear-gradient(90deg, rgba(98,215,163,.06), rgba(98,215,163,.018) 46%, transparent);
+}
+
+#overview-view .sender-status-table tr.is-jc td:first-child {
+  box-shadow: inset 3px 0 0 rgba(98,215,163,.78);
+}
+
+#overview-view .sender-status-table tr.is-selected:not(.is-jc) td:first-child {
+  box-shadow: inset 3px 0 0 rgba(120,173,247,.7);
+}
+
+#overview-view .sender-status-name-btn {
+  color: #e1e9f3;
+  font-size: .76rem;
+  font-weight: 700;
+}
+
+#overview-view .sender-status-table tr.is-complete:not(.is-selected) { opacity: .72; }
+
+#overview-view .sender-status-pill {
+  min-width: 0;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: .59rem;
+}
+
+#overview-view .sender-status-action-btn {
+  min-height: 30px;
+  padding: 4px 11px;
+  border-radius: 7px;
+  font-size: .64rem;
+}
+
+#overview-view .sender-status-activity {
+  color: #8394a9;
+  font-size: .68rem;
+}
+
+#overview-view .sender-status-panel.hide-awaiting-column th:nth-child(6),
+#overview-view .sender-status-panel.hide-awaiting-column td:nth-child(6) {
+  display: none;
+}
+
+#overview-view .sender-status-profile-meta { color: #6e8198; }
+
+.react-sender-detail-panels { margin-top: 12px; }
+
+#overview-view .react-sender-detail-panels #detail-panel {
+  overflow: hidden;
+  border: 1px solid var(--astra-border);
+  border-radius: 13px;
+  background: rgba(11,21,32,.86);
+  box-shadow: 0 18px 44px rgba(0,0,0,.15);
+}
+
+#overview-view .react-sender-detail-panels .panel-header {
+  min-height: 62px;
+  padding: 14px 17px;
+  border-bottom: 1px solid rgba(160,181,207,.07);
+  background: rgba(255,255,255,.012);
+}
+
+#overview-view .react-sender-detail-panels .panel-header h2 {
+  color: #e7eef7;
+  font-size: .94rem;
+  font-weight: 690;
+}
+
+#overview-view .react-sender-detail-panels #detail-caption {
+  color: #71839a;
+  font-size: .67rem;
+}
+
+#overview-view .detail-switcher { gap: 7px; }
+
+#overview-view .detail-switcher .btn {
+  min-height: 32px;
+  border-radius: 7px;
+}
+
+#overview-view .detail-card {
+  gap: 14px;
+  padding: 18px;
+  border-radius: 0;
+  background: transparent;
+}
+
+#overview-view .detail-command-bar {
+  grid-template-columns: minmax(0,1fr) auto;
+  gap: 22px;
+  padding-bottom: 16px;
+  border-bottom-color: rgba(160,181,207,.07);
+}
+
+#overview-view .detail-command-bar .detail-head h3 {
+  color: #f1f6fc;
+  font-size: 1.68rem;
+  font-weight: 710;
+  letter-spacing: -.035em;
+  line-height: 1.05;
+}
+
+#overview-view .detail-kicker {
+  margin-top: 9px;
+  color: #8192a7;
+  font-size: .72rem;
+}
+
+#overview-view .detail-state-line {
+  gap: 7px;
+  padding: 5px 9px;
+  font-size: .58rem;
+  letter-spacing: .045em;
+}
+
+#overview-view .detail-command-actions {
+  min-width: 260px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#overview-view .detail-command-actions .profile-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#overview-view .detail-command-actions .btn {
+  min-width: 104px;
+  min-height: 34px;
+  border-radius: 7px;
+}
+
+#overview-view .detail-last-update,
+#overview-view .detail-action-note {
+  color: #71839a;
+  font-size: .65rem;
+}
+
+#overview-view .detail-section {
+  border: 1px solid rgba(160,181,207,.075);
+  border-radius: 11px;
+  background: rgba(255,255,255,.014);
+  box-shadow: none;
+}
+
+#overview-view .detail-core-section {
+  gap: 11px;
+  padding: 14px;
+}
+
+#overview-view .detail-core-section .detail-section-head strong {
+  color: #dce6f1;
+  font-size: .82rem;
+  font-weight: 690;
+}
+
+#overview-view .detail-core-grid { gap: 8px; }
+
+#overview-view .detail-core-item {
+  gap: 5px;
+  padding: 10px;
+  border-color: rgba(160,181,207,.07);
+  border-radius: 9px;
+  background: rgba(255,255,255,.018);
+}
+
+#overview-view .detail-core-value {
+  color: #ebf2fa;
+  font-size: 1.2rem;
+  font-weight: 690;
+}
+
+#overview-view .detail-core-label,
+#overview-view .detail-compact-label {
+  color: #71839a;
+  font-size: .57rem;
+  letter-spacing: .055em;
+}
+
+#overview-view .detail-core-meta-row {
+  padding: 11px;
+  border-color: rgba(160,181,207,.07);
+  border-radius: 9px;
+  background: rgba(255,255,255,.015);
+}
+
+#overview-view .detail-disclosure,
+#overview-view .detail-runtime-output {
+  padding: 12px 14px;
+  border-color: rgba(160,181,207,.075);
+  border-radius: 10px;
+  background: rgba(255,255,255,.012);
+}
+
+#overview-view .detail-summary-title {
+  color: #dce5f0;
+  font-size: .72rem;
+  font-weight: 680;
+}
+
+#overview-view .detail-summary-note,
+#overview-view .detail-summary-meta {
+  color: #708198;
+  font-size: .62rem;
+}
+
+#overview-view .detail-advanced-disclosure[open] { gap: 8px; }
+
+.react-history-page .campaign-history-panel,
+.react-validation-tools,
+#diagnostics-view .workspace-metric-details,
+#leads-view .operator-step,
+#leads-view .react-current-staged-legend {
+  border-color: var(--astra-border);
+  border-radius: 12px;
+  background: rgba(11,21,32,.82);
+}
+
+@media (max-width: 1100px) {
+  .react-overview-live-grid { grid-template-columns: 1fr; }
+
+  #overview-view .react-command-bar,
+  #overview-view .react-senders-progress .ops-progress-strip {
+    min-height: auto;
+  }
+
+  #overview-view .detail-command-bar { grid-template-columns: 1fr; }
+  #overview-view .detail-command-actions { min-width: 0; }
+  #overview-view .detail-command-actions .profile-actions { justify-content: flex-start; }
+}
+
+@media (max-width: 900px) {
+  .react-app-shell.app-shell,
+  .react-app-shell.app-shell.warm-research-shell {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 820px) {
+  .react-main.app-main { padding: 18px 12px 34px !important; }
+  .react-page-heading { align-items: flex-start; }
+
+  .react-primary-operation {
+    padding: 17px;
+    border-radius: 12px;
+  }
+
+  .primary-operation-title-row h3 { font-size: 1.5rem; }
+  .primary-operation-stats { gap: 6px; }
+
+  #overview-view .workspace-summary-strip.summary-grid,
+  #overview-view #summary-grid.workspace-summary-strip.summary-grid {
+    gap: 6px !important;
+  }
+
+  #overview-view .summary-card,
+  #overview-view .workspace-summary-strip .summary-card {
+    border-radius: 9px !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .react-page-heading h2 { font-size: 1.55rem; }
+  .react-page-heading .react-status-pill { display: none; }
+  .primary-operation-stats { grid-template-columns: 1fr 1fr; }
+  #overview-view .detail-card { padding: 13px; }
+  #overview-view .detail-switcher { width: 100%; }
+  #overview-view .detail-switcher select { width: 100%; }
+  #overview-view .detail-core-meta { grid-template-columns: 1fr; }
+}

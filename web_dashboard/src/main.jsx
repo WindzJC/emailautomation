@@ -398,6 +398,7 @@ export function OverviewDashboard({ view }) {
         description="Current queues, sender state, and the next authorized action."
         aside={<StatusPill tone="live">Live operations</StatusPill>}
       />
+      <PrimaryOperation />
       <FleetSummary>
         <LegacyNode html={view.metrics} />
       </FleetSummary>

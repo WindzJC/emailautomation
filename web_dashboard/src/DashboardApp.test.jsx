@@ -96,6 +96,7 @@ describe("DashboardApp", () => {
     expect(overview.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
     expect(overview.querySelector("#start-ready-btn")).not.toBeInTheDocument();
     expect(overview.querySelector("#stop-btn")).toBeInTheDocument();
+    expect(overview.querySelector("#primary-operation-hero")).toBeInTheDocument();
     expect(overview.querySelector(".sender-status-mount")).toBeInTheDocument();
     expect(overview.querySelector("#profile-detail")).toBeInTheDocument();
     expect(overview.querySelector('[aria-label="Selected sender details"]')).toBeInTheDocument();
