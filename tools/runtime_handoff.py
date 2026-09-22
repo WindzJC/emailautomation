@@ -750,6 +750,15 @@ def sqlite_snapshot(source: Path, destination: Path) -> dict[str, Any]:
         raise HandoffError(f"SQLite integrity failure: {source}") from exc
     if result != [("ok",)]:
         raise HandoffError(f"SQLite integrity failure: {source}: {result[:3]}")
+
+    # A backup of a WAL-mode database preserves WAL mode. Opening the staged
+    # copy for integrity verification can therefore create empty/transient
+    # -wal and -shm files even though the backup is fully contained in the
+    # main database file. They are not part of the snapshot and must not be
+    # recursively archived as unmanifested runtime files.
+    for suffix in ("-wal", "-shm"):
+        destination.with_name(destination.name + suffix).unlink(missing_ok=True)
+
     return {
         "method": "sqlite_backup_includes_wal",
         "source_wal_present": source.with_name(source.name + "-wal").exists(),

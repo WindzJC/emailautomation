@@ -2853,6 +2853,26 @@ def test_sqlite_integrity_is_non_mutating_for_wal_mode_database(tmp_path):
     assert not any(path.exists() for path in sidecars)
 
 
+def test_sqlite_snapshot_removes_transient_wal_sidecars(tmp_path):
+    source = tmp_path / "source.sqlite3"
+    destination = tmp_path / "staged.sqlite3"
+    with sqlite3.connect(source) as db:
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        db.execute("CREATE TABLE items (value TEXT)")
+        db.execute("INSERT INTO items VALUES (?)", ("preserved",))
+        db.commit()
+
+    metadata = runtime_handoff.sqlite_snapshot(source, destination)
+
+    assert metadata["method"] == "sqlite_backup_includes_wal"
+    assert destination.is_file()
+    assert not destination.with_name(destination.name + "-wal").exists()
+    assert not destination.with_name(destination.name + "-shm").exists()
+    with sqlite3.connect(f"file:{destination.resolve().as_posix()}?mode=ro&immutable=1", uri=True) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert db.execute("SELECT value FROM items").fetchall() == [("preserved",)]
+
+
 def test_complete_bundle_verifier_preserves_extracted_inventory(repos, tmp_path):
     windows, _mac = repos
     exported = _export(windows, tmp_path, "mac", "windows-wsl")
