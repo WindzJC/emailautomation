@@ -169,4 +169,134 @@ def test_handoff_entrypoint_routes_switches_through_transport() -> None:
     assert "tools/handoff_transport.py" in script
     assert "transport_handoff switch --target mac" in script
     assert "transport_handoff switch --target windows-wsl" in script
+    assert "transport_handoff takeover --source mac --target windows-wsl" in script
+    assert "transport_handoff prepare-export --target" in script
     assert "runtime_handoff import" in script
+
+
+def test_takeover_from_mac_preflights_before_remote_export(
+    monkeypatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    bundle_dir = tmp_path / "bundles"
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        ht,
+        "endpoint",
+        lambda *_args: ("windelle@mac", "/repo"),
+    )
+    monkeypatch.setattr(
+        ht,
+        "_remote_source_identity",
+        lambda *_args: (
+            "main",
+            HEAD,
+            {
+                "head": HEAD,
+                "process_blockers": [],
+                "active_job_files": [],
+                "real_send_authorized": True,
+                "authority": {
+                    "expected_git_commit": HEAD,
+                    "authorized_machine": "mac",
+                    "status": "active",
+                },
+            },
+        ),
+    )
+
+    def sync(*_args, **_kwargs):
+        events.append("local-sync")
+        return {}
+
+    monkeypatch.setattr(ht, "_sync_local_target", sync)
+
+    def remote_export(*_args, **_kwargs):
+        events.append("remote-export")
+        return "/tmp/runtime_handoff.tgz"
+
+    monkeypatch.setattr(ht, "_remote_prepare_export", remote_export)
+
+    def pull(*_args, **_kwargs):
+        events.append("pull")
+        destination = _args[2]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"bundle")
+    monkeypatch.setattr(ht, "_pull_remote_bundle", pull)
+    monkeypatch.setattr(
+        ht,
+        "_local_receive",
+        lambda *_args, **_kwargs: events.append("local-receive"),
+    )
+    monkeypatch.setattr(
+        ht,
+        "_runtime_status",
+        lambda *_args, **_kwargs: {
+            "head": HEAD,
+            "process_blockers": [],
+            "active_job_files": [],
+            "real_send_authorized": True,
+            "authority": {
+                "expected_git_commit": HEAD,
+                "authorized_machine": "windows-wsl",
+                "status": "active",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ht,
+        "_ssh",
+        lambda *_args, **_kwargs: events.append("remote-cleanup"),
+    )
+    ht.takeover_from(
+        repo,
+        {"HANDOFF_BUNDLE_DIR": str(bundle_dir), "HANDOFF_PYTHON": "python3"},
+        source="mac",
+        target="windows-wsl",
+    )
+
+    assert events == [
+        "local-sync",
+        "remote-export",
+        "pull",
+        "local-receive",
+        "remote-cleanup",
+    ]
+
+
+def test_takeover_rejects_source_not_authorized(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        ht,
+        "endpoint",
+        lambda *_args: ("windelle@mac", "/repo"),
+    )
+    monkeypatch.setattr(
+        ht,
+        "_remote_source_identity",
+        lambda *_args: (
+            "main",
+            HEAD,
+            {
+                "head": HEAD,
+                "process_blockers": [],
+                "active_job_files": [],
+                "real_send_authorized": False,
+                "authority": {
+                    "expected_git_commit": HEAD,
+                    "authorized_machine": "mac",
+                    "status": "handoff_in_progress",
+                },
+            },
+        ),
+    )
+    with pytest.raises(ht.TransportError, match="authority status|real-send"):
+        ht.takeover_from(
+            repo,
+            {"HANDOFF_BUNDLE_DIR": str(tmp_path), "HANDOFF_PYTHON": "python3"},
+            source="mac",
+            target="windows-wsl",
+        )

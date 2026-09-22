@@ -1,8 +1,14 @@
 # Copy to .handoff.local on each machine and fill in SSH-reachable peer hosts.
 # Environment variables with the same names override this file.
+#
+# Windows/WSL does not need to run an SSH server for the recommended workflow:
+#   WSL -> Mac: ./handoff switch-to-mac
+#   Mac -> WSL: run ./handoff takeover-from-mac from WSL
+# Both routes need WSL to be able to SSH to the Mac.
 
-HANDOFF_MAC_HOST=windellereboquio@YOUR-MAC-TAILSCALE-HOST
+HANDOFF_MAC_HOST=windellereboquio@YOUR-MAC-SSH-HOST
 HANDOFF_MAC_REPO=/Users/windellereboquio/AstraHandoff/emailautomation
 
-HANDOFF_WINDOWS_HOST=jc@YOUR-WSL-TAILSCALE-HOST
+# Optional only if you later enable an SSH endpoint that lands directly in WSL.
+HANDOFF_WINDOWS_HOST=jc@YOUR-WSL-SSH-HOST
 HANDOFF_WINDOWS_REPO=/home/jc/src/emailautomation

@@ -22,6 +22,16 @@ case "${1:-}" in
   switch-to-cloud)
     transport_handoff switch --target cloud
     ;;
+  takeover-from-mac)
+    transport_handoff takeover --source mac --target windows-wsl
+    ;;
+  prepare-export)
+    [[ $# -eq 2 ]] || {
+      echo "Usage: ./handoff prepare-export TARGET" >&2
+      exit 2
+    }
+    transport_handoff prepare-export --target "$2"
+    ;;
   status)
     runtime_handoff status
     ;;
@@ -68,7 +78,7 @@ case "${1:-}" in
     runtime_handoff rollback "$@"
     ;;
   *)
-    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|switch-to-cloud|status|config|doctor [TARGET]|verify BUNDLE|activate ...|emergency-takeover ...|rollback ...}" >&2
+    echo "Usage: ./handoff {switch-to-mac|switch-to-windows|switch-to-cloud|takeover-from-mac|status|config|doctor [TARGET]|verify BUNDLE|activate ...|emergency-takeover ...|rollback ...}" >&2
     exit 2
     ;;
 esac

@@ -304,6 +304,153 @@ def _remote_status(host: str, remote_repo: str, target: str) -> dict:
         raise TransportError("Target verification returned invalid status JSON") from exc
 
 
+def _best_effort_remote_cleanup(host: str, path: str) -> None:
+    try:
+        _ssh(host, f"rm -f {shlex.quote(path)}", capture=False)
+    except TransportError as exc:
+        print(
+            f"WARNING: handoff succeeded but remote bundle cleanup failed: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _best_effort_local_cleanup(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(
+            f"WARNING: handoff succeeded but local bundle cleanup failed: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _remote_source_identity(
+    host: str,
+    remote_repo: str,
+    source: str,
+) -> tuple[str, str, dict]:
+    script = f"""set -euo pipefail
+cd {shlex.quote(remote_repo)}
+test -z "$(git status --porcelain --untracked-files=no)" || {{
+  echo "REFUSED: tracked source worktree is dirty." >&2; exit 51;
+}}
+branch="$(git branch --show-current)"
+test -n "$branch" || {{ echo "REFUSED: source is detached." >&2; exit 52; }}
+head="$(git rev-parse HEAD)"
+remote_head="$(git ls-remote origin "refs/heads/$branch" | awk 'NR==1 {{print $1}}')"
+test "$remote_head" = "$head" || {{
+  echo "REFUSED: source HEAD is not published." >&2; exit 53;
+}}
+printf '__HANDOFF_BRANCH__=%s\n' "$branch"
+printf '__HANDOFF_HEAD__=%s\n' "$head"
+ASTRA_MACHINE_ID={shlex.quote(source)} ./handoff status
+"""
+    result = _ssh(host, script)
+    lines = result.stdout.splitlines()
+    if len(lines) < 3 or not lines[0].startswith("__HANDOFF_BRANCH__="):
+        raise TransportError("Remote source identity response is malformed")
+    if not lines[1].startswith("__HANDOFF_HEAD__="):
+        raise TransportError("Remote source identity response is malformed")
+    branch = lines[0].split("=", 1)[1].strip()
+    head = lines[1].split("=", 1)[1].strip()
+    if not branch or not SHA_RE.fullmatch(head):
+        raise TransportError("Remote source Git identity is malformed")
+    try:
+        status = json.loads("\n".join(lines[2:]))
+    except json.JSONDecodeError as exc:
+        raise TransportError("Remote source status returned invalid JSON") from exc
+    return branch, head, status
+
+
+def _sync_local_target(
+    repo: Path,
+    config: Mapping[str, str],
+    *,
+    target: str,
+    branch: str,
+    head: str,
+) -> dict:
+    if _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        raise TransportError("Tracked target worktree is dirty")
+    current_branch = _git(repo, "branch", "--show-current")
+    if current_branch != branch:
+        raise TransportError(
+            f"Target branch is {current_branch or '<detached>'}, expected {branch}"
+        )
+    _run(["git", "fetch", "--quiet", "origin", branch], cwd=repo)
+    try:
+        _run(["git", "cat-file", "-e", f"{head}^{{commit}}"], cwd=repo)
+    except TransportError as exc:
+        raise TransportError("Target cannot resolve the published source commit") from exc
+
+    current = _git(repo, "rev-parse", "HEAD")
+    if current != head:
+        try:
+            _run(["git", "merge-base", "--is-ancestor", current, head], cwd=repo)
+        except TransportError as exc:
+            raise TransportError(
+                "Target code is not a fast-forward ancestor of source; refusing takeover"
+            ) from exc
+        _run(["git", "merge", "--ff-only", head], cwd=repo)
+    if _git(repo, "rev-parse", "HEAD") != head:
+        raise TransportError("Target HEAD mismatch after code synchronization")
+
+    status = _runtime_status(
+        repo,
+        config["HANDOFF_PYTHON"],
+        machine=target,
+    )
+    validate_preflight_status(status, head)
+    return status
+
+
+def _remote_prepare_export(
+    host: str,
+    remote_repo: str,
+    *,
+    target: str,
+) -> str:
+    script = (
+        f"cd {shlex.quote(remote_repo)} && "
+        f"./handoff prepare-export {shlex.quote(target)}"
+    )
+    result = _ssh(host, script)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise TransportError("Remote runtime export did not return a bundle path")
+    remote_bundle = lines[-1]
+    path = PurePosixPath(remote_bundle)
+    if not path.is_absolute() or ".." in path.parts or "\n" in remote_bundle:
+        raise TransportError("Remote runtime bundle path is unsafe")
+    return remote_bundle
+
+
+def _pull_remote_bundle(host: str, remote_bundle: str, destination: Path) -> None:
+    part = destination.with_name(destination.name + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        _run(["scp", "-p", f"{host}:{remote_bundle}", str(part)], capture=False)
+        os.chmod(part, 0o600)
+        os.replace(part, destination)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _local_receive(repo: Path, target: str, bundle: Path) -> None:
+    env = os.environ.copy()
+    env["ASTRA_MACHINE_ID"] = target
+    try:
+        subprocess.run(
+            [str(repo / "handoff"), "receive", str(bundle)],
+            cwd=repo,
+            text=True,
+            check=True,
+            env=env,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise TransportError("Local runtime import failed") from exc
+
+
 def validate_activation_status(status: Mapping[str, object], target: str, head: str) -> None:
     authority = status.get("authority") or {}
     if not isinstance(authority, Mapping):
@@ -338,7 +485,7 @@ def switch(repo: Path, config: Mapping[str, str], target: str) -> None:
         remote_bundle = _remote_receive(host, remote_repo, target, bundle)
         activated = _remote_status(host, remote_repo, target)
         validate_activation_status(activated, target, head)
-        _ssh(host, f"rm -f {shlex.quote(remote_bundle)}", capture=False)
+        _best_effort_remote_cleanup(host, remote_bundle)
     except Exception:
         print(
             "HANDOFF INCOMPLETE. The source remains unauthorized by design. "
@@ -353,6 +500,84 @@ def switch(repo: Path, config: Mapping[str, str], target: str) -> None:
 
     print(f"Handoff complete: {target} is authorized at {head}.")
     print("No sender was started. Start sending only when you choose to.")
+
+
+def takeover_from(
+    repo: Path,
+    config: Mapping[str, str],
+    *,
+    source: str,
+    target: str,
+) -> None:
+    if source == target:
+        raise TransportError("Source and target machine must differ")
+    host, remote_repo = endpoint(config, source)
+
+    print(f"Inspecting {source} before any authorization changes...")
+    branch, head, source_status = _remote_source_identity(
+        host,
+        remote_repo,
+        source,
+    )
+    validate_activation_status(source_status, source, head)
+
+    print(f"Synchronizing local {target} code to {head[:7]} before takeover...")
+    _sync_local_target(
+        repo,
+        config,
+        target=target,
+        branch=branch,
+        head=head,
+    )
+
+    bundle: Path | None = None
+    remote_bundle = ""
+    try:
+        remote_bundle = _remote_prepare_export(
+            host,
+            remote_repo,
+            target=target,
+        )
+        print("Source is now unauthorized. Pulling verified runtime bundle...")
+        local_dir = Path(config["HANDOFF_BUNDLE_DIR"]).expanduser()
+        local_dir.mkdir(parents=True, exist_ok=True)
+        bundle = local_dir / Path(remote_bundle).name
+        if bundle.exists():
+            raise TransportError(f"Local runtime bundle already exists: {bundle}")
+        _pull_remote_bundle(host, remote_bundle, bundle)
+        _local_receive(repo, target, bundle)
+        activated = _runtime_status(
+            repo,
+            config["HANDOFF_PYTHON"],
+            machine=target,
+        )
+        validate_activation_status(activated, target, head)
+        _best_effort_remote_cleanup(host, remote_bundle)
+        _best_effort_local_cleanup(bundle)
+    except Exception:
+        print(
+            "TAKEOVER INCOMPLETE. The source remains unauthorized if export "
+            "already started. Do not start either sender until status is reconciled.",
+            file=sys.stderr,
+        )
+        if remote_bundle:
+            print(f"Remote bundle retained at: {host}:{remote_bundle}", file=sys.stderr)
+        if bundle is not None and bundle.exists():
+            print(f"Local bundle retained at: {bundle}", file=sys.stderr)
+        raise
+
+    print(f"Takeover complete: {target} is authorized at {head}.")
+    print("No sender was started. Start sending only when you choose to.")
+
+
+def prepare_export(
+    repo: Path,
+    config: Mapping[str, str],
+    *,
+    target: str,
+) -> Path:
+    source_identity(repo, config)
+    return _export_bundle(repo, config, target)
 
 
 def show_config(repo: Path, config: Mapping[str, str]) -> None:
@@ -395,6 +620,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     switch_parser = commands.add_parser("switch")
     switch_parser.add_argument("--target", choices=sorted(MACHINES), required=True)
+    takeover_parser = commands.add_parser("takeover")
+    takeover_parser.add_argument("--source", choices=sorted(MACHINES), required=True)
+    takeover_parser.add_argument("--target", choices=sorted(MACHINES), required=True)
+    prepare_parser = commands.add_parser("prepare-export")
+    prepare_parser.add_argument("--target", choices=sorted(MACHINES), required=True)
     commands.add_parser("config")
     doctor_parser = commands.add_parser("doctor")
     doctor_parser.add_argument("--target", choices=sorted(MACHINES))
@@ -408,6 +638,15 @@ def main() -> int:
     try:
         if args.command == "switch":
             switch(repo, config, args.target)
+        elif args.command == "takeover":
+            takeover_from(
+                repo,
+                config,
+                source=args.source,
+                target=args.target,
+            )
+        elif args.command == "prepare-export":
+            print(prepare_export(repo, config, target=args.target))
         elif args.command == "config":
             show_config(repo, config)
         elif args.command == "doctor":
