@@ -1827,7 +1827,7 @@ PITCH_1_5_BODY = f"""Hi {{FirstName}},
 
 {SENDGRID_BOOK_TITLE_OPENING}
 
-We’re reviewing a small number of independently published books for physical consignment placement.
+We’re reviewing a small number of independently published books for consignment placement.
 
 If approved, you’d receive 85% of sales, with quarterly reporting and payouts. Our stocking and distribution options start at $250, and there’s no cost to have the title reviewed.
 
@@ -1843,7 +1843,7 @@ PITCH_1_5_GENERIC_BODY = f"""Hi {{FirstName}},
 
 {BOOK_TITLE_GENERIC_OPENING}
 
-We’re reviewing a small number of independently published books for physical consignment.
+We’re reviewing a small number of independently published books for consignment placement.
 
 If approved, you’d receive 85% of sales, with quarterly reporting and payouts. Our stocking and distribution options start at $250, and there’s no cost to have the title reviewed.
 
@@ -1854,6 +1854,7 @@ Best regards,
 
 {REPLY_UNSUBSCRIBE_FOOTER}
 """
+
 # ===== JC / ASTRA PRIVATE PITCH COPY =====
 # Edit this section to change the private JC Astra outreach email.
 # Keep {BookTitle}, {BookTitleOrProject}, and {{FirstName}} exactly formatted.

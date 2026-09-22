@@ -5562,6 +5562,11 @@ finished_path.write_text(
             body_text,
         )
         self.assertIn(send_shard.REPLY_UNSUBSCRIBE_FOOTER, body_text)
+        self.assertIn(
+            "We’re reviewing a small number of independently published books for consignment placement.",
+            body_text,
+        )
+        self.assertNotIn("physical consignment", body_text)
         self.assertNotIn("{FirstName}", body_text)
         self.assertNotIn("{BookTitle}", body_text)
         self.assertEqual(1, body_text.count("{SIGIMG}"))
@@ -5587,6 +5592,11 @@ finished_path.write_text(
         self.assertIn(send_shard.BOOK_TITLE_GENERIC_OPENING, generic_body)
         self.assertIn("Would you be open to having one of your titles reviewed", generic_body)
         self.assertIn(send_shard.REPLY_UNSUBSCRIBE_FOOTER, generic_body)
+        self.assertIn(
+            "We’re reviewing a small number of independently published books for consignment placement.",
+            generic_body,
+        )
+        self.assertNotIn("physical consignment", generic_body)
         self.assertNotIn("{FirstName}", generic_body)
         self.assertNotIn("{BookTitle}", generic_body)
         self.assertEqual(1, generic_body.count("{SIGIMG}"))
