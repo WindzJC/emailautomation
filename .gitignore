@@ -69,6 +69,7 @@ audit*/
 # Local Mac cutover bundles and verification output.
 /_migration/
 /.runtime_handoff/
+/.handoff.local
 /runtime_handoff_bundles/
 
 # Dashboard snapshot cache generated on the cloud VM

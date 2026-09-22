@@ -1,0 +1,8 @@
+# Copy to .handoff.local on each machine and fill in SSH-reachable peer hosts.
+# Environment variables with the same names override this file.
+
+HANDOFF_MAC_HOST=windellereboquio@YOUR-MAC-TAILSCALE-HOST
+HANDOFF_MAC_REPO=/Users/windellereboquio/AstraHandoff/emailautomation
+
+HANDOFF_WINDOWS_HOST=jc@YOUR-WSL-TAILSCALE-HOST
+HANDOFF_WINDOWS_REPO=/home/jc/src/emailautomation
