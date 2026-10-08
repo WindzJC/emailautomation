@@ -8,6 +8,12 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from durable_io import (
+    atomic_write_json as _durable_atomic_write_json,
+    secure_private_dir as _durable_secure_private_dir,
+    secure_private_file as _durable_secure_private_file,
+)
+
 
 APP_ROOT = Path(__file__).resolve().parent
 ENV_FILES = [APP_ROOT / ".env.local", APP_ROOT / ".env"]
@@ -48,15 +54,31 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _strict_config_enabled() -> bool:
+    return str(os.environ.get("ASTRA_STRICT_CONFIG", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     raw = _env(name, str(default))
     try:
         value = int(raw)
-    except Exception:
+    except Exception as exc:
+        if _strict_config_enabled():
+            raise RuntimeError(f"Invalid integer configuration for {name}: {raw!r}") from exc
         value = default
     if minimum is not None:
         value = max(minimum, value)
     return value
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name, "1" if default else "0").lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _resolve_path(raw: str, default: Path | None = None) -> Path:
@@ -115,6 +137,12 @@ DASHBOARD_SESSION_SECRET = _env("DASHBOARD_SESSION_SECRET", "")
 DASHBOARD_AUTH_USERNAME = _env("DASHBOARD_AUTH_USERNAME", "admin")
 DASHBOARD_AUTH_PASSWORD = _env("DASHBOARD_AUTH_PASSWORD", "")
 DASHBOARD_AUTH_COOKIE_NAME = _env("DASHBOARD_AUTH_COOKIE_NAME", "dashboard_session")
+DASHBOARD_COOKIE_SECURE = _env_bool("DASHBOARD_COOKIE_SECURE", False)
+DASHBOARD_REQUIRE_MUTATION_ORIGIN = _env_bool("DASHBOARD_REQUIRE_MUTATION_ORIGIN", False)
+DASHBOARD_LOGIN_MAX_FAILURES = _env_int("DASHBOARD_LOGIN_MAX_FAILURES", 5, minimum=1)
+DASHBOARD_LOGIN_WINDOW_SECONDS = _env_int("DASHBOARD_LOGIN_WINDOW_SECONDS", 300, minimum=30)
+DASHBOARD_LOGIN_LOCK_SECONDS = _env_int("DASHBOARD_LOGIN_LOCK_SECONDS", 300, minimum=30)
+ASTRA_STRICT_FILE_PERMISSIONS = _env_bool("ASTRA_STRICT_FILE_PERMISSIONS", False)
 DASHBOARD_MAX_UPLOAD_BYTES = _env_int("DASHBOARD_MAX_UPLOAD_BYTES", 25 * 1024 * 1024, minimum=1)
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
@@ -222,11 +250,18 @@ def tmp_path(value: str | Path) -> Path:
 def maybe_seed_file(target: Path, legacy: str | Path | None = None) -> Path:
     ensure_dirs((target.parent,))
     legacy_path = app_path(legacy) if legacy else None
-    if target.exists() or legacy_path is None or not legacy_path.exists():
+    if target.exists():
+        if target.is_file() and not target.is_symlink():
+            secure_private_file(target)
+        return target
+    if legacy_path is None or not legacy_path.exists():
         return target
     if legacy_path.resolve() == target.resolve():
+        if target.is_file() and not target.is_symlink():
+            secure_private_file(target)
         return target
     shutil.copy2(legacy_path, target)
+    secure_private_file(target)
     return target
 
 
@@ -274,35 +309,37 @@ def seed_missing_dir_contents(target: Path, legacy: str | Path | None = None) ->
 
 
 def secure_private_file(path: Path) -> Path:
-    try:
-        path.chmod(PRIVATE_FILE_MODE)
-    except Exception:
-        pass
-    return path
+    return _durable_secure_private_file(
+        path,
+        strict=ASTRA_STRICT_FILE_PERMISSIONS,
+    )
 
 
 def secure_private_dir(path: Path) -> Path:
-    try:
-        path.chmod(PRIVATE_DIR_MODE)
-    except Exception:
-        pass
-    return path
+    return _durable_secure_private_dir(
+        path,
+        strict=ASTRA_STRICT_FILE_PERMISSIONS,
+    )
+
+
+def harden_managed_runtime_permissions() -> None:
+    managed_roots = (STATE_DIR, SHARDS_DIR, LOGS_DIR, UPLOADS_DIR, CLEANED_DIR, TMP_DIR)
+    for root in managed_roots:
+        if not root.exists() or root.is_symlink():
+            continue
+        secure_private_dir(root)
+        for entry in root.rglob("*"):
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                secure_private_dir(entry)
+            elif entry.is_file():
+                secure_private_file(entry)
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     ensure_dirs((path.parent,))
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        tmp_path = Path(handle.name)
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp_path.replace(path)
+    _durable_atomic_write_json(path, payload, mode=PRIVATE_FILE_MODE)
 
 
 def _artifact_target(value: object, default_dir: Path, filename_key: str) -> Path | None:
@@ -394,3 +431,4 @@ def seed_known_runtime_artifacts() -> None:
 
 
 seed_known_runtime_artifacts()
+harden_managed_runtime_permissions()

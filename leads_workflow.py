@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import settings
+from durable_io import atomic_write_json as durable_atomic_write_json
 from recipient_file_lock import lock_files
 from send_shard import PROFILES, ROLE_LOCALPART_BLOCKLIST, is_role_recipient
 from sendgrid_hygiene import domain_from_email, load_active_suppressed_emails, norm_email
@@ -82,20 +83,7 @@ def timestamp_slug(reference: Optional[datetime] = None) -> str:
 
 
 def write_json_atomic(path: Path, payload: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        tmp_path = Path(handle.name)
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp_path.replace(path)
-    settings.secure_private_file(path)
+    durable_atomic_write_json(path, payload, mode=settings.PRIVATE_FILE_MODE)
 
 
 def load_state() -> Dict[str, object]:

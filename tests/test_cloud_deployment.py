@@ -35,7 +35,8 @@ def test_cloud_identity_is_available_to_handoff_cli() -> None:
     assert args.machine == "cloud"
     assert export_args.target == "cloud"
     handoff = (ROOT / "handoff").read_text(encoding="utf-8")
-    assert "ASTRA_MACHINE_ID='${target}' ./handoff receive" in handoff
+    assert "transport_handoff switch --target cloud" in handoff
+    assert 'runtime_handoff import "$@"' in handoff
 
 
 def test_cloud_shell_scripts_are_syntax_valid() -> None:

@@ -174,9 +174,17 @@ AWAITING_BUCKET_LABELS = {
     "gt_24h": ">24h",
 }
 SENDGRID_OUTCOME_STALE_HOURS = 24
+SENDGRID_OUTCOME_BLOCK_HOURS = max(
+    SENDGRID_OUTCOME_STALE_HOURS + 1,
+    int(os.environ.get("SENDGRID_OUTCOME_BLOCK_HOURS", "72") or "72"),
+)
 SENDGRID_OUTCOME_STALE_WARNING_TEXT = (
     "SendGrid outcome feed is stale. Emails may have been accepted by SendGrid, "
     "but delivery/bounce/spam outcomes are not currently being received."
+)
+SENDGRID_OUTCOME_BLOCK_TEXT = (
+    "SendGrid outcome feed is severely stale while accepted mail is still awaiting outcomes. "
+    "New SendGrid work is blocked until webhook intake recovers or an operator override is recorded."
 )
 AUTO_STOP_EVENT_LOCK = threading.Lock()
 AUTO_STOP_EVENTS: Dict[str, Dict[str, object]] = {}
@@ -787,6 +795,113 @@ def _resume_approval_status(
     }
 
 
+def _private_jc_confirmed_progress_status(
+    rows: Sequence[Dict[str, str]],
+    *,
+    generated_rows: Sequence[Dict[str, str]],
+    validated_rows: Sequence[Dict[str, str]],
+    failed_count: Optional[int],
+) -> Dict[str, object]:
+    manifest = _read_dashboard_json(STATE_DIR / "active_campaign_snapshot.json")
+    preview_id = str(manifest.get("preview_id") or "").strip()
+    if not preview_id:
+        return {"safe": False, "reason": "active_campaign_preview_missing"}
+    preview = _active_campaign_preview_payload()
+    if str(preview.get("preview_id") or preview_id).strip() != preview_id:
+        return {"safe": False, "reason": "active_campaign_preview_id_mismatch"}
+    rows_by_queue = preview.get("plan_rows_by_queue")
+    if not isinstance(rows_by_queue, dict):
+        return {"safe": False, "reason": "active_campaign_plan_missing"}
+    planned_raw = rows_by_queue.get("private_jc")
+    if not isinstance(planned_raw, list) or not planned_raw:
+        return {"safe": False, "reason": "private_jc_plan_missing"}
+    planned_rows = [
+        {str(key): str(value or "").strip() for key, value in row.items()}
+        for row in planned_raw
+        if isinstance(row, dict)
+    ]
+    if len(planned_rows) != len(planned_raw):
+        return {"safe": False, "reason": "private_jc_plan_invalid"}
+    if failed_count not in (0, None):
+        return {"safe": False, "reason": "preview_validation_failed"}
+
+    planned_emails = [_normalized_email_for_readiness(row) for row in planned_rows]
+    generated_emails = [_normalized_email_for_readiness(row) for row in generated_rows]
+    validated_emails = [_normalized_email_for_readiness(row) for row in validated_rows]
+    if (
+        not planned_emails
+        or any(not email or not EMAIL_SYNTAX_RE.match(email) for email in planned_emails)
+        or len(set(planned_emails)) != len(planned_emails)
+    ):
+        return {"safe": False, "reason": "private_jc_plan_recipients_invalid"}
+    if generated_emails != planned_emails or validated_emails != planned_emails:
+        return {"safe": False, "reason": "preview_not_confirmed_plan"}
+
+    current_emails = [_normalized_email_for_readiness(row) for row in rows]
+    if any(not email or not EMAIL_SYNTAX_RE.match(email) for email in current_emails):
+        return {"safe": False, "reason": "current_queue_invalid_email"}
+    if len(set(current_emails)) != len(current_emails):
+        return {"safe": False, "reason": "current_queue_duplicate_email"}
+    planned_set = set(planned_emails)
+    current_set = set(current_emails)
+    if not current_set.issubset(planned_set):
+        return {
+            "safe": False,
+            "reason": "current_queue_has_unapproved_recipients",
+            "extra_count": len(current_set - planned_set),
+        }
+    if [email for email in planned_emails if email in current_set] != current_emails:
+        return {"safe": False, "reason": "current_queue_order_changed"}
+    if len(current_emails) >= len(planned_emails):
+        return {"safe": False, "reason": "queue_not_reduced"}
+
+    planned_content = {
+        email: _approval_content_fingerprint(row)
+        for email, row in zip(planned_emails, planned_rows)
+    }
+    for row, email in zip(rows, current_emails):
+        if _approval_content_fingerprint(row) != planned_content[email]:
+            return {
+                "safe": False,
+                "reason": "current_queue_content_changed",
+                "content_mismatch_email": email,
+            }
+
+    cfg = PROFILES.get("private_jc", {})
+    csv_path = _profile_csv_path(cfg)
+    history_paths = authoritative_send_log_paths(
+        profile_name="private_jc",
+        provider=str(cfg.get("provider") or ""),
+        current_csv=csv_path,
+    )
+    loaded = load_authoritative_history_email_sets(history_paths)
+    sent: set[str] = set()
+    invalid: set[str] = set()
+    for data in loaded.values():
+        sent |= set(data.get("sent") or set())
+        invalid |= set(data.get("invalid") or set())
+    blocked = private_jc_authoritative_blocked_emails(invalid_outcomes=invalid)
+    removed = planned_set - current_set
+    accounted = sent | blocked
+    unaccounted = removed - accounted
+    if unaccounted:
+        return {
+            "safe": False,
+            "reason": "removed_recipients_unaccounted",
+            "removed_count": len(removed),
+            "unaccounted_removed_count": len(unaccounted),
+        }
+    return {
+        "safe": True,
+        "reason": "confirmed_dispatch_remainder",
+        "preview_id": preview_id,
+        "approved_row_count": len(planned_emails),
+        "current_row_count": len(current_emails),
+        "removed_count": len(removed),
+        "accounted_removed_count": len(removed),
+    }
+
+
 def build_controlled_sendgrid_queue_safety_report(
     profile_name: str = CONTROLLED_SENDGRID_PROFILE,
 ) -> Dict[str, object]:
@@ -868,6 +983,7 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     queue_recipient_emails = [_normalized_email_for_readiness(row) for row in rows]
     preview_recipient_emails = [_normalized_email_for_readiness(row) for row in _preview_rows]
     validated_recipient_emails = [_normalized_email_for_readiness(row) for row in validated_rows]
+    failed_count = _validation_failed_count(failed_path, summary_path)
     generated_row_count_matches_queue = preview_row_count == row_count
     validated_row_count_matches_queue = validated_row_count == row_count
     generated_email_set_matches_queue = set(preview_recipient_emails) == set(queue_recipient_emails)
@@ -892,6 +1008,27 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
         and bool(failed_alignment_predicates)
         else {"safe": False, "reason": "exact_alignment"}
     )
+    if (
+        profile_name == "private_jc"
+        and not pre_rendered_message
+        and bool(failed_alignment_predicates)
+        and not bool(resume_approval.get("safe"))
+    ):
+        confirmed_progress = _private_jc_confirmed_progress_status(
+            rows,
+            generated_rows=_preview_rows,
+            validated_rows=validated_rows,
+            failed_count=failed_count,
+        )
+        if bool(confirmed_progress.get("safe")) or str(
+            confirmed_progress.get("reason") or ""
+        ) not in {
+            "active_campaign_preview_missing",
+            "active_campaign_preview_id_mismatch",
+            "active_campaign_plan_missing",
+            "private_jc_plan_missing",
+        }:
+            resume_approval = confirmed_progress
     resume_safe = bool(resume_approval.get("safe"))
     preview_exists = preview_path.exists() or (pre_rendered_message and row_count > 0)
     validated_exists = validated_path.exists() or (pre_rendered_message and row_count > 0)
@@ -902,7 +1039,6 @@ def build_profile_message_readiness(profile_name: str) -> Dict[str, object]:
     preview_mtime = safe_path_mtime(preview_path)
     queue_mtime = safe_path_mtime(csv_path)
     validation_mtime = max((safe_path_mtime(path) for path in validation_artifacts), default=0.0)
-    failed_count = _validation_failed_count(failed_path, summary_path)
 
     expected_mode = profile_expected_pitch_mode(profile_name)
     actual_mode = profile_actual_pitch_mode(profile_name)
@@ -2742,22 +2878,55 @@ def build_webhook_health(
 def build_sendgrid_outcome_health(
     webhook_health: Dict[str, object],
     total_awaiting_outcome: int,
+    *,
+    operator_override: bool = False,
+    operator_override_reason: str = "",
 ) -> Dict[str, object]:
     latest_iso = str(webhook_health.get("last_received_iso") or "").strip()
     latest_event = parse_iso_utc(latest_iso)
     now = datetime.now(timezone.utc)
     latest_age_seconds = int((now - latest_event).total_seconds()) if latest_event else None
     stale_cutoff = now - timedelta(hours=SENDGRID_OUTCOME_STALE_HOURS)
+    block_cutoff = now - timedelta(hours=SENDGRID_OUTCOME_BLOCK_HOURS)
     awaiting = max(0, int(total_awaiting_outcome or 0))
     event_stale = latest_event is None or latest_event < stale_cutoff
-    warning = awaiting > 0 and event_stale
+    severely_stale = latest_event is None or latest_event < block_cutoff
     receiver_url_configured = bool(str(SENDGRID_WEBHOOK_RECEIVER_URL or "").strip())
-    if warning:
-        state = "stale"
-        message = SENDGRID_OUTCOME_STALE_WARNING_TEXT
+    signature_key_configured = bool(WEBHOOK_SIGNATURE_ENABLED)
+    config_missing = not receiver_url_configured or not signature_key_configured
+    stale_warning = awaiting > 0 and event_stale
+    warning = config_missing or stale_warning
+    blocking = awaiting > 0 and severely_stale
+    override_reason = str(operator_override_reason or "").strip()
+    override_applied = bool(operator_override and override_reason and blocking)
+    effective_blocking = blocking and not override_applied
+    missing_parts: List[str] = []
+    if not receiver_url_configured:
+        missing_parts.append("webhook receiver URL")
+    if not signature_key_configured:
+        missing_parts.append("webhook signature public key")
+    config_message = (
+        "SendGrid outcome telemetry is not fully configured: "
+        + " and ".join(missing_parts)
+        + "."
+        if missing_parts
+        else ""
+    )
+    if effective_blocking:
+        state = "blocked"
+        message = SENDGRID_OUTCOME_BLOCK_TEXT
+    elif override_applied:
+        state = "override"
+        message = f"{SENDGRID_OUTCOME_BLOCK_TEXT} Override: {override_reason}"
     elif not receiver_url_configured:
         state = "missing_receiver_url"
-        message = "SendGrid webhook receiver URL is not configured."
+        message = config_message
+    elif not signature_key_configured:
+        state = "missing_signature_key"
+        message = config_message
+    elif stale_warning:
+        state = "stale"
+        message = SENDGRID_OUTCOME_STALE_WARNING_TEXT
     elif latest_event:
         state = "healthy"
         message = "SendGrid outcome feed is receiving events."
@@ -2767,17 +2936,30 @@ def build_sendgrid_outcome_health(
     return {
         "state": state,
         "warning": warning,
+        "blocking": effective_blocking,
+        "would_block_without_override": blocking,
+        "override_applied": override_applied,
+        "override_reason": override_reason if override_applied else "",
         "event_stale": event_stale,
+        "severely_stale": severely_stale,
         "message": message,
         "webhook_route_exists": True,
-        "sendgrid_event_public_key_configured": WEBHOOK_SIGNATURE_ENABLED,
+        "sendgrid_event_public_key_configured": signature_key_configured,
         "sendgrid_webhook_receiver_url_configured": receiver_url_configured,
         "latest_sendgrid_event_timestamp": latest_iso,
         "latest_sendgrid_event_age": str(webhook_health.get("last_received_age") or "never"),
         "latest_sendgrid_event_age_seconds": latest_age_seconds,
         "awaiting_outcome": awaiting,
         "stale_after_hours": SENDGRID_OUTCOME_STALE_HOURS,
-        "warning_text": SENDGRID_OUTCOME_STALE_WARNING_TEXT if warning else "",
+        "block_after_hours": SENDGRID_OUTCOME_BLOCK_HOURS,
+        "warning_text": (
+            config_message
+            if config_missing
+            else SENDGRID_OUTCOME_STALE_WARNING_TEXT
+            if stale_warning
+            else ""
+        ),
+        "blocking_text": SENDGRID_OUTCOME_BLOCK_TEXT if effective_blocking else "",
     }
 
 
@@ -5073,12 +5255,22 @@ def build_dashboard_snapshot(
         private_bounce_guard=private_bounce_guard,
     )
     if bool(sendgrid_outcome_health.get("warning")):
+        outcome_state = str(sendgrid_outcome_health.get("state") or "").strip()
+        outcome_title = (
+            "SendGrid outcome feed not configured"
+            if outcome_state in {"missing_receiver_url", "missing_signature_key"}
+            else "SendGrid outcome feed stale"
+        )
         alerts.insert(
             0,
             {
                 "severity": "warn",
-                "title": "SendGrid outcome feed stale",
-                "message": str(sendgrid_outcome_health.get("warning_text") or SENDGRID_OUTCOME_STALE_WARNING_TEXT),
+                "title": outcome_title,
+                "message": str(
+                    sendgrid_outcome_health.get("warning_text")
+                    or sendgrid_outcome_health.get("message")
+                    or SENDGRID_OUTCOME_STALE_WARNING_TEXT
+                ),
                 "source_function": "dashboard_core.build_sendgrid_outcome_health",
                 "blocks_sending": False,
                 "blocking_label": "Warning",

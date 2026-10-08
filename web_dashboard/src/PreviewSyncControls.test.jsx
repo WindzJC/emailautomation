@@ -306,6 +306,21 @@ describe("safe preview synchronization controls", () => {
     expect(startPosts(fetchMock)).toHaveLength(0);
   });
 
+  it("does not show SYNC REQUIRED for transient preview drift while JC is actively sending", async () => {
+    const current = snapshot();
+    current.profiles[0].runtime_state = "running";
+    current.profiles[0].runtime_label = "Running";
+    root = await bootController(fetchMockFor(current, () => Promise.resolve(jsonResponse({ ok: true }))));
+
+    const row = document.querySelector(".sender-status-table tbody tr");
+    expect(row).toHaveTextContent("Ready");
+    expect(row).not.toHaveTextContent("Sync Required");
+    expect(document.getElementById("profile-detail")).toHaveTextContent("IN PROGRESS");
+    expect(document.getElementById("profile-detail")).not.toHaveTextContent("SYNC REQUIRED");
+    expect(senderSyncButton()).not.toBeInTheDocument();
+    expect(profileStartButton()).toBeDisabled();
+  });
+
   it("does not classify a matching preview as SYNC REQUIRED", async () => {
     const current = snapshot({
       readiness: messageReadiness({

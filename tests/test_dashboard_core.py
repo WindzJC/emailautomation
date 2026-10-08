@@ -340,6 +340,179 @@ class DashboardCoreTests(unittest.TestCase):
                     extra["resume_approval_reason"],
                 )
 
+    def test_private_jc_readiness_accepts_confirmed_dispatch_partial_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            shards = base / "data" / "shards"
+            previews = base / "data" / "message_previews"
+            state = base / "data" / "state"
+            logs = base / "data" / "logs"
+            dispatch_previews = base / "_important" / "dispatch_jobs" / "previews"
+            for path in (shards, previews, state, logs, dispatch_previews):
+                path.mkdir(parents=True)
+            queue = shards / "recipients_private_jc.csv"
+            log = logs / "private_jc_log.csv"
+            preview_id = "dispatch_preview_private_jc_progress"
+            original_rows = [
+                {
+                    "Email": "one@example.test",
+                    "AuthorEmail": "one@example.test",
+                    "AuthorName": "Author One",
+                    "FirstName": "One",
+                    "BookTitle": "Book One",
+                },
+                {
+                    "Email": "two@example.test",
+                    "AuthorEmail": "two@example.test",
+                    "AuthorName": "Author Two",
+                    "FirstName": "Two",
+                    "BookTitle": "Book Two",
+                },
+                {
+                    "Email": "three@example.test",
+                    "AuthorEmail": "three@example.test",
+                    "AuthorName": "Author Three",
+                    "FirstName": "Three",
+                    "BookTitle": "Book Three",
+                },
+            ]
+
+            def write_queue(rows):
+                with queue.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(
+                        handle,
+                        fieldnames=["Email", "AuthorEmail", "AuthorName", "FirstName", "BookTitle"],
+                    )
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            def write_preview_rows(rows):
+                fieldnames = [
+                    "Email",
+                    "AuthorEmail",
+                    "AuthorName",
+                    "FirstName",
+                    "BookTitle",
+                    "Subject",
+                    "Body",
+                    "ValidationStatus",
+                    "FailureReasons",
+                ]
+                for suffix in ("", "_validated"):
+                    with (previews / f"private_jc_message_preview{suffix}.csv").open(
+                        "w", newline="", encoding="utf-8"
+                    ) as handle:
+                        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                        writer.writeheader()
+                        for row in rows:
+                            writer.writerow(
+                                {
+                                    **row,
+                                    "Subject": "Subject",
+                                    "Body": "Body",
+                                    "ValidationStatus": "PASS",
+                                    "FailureReasons": "",
+                                }
+                            )
+
+            write_queue(original_rows)
+            write_preview_rows(original_rows)
+            (previews / "private_jc_message_preview_failed.csv").write_text(
+                "Email\n", encoding="utf-8"
+            )
+            (previews / "private_jc_message_preview_summary.txt").write_text(
+                "failed rows: 0\n", encoding="utf-8"
+            )
+            (state / "active_campaign_snapshot.json").write_text(
+                json.dumps({"preview_id": preview_id, "snapshot_type": "confirmed_dispatch"}),
+                encoding="utf-8",
+            )
+            (dispatch_previews / f"{preview_id}.json").write_text(
+                json.dumps(
+                    {
+                        "preview_id": preview_id,
+                        "plan_rows_by_queue": {"private_jc": original_rows},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            profiles = {
+                "private_jc": {
+                    "provider": "private",
+                    "csv": str(queue),
+                    "log": str(log),
+                    "pitch": "pitch_jc",
+                }
+            }
+            with patch.multiple(
+                dashboard_core,
+                ROOT=base,
+                SHARDS_DIR=shards,
+                MESSAGE_PREVIEW_DIR=previews,
+                STATE_DIR=state,
+                PROFILES=profiles,
+                authoritative_send_log_paths=lambda **kwargs: [log],
+                private_jc_authoritative_blocked_emails=lambda invalid_outcomes=None: set(),
+            ):
+                initial = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("PASS", initial["status"])
+                self.assertFalse(initial["preview_sync_required"])
+
+                log.write_text(
+                    "TimestampUTC,Email,Status,Info\n"
+                    "2026-09-18T00:00:00+00:00,one@example.test,SENT,campaign_type=cold\n",
+                    encoding="utf-8",
+                )
+                write_queue(original_rows[1:])
+                progressed = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("PASS", progressed["status"])
+                self.assertTrue(progressed["resume_approval_safe"])
+                self.assertEqual(
+                    "confirmed_dispatch_remainder",
+                    progressed["resume_approval_reason"],
+                )
+                self.assertFalse(progressed["preview_sync_required"])
+
+                log.write_text("TimestampUTC,Email,Status,Info\n", encoding="utf-8")
+                unaccounted = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", unaccounted["status"])
+                self.assertTrue(unaccounted["preview_sync_required"])
+                self.assertEqual(
+                    "removed_recipients_unaccounted",
+                    unaccounted["resume_approval_reason"],
+                )
+
+                log.write_text(
+                    "TimestampUTC,Email,Status,Info\n"
+                    "2026-09-18T00:00:00+00:00,one@example.test,SENT,campaign_type=cold\n",
+                    encoding="utf-8",
+                )
+                added = original_rows[1:] + [
+                    {
+                        "Email": "new@example.test",
+                        "AuthorEmail": "new@example.test",
+                        "AuthorName": "New Author",
+                        "FirstName": "New",
+                        "BookTitle": "New Book",
+                    }
+                ]
+                write_queue(added)
+                extra = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", extra["status"])
+                self.assertEqual(
+                    "current_queue_has_unapproved_recipients",
+                    extra["resume_approval_reason"],
+                )
+
+                changed = [dict(original_rows[1], FirstName="Changed"), original_rows[2]]
+                write_queue(changed)
+                modified = dashboard_core.build_profile_message_readiness("private_jc")
+                self.assertEqual("STALE", modified["status"])
+                self.assertEqual(
+                    "current_queue_content_changed",
+                    modified["resume_approval_reason"],
+                )
+
     def test_controlled_sendgrid_readiness_requires_matching_recipient_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -3936,7 +4109,7 @@ class DashboardCoreTests(unittest.TestCase):
         with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
             dashboard_core,
             "SENDGRID_WEBHOOK_RECEIVER_URL",
-            "",
+            "https://receiver.example.com",
         ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", True):
             health = dashboard_core.build_sendgrid_outcome_health(
                 {
@@ -3949,11 +4122,72 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("stale", health["state"])
         self.assertTrue(health["event_stale"])
         self.assertTrue(health["warning"])
+        self.assertFalse(health["blocking"])
         self.assertTrue(health["webhook_route_exists"])
         self.assertTrue(health["sendgrid_event_public_key_configured"])
-        self.assertFalse(health["sendgrid_webhook_receiver_url_configured"])
+        self.assertTrue(health["sendgrid_webhook_receiver_url_configured"])
         self.assertEqual("2026-07-13T11:00:00+00:00", health["latest_sendgrid_event_timestamp"])
         self.assertEqual(dashboard_core.SENDGRID_OUTCOME_STALE_WARNING_TEXT, health["warning_text"])
+
+    def test_sendgrid_outcome_health_blocks_when_severely_stale_with_awaiting_outcomes(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
+            dashboard_core,
+            "SENDGRID_OUTCOME_BLOCK_HOURS",
+            48,
+        ):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {
+                    "last_received_iso": "2026-07-12T11:00:00+00:00",
+                    "last_received_age": "3d ago",
+                },
+                total_awaiting_outcome=12,
+            )
+
+        self.assertEqual("blocked", health["state"])
+        self.assertTrue(health["warning"])
+        self.assertTrue(health["blocking"])
+        self.assertTrue(health["severely_stale"])
+        self.assertEqual(dashboard_core.SENDGRID_OUTCOME_BLOCK_TEXT, health["blocking_text"])
+
+    def test_sendgrid_outcome_health_override_records_reason_without_blocking(self) -> None:
+        fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
+
+        class FrozenDateTime(dashboard_core.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fake_now.replace(tzinfo=None)
+                return fake_now.astimezone(tz)
+
+        with patch.object(dashboard_core, "datetime", FrozenDateTime), patch.object(
+            dashboard_core,
+            "SENDGRID_OUTCOME_BLOCK_HOURS",
+            48,
+        ):
+            health = dashboard_core.build_sendgrid_outcome_health(
+                {
+                    "last_received_iso": "2026-07-12T11:00:00+00:00",
+                    "last_received_age": "3d ago",
+                },
+                total_awaiting_outcome=12,
+                operator_override=True,
+                operator_override_reason="Webhook provider incident acknowledged.",
+            )
+
+        self.assertEqual("override", health["state"])
+        self.assertFalse(health["blocking"])
+        self.assertTrue(health["would_block_without_override"])
+        self.assertTrue(health["override_applied"])
+        self.assertEqual("Webhook provider incident acknowledged.", health["override_reason"])
 
     def test_sendgrid_outcome_health_healthy_when_events_recent(self) -> None:
         fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
@@ -3986,7 +4220,9 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("", health["warning_text"])
 
     def test_sendgrid_outcome_health_exposes_stale_feed_without_backlog_warning(self) -> None:
-        with patch.object(dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"):
+        with patch.object(
+            dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"
+        ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", True):
             health = dashboard_core.build_sendgrid_outcome_health(
                 {"last_received_iso": "2000-01-01T00:00:00+00:00", "last_received_age": "years ago"},
                 total_awaiting_outcome=0,
@@ -4001,7 +4237,9 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("2000-01-01T00:00:00+00:00", health["latest_sendgrid_event_timestamp"])
 
     def test_sendgrid_outcome_health_preserves_no_events_without_backlog_warning(self) -> None:
-        with patch.object(dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"):
+        with patch.object(
+            dashboard_core, "SENDGRID_WEBHOOK_RECEIVER_URL", "https://receiver.example.com"
+        ), patch.object(dashboard_core, "WEBHOOK_SIGNATURE_ENABLED", True):
             health = dashboard_core.build_sendgrid_outcome_health({}, total_awaiting_outcome=0)
 
         self.assertEqual("no_events", health["state"])
@@ -4010,7 +4248,7 @@ class DashboardCoreTests(unittest.TestCase):
         self.assertEqual("", health["warning_text"])
         self.assertEqual("", health["latest_sendgrid_event_timestamp"])
 
-    def test_sendgrid_outcome_health_reports_missing_receiver_url_without_stale_warning(self) -> None:
+    def test_sendgrid_outcome_health_warns_when_receiver_or_signature_is_missing(self) -> None:
         fake_now = dashboard_core.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dashboard_core.timezone.utc)
 
         class FrozenDateTime(dashboard_core.datetime):
@@ -4034,7 +4272,10 @@ class DashboardCoreTests(unittest.TestCase):
             )
 
         self.assertEqual("missing_receiver_url", health["state"])
-        self.assertFalse(health["warning"])
+        self.assertTrue(health["warning"])
+        self.assertIn("webhook receiver URL", health["warning_text"])
+        self.assertIn("webhook signature public key", health["warning_text"])
+        self.assertFalse(health["blocking"])
         self.assertFalse(health["sendgrid_webhook_receiver_url_configured"])
         self.assertFalse(health["sendgrid_event_public_key_configured"])
 

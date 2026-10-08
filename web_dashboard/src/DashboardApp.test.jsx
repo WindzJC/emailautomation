@@ -19,7 +19,7 @@ const template = {
     status: '<div class="app-rail-status"><span id="auth-status-label">Local dev</span></div>',
   },
   senders: {
-    commandBar: '<section class="workspace-status-row"><button id="start-ready-btn">Start Ready Senders</button><button id="stop-btn">Stop All</button><button id="refresh-btn">Refresh</button></section>',
+    commandBar: '<section class="workspace-status-row"><button id="start-ready-btn">Start All Senders</button><button id="stop-btn">Stop All</button><button id="refresh-btn">Refresh</button></section>',
     metrics: '<section class="queue-health-section"><div id="summary-grid"></div></section>',
     progress: '<section class="ops-progress-strip"><span id="ops-progress-summary"></span></section>',
     progressDetails: '<div id="alerts-progress"></div><div id="alerts-grid"></div>',
@@ -44,7 +44,7 @@ describe("DashboardApp", () => {
 
   it("mounts sender and Lead Ops controller contracts", () => {
     render(<DashboardApp template={template} />);
-    expect(screen.queryByText("Start All")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start All Senders" })).toBeInTheDocument();
     expect(screen.getByText("Refresh")).toBeInTheDocument();
     expect(screen.getAllByText("Checking dashboard mode...").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Manual Start/Resume can launch real workers and consume queues.").length).toBeGreaterThan(0);
@@ -94,7 +94,7 @@ describe("DashboardApp", () => {
     expect(document.getElementById("ops-view")).not.toBeInTheDocument();
     expect(overview).toHaveTextContent("Overview");
     expect(overview.querySelector('[aria-label="Fleet operations summary"] #summary-grid')).toBeInTheDocument();
-    expect(overview.querySelector("#start-ready-btn")).not.toBeInTheDocument();
+    expect(overview.querySelector("#start-ready-btn")).toBeInTheDocument();
     expect(overview.querySelector("#stop-btn")).toBeInTheDocument();
     expect(overview.querySelector("#primary-operation-hero")).not.toBeInTheDocument();
     expect(overview.querySelector(".sender-status-mount")).toBeInTheDocument();
@@ -272,7 +272,7 @@ describe("Warm Outreach controller layout", () => {
     expect(document.getElementById("leads-view")).toHaveAttribute("hidden");
     expect(document.querySelectorAll("#senders-table-panel")).toHaveLength(1);
     expect(overview.querySelector("#senders-table-panel")).toBeInTheDocument();
-    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(0);
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
     expect(Array.from(overview.querySelectorAll(".controlled-send-test-card"))).toHaveLength(0);
 
@@ -286,7 +286,7 @@ describe("Warm Outreach controller layout", () => {
     fireEvent.click(document.getElementById("overview-tab-btn"));
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
     expect(window.location.search).toContain("tab=overview");
-    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(0);
+    expect(document.querySelectorAll("#start-ready-btn")).toHaveLength(1);
     expect(document.querySelectorAll("#stop-btn")).toHaveLength(1);
 
     window.history.replaceState({}, "", "/?tab=ops");

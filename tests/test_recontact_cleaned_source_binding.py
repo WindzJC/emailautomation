@@ -393,6 +393,7 @@ def test_fresh_cold_keep_still_uses_same_staged_run(
         campaign_type="cold",
         dispatch_source_mode="triaged_keep",
         dispatch_cap="all",
+        fresh_cold_route="both",
     )
 
     response = dashboard.preview_dispatch_important_leads(

@@ -51,6 +51,10 @@ from provider_pacing import (
     throttle_pause_seconds,
 )
 from recipient_file_lock import lock_files
+from dispatch_transaction_guard import (
+    DispatchTransactionError,
+    assert_no_incomplete_dispatch_transaction,
+)
 from runtime_authority import AuthorityError, assert_send_authorized
 from sendgrid_hygiene import (
     load_active_suppressed_emails,
@@ -63,7 +67,7 @@ SMTP_PRESETS = {
     "gmail": ("smtp.gmail.com", 587),           # Google Workspace / Gmail SMTP
 }
 
-DEFAULT_DOMAIN = "barnesnoblemarketing.com"
+DEFAULT_DOMAIN = "bnmarketing.info"
 DEFAULT_UNSUB_EMAIL = f"unsubscribe@{DEFAULT_DOMAIN}"
 CONTROLLED_SENDGRID_PROFILE = "sendgrid_controlled_test"
 CONTROLLED_SENDGRID_RECIPIENT = "bebelyndcuriana@gmail.com"
@@ -292,112 +296,6 @@ BUSINESS_LOCALPART_HINTS = {
 
 PROFILES: dict[str, dict[str, object]] = {
 
-    # Private mailboxes (staggered pacing, domain-wide hourly cap controlled by PROVIDER_LIMIT_DEFAULTS)
-    "private_annette": {
-        "provider": "private",
-        "csv": "recipients_1.csv",
-        "log": "private_annette_log.csv",
-        "pitch": "pitch1",
-        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 90,
-        "batch_size": 1,
-        "cooldown_seconds": 0,
-        "repeat": True,
-        "human_mode": True,
-        "max_total": 100,
-        "domain_log": "private_domain_log.csv",
-        "suppress_invalid": True,
-        "global_dedupe": True,
-        "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": True,
-        "password_env": "PRIVATE_ANNETTE_APP_PW",
-    },
-    "private_jordan": {
-        "provider": "private",
-        "csv": "recipients_2.csv",
-        "log": "private_jordan_kendrick_log.csv",
-        "pitch": "pitch2",
-        "from_email": "jordankendrick@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 90,
-        "batch_size": 1,
-        "cooldown_seconds": 0,
-        "repeat": True,
-        "human_mode": True,
-        "max_total": 100,
-        "domain_log": "private_domain_log.csv",
-        "suppress_invalid": True,
-        "global_dedupe": True,
-        "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": True,
-        "password_env": "PRIVATE_JORDAN_APP_PW",
-    },
-    "private_jodi": {
-        "provider": "private",
-        "csv": "recipients_3.csv",
-        "log": "private_jodi_horowitz_log.csv",
-        "pitch": "pitch3",
-        "from_email": "jodihorowitz@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 90,
-        "batch_size": 1,
-        "cooldown_seconds": 0,
-        "repeat": True,
-        "human_mode": True,
-        "max_total": 100,
-        "domain_log": "private_domain_log.csv",
-        "suppress_invalid": True,
-        "global_dedupe": True,
-        "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": True,
-        "password_env": "PRIVATE_JODI_APP_PW",
-    },
-    "private_alison": {
-        "provider": "private",
-        "csv": "recipients_4.csv",
-        "log": "private_alison_log.csv",
-        "pitch": "pitch4",
-        "from_email": "alisonaguair@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 90,
-        "batch_size": 1,
-        "cooldown_seconds": 0,
-        "repeat": True,
-        "human_mode": True,
-        "max_total": 100,
-        "domain_log": "private_domain_log.csv",
-        "suppress_invalid": True,
-        "global_dedupe": True,
-        "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": True,
-        "password_env": "PRIVATE_ALISON_APP_PW",
-    },
-    "private_fiorela": {
-        "provider": "private",
-        "csv": "recipients_5.csv",
-        "log": "private_fiorela_log.csv",
-        "pitch": "pitch5",
-        "from_email": "fiorelladelima@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
-        "interval": 90,
-        "batch_size": 1,
-        "cooldown_seconds": 0,
-        "repeat": True,
-        "human_mode": True,
-        "max_total": 100,
-        "domain_log": "private_domain_log.csv",
-        "suppress_invalid": True,
-        "global_dedupe": True,
-        "account_map": "account_map_private_sendgrid.csv",
-        "always_send": "astraproductionsbyjc@gmail.com",
-        "prune_sent": True,
-        "password_env": "PRIVATE_FIORELA_APP_PW",
-    },
     "private_jc": {
         "provider": "private",
         "csv": "recipients_private_jc.csv",
@@ -574,8 +472,8 @@ PROFILES: dict[str, dict[str, object]] = {
         "csv": "recipients_sendgrid_controlled_test.csv",
         "log": "sendgrid_controlled_test_log.csv",
         "pitch": "pitch1",
-        "from_email": "annettedanek-akey@barnesnoblemarketing.com",
-        "my_domains": "barnesnoblemarketing.com,astraproductionsbyjc.com",
+        "from_email": "annettedanek-akey@bnmarketing.info",
+        "my_domains": "bnmarketing.info,astraproductionsbyjc.com",
         "interval": 35,
         "batch_size": 1,
         "cooldown_seconds": 0,
@@ -603,7 +501,6 @@ PROFILES: dict[str, dict[str, object]] = {
 
 
 }
-
 
 def profile_send_unavailable_reason(
     profile_name: str,
@@ -1248,10 +1145,13 @@ def _init_send_idempotency_db(conn: sqlite3.Connection) -> None:
 
 
 def _send_idempotency_connection(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings.secure_private_dir(path.parent)
     conn = sqlite3.connect(
         path,
         timeout=SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS / 1000.0,
     )
+    settings.secure_private_file(path)
     conn.execute(f"PRAGMA busy_timeout = {SEND_IDEMPOTENCY_BUSY_TIMEOUT_MS}")
     return conn
 
@@ -4761,7 +4661,10 @@ def profile_aggregate_spacing_seconds(
 
 
 def _sendgrid_rate_connection(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    settings.secure_private_dir(path.parent)
     conn = sqlite3.connect(path, timeout=5.0)
+    settings.secure_private_file(path)
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
@@ -5400,6 +5303,12 @@ def main() -> int | None:
         or getattr(args, "status_sendgrid", False)
         or getattr(args, "resync_sendgrid", False)
     )
+    if bool(getattr(args, "preflight", False)) or not inspection_only:
+        try:
+            assert_no_incomplete_dispatch_transaction()
+        except DispatchTransactionError as exc:
+            print(f"REFUSED: dispatch transaction is unresolved: {exc}")
+            return
     if not inspection_only:
         try:
             assert_send_authorized(ROOT)

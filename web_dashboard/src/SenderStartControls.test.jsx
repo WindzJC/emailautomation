@@ -150,6 +150,16 @@ function startReadyPosts(fetchMock) {
   ));
 }
 
+function stopAllPosts(fetchMock) {
+  return fetchMock.mock.calls.filter(([url, options = {}]) => (
+    String(url) === "/api/stop" && options.method === "POST"
+  ));
+}
+
+function stopAllButton() {
+  return document.getElementById("stop-btn");
+}
+
 function senderRowStartButton() {
   return document.querySelector(
     '.sender-status-action-btn[data-profile="private_jc"][data-action="start"]',
@@ -462,9 +472,85 @@ describe("individual sender Start controls", () => {
       backendFailure,
     );
   });
+
+  it("Stop All posts a background job, polls status, and resets the button", async () => {
+    const pendingPost = deferredResponse();
+    let snapshotCalls = 0;
+    const fetchMock = vi.fn((url, options = {}) => {
+      const pathName = String(url);
+      if (pathName === "/api/auth/status") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          authenticated: true,
+          auth_enabled: false,
+          auth_disabled: true,
+          dashboard_mode: "local_dev",
+          machine_id: "mac",
+          authorized_machine: "mac",
+          authority_status: "active",
+          authority_generation: 1,
+          production_authorized: true,
+          live_actions_enabled: true,
+        }));
+      }
+      if (pathName.startsWith("/api/snapshot")) {
+        snapshotCalls += 1;
+        return Promise.resolve(jsonResponse(READY_SNAPSHOT));
+      }
+      if (pathName === "/api/stop" && options.method === "POST") {
+        return pendingPost.promise;
+      }
+      if (pathName === "/api/stop/status/stop-job-1") {
+        return Promise.resolve(jsonResponse({
+          ok: true,
+          job: {
+            job_id: "stop-job-1",
+            status: "COMPLETE",
+            message: "Stop All Senders completed; all targeted profiles verified stopped.",
+            results: [
+              { profile: "private_jc", label: "JC", status: "STOPPED", reason: "Stopped and verified." },
+            ],
+            snapshot: READY_SNAPSHOT,
+          },
+        }));
+      }
+      if (pathName.startsWith("/api/start-ready")) {
+        return Promise.resolve(jsonResponse({ ok: true, ready_profiles: [], skipped_profiles: [] }));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    root = await bootController(fetchMock, "ops");
+
+    fireEvent.click(stopAllButton());
+    expect(stopAllButton()).toBeDisabled();
+    expect(stopAllButton()).toHaveTextContent("Stop All in progress...");
+    expect(document.getElementById("stop-all-status")).toHaveTextContent("Stop All in progress");
+    expect(stopAllPosts(fetchMock)).toHaveLength(1);
+
+    await act(async () => {
+      pendingPost.resolve(jsonResponse({
+        ok: true,
+        job_id: "stop-job-1",
+        job: {
+          job_id: "stop-job-1",
+          status: "RUNNING",
+          message: "Stopping 1 active sender(s) cooperatively.",
+          results: [
+            { profile: "private_jc", label: "JC", status: "STOPPING", reason: "Cooperative stop requested." },
+          ],
+        },
+      }, 202));
+      await flushMicrotasks(16);
+    });
+
+    expect(stopAllButton()).toHaveTextContent("Stop All");
+    expect(document.getElementById("stop-all-status")).toHaveTextContent("STOPPEDJCStopped and verified.");
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/stop/status/stop-job-1")).toBe(true);
+    expect(snapshotCalls).toBeGreaterThan(0);
+  });
 });
 
-describe("Start Ready Senders controls", () => {
+describe("Start All Senders controls", () => {
   let root;
 
   beforeEach(() => {
@@ -504,7 +590,7 @@ describe("Start Ready Senders controls", () => {
     const fetchMock = baseFetchMock(() => Promise.resolve(jsonResponse({ ok: true })), handler);
     root = await bootController(fetchMock, "start-ready");
 
-    expect(startReadyButton()).toHaveTextContent("Start Ready Senders");
+    expect(startReadyButton()).toHaveTextContent("Start All Senders");
     fireEvent.click(startReadyButton());
     await act(async () => flushMicrotasks(16));
 
@@ -538,7 +624,7 @@ describe("Start Ready Senders controls", () => {
     expect(startReadyPosts(fetchMock)).toHaveLength(0);
     expect(startReadyButton()).not.toBeDisabled();
     expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
-      "Start Ready Senders cancelled. No Start request was submitted.",
+      "Start All Senders cancelled. No Start request was submitted.",
     );
   });
 
@@ -641,7 +727,7 @@ describe("Start Ready Senders controls", () => {
     expect(startReadyPosts(fetchMock)).toHaveLength(1);
     expect(startReadyButton()).toBeDisabled();
     expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
-      "Do not retry. Inspect the Start Ready job and sender runtime state.",
+      "Do not retry. Inspect the Start All job and sender runtime state.",
     );
     fireEvent.click(startReadyButton());
     expect(startReadyPosts(fetchMock)).toHaveLength(1);
@@ -739,7 +825,7 @@ describe("Start Ready Senders controls", () => {
       if (pathName === "/api/start-ready" && options.method === "POST") {
         return Promise.resolve(jsonResponse({
           ok: false,
-          message: "Start Ready Senders is already running.",
+          message: "Start All Senders is already running.",
           job: { job_id: "job-active", status: "RUNNING", results: [] },
         }, 409));
       }
@@ -757,7 +843,7 @@ describe("Start Ready Senders controls", () => {
     expect(startReadyPosts(fetchMock)).toHaveLength(1);
     expect(startReadyButton()).toBeDisabled();
     expect(document.getElementById("react-start-ready-status")).toHaveTextContent(
-      "Start Ready Senders is already running.",
+      "Start All Senders is already running.",
     );
     fireEvent.click(startReadyButton());
     expect(startReadyPosts(fetchMock)).toHaveLength(1);

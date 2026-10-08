@@ -14,6 +14,7 @@ class RuntimeBackend(Protocol):
     def runtime_profile_overlays(self, profile_names: list[str] | None = None) -> dict[str, dict[str, object]]: ...
     def start_all_senders(self) -> tuple[bool, str]: ...
     def stop_all_senders(self, session: str = ...) -> tuple[bool, str]: ...
+    def stop_profiles_cooperatively(self, profile_names: list[str], session: str = ...) -> dict[str, object]: ...
     def start_sender(self, profile_name: str, session: str = ...) -> tuple[bool, str]: ...
     def stop_sender(self, profile_name: str, session: str = ...) -> tuple[bool, str]: ...
     def archive_reset_logs(self, session: str = ...) -> tuple[bool, str]: ...
@@ -84,6 +85,34 @@ def stop_all_senders(session: str | None = None) -> tuple[bool, str]:
     if session is None:
         return _BACKEND.stop_all_senders()
     return _BACKEND.stop_all_senders(session=session)
+
+
+def stop_profiles_cooperatively(
+    profile_names: list[str],
+    session: str | None = None,
+) -> dict[str, object]:
+    stopper = getattr(_BACKEND, "stop_profiles_cooperatively", None)
+    if callable(stopper):
+        if session is None:
+            return stopper(profile_names)
+        return stopper(profile_names, session=session)
+
+    results: list[dict[str, object]] = []
+    ok = True
+    for profile_name in profile_names:
+        stopped, message = stop_sender(profile_name, session=session)
+        ok = ok and stopped
+        results.append({
+            "profile": profile_name,
+            "status": "STOPPED" if stopped else "FAILED",
+            "reason": message,
+        })
+    remaining = [
+        str(item.get("profile") or "")
+        for item in results
+        if str(item.get("status") or "") == "FAILED"
+    ]
+    return {"ok": ok, "results": results, "remaining": remaining}
 
 
 def start_sender(profile_name: str, session: str | None = None) -> tuple[bool, str]:

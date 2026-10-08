@@ -623,6 +623,117 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertTrue(json.loads(response.body)["ok"])
         start_sender.assert_called_once_with("sendgrid_annette")
 
+    def test_sendgrid_start_does_not_block_an_already_confirmed_campaign_on_stale_feedback(self) -> None:
+        snapshot = {
+            "profiles": [],
+            "sendgrid_outcome_health": {
+                "blocking": True,
+                "blocking_text": "Synthetic stale feed block.",
+                "awaiting_outcome": 7,
+            },
+        }
+        with patch.object(
+            live_dashboard,
+            "build_dashboard_queue_safety_report",
+            return_value={"safe": True},
+        ), patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_active_preview_names",
+            return_value=set(),
+        ), patch.object(
+            live_dashboard,
+            "_profile_readiness_from_snapshot",
+            return_value={"status": "PASS", "reasons": []},
+        ), patch.object(
+            live_dashboard,
+            "protected_sendgrid_credential_error",
+            return_value="",
+        ), patch.object(
+            live_dashboard,
+            "_profile_provider_block_reason_from_snapshot",
+            return_value="",
+        ), patch.object(
+            live_dashboard,
+            "_lead_state_start_block_reasons",
+            return_value=[],
+        ):
+            report = live_dashboard._build_start_preconditions_report(
+                "sendgrid_annette",
+                snapshot=snapshot,
+            )
+
+        self.assertTrue(report["ok"])
+        self.assertNotIn("Synthetic stale feed block.", report["blocked_reasons"])
+
+    def test_dispatch_preflight_blocks_unresolved_transaction(self) -> None:
+        with patch.object(
+            live_dashboard,
+            "assert_no_incomplete_dispatch_transaction",
+            side_effect=live_dashboard.DispatchTransactionError("synthetic unresolved transaction"),
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "list_active_sender_snapshots",
+            side_effect=AssertionError("active sender check should not run"),
+        ):
+            response = live_dashboard._dispatch_preflight_block_response(snapshot={"profiles": []})
+
+        self.assertIsNotNone(response)
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("dispatch_transaction_unresolved", body["error"])
+        self.assertIn("synthetic unresolved transaction", body["message"])
+
+    def test_sendgrid_confirm_outcome_gate_requires_visible_override_reason(self) -> None:
+        snapshot = {
+            "sendgrid_outcome_health": {
+                "blocking": True,
+                "blocking_text": "Synthetic outcome feed block.",
+                "sendgrid_webhook_receiver_url_configured": True,
+                "sendgrid_event_public_key_configured": True,
+            }
+        }
+
+        blocked = live_dashboard._sendgrid_outcome_confirm_block_response(
+            snapshot=snapshot,
+            sendgrid_rows=3,
+            override=True,
+            override_reason="",
+        )
+        allowed = live_dashboard._sendgrid_outcome_confirm_block_response(
+            snapshot=snapshot,
+            sendgrid_rows=3,
+            override=True,
+            override_reason="Operator verified SendGrid incident.",
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertEqual(409, blocked.status_code)
+        self.assertIsNone(allowed)
+
+    def test_sendgrid_confirm_blocks_when_feedback_security_is_not_configured(self) -> None:
+        snapshot = {
+            "sendgrid_outcome_health": {
+                "blocking": False,
+                "sendgrid_webhook_receiver_url_configured": False,
+                "sendgrid_event_public_key_configured": False,
+            }
+        }
+        response = live_dashboard._sendgrid_outcome_confirm_block_response(
+            snapshot=snapshot,
+            sendgrid_rows=3,
+            override=True,
+            override_reason="Do not bypass missing webhook security.",
+        )
+        self.assertIsNotNone(response)
+        self.assertEqual(409, response.status_code)
+        body = json.loads(response.body)
+        self.assertEqual("sendgrid_outcome_feed_not_configured", body["error"])
+        self.assertFalse(body["override_required"])
+
     def test_preview_validate_profile_blocks_active_sender(self) -> None:
         with (
             patch.object(live_dashboard.runtime_control, "is_known_profile", return_value=True),
@@ -1844,6 +1955,97 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual(409, response.status_code)
         self.assertFalse(body["ok"])
         self.assertEqual("running", body["snapshot"]["profiles"][0]["runtime_state"])
+
+    def test_stop_all_post_returns_background_job_without_stopping_inline(self) -> None:
+        live_dashboard._reset_stop_all_jobs_for_tests()
+        submitted: list[tuple[object, tuple[object, ...]]] = []
+        with patch.object(live_dashboard, "_stop_all_targets", return_value=["private_jc", "sendgrid_annette"]), patch.object(
+            live_dashboard._SENDER_STOP_EXECUTOR,
+            "submit",
+            side_effect=lambda fn, *args: submitted.append((fn, args)),
+        ) as submit, patch.object(
+            live_dashboard.runtime_control,
+            "stop_profiles_cooperatively",
+            side_effect=AssertionError("Stop All must run in the background executor"),
+        ):
+            response = live_dashboard.stop()
+
+        body = json.loads(response.body)
+        self.assertEqual(202, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual("PLANNING", body["status"])
+        self.assertEqual(["private_jc", "sendgrid_annette"], body["job"]["target_profiles"])
+        self.assertEqual(1, submit.call_count)
+        self.assertEqual(1, len(submitted))
+
+    def test_stop_all_targets_all_active_operational_profiles(self) -> None:
+        with patch.object(
+            live_dashboard,
+            "_active_sender_names",
+            return_value={"sendgrid_jodi", "private_jc", "non_production_debug"},
+        ):
+            self.assertEqual(["private_jc", "sendgrid_jodi"], live_dashboard._stop_all_targets())
+
+    def test_stop_all_no_active_profiles_is_successful_noop(self) -> None:
+        live_dashboard._reset_stop_all_jobs_for_tests()
+        with patch.object(live_dashboard, "_stop_all_targets", return_value=[]), patch.object(
+            live_dashboard._SENDER_STOP_EXECUTOR,
+            "submit",
+            side_effect=AssertionError("No-op Stop All should not queue a worker"),
+        ):
+            response = live_dashboard.stop()
+
+        body = json.loads(response.body)
+        self.assertEqual(202, response.status_code)
+        self.assertTrue(body["ok"])
+        self.assertEqual("COMPLETE", body["job"]["status"])
+        self.assertEqual([], body["job"]["target_profiles"])
+        self.assertIn("No operational production sender", body["job"]["message"])
+
+    def test_stop_all_partial_failure_is_reported_per_profile(self) -> None:
+        live_dashboard._reset_stop_all_jobs_for_tests()
+        with patch.object(live_dashboard, "_stop_all_targets", return_value=["private_jc", "sendgrid_annette"]), patch.object(
+            live_dashboard._SENDER_STOP_EXECUTOR,
+            "submit",
+            side_effect=lambda fn, *args: fn(*args),
+        ), patch.object(
+            live_dashboard.runtime_control,
+            "stop_profiles_cooperatively",
+            return_value={
+                "ok": False,
+                "remaining": ["sendgrid_annette"],
+                "results": [
+                    {"profile": "private_jc", "status": "STOPPED", "reason": "Stopped and verified."},
+                    {"profile": "sendgrid_annette", "status": "FAILED", "reason": "Still active."},
+                ],
+            },
+        ), patch.object(
+            live_dashboard, "_load_or_build_live_snapshot", return_value={"profiles": []}
+        ), patch.object(live_dashboard, "_append_campaign_history"):
+            response = live_dashboard.stop()
+
+        body = json.loads(response.body)
+        job = live_dashboard._stop_all_job_snapshot(body["job_id"])
+        self.assertIsNotNone(job)
+        self.assertEqual("PARTIAL", job["status"])
+        self.assertEqual(["sendgrid_annette"], job["remaining_profiles"])
+        self.assertEqual(["STOPPED", "FAILED"], [item["status"] for item in job["results"]])
+
+    def test_stop_all_duplicate_click_returns_existing_active_job(self) -> None:
+        live_dashboard._reset_stop_all_jobs_for_tests()
+        with patch.object(live_dashboard, "_stop_all_targets", return_value=["private_jc"]), patch.object(
+            live_dashboard._SENDER_STOP_EXECUTOR,
+            "submit",
+            return_value=None,
+        ) as submit:
+            first = live_dashboard.stop()
+            second = live_dashboard.stop()
+
+        first_body = json.loads(first.body)
+        second_body = json.loads(second.body)
+        self.assertEqual(202, second.status_code)
+        self.assertEqual(first_body["job_id"], second_body["job_id"])
+        self.assertEqual(1, submit.call_count)
 
     def test_start_profile_precondition_block_reuses_request_snapshot(self) -> None:
         snapshot = {"profiles": []}
@@ -5338,11 +5540,12 @@ class LiveDashboardTests(unittest.TestCase):
         self.assertEqual("Missing SendGrid timestamp header.", body["message"])
 
     def test_sendgrid_event_webhook_rejects_invalid_signature_without_state_changes(self) -> None:
+        timestamp = str(int(time.time()))
         body = self._assert_webhook_rejection_has_no_state_changes(
             public_key="configured-public-key",
             headers={
                 live_dashboard.SENDGRID_SIG_HEADER: "synthetic-signature",
-                live_dashboard.SENDGRID_TS_HEADER: "1700000000",
+                live_dashboard.SENDGRID_TS_HEADER: timestamp,
             },
             expected_status=401,
             verify_result=False,
@@ -5351,7 +5554,7 @@ class LiveDashboardTests(unittest.TestCase):
 
     def test_sendgrid_event_webhook_accepts_valid_signed_payload(self) -> None:
         raw_body = b'[{"email":"synthetic@example.test","event":"delivered"}]'
-        timestamp = "1700000000"
+        timestamp = str(int(time.time()))
         private_key = ec.generate_private_key(ec.SECP256R1())
         public_key_der = private_key.public_key().public_bytes(
             encoding=serialization.Encoding.DER,
@@ -6674,6 +6877,7 @@ class LiveDashboardTests(unittest.TestCase):
                 output_path=str(output_path),
                 rejected_path=str(rejected_path),
                 dispatch_source_mode="strict_verified",
+                fresh_cold_route="both",
             )
             fake_preview = {
                 "preview_id": "dispatch_preview_20260409_120230_abcd1234",
@@ -7200,6 +7404,7 @@ class LiveDashboardTests(unittest.TestCase):
                 input_path=str(input_path),
                 output_path=str(output_path),
                 rejected_path=str(rejected_path),
+                fresh_cold_route="both",
             )
             fake_preview = {
                 "preview_id": "dispatch_preview_20260409_120230_triage",
@@ -7321,6 +7526,7 @@ class LiveDashboardTests(unittest.TestCase):
                 input_path=str(input_path),
                 output_path=str(output_path),
                 rejected_path=str(rejected_path),
+                fresh_cold_route="both",
             )
             fake_preview = {
                 "preview_id": "dispatch_preview_staged",
@@ -7438,7 +7644,11 @@ class LiveDashboardTests(unittest.TestCase):
                 "auto_triage_keep_path": str(staged_keep_path),
             }
             (jobs_dir / "check_empty.json").write_text(json.dumps(job), encoding="utf-8")
-            payload = live_dashboard.ImportantLeadDispatchPayload(output_path=str(output_path), rejected_path=str(rejected_path))
+            payload = live_dashboard.ImportantLeadDispatchPayload(
+                output_path=str(output_path),
+                rejected_path=str(rejected_path),
+                fresh_cold_route="both",
+            )
 
             with patch.object(live_dashboard, "IMPORTANT_LEADS_CHECK_JOBS", jobs_dir), patch.object(
                 live_dashboard,
@@ -7481,6 +7691,7 @@ class LiveDashboardTests(unittest.TestCase):
                 input_path=str(input_path),
                 output_path=str(output_path),
                 rejected_path=str(rejected_path),
+                fresh_cold_route="both",
             )
 
             with patch.object(
@@ -10360,6 +10571,7 @@ class LiveDashboardTests(unittest.TestCase):
                     output_path=str(output_path),
                     rejected_path=str(rejected_path),
                     dispatch_source_mode="triaged_keep",
+                    fresh_cold_route="both",
                     job_id=job["job_id"],
                     current_run_id=job["job_id"],
                     preview_recovery_binding=binding,
@@ -10431,6 +10643,7 @@ class LiveDashboardTests(unittest.TestCase):
                     output_path=str(output_path),
                     rejected_path=str(rejected_path),
                     dispatch_source_mode="triaged_keep",
+                    fresh_cold_route="both",
                     job_id=job["job_id"],
                     current_run_id=job["job_id"],
                     preview_recovery_binding=live_dashboard._preview_recovery_binding(job),
@@ -11306,7 +11519,7 @@ class DashboardStabilizationTests(unittest.TestCase):
         self.assertTrue(any("private_jc" in reason for reason in reasons))
         self.assertTrue(any("sendgrid_jodi" in reason for reason in reasons))
         self.assertTrue(any("dispatch" in reason for reason in reasons))
-        self.assertTrue(any("Start Ready" in reason for reason in reasons))
+        self.assertTrue(any("Start All" in reason for reason in reasons))
 
 
 if __name__ == "__main__":

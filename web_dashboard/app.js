@@ -210,6 +210,9 @@ let wallboardMode = false;
 let startReadyBusy = false;
 let startReadyJobId = "";
 let startReadyPollTimer = null;
+let stopAllBusy = false;
+let stopAllJobId = "";
+let stopAllPollTimer = null;
 let activeDashboardTab = "overview";
 let activeLeadWorkflow = "cold";
 const tabPanelMounts = {
@@ -2115,7 +2118,8 @@ function normalizeDispatchPlanPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
 }
 
-let selectedFreshColdRoute = "sendgrid";
+const DEFAULT_FRESH_COLD_ROUTE = "sendgrid";
+let selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE;
 let selectedRecontactRoute = "sendgrid";
 const invalidatedFreshColdPreviewIds = new Set();
 const invalidatedRecontactPreviewIds = new Set();
@@ -2124,6 +2128,21 @@ function normalizeFreshColdRoute(value) {
   const route = String(value || "").trim();
   return ["sendgrid", "private_jc", "both"].includes(route) ? route : "";
 }
+
+function saveFreshColdRoute(value) {
+  const route = normalizeFreshColdRoute(value) || DEFAULT_FRESH_COLD_ROUTE;
+  selectedFreshColdRoute = route;
+  return route;
+}
+
+function resetFreshColdRouteForPageLoad() {
+  return saveFreshColdRoute(DEFAULT_FRESH_COLD_ROUTE);
+}
+
+// Fresh Cold route is page-session state only.
+// Every full dashboard load starts at SendGrid Cold. Any route change invalidates
+// the current Preview and requires a new Preview before Confirm can unlock.
+selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE;
 
 function freshColdRouteLabel(value = selectedFreshColdRoute) {
   const route = normalizeFreshColdRoute(value);
@@ -2668,32 +2687,66 @@ function resumeImportantLeadCheckJob(job) {
 }
 
 async function hydrateImportantLeadCheckJobOnLoad() {
-  const savedJobId = readSavedImportantLeadCheckJobId();
-  if (savedJobId) {
-    try {
-      const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(savedJobId)}`);
-      const job = data.job || null;
-      if (resumeImportantLeadCheckJob(job)) return;
-      if (job && isTerminalImportantLeadCheckJob(job)) {
-        renderImportantLeadCheckJob(job);
-        if (job.status === "completed" && job.check) {
-          lastImportantLeadCheck = job.check;
-          renderImportantLeadCheck(lastImportantLeadCheck);
-        }
-      }
-    } catch (err) {
-      if (String(err || "").includes("not found")) {
-        clearSavedImportantLeadCheckJobId(savedJobId);
-      } else if (importantLeadCheckJobPollId !== savedJobId) {
-        void pollImportantLeadCheckJob(savedJobId, selectedLeadUploadType());
-      }
-    }
-  }
+  const uploadType = selectedLeadUploadType();
+  const savedJobId = readSavedImportantLeadCheckJobId(uploadType);
   try {
     const data = await fetchJson("/api/leads/check-important/active");
-    resumeImportantLeadCheckJob(data.job || null);
+    const workflowJobs = data.status?.active_important_check_jobs;
+    const activeJob = workflowJobs && typeof workflowJobs === "object"
+      ? workflowJobs[uploadType]
+      : data.job || null;
+    if (resumeImportantLeadCheckJob(activeJob || null)) return;
+
+    // The active endpoint is authoritative. If it reports no active job for
+    // this workflow, stale browser pointers must not keep Confirm Dispatch locked.
+    stopImportantLeadCheckJobPolling();
+    lastImportantLeadCheckJob = null;
+    clearSavedImportantLeadCheckJobId("", uploadType);
+    renderSelectedDispatchWorkflowState();
+
+    // A saved terminal job may still be useful as history, but a saved
+    // non-terminal record is ignored when the authoritative active endpoint is empty.
+    if (savedJobId) {
+      try {
+        const savedData = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(savedJobId)}`);
+        const savedJob = savedData.job || null;
+        if (savedJob && isTerminalImportantLeadCheckJob(savedJob)) {
+          renderImportantLeadCheckJob(savedJob);
+          if (savedJob.status === "completed" && savedJob.check) {
+            lastImportantLeadCheck = savedJob.check;
+            renderImportantLeadCheck(lastImportantLeadCheck);
+          }
+        }
+      } catch (err) {
+        if (String(err || "").includes("not found")) {
+          clearSavedImportantLeadCheckJobId(savedJobId, uploadType);
+        }
+      }
+    }
+    return;
+  } catch (activeErr) {
+    // If the authoritative active endpoint itself is unavailable, fall back to
+    // the saved pointer so a genuinely active upload can still be recovered.
+  }
+
+  if (!savedJobId) return;
+  try {
+    const data = await fetchJson(`/api/leads/check-important/job/${encodeURIComponent(savedJobId)}`);
+    const job = data.job || null;
+    if (resumeImportantLeadCheckJob(job)) return;
+    if (job && isTerminalImportantLeadCheckJob(job)) {
+      renderImportantLeadCheckJob(job);
+      if (job.status === "completed" && job.check) {
+        lastImportantLeadCheck = job.check;
+        renderImportantLeadCheck(lastImportantLeadCheck);
+      }
+    }
   } catch (err) {
-    // Leads status still renders normally if active-job hydration is unavailable.
+    if (String(err || "").includes("not found")) {
+      clearSavedImportantLeadCheckJobId(savedJobId, uploadType);
+    } else if (importantLeadCheckJobPollId !== savedJobId) {
+      void pollImportantLeadCheckJob(savedJobId, uploadType);
+    }
   }
 }
 
@@ -3627,7 +3680,7 @@ function renderDispatchModeCards(preview = null) {
             <option value="private_jc" ${selectedFreshColdRoute === "private_jc" ? "selected" : ""}>Private JC Cold</option>
             <option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — Split</option>
           </select>
-          <small>${escapeHtml(freshColdRouteLabel())} selected · route changes require a new Preview Dispatch.</small>
+          <small>${escapeHtml(freshColdRouteLabel())} selected · changing route requires a new Preview Dispatch.</small>
         </label>` : ""}
       ${normalFullRecontactSelectionActive(recontactSource) ? `
         <label class="dispatch-recontact-route">
@@ -8118,10 +8171,17 @@ function senderReadinessBadge(profile, snapshot = lastSnapshot) {
   if (profileTelemetryChannel(profile) === "sendgrid" && profile?.sendgrid_hourly_cap_waiting) {
     return { label: "Waiting · hourly cap", tone: "warn" };
   }
-  if (queueSafetyBlockedForProfile(profile)) {
+  if (queueSafetyBlockedForProfile(profile) || profileHasIndependentBlocker(profile, snapshot)) {
     return { label: "Blocked", tone: "bad" };
   }
-  if (profilePreviewSyncRequired(profile) && !profileHasIndependentBlocker(profile)) {
+  if (isProfileActive(profile)) {
+    const readinessLabel = String(profile?.readiness_label || "").trim();
+    if (readinessLabel && readinessLabel !== "Ready") {
+      return { label: readinessLabel, tone: profile?.readiness_tone || "warn" };
+    }
+    return { label: "Ready", tone: "good" };
+  }
+  if (profilePreviewSyncRequired(profile)) {
     return { label: "Sync Required", tone: "warn" };
   }
   if (pendingCount > 0 && queueSafetyVerifiedSubset(queueSafety)) return { label: "Resume", tone: "good" };
@@ -8828,9 +8888,14 @@ function renderMessageReadiness(profile) {
         ? queueSafetyBlockMessageForProfile(profile)
         : "Render the current queue without sending, then validate the preview.";
   const status = String(readiness.status || "NOT RUN").trim().toUpperCase() || "NOT RUN";
-  const syncRequired = Boolean(readiness.preview_sync_required) && !profileHasIndependentBlocker(profile);
-  const displayStatus = syncRequired ? "SYNC REQUIRED" : status;
-  const tone = messageReadinessTone(syncRequired ? "STALE" : status);
+  const activeProgress = Boolean(readiness.preview_sync_required)
+    && !profileHasIndependentBlocker(profile)
+    && isProfileActive(profile);
+  const syncRequired = Boolean(readiness.preview_sync_required)
+    && !profileHasIndependentBlocker(profile)
+    && !isProfileActive(profile);
+  const displayStatus = activeProgress ? "IN PROGRESS" : (syncRequired ? "SYNC REQUIRED" : status);
+  const tone = activeProgress ? "pass" : messageReadinessTone(syncRequired ? "STALE" : status);
   const emailSetsMatch = Boolean(
     readiness.generated_email_set_matches_queue
     && readiness.validated_email_set_matches_queue
@@ -11135,7 +11200,115 @@ async function postAction(path, options = {}) {
   }
 }
 
-function renderStartReadyStatus(payload = {}, title = "Start Ready Senders") {
+function stopAllStatusNode() {
+  let node = document.getElementById("stop-all-status");
+  if (!node && els.stopBtn?.parentElement) {
+    node = document.createElement("section");
+    node.id = "stop-all-status";
+    node.className = "start-ready-status stop-all-status";
+    node.setAttribute("aria-live", "polite");
+    els.stopBtn.parentElement.insertAdjacentElement("afterend", node);
+  }
+  return node;
+}
+
+function renderStopAllStatus(job = {}) {
+  const node = stopAllStatusNode();
+  if (!node) return;
+  const message = String(job.message || "").trim();
+  const results = Array.isArray(job.results) ? job.results : [];
+  const rows = results.map((item) => {
+    const status = String(item?.status || "STOPPING").toUpperCase();
+    const label = escapeHtml(item?.label || item?.profile || "Sender");
+    const reason = escapeHtml(item?.reason || "");
+    return `<li class="start-ready-item status-${status.toLowerCase()}">`
+      + `<span class="start-ready-item-state">${escapeHtml(status)}</span>`
+      + `<strong>${label}</strong>`
+      + `<span>${reason}</span>`
+      + "</li>";
+  }).join("");
+  node.innerHTML = `
+    <div class="start-ready-head">
+      <strong>Stop All Senders</strong>
+      ${message ? `<span>${escapeHtml(message)}</span>` : ""}
+    </div>
+    ${rows ? `<ul class="start-ready-list">${rows}</ul>` : ""}
+  `;
+  node.classList.remove("hidden");
+}
+
+function resetStopAllButton() {
+  stopAllBusy = false;
+  stopAllJobId = "";
+  if (stopAllPollTimer) clearTimeout(stopAllPollTimer);
+  stopAllPollTimer = null;
+  if (els.stopBtn) {
+    els.stopBtn.disabled = false;
+    els.stopBtn.textContent = "Stop All";
+  }
+}
+
+async function pollStopAllJob(jobId) {
+  if (!stopAllBusy || jobId !== stopAllJobId) return;
+  try {
+    const response = await fetch(`/api/stop/status/${encodeURIComponent(jobId)}`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false || !data.job) {
+      throw new Error(data.message || `Status request failed (${response.status}).`);
+    }
+    const job = data.job;
+    renderStopAllStatus(job);
+    if (["COMPLETE", "PARTIAL", "FAILED"].includes(String(job.status || "").toUpperCase())) {
+      const failed = ["PARTIAL", "FAILED"].includes(String(job.status || "").toUpperCase());
+      resetStopAllButton();
+      showMessage(job.message || "Stop All Senders finished.", failed ? "error" : "success");
+      if (job.snapshot) {
+        renderSnapshot(job.snapshot);
+      } else {
+        await fetchSnapshot();
+      }
+      return;
+    }
+    await fetchSnapshot();
+    stopAllPollTimer = setTimeout(() => void pollStopAllJob(jobId), 750);
+  } catch (err) {
+    resetStopAllButton();
+    showMessage(`Stop All Senders status failed: ${err}`, "error");
+  }
+}
+
+async function stopAllSenders() {
+  if (stopAllBusy) return;
+  stopAllBusy = true;
+  if (els.stopBtn) {
+    els.stopBtn.disabled = true;
+    els.stopBtn.textContent = "Stop All in progress...";
+  }
+  renderStopAllStatus({ message: "Stop All in progress..." });
+  try {
+    const response = await fetch("/api/stop", { method: "POST" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false || !data.job?.job_id) {
+      throw new Error(data.message || `Stop All request failed (${response.status}).`);
+    }
+    const job = data.job;
+    stopAllJobId = String(job.job_id);
+    renderStopAllStatus(job);
+    if (["COMPLETE", "PARTIAL", "FAILED"].includes(String(job.status || "").toUpperCase())) {
+      const failed = ["PARTIAL", "FAILED"].includes(String(job.status || "").toUpperCase());
+      resetStopAllButton();
+      showMessage(job.message || "Stop All Senders finished.", failed ? "error" : "success");
+      await fetchSnapshot();
+      return;
+    }
+    await pollStopAllJob(stopAllJobId);
+  } catch (err) {
+    resetStopAllButton();
+    showMessage(`Stop All Senders failed: ${err}`, "error");
+  }
+}
+
+function renderStartReadyStatus(payload = {}, title = "Start All Senders") {
   if (!els.startReadyStatus) return;
   const ready = Array.isArray(payload.ready_profiles) ? payload.ready_profiles : [];
   const skipped = Array.isArray(payload.skipped_profiles) ? payload.skipped_profiles : [];
@@ -11170,7 +11343,7 @@ function resetStartReadyButton() {
   startReadyPollTimer = null;
   if (els.startReadyBtn) {
     els.startReadyBtn.disabled = false;
-    els.startReadyBtn.textContent = "Start Ready Senders";
+    els.startReadyBtn.textContent = "Start All Senders";
   }
 }
 
@@ -11183,18 +11356,18 @@ async function pollStartReadyJob(jobId) {
       throw new Error(data.message || `Status request failed (${response.status}).`);
     }
     const job = data.job;
-    renderStartReadyStatus(job, "Start Ready Senders progress");
+    renderStartReadyStatus(job, "Start All Senders progress");
     if (["COMPLETE", "FAILED"].includes(String(job.status || "").toUpperCase())) {
       const failed = String(job.status || "").toUpperCase() === "FAILED";
       resetStartReadyButton();
-      showMessage(job.message || "Start Ready Senders finished.", failed ? "error" : "success");
+      showMessage(job.message || "Start All Senders finished.", failed ? "error" : "success");
       await fetchSnapshot();
       return;
     }
     startReadyPollTimer = setTimeout(() => void pollStartReadyJob(jobId), 750);
   } catch (err) {
     resetStartReadyButton();
-    showMessage(`Start Ready Senders status failed: ${err}`, "error");
+    showMessage(`Start All Senders status failed: ${err}`, "error");
   }
 }
 
@@ -11211,7 +11384,7 @@ async function startReadySenders() {
     if (!planResponse.ok || plan.ok === false) {
       throw new Error(plan.message || `Readiness request failed (${planResponse.status}).`);
     }
-    renderStartReadyStatus(plan, "Start Ready Senders review");
+    renderStartReadyStatus(plan, "Start All Senders review");
     const ready = Array.isArray(plan.ready_profiles) ? plan.ready_profiles : [];
     if (!ready.length) {
       resetStartReadyButton();
@@ -11230,7 +11403,7 @@ async function startReadySenders() {
     );
     if (!confirmed) {
       resetStartReadyButton();
-      showMessage("Start Ready Senders cancelled. No Start request was submitted.", "info");
+      showMessage("Start All Senders cancelled. No Start request was submitted.", "info");
       return;
     }
     if (els.startReadyBtn) els.startReadyBtn.textContent = "Starting ready senders...";
@@ -11240,11 +11413,11 @@ async function startReadySenders() {
       throw new Error(data.message || `Start request failed (${response.status}).`);
     }
     startReadyJobId = String(data.job.job_id);
-    renderStartReadyStatus(data.job, "Start Ready Senders progress");
+    renderStartReadyStatus(data.job, "Start All Senders progress");
     await pollStartReadyJob(startReadyJobId);
   } catch (err) {
     resetStartReadyButton();
-    showMessage(`Start Ready Senders failed: ${err}`, "error");
+    showMessage(`Start All Senders failed: ${err}`, "error");
   }
 }
 
@@ -11478,6 +11651,7 @@ function stopSocket() {
 }
 
 async function bootstrapAuthenticatedDashboard() {
+  resetFreshColdRouteForPageLoad();
   document.querySelectorAll(".profile-detail-panel[open], .campaign-history-panel[open]").forEach((node) => {
     node.removeAttribute("open");
   });
@@ -11525,7 +11699,7 @@ if (els.controlledSendTestBtn) els.controlledSendTestBtn.addEventListener("click
 if (els.controlledSendTestJcBtn) els.controlledSendTestJcBtn.addEventListener("click", () => runControlledJcSenderTest());
 if (els.controlledSendTestAllBtn) els.controlledSendTestAllBtn.addEventListener("click", () => runControlledAllSenderTest());
 if (els.wallboardBtn) els.wallboardBtn.addEventListener("click", () => toggleWallboardMode());
-if (els.stopBtn) els.stopBtn.addEventListener("click", () => postAction("/api/stop"));
+if (els.stopBtn) els.stopBtn.addEventListener("click", () => stopAllSenders());
 if (els.archiveBtn) els.archiveBtn.addEventListener("click", () => postAction("/api/archive-reset-logs"));
 if (els.opsProgressDetailsToggle && els.opsProgressDetails) {
   els.opsProgressDetailsToggle.addEventListener("click", () => {
@@ -11611,7 +11785,7 @@ if (els.leadsDispatchModeCards) {
     if (freshRouteSelect && selectedImportantDispatchCampaignType() === "cold") {
       const nextRoute = normalizeFreshColdRoute(freshRouteSelect.value);
       if (!nextRoute || nextRoute === selectedFreshColdRoute) return;
-      selectedFreshColdRoute = nextRoute;
+      saveFreshColdRoute(nextRoute);
       if (
         lastImportantDispatchPreview?.preview_id
         && String(lastImportantDispatchPreview?.campaign_type || "") === "cold"

@@ -49,7 +49,7 @@ def _report(emails: list[str], validated: bool) -> dict[str, object]:
     }
 
 
-def _fixture(tmp_path: Path, current=None, terminal="SENT"):
+def _fixture(tmp_path: Path, current=None, terminal="SENT", profile: str = PROFILE):
     repo = tmp_path / "repo"
     queue_dir = repo / "data/shards"
     log_dir = repo / "data/logs"
@@ -60,7 +60,8 @@ def _fixture(tmp_path: Path, current=None, terminal="SENT"):
 
     plan = ["first@example.test", "second@example.test", "third@example.test"]
     current = list(current or plan[1:])
-    queue_path = queue_dir / "recipients_sendgrid_1.csv"
+    queue_key = "private_jc" if profile == "private_jc" else "sendgrid_1"
+    queue_path = queue_dir / f"recipients_{queue_key}.csv"
     with queue_path.open("w", newline="", encoding="utf-8") as h:
         w = csv.DictWriter(h, fieldnames=["Email", "FirstName", "BookTitle"])
         w.writeheader()
@@ -75,7 +76,7 @@ def _fixture(tmp_path: Path, current=None, terminal="SENT"):
             "preview_id": preview_id,
             "campaign_id": "cold",
             "plan_rows_by_queue": {
-                "sendgrid_1": [
+                queue_key: [
                     {"Email": email, "FirstName": "Test", "BookTitle": "Book"}
                     for email in plan
                 ]
@@ -85,7 +86,7 @@ def _fixture(tmp_path: Path, current=None, terminal="SENT"):
     )
 
     removed = [email for email in plan if email not in set(current)]
-    with (log_dir / f"{PROFILE}_log.csv").open("w", newline="", encoding="utf-8") as h:
+    with (log_dir / f"{profile}_log.csv").open("w", newline="", encoding="utf-8") as h:
         w = csv.DictWriter(h, fieldnames=["TimestampUTC", "Email", "Status", "Info"])
         w.writeheader()
         for email in removed:
@@ -100,7 +101,8 @@ def _fixture(tmp_path: Path, current=None, terminal="SENT"):
     return {
         "repo": repo,
         "queue_path": queue_path,
-        "queue_state": runtime_handoff._read_queue_state(queue_path, PROFILE),
+        "queue_state": runtime_handoff._read_queue_state(queue_path, profile),
+        "profile": profile,
         "manifest": manifest,
         "generated": _report(plan, False),
         "validated": _report(plan, True),
@@ -111,7 +113,7 @@ def _fixture(tmp_path: Path, current=None, terminal="SENT"):
 
 def _run(f):
     return runtime_handoff._normal_queue_progress_match(
-        f["repo"], profile=PROFILE, manifest=f["manifest"], queue_path=f["queue_path"],
+        f["repo"], profile=f.get("profile", PROFILE), manifest=f["manifest"], queue_path=f["queue_path"],
         queue_state=f["queue_state"], generated=f["generated"], validated=f["validated"],
         failed=f["failed"], summary=f["summary"], expected_mode="astra_visual"
     )
@@ -123,6 +125,13 @@ def test_normal_progress_accepts_authoritative_sent_remainder(tmp_path):
     assert r["verified_normal_queue_progress"] is True
     assert r["removed_rows"] == 1
     assert r["terminal_sent_rows"] == 1
+
+
+def test_normal_progress_accepts_private_jc_confirmed_remainder(tmp_path):
+    r = _run(_fixture(tmp_path, profile="private_jc"))
+    assert r["safe"] is True
+    assert r["verified_normal_queue_progress"] is True
+    assert r["dispatch_queue_key"] == "private_jc"
 
 
 def test_normal_progress_rejects_missing_terminal(tmp_path):
@@ -147,7 +156,7 @@ def test_normal_progress_rejects_changed_survivor(tmp_path):
     f = _fixture(tmp_path)
     p = f["queue_path"]
     p.write_text(p.read_text(encoding="utf-8").replace("second@example.test,Test,Book", "second@example.test,Changed,Book"), encoding="utf-8")
-    f["queue_state"] = runtime_handoff._read_queue_state(p, PROFILE)
+    f["queue_state"] = runtime_handoff._read_queue_state(p, f["profile"])
     r = _run(f)
     assert r["safe"] is False
     assert "normal_progress_surviving_queue_rows_unchanged" in r["failed_predicates"]

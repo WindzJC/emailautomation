@@ -11,6 +11,9 @@ WorkingDirectory=/opt/astra/emailautomation
 EnvironmentFile=/etc/astra-emailautomation/profiles/%i.env
 Environment=ASTRA_MACHINE_ID=cloud
 Environment=ASTRA_DISABLE_DOTENV=1
+Environment=ASTRA_STRICT_FILE_PERMISSIONS=1
+Environment=ASTRA_STRICT_CONFIG=1
+Environment=ASTRA_REQUIRE_CRITICAL_CODE_SEAL=1
 RuntimeDirectory=astra-emailautomation
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes

@@ -3835,6 +3835,52 @@ def test_non_emergency_queue_preview_mismatch_remains_fail_closed(tmp_path):
     assert "generated_row_count_matches_queue" in preview["failed_predicates"]
 
 
+def test_preflight_ignores_other_profile_preview_staleness_when_target_preview_is_safe(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        runtime_handoff,
+        "recompute_queue_safety",
+        lambda _repo: {
+            "safe": False,
+            "unsafe_reasons": ["active profile preview is stale or invalid"],
+            "profiles": [
+                {
+                    "profile": "private_jc",
+                    "preview": {
+                        "safe": True,
+                        "verified_emergency_queue_progress": False,
+                        "verified_normal_queue_progress": True,
+                        "verified_queue_progress": True,
+                        "failed_predicates": [],
+                    },
+                },
+                {
+                    "profile": "sendgrid_annette",
+                    "preview": {
+                        "safe": False,
+                        "verified_emergency_queue_progress": False,
+                        "failed_predicates": ["generated_file_exists"],
+                    },
+                },
+            ],
+        },
+    )
+
+    preflight = runtime_handoff.preflight_queue_safety(
+        repo,
+        profile="private_jc",
+    )
+
+    assert preflight["safe"] is True
+    assert preflight["ignored_other_profile_preview_staleness"] is True
+    assert preflight["verified_normal_queue_progress"] is True
+    assert preflight["verified_queue_progress"] is True
+
+
 def test_exact_match_behavior_does_not_claim_emergency_progress(tmp_path):
     repo = tmp_path / "repo"
     _write_runtime(repo, ["current@example.test"])

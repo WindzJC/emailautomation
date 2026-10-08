@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -17,6 +18,24 @@ MACHINES = {"cloud", "mac", "windows-wsl"}
 ACTIVE_STATUS = "active"
 AUTHORITY_FILENAME = "runtime_authority.json"
 GENERATION_FLOOR_RELATIVE = Path(".runtime_handoff/generation_floor.json")
+CRITICAL_CODE_MANIFEST_VERSION = 1
+CRITICAL_CODE_FILES = (
+    "send_shard.py",
+    "recipient_file_lock.py",
+    "runtime_authority.py",
+    "provider_pacing.py",
+    "protected_profile_env.py",
+    "settings.py",
+    "sendgrid_hygiene.py",
+    "lead_ledger.py",
+    "important_leads_workflow.py",
+    "dashboard_core.py",
+    "live_dashboard.py",
+    "runtime_control.py",
+    "tools/rebuild_recipient_queues.py",
+    "durable_io.py",
+    "dispatch_transaction_guard.py",
+)
 REQUIRED_FIELDS = {
     "authorized_machine",
     "generation",
@@ -220,6 +239,56 @@ def write_authority(repo: Path, payload: dict[str, Any]) -> None:
     _atomic_json_write(authority_path(repo), payload)
 
 
+def critical_code_manifest(repo: Path) -> dict[str, Any]:
+    root = repo.resolve()
+    files: list[dict[str, Any]] = []
+    for relative_text in CRITICAL_CODE_FILES:
+        relative = Path(relative_text)
+        path = root / relative
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "missing": True,
+                    "size": 0,
+                    "sha256": "",
+                }
+            )
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise AuthorityError(f"Critical runtime file is unsafe: {relative_text}")
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files.append(
+            {
+                "path": relative.as_posix(),
+                "missing": False,
+                "size": metadata.st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return {"version": CRITICAL_CODE_MANIFEST_VERSION, "files": files}
+
+
+def critical_code_manifest_hash(repo: Path) -> str:
+    manifest = critical_code_manifest(repo)
+    blob = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def seal_critical_code_authority(repo: Path) -> dict[str, Any]:
+    authority = dict(load_authority(repo))
+    authority["critical_code_manifest_version"] = CRITICAL_CODE_MANIFEST_VERSION
+    authority["critical_code_manifest_hash"] = critical_code_manifest_hash(repo)
+    authority["critical_code_sealed_utc"] = utc_now()
+    write_authority(repo, authority)
+    return authority
+
+
 def assert_send_authorized(
     repo: Path,
     *,
@@ -257,5 +326,23 @@ def assert_send_authorized(
     if authority["expected_git_commit"] != head:
         raise AuthorityError(
             "Authority expected Git commit does not match the current checkout"
+        )
+
+    expected_code_hash = str(authority.get("critical_code_manifest_hash") or "").strip()
+    require_code_seal = str(os.environ.get("ASTRA_REQUIRE_CRITICAL_CODE_SEAL", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if expected_code_hash:
+        current_code_hash = critical_code_manifest_hash(repo)
+        if current_code_hash != expected_code_hash:
+            raise AuthorityError(
+                "Critical runtime code differs from the sealed authority manifest"
+            )
+    elif require_code_seal:
+        raise AuthorityError(
+            "Critical runtime code is not sealed; activate or seal runtime authority first"
         )
     return authority

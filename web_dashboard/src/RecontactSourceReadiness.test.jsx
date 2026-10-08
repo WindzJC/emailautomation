@@ -403,6 +403,7 @@ describe("source-scoped Recontact readiness", () => {
     if (root) await act(async () => root.unmount());
     root = null;
     cleanup();
+    window.localStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     document.head.innerHTML = "";
@@ -851,8 +852,6 @@ describe("source-scoped Recontact readiness", () => {
 
     const boot = await bootController(status);
     root = boot.root;
-    const route = document.querySelector("[data-fresh-cold-route]");
-    fireEvent.change(route, { target: { value: "private_jc" } });
 
     const rail = document.getElementById("leads-workflow-task-list");
     expect(rail).toHaveTextContent("Source Checked");
@@ -861,10 +860,12 @@ describe("source-scoped Recontact readiness", () => {
     expect(rail).toHaveTextContent("Checked 2026-08-27 17:05:00 PDT");
     expect(rail).toHaveTextContent("Campaign Configured");
     expect(rail).toHaveTextContent("Campaign: Fresh Cold Keep");
-    expect(rail).toHaveTextContent("Route: Private JC Cold");
+    expect(rail).toHaveTextContent("Route: SendGrid Cold");
     expect(rail).toHaveTextContent("Preview Action required");
     expect(rail).toHaveTextContent("Confirm Locked");
-    expect(document.querySelectorAll("[data-fresh-cold-route]")).toHaveLength(1);
+    const route = document.querySelector("[data-fresh-cold-route]");
+    expect(route).not.toBeDisabled();
+    expect(route).toHaveValue("sendgrid");
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
@@ -911,14 +912,14 @@ describe("source-scoped Recontact readiness", () => {
 
     const boot = await bootController(status);
     root = boot.root;
-    fireEvent.change(document.querySelector("[data-fresh-cold-route]"), { target: { value: "private_jc" } });
+    expect(document.querySelector("[data-fresh-cold-route]")).not.toBeDisabled();
     fireEvent.click(previewButton());
     await act(async () => flushMicrotasks());
 
     expect(previewPosts(boot.fetchMock)).toHaveLength(1);
     const [, request] = previewPosts(boot.fetchMock)[0];
     const payload = JSON.parse(request.body);
-    expect(payload.fresh_cold_route).toBe("private_jc");
+    expect(payload.fresh_cold_route).toBe("sendgrid");
     expect(payload.preview_recovery_binding).toEqual(recoveryBinding);
     expect(payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("1789080427555309480");
     expect(typeof payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("string");
@@ -1071,6 +1072,30 @@ describe("source-scoped Recontact readiness", () => {
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
+  it("does not treat a persisted Both preview as current after SendGrid-default page load", async () => {
+    const status = leadsStatus({ checkState: "success" });
+    status.latest_master_check = {
+      generated_at_utc: "2026-08-28T00:05:00Z",
+      checked_source_filename: "authors-september.csv",
+      input_rows: 25,
+      cleaned_rows: 20,
+      rejected_rows: 5,
+    };
+    status.latest_lead_triage = { generated_at_utc: "2026-08-28T00:06:00Z", keep_count: 20 };
+    status.latest_auto_dispatch_preview = currentFreshPreview(status, { fresh_cold_route: "both" });
+    status.latest_auto_dispatch_preview_current = true;
+
+    const boot = await bootController(status);
+    root = boot.root;
+
+    const route = document.querySelector("[data-fresh-cold-route]");
+    expect(route).toHaveValue("sendgrid");
+    expect(confirmButton()).toBeDisabled();
+    expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Preview Re-preview required");
+    expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Preview Dispatch");
+    expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
+  });
+
   it("invalidates the visible Preview state when the selected route changes", async () => {
     const status = leadsStatus({ checkState: "success" });
     status.latest_master_check = {
@@ -1088,9 +1113,13 @@ describe("source-scoped Recontact readiness", () => {
     root = boot.root;
     expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Preview Ready");
 
-    fireEvent.change(document.querySelector("[data-fresh-cold-route]"), { target: { value: "private_jc" } });
+    const route = document.querySelector("[data-fresh-cold-route]");
+    expect(route).not.toBeDisabled();
+    expect(route).toHaveValue("sendgrid");
+    fireEvent.change(route, { target: { value: "private_jc" } });
 
     const rail = document.getElementById("leads-workflow-task-list");
+    expect(route).toHaveValue("private_jc");
     expect(rail).toHaveTextContent("Preview Re-preview required");
     expect(rail).toHaveTextContent("Confirm Locked");
     expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Preview Dispatch");

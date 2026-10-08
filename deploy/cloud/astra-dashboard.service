@@ -15,6 +15,11 @@ Environment=RUNTIME_BACKEND=systemd
 Environment=ASTRA_SYSTEMCTL_BIN=/usr/bin/systemctl
 Environment=DASHBOARD_ENABLE_LIVE_ACTIONS=1
 Environment=DASHBOARD_ALLOW_AUTO_START=0
+Environment=DASHBOARD_COOKIE_SECURE=1
+Environment=DASHBOARD_REQUIRE_MUTATION_ORIGIN=1
+Environment=ASTRA_STRICT_FILE_PERMISSIONS=1
+Environment=ASTRA_STRICT_CONFIG=1
+Environment=ASTRA_REQUIRE_CRITICAL_CODE_SEAL=1
 Environment=LIVE_DASHBOARD_HOST=127.0.0.1
 Environment=LIVE_DASHBOARD_PORT=8000
 ExecStartPre=/opt/astra/emailautomation/.venv/bin/python dashboard_security.py --host 127.0.0.1 --tunnel

@@ -70,6 +70,7 @@ from controlled_sendgrid_test import (
     execute_controlled_sendgrid_test,
 )
 from runtime_authority import AuthorityError, assert_send_authorized, current_machine, load_authority
+from dispatch_transaction_guard import DispatchTransactionError, assert_no_incomplete_dispatch_transaction
 from dashboard_security import (
     DashboardSecurityStatus,
     require_dashboard_startup_security,
@@ -177,6 +178,9 @@ from sendgrid_hygiene import (
     WEBHOOK_EVENTS_JSONL,
     append_events_jsonl,
     dedupe_webhook_events,
+    mark_webhook_events_applied,
+    mark_webhook_events_failed,
+    mark_webhook_events_logged,
     normalize_webhook_events,
     update_suppressions_from_events,
 )
@@ -231,6 +235,21 @@ _AUTH_PUBLIC_PATHS = {
 _AUTH_PUBLIC_PREFIXES = ("/static/",)
 _AUTH_PROTECTED_DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
 _AUTH_SESSION_KEY = "dashboard_authenticated"
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _dashboard_mutation_origin_allowed(request: Request) -> bool:
+    if not settings.DASHBOARD_REQUIRE_MUTATION_ORIGIN:
+        return True
+    origin = str(request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        return False
+    forwarded_proto = str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    host = str(request.headers.get("host") or request.url.netloc).strip()
+    allowed = {f"{scheme}://{host}".rstrip("/")}
+    allowed.update(str(item).strip().rstrip("/") for item in settings.ALLOWED_ORIGINS if str(item).strip())
+    return origin in allowed
 
 
 class DashboardAuthMiddleware(BaseHTTPMiddleware):
@@ -255,6 +274,15 @@ class DashboardAuthMiddleware(BaseHTTPMiddleware):
                     {"ok": False, "message": "Authentication required."},
                     status_code=401,
                 )
+            if request.method in _MUTATING_METHODS and not _dashboard_mutation_origin_allowed(request):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "mutation_origin_rejected",
+                        "message": "Mutating dashboard requests must come from an allowed same-origin page.",
+                    },
+                    status_code=403,
+                )
         response = await call_next(request)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and path.startswith("/api/leads/"):
             _invalidate_local_leads_status_cache()
@@ -277,12 +305,15 @@ app.add_middleware(
     secret_key=_SESSION_MIDDLEWARE_SECRET,
     session_cookie=settings.DASHBOARD_AUTH_COOKIE_NAME,
     same_site="lax",
-    https_only=False,
+    https_only=settings.DASHBOARD_COOKIE_SECURE,
 )
 
 SENDGRID_EVENT_PUBLIC_KEY = os.environ.get("SENDGRID_EVENT_PUBLIC_KEY", "").strip()
 SENDGRID_SIG_HEADER = "X-Twilio-Email-Event-Webhook-Signature"
 SENDGRID_TS_HEADER = "X-Twilio-Email-Event-Webhook-Timestamp"
+SENDGRID_WEBHOOK_MAX_BYTES = _int_env("SENDGRID_WEBHOOK_MAX_BYTES", 2 * 1024 * 1024)
+SENDGRID_WEBHOOK_MAX_EVENTS = _int_env("SENDGRID_WEBHOOK_MAX_EVENTS", 1000)
+SENDGRID_WEBHOOK_MAX_AGE_SECONDS = _int_env("SENDGRID_WEBHOOK_MAX_AGE_SECONDS", 300)
 PRIVATE_BOUNCE_PROFILE = "private_jc"
 AUTOMATION_LOOP_SECONDS = max(15, min(60, max(30, int(PRIVATE_BOUNCE_SYNC_INTERVAL_SECONDS or 120)) // 2))
 DASHBOARD_AUTO_START_STATE_PATH = settings.STATE_DIR / "dashboard_auto_start_state.json"
@@ -366,6 +397,7 @@ def _triage_mode_label(mode: object) -> str:
     return "Fast Triage"
 
 
+
 class ImportantLeadDispatchPayload(BaseModel):
     input_path: str = ""
     output_path: str = ""
@@ -377,6 +409,8 @@ class ImportantLeadDispatchPayload(BaseModel):
     recontact_recency_override: bool = False
     recontact_route: str = ""
     fresh_cold_route: str = ""
+    sendgrid_outcome_override: bool = False
+    sendgrid_outcome_override_reason: str = ""
     job_id: str = ""
     current_run_id: str = ""
     preview_recovery_binding: dict[str, object] = Field(default_factory=dict)
@@ -4852,6 +4886,48 @@ def _verify_sendgrid_signature(raw_body: bytes, signature_b64: str, timestamp: s
         return False
 
 
+def _sendgrid_webhook_timestamp_fresh(
+    timestamp: str,
+    *,
+    reference_utc: datetime | None = None,
+) -> bool:
+    try:
+        event_time = datetime.fromtimestamp(int(str(timestamp or "").strip()), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    reference = reference_utc or datetime.now(timezone.utc)
+    return abs((reference - event_time).total_seconds()) <= SENDGRID_WEBHOOK_MAX_AGE_SECONDS
+
+
+async def _read_request_body_limited(request: Request, max_bytes: int) -> bytes:
+    content_length = str(request.headers.get("content-length") or "").strip()
+    if content_length:
+        try:
+            declared = int(content_length)
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length header.") from exc
+        if declared < 0:
+            raise ValueError("Invalid Content-Length header.")
+        if declared > max_bytes:
+            raise OverflowError("Request payload exceeds configured byte limit.")
+
+    stream = getattr(request, "stream", None)
+    if callable(stream):
+        parts: list[bytes] = []
+        size = 0
+        async for chunk in stream():
+            size += len(chunk)
+            if size > max_bytes:
+                raise OverflowError("Request payload exceeds configured byte limit.")
+            parts.append(bytes(chunk))
+        return b"".join(parts)
+
+    body = await request.body()
+    if len(body) > max_bytes:
+        raise OverflowError("Request payload exceeds configured byte limit.")
+    return bytes(body)
+
+
 def _dashboard_env_flag(name: str) -> bool:
     return str(os.environ.get(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -5042,6 +5118,52 @@ async def auth_status(request: Request) -> JSONResponse:
     )
 
 
+_LOGIN_FAILURE_LOCK = threading.Lock()
+_LOGIN_FAILURE_STATE: dict[str, dict[str, float | int]] = {}
+
+
+def _dashboard_login_key(request: Request, username: str) -> str:
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "unknown")
+    return f"{host}|{str(username or '').strip().casefold()}"
+
+
+def _dashboard_login_retry_after(key: str, *, now: float | None = None) -> int:
+    moment = time.monotonic() if now is None else now
+    with _LOGIN_FAILURE_LOCK:
+        state = _LOGIN_FAILURE_STATE.get(key)
+        if not state:
+            return 0
+        locked_until = float(state.get("locked_until", 0.0) or 0.0)
+        if locked_until <= moment:
+            if moment - float(state.get("window_started", moment) or moment) > settings.DASHBOARD_LOGIN_WINDOW_SECONDS:
+                _LOGIN_FAILURE_STATE.pop(key, None)
+            return 0
+        return max(1, int(locked_until - moment + 0.999))
+
+
+def _dashboard_record_login_failure(key: str, *, now: float | None = None) -> int:
+    moment = time.monotonic() if now is None else now
+    with _LOGIN_FAILURE_LOCK:
+        state = dict(_LOGIN_FAILURE_STATE.get(key) or {})
+        window_started = float(state.get("window_started", moment) or moment)
+        if moment - window_started > settings.DASHBOARD_LOGIN_WINDOW_SECONDS:
+            state = {"window_started": moment, "failures": 0, "locked_until": 0.0}
+        failures = int(state.get("failures", 0) or 0) + 1
+        state["window_started"] = float(state.get("window_started", moment) or moment)
+        state["failures"] = failures
+        if failures >= settings.DASHBOARD_LOGIN_MAX_FAILURES:
+            state["locked_until"] = moment + settings.DASHBOARD_LOGIN_LOCK_SECONDS
+        _LOGIN_FAILURE_STATE[key] = state
+        locked_until = float(state.get("locked_until", 0.0) or 0.0)
+        return max(0, int(locked_until - moment + 0.999)) if locked_until > moment else 0
+
+
+def _dashboard_clear_login_failures(key: str) -> None:
+    with _LOGIN_FAILURE_LOCK:
+        _LOGIN_FAILURE_STATE.pop(key, None)
+
+
 @app.post("/api/auth/login")
 async def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONResponse:
     if _dashboard_auth_disabled():
@@ -5059,9 +5181,33 @@ async def auth_login(payload: DashboardAuthPayload, request: Request) -> JSONRes
         )
     expected_user = str(settings.DASHBOARD_AUTH_USERNAME or "admin")
     expected_pass = str(settings.DASHBOARD_AUTH_PASSWORD or "")
+    login_key = _dashboard_login_key(request, str(payload.username or ""))
+    retry_after = _dashboard_login_retry_after(login_key)
+    if retry_after:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "login_rate_limited",
+                "message": "Too many failed login attempts. Try again later.",
+                "retry_after_seconds": retry_after,
+            },
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
     if not secrets.compare_digest(str(payload.username or ""), expected_user) or not secrets.compare_digest(str(payload.password or ""), expected_pass):
-        return JSONResponse({"ok": False, "message": "Invalid dashboard credentials."}, status_code=401)
+        retry_after = _dashboard_record_login_failure(login_key)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Invalid dashboard credentials.",
+                **({"retry_after_seconds": retry_after} if retry_after else {}),
+            },
+            status_code=429 if retry_after else 401,
+            headers=headers,
+        )
 
+    _dashboard_clear_login_failures(login_key)
     request.session[_AUTH_SESSION_KEY] = True
     request.session["dashboard_username"] = expected_user
     request.session["dashboard_authenticated_at_utc"] = iso_utc()
@@ -5121,6 +5267,7 @@ _LEADS_STATUS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="a
 # serialize it so concurrent clicks cannot multiply full snapshot scans or race
 # each other past the active-sender precondition on a small production host.
 _SENDER_START_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-sender-start")
+_SENDER_STOP_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="astra-sender-stop")
 
 OPERATIONAL_PRODUCTION_PROFILES = (
     "private_jc",
@@ -5144,6 +5291,10 @@ _START_READY_JOB_LOCK = threading.Lock()
 _START_READY_JOBS: dict[str, dict[str, object]] = {}
 _START_READY_ACTIVE_JOB_ID = ""
 _START_READY_JOB_LIMIT = 20
+_STOP_ALL_JOB_LOCK = threading.Lock()
+_STOP_ALL_JOBS: dict[str, dict[str, object]] = {}
+_STOP_ALL_ACTIVE_JOB_ID = ""
+_STOP_ALL_JOB_LIMIT = 20
 _PREVIEW_SYNC_LOCK = threading.Lock()
 _PREVIEW_SYNC_ACTIVE_PROFILE = ""
 
@@ -5702,6 +5853,74 @@ def _queue_safety_provider_for_start(profile_name: str = "") -> str:
     return "all"
 
 
+def _sendgrid_outcome_confirm_block_response(
+    *,
+    snapshot: dict[str, object],
+    sendgrid_rows: int,
+    override: bool,
+    override_reason: str,
+) -> JSONResponse | None:
+    if max(0, int(sendgrid_rows or 0)) <= 0:
+        return None
+    health = snapshot.get("sendgrid_outcome_health") if isinstance(snapshot, dict) else {}
+    if not isinstance(health, dict):
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "sendgrid_outcome_feed_unknown",
+                "reason": "sendgrid_outcome_feed_unknown",
+                "message": "SendGrid outcome health is unavailable; new SendGrid work is blocked.",
+                "snapshot": snapshot,
+            },
+            status_code=409,
+        )
+    receiver_configured = bool(health.get("sendgrid_webhook_receiver_url_configured"))
+    signature_configured = bool(health.get("sendgrid_event_public_key_configured"))
+    if not receiver_configured or not signature_configured:
+        missing: list[str] = []
+        if not receiver_configured:
+            missing.append("webhook receiver URL")
+        if not signature_configured:
+            missing.append("webhook signature public key")
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "error": "sendgrid_outcome_feed_not_configured",
+                "reason": "sendgrid_outcome_feed_not_configured",
+                "message": "New SendGrid work is blocked until the " + " and ".join(missing) + " are configured.",
+                "sendgrid_outcome_health": health,
+                "override_required": False,
+                "snapshot": snapshot,
+            },
+            status_code=409,
+        )
+    if not bool(health.get("blocking")):
+        return None
+    clean_reason = str(override_reason or "").strip()
+    if override and clean_reason:
+        return None
+    return JSONResponse(
+        {
+            "ok": False,
+            "blocked": True,
+            "error": "sendgrid_outcome_feed_blocking",
+            "reason": "sendgrid_outcome_feed_blocking",
+            "message": str(
+                health.get("blocking_text")
+                or health.get("message")
+                or "SendGrid outcome feed is severely stale; new SendGrid work is blocked."
+            ),
+            "sendgrid_outcome_health": health,
+            "override_required": True,
+            "override_hint": "Set sendgrid_outcome_override with a visible sendgrid_outcome_override_reason to confirm anyway.",
+            "snapshot": snapshot,
+        },
+        status_code=409,
+    )
+
+
 def _profile_readiness_from_snapshot(snapshot: dict[str, object], profile_name: str) -> dict[str, object]:
     profiles = snapshot.get("profiles")
     if isinstance(profiles, list):
@@ -5883,7 +6102,6 @@ def _build_start_preconditions_report(
             blocked_reasons.extend(str(reason) for reason in raw_reasons)
         else:
             blocked_reasons.append(str(queue_safety.get("message") or "Recipient queue is unsafe."))
-
     if requested_profile:
         if requested_profile in active_profiles:
             blocked_reasons.append(f"{requested_profile} is already active.")
@@ -6778,6 +6996,123 @@ def _update_start_ready_job(job_id: str, **updates: object) -> None:
             job["updated_at_utc"] = iso_utc()
 
 
+def _stop_all_job_snapshot(job_id: str) -> dict[str, object] | None:
+    with _STOP_ALL_JOB_LOCK:
+        job = _STOP_ALL_JOBS.get(job_id)
+        return dict(job) if isinstance(job, dict) else None
+
+
+def _reset_stop_all_jobs_for_tests() -> None:
+    global _STOP_ALL_ACTIVE_JOB_ID
+    with _STOP_ALL_JOB_LOCK:
+        _STOP_ALL_JOBS.clear()
+        _STOP_ALL_ACTIVE_JOB_ID = ""
+
+
+def _update_stop_all_job(job_id: str, **updates: object) -> None:
+    with _STOP_ALL_JOB_LOCK:
+        job = _STOP_ALL_JOBS.get(job_id)
+        if isinstance(job, dict):
+            job.update(updates)
+            job["updated_at_utc"] = iso_utc()
+
+
+def _stop_all_targets() -> list[str]:
+    active = _active_sender_names()
+    return [
+        profile for profile in OPERATIONAL_PRODUCTION_PROFILES
+        if profile in active
+    ]
+
+
+def _stop_all_result_item(profile_name: str, status: str, reason: str) -> dict[str, object]:
+    return {
+        "profile": profile_name,
+        "label": _OPERATIONAL_PROFILE_LABELS.get(profile_name, profile_name),
+        "status": status,
+        "reason": reason,
+    }
+
+
+def _run_stop_all_job(job_id: str) -> None:
+    global _STOP_ALL_ACTIVE_JOB_ID
+    try:
+        job = _stop_all_job_snapshot(job_id) or {}
+        targets = [str(profile) for profile in job.get("target_profiles") or []]
+        if not targets:
+            _update_stop_all_job(
+                job_id,
+                status="COMPLETE",
+                completed_at_utc=iso_utc(),
+                message="No operational production sender workers are running.",
+                results=[],
+                snapshot=_load_or_build_live_snapshot(activity_hours=24, tail_lines=12),
+            )
+            return
+
+        _update_stop_all_job(
+            job_id,
+            status="RUNNING",
+            results=[
+                _stop_all_result_item(profile, "STOPPING", "Cooperative stop requested.")
+                for profile in targets
+            ],
+            message=f"Stopping {len(targets)} active sender(s) cooperatively.",
+        )
+        result = runtime_control.stop_profiles_cooperatively(targets)
+        backend_results = {
+            str(item.get("profile") or ""): item
+            for item in list(result.get("results") or [])
+            if isinstance(item, dict)
+        }
+        results = []
+        for profile in targets:
+            item = backend_results.get(profile) or {}
+            status = str(item.get("status") or "FAILED").strip().upper()
+            if status not in {"STOPPING", "STOPPED", "FAILED", "SKIPPED"}:
+                status = "FAILED"
+            results.append(_stop_all_result_item(
+                profile,
+                status,
+                str(item.get("reason") or "Stop result was not reported."),
+            ))
+        failed = [item for item in results if item.get("status") == "FAILED"]
+        stopping = [item for item in results if item.get("status") == "STOPPING"]
+        final_status = "COMPLETE" if not failed and not stopping else "PARTIAL"
+        remaining = sorted(str(profile) for profile in list(result.get("remaining") or []) if str(profile))
+        _update_stop_all_job(
+            job_id,
+            status=final_status,
+            results=results,
+            remaining_profiles=remaining,
+            completed_at_utc=iso_utc(),
+            message=(
+                "Stop All Senders completed; all targeted profiles verified stopped."
+                if final_status == "COMPLETE"
+                else "Stop All Senders finished with profiles still active after the safe shutdown window."
+            ),
+            snapshot=_load_or_build_live_snapshot(activity_hours=24, tail_lines=12),
+        )
+        snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
+        _append_campaign_history(
+            "stop_all_completed" if final_status == "COMPLETE" else "stop_all_failed",
+            profile="all",
+            snapshot=snapshot,
+            blocked_reasons=[] if final_status == "COMPLETE" else [str(item.get("reason") or "") for item in failed],
+        )
+    except Exception as exc:
+        _update_stop_all_job(
+            job_id,
+            status="FAILED",
+            completed_at_utc=iso_utc(),
+            message=f"Stop All Senders failed safely: {type(exc).__name__}.",
+        )
+    finally:
+        with _STOP_ALL_JOB_LOCK:
+            if _STOP_ALL_ACTIVE_JOB_ID == job_id:
+                _STOP_ALL_ACTIVE_JOB_ID = ""
+
+
 def _response_json_payload(response: JSONResponse) -> dict[str, object]:
     try:
         payload = json.loads(bytes(response.body).decode("utf-8"))
@@ -6872,9 +7207,9 @@ def _run_start_ready_job(job_id: str) -> None:
             current_profile="",
             completed_at_utc=iso_utc(),
             message=(
-                "Start Ready Senders stopped safely after a refusal or global safety change."
+                "Start All Senders stopped safely after a refusal or global safety change."
                 if aborted
-                else "Start Ready Senders completed without retries."
+                else "Start All Senders completed without retries."
             ),
         )
     except Exception as exc:
@@ -6892,7 +7227,7 @@ def _run_start_ready_job(job_id: str) -> None:
             results=items,
             current_profile="",
             completed_at_utc=iso_utc(),
-            message=f"Start Ready Senders failed safely: {type(exc).__name__}.",
+            message=f"Start All Senders failed safely: {type(exc).__name__}.",
         )
     finally:
         with _START_READY_JOB_LOCK:
@@ -6914,7 +7249,7 @@ def _controlled_sendgrid_test_conflicts() -> list[str]:
     with _START_READY_JOB_LOCK:
         start_ready_job = _START_READY_JOBS.get(_START_READY_ACTIVE_JOB_ID)
         if isinstance(start_ready_job, dict) and str(start_ready_job.get("status") or "") in {"PLANNING", "RUNNING"}:
-            reasons.append("Start Ready Senders is active")
+            reasons.append("Start All Senders is active")
     return reasons
 
 
@@ -7071,7 +7406,7 @@ async def start_ready_endpoint() -> JSONResponse:
                     "ok": False,
                     "blocked": True,
                     "error": "start_ready_already_running",
-                    "message": "Start Ready Senders is already running.",
+                    "message": "Start All Senders is already running.",
                     "job": dict(active_job),
                 },
                 status_code=409,
@@ -7099,7 +7434,7 @@ async def start_ready_endpoint() -> JSONResponse:
         {
             "ok": True,
             "status": "PLANNING",
-            "message": "Start Ready Senders accepted. Eligibility will be recomputed server-side.",
+            "message": "Start All Senders accepted. Eligibility will be recomputed server-side.",
             "job": dict(job),
         },
         status_code=202,
@@ -7111,7 +7446,7 @@ async def start_ready_status_endpoint(job_id: str) -> JSONResponse:
     job = _start_ready_job_snapshot(str(job_id or "").strip())
     if job is None:
         return JSONResponse(
-            {"ok": False, "message": "Start Ready Senders job not found."},
+            {"ok": False, "message": "Start All Senders job not found."},
             status_code=404,
         )
     return JSONResponse({"ok": True, "job": job})
@@ -7215,18 +7550,82 @@ def start_profile(profile_name: str) -> JSONResponse:
 
 @app.post("/api/stop")
 def stop() -> JSONResponse:
-    ok, message = runtime_control.stop_all_senders()
-    snapshot = _load_or_build_live_snapshot(activity_hours=24, tail_lines=12)
-    _append_campaign_history(
-        "stop_all_completed" if ok else "stop_all_failed",
-        profile="all",
-        snapshot=snapshot,
-        blocked_reasons=[] if ok else [message],
-    )
+    global _STOP_ALL_ACTIVE_JOB_ID
+    with _STOP_ALL_JOB_LOCK:
+        active_job = _STOP_ALL_JOBS.get(_STOP_ALL_ACTIVE_JOB_ID)
+        if isinstance(active_job, dict) and str(active_job.get("status") or "") in {"PLANNING", "RUNNING"}:
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "status": str(active_job.get("status") or "RUNNING"),
+                    "message": "Stop All Senders is already running.",
+                    "job_id": str(active_job.get("job_id") or ""),
+                    "job": dict(active_job),
+                },
+                status_code=202,
+            )
+        targets = _stop_all_targets()
+        job_id = f"stop_all_{uuid.uuid4().hex}"
+        now = iso_utc()
+        job = {
+            "job_id": job_id,
+            "status": "PLANNING" if targets else "COMPLETE",
+            "created_at_utc": now,
+            "updated_at_utc": now,
+            "completed_at_utc": now if not targets else "",
+            "target_profiles": targets,
+            "remaining_profiles": [],
+            "results": [
+                _stop_all_result_item(profile, "STOPPING", "Queued for cooperative stop.")
+                for profile in targets
+            ],
+            "cancellable": False,
+            "message": (
+                f"Stop All Senders accepted for {len(targets)} active sender(s)."
+                if targets
+                else "No operational production sender workers are running."
+            ),
+        }
+        _STOP_ALL_JOBS[job_id] = job
+        if targets:
+            _STOP_ALL_ACTIVE_JOB_ID = job_id
+        while len(_STOP_ALL_JOBS) > _STOP_ALL_JOB_LIMIT:
+            oldest = next(iter(_STOP_ALL_JOBS))
+            if oldest == job_id:
+                break
+            _STOP_ALL_JOBS.pop(oldest, None)
+    if targets:
+        _SENDER_STOP_EXECUTOR.submit(_run_stop_all_job, job_id)
     return JSONResponse(
-        {"ok": ok, "message": message, "snapshot": snapshot},
-        status_code=200 if ok else 409,
+        {
+            "ok": True,
+            "status": str(job.get("status") or ""),
+            "message": str(job.get("message") or ""),
+            "job_id": job_id,
+            "job": dict(job),
+        },
+        status_code=202,
     )
+
+
+@app.get("/api/stop/status/{job_id}")
+def stop_status(job_id: str) -> JSONResponse:
+    job = _stop_all_job_snapshot(str(job_id or "").strip())
+    if job is None:
+        return JSONResponse(
+            {"ok": False, "message": "Stop All Senders job not found."},
+            status_code=404,
+        )
+    return JSONResponse({"ok": True, "job": job})
+
+
+@app.get("/api/stop/active")
+def stop_active() -> JSONResponse:
+    with _STOP_ALL_JOB_LOCK:
+        job = _STOP_ALL_JOBS.get(_STOP_ALL_ACTIVE_JOB_ID)
+        if isinstance(job, dict) and str(job.get("status") or "") in {"PLANNING", "RUNNING"}:
+            return JSONResponse({"ok": True, "active": True, "job": dict(job)})
+    return JSONResponse({"ok": True, "active": False, "job": None})
 
 
 @app.post("/api/stop/{profile_name}")
@@ -8446,6 +8845,12 @@ def preview_dispatch_important_leads(payload: ImportantLeadDispatchPayload | Non
         dispatch_source_mode = str(getattr(payload, "dispatch_source_mode", DISPATCH_SOURCE_TRIAGED_KEEP) if payload else DISPATCH_SOURCE_TRIAGED_KEEP).strip().lower() or DISPATCH_SOURCE_TRIAGED_KEEP
         dispatch_cap = str(getattr(payload, "dispatch_cap", DISPATCH_CAP_ALL) if payload else DISPATCH_CAP_ALL).strip().lower() or DISPATCH_CAP_ALL
         campaign_type = normalize_campaign_type(getattr(payload, "campaign_type", CAMPAIGN_TYPE_COLD) if payload else CAMPAIGN_TYPE_COLD)
+        if campaign_type == CAMPAIGN_TYPE_COLD:
+            requested_fresh_cold_route = str(
+                getattr(payload, "fresh_cold_route", "") if payload else ""
+            ).strip()
+            if requested_fresh_cold_route not in {"sendgrid", "private_jc", "both"}:
+                raise ValueError("Fresh Cold route must be sendgrid, private_jc, or both.")
         aliases = {
             "verified": DISPATCH_SOURCE_TRIAGED_KEEP,
             "fast_triage": DISPATCH_SOURCE_TRIAGED_KEEP,
@@ -8784,6 +9189,21 @@ def create_safer_recontact_pool(payload: ImportantLeadDispatchPayload | None = N
 
 
 def _dispatch_preflight_block_response(*, snapshot: dict[str, object] | None = None) -> JSONResponse | None:
+    current_snapshot = snapshot or _build_live_snapshot()
+    try:
+        assert_no_incomplete_dispatch_transaction()
+    except DispatchTransactionError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "blocked": True,
+                "reason": "dispatch_transaction_unresolved",
+                "error": "dispatch_transaction_unresolved",
+                "message": str(exc),
+                "snapshot": current_snapshot,
+            },
+            status_code=409,
+        )
     active_profiles = runtime_control.list_active_sender_snapshots(tail_lines=12)
     if not active_profiles:
         return None
@@ -8799,7 +9219,7 @@ def _dispatch_preflight_block_response(*, snapshot: dict[str, object] | None = N
             "active_sender_count": len(active_names),
             "states": states,
             "message": f"Dispatch blocked: stop active senders first. Active: {', '.join(sorted(states))}",
-            "snapshot": snapshot or _build_live_snapshot(),
+            "snapshot": current_snapshot,
         },
         status_code=409,
     )
@@ -8957,6 +9377,20 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
         requested_cap = str(getattr(payload, "dispatch_cap", preview.get("dispatch_cap") or DISPATCH_CAP_ALL) if payload else preview.get("dispatch_cap") or DISPATCH_CAP_ALL).strip().lower()
         if requested_cap and requested_cap != str(preview.get("dispatch_cap") or DISPATCH_CAP_ALL):
             raise RuntimeError("Dispatch preview does not match the selected cap. Re-run Preview Dispatch.")
+        sendgrid_rows_planned = int(
+            preview.get("sendgrid_planned_count")
+            or preview.get("rows_to_add_sendgrid")
+            or preview.get("added_sendgrid")
+            or 0
+        )
+        outcome_block = _sendgrid_outcome_confirm_block_response(
+            snapshot=_build_live_snapshot(),
+            sendgrid_rows=sendgrid_rows_planned,
+            override=bool(getattr(payload, "sendgrid_outcome_override", False) if payload else False),
+            override_reason=str(getattr(payload, "sendgrid_outcome_override_reason", "") if payload else ""),
+        )
+        if outcome_block is not None:
+            return outcome_block
         queue_paths_map = preview.get("queue_paths") or {}
         if not isinstance(queue_paths_map, dict):
             raise RuntimeError(
@@ -9988,16 +10422,37 @@ def _process_sendgrid_webhook_payload(
         WEBHOOK_DEDUPE_PATH,
         reference_utc=received_at,
     )
-    unique_events = list(dedupe_result.get("unique_events", []))
-    appended = append_events_jsonl(unique_events, WEBHOOK_EVENTS_PATH)
-    suppression_summary = update_suppressions_from_events(unique_events, SUPPRESSION_CSV)
-    ledger_summary = ingest_send_outcome_events(unique_events, db_path=settings.LEAD_LEDGER_DB_PATH)
-    auto_stops = runtime_control.apply_delivery_guards()
+    work_events = list(dedupe_result.get("unique_events", []))
+    events_needing_log = list(dedupe_result.get("events_needing_log", work_events))
+    appended = 0
+    try:
+        appended = append_events_jsonl(events_needing_log, WEBHOOK_EVENTS_PATH)
+        mark_webhook_events_logged(
+            events_needing_log,
+            WEBHOOK_DEDUPE_PATH,
+            reference_utc=received_at,
+        )
+        suppression_summary = update_suppressions_from_events(work_events, SUPPRESSION_CSV)
+        ledger_summary = ingest_send_outcome_events(
+            work_events,
+            db_path=settings.LEAD_LEDGER_DB_PATH,
+        )
+        auto_stops = runtime_control.apply_delivery_guards()
+    except Exception as exc:
+        mark_webhook_events_failed(work_events, WEBHOOK_DEDUPE_PATH, str(exc))
+        raise
+    mark_webhook_events_applied(
+        work_events,
+        WEBHOOK_DEDUPE_PATH,
+        reference_utc=received_at,
+    )
     return {
         "ok": True,
         "received": len(payload),
         "normalized": len(normalized),
         "stored": appended,
+        "processed": len(work_events),
+        "retried": int(dedupe_result.get("retries", 0) or 0),
         "duplicates_ignored": int(dedupe_result.get("duplicates", 0) or 0),
         "suppression_summary": {
             "updated_events": int(suppression_summary.get("updated_events", 0) or 0),
@@ -10010,6 +10465,7 @@ def _process_sendgrid_webhook_payload(
             "matched_events": int(ledger_summary.get("matched_events", 0) or 0),
             "unmatched_events": int(ledger_summary.get("unmatched_events", 0) or 0),
             "ignored_events": int(ledger_summary.get("ignored_events", 0) or 0),
+            "duplicate_events": int(ledger_summary.get("duplicate_events", 0) or 0),
             "dispatch_rows_updated": int(ledger_summary.get("dispatch_rows_updated", 0) or 0),
             "lead_rows_updated": int(ledger_summary.get("lead_rows_updated", 0) or 0),
             "suppressed_events": int(ledger_summary.get("suppressed_events", 0) or 0),
@@ -10039,7 +10495,6 @@ async def _process_sendgrid_webhook_payload_async(
 
 @app.post("/webhooks/sendgrid/events")
 async def sendgrid_event_webhook(request: Request) -> JSONResponse:
-    raw_body = await request.body()
     if not SENDGRID_EVENT_PUBLIC_KEY:
         return JSONResponse(
             {
@@ -10049,12 +10504,30 @@ async def sendgrid_event_webhook(request: Request) -> JSONResponse:
             },
             status_code=503,
         )
+
     signature = request.headers.get(SENDGRID_SIG_HEADER, "")
     timestamp = request.headers.get(SENDGRID_TS_HEADER, "")
     if not signature:
         return JSONResponse({"ok": False, "message": "Missing SendGrid signature header."}, status_code=401)
     if not timestamp:
         return JSONResponse({"ok": False, "message": "Missing SendGrid timestamp header."}, status_code=401)
+    if not _sendgrid_webhook_timestamp_fresh(timestamp):
+        return JSONResponse(
+            {"ok": False, "message": "Stale or invalid SendGrid webhook timestamp."},
+            status_code=401,
+        )
+    try:
+        raw_body = await _read_request_body_limited(request, SENDGRID_WEBHOOK_MAX_BYTES)
+    except OverflowError:
+        return JSONResponse(
+            {"ok": False, "message": "SendGrid webhook payload is too large."},
+            status_code=413,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "message": str(exc)},
+            status_code=400,
+        )
     try:
         verified = _verify_sendgrid_signature(raw_body, signature, timestamp)
     except Exception:
@@ -10068,6 +10541,11 @@ async def sendgrid_event_webhook(request: Request) -> JSONResponse:
 
     if not isinstance(payload, list):
         return JSONResponse({"ok": False, "message": "Expected JSON array."}, status_code=400)
+    if len(payload) > SENDGRID_WEBHOOK_MAX_EVENTS:
+        return JSONResponse(
+            {"ok": False, "message": "Too many SendGrid webhook events in one request."},
+            status_code=413,
+        )
 
     received_at = datetime.now(timezone.utc)
     result = await _process_sendgrid_webhook_payload_async(

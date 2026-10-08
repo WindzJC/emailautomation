@@ -37,6 +37,7 @@ from runtime_authority import (  # noqa: E402
     AuthorityError,
     authority_path,
     assert_send_authorized,
+    critical_code_manifest_hash,
     current_machine,
     generation_floor_path,
     load_authority,
@@ -864,6 +865,7 @@ def export_runtime(
         "created_utc": utc_now(),
         "expected_git_commit": expected_commit,
         "runtime_manifest_hash": "pending",
+        "critical_code_manifest_hash": critical_code_manifest_hash(repo),
         "status": "handoff_in_progress",
     }
     # This is deliberately first: every later failure leaves the source unable to send.
@@ -890,6 +892,7 @@ def export_runtime(
                 "expected_git_commit": expected_commit,
                 "source_generation": active["generation"],
                 "runtime_manifest_hash": runtime_hash,
+                "critical_code_manifest_hash": handoff_authority["critical_code_manifest_hash"],
                 "files": entries,
                 "queue_row_counts": queues,
                 "log_record_counts": logs,
@@ -1264,6 +1267,11 @@ def extract_and_verify(bundle: Path, staging: Path) -> tuple[dict[str, Any], dic
             manifest.get("runtime_manifest_hash"),
             bundled_authority.get("runtime_manifest_hash"),
         ),
+        (
+            "critical_code_manifest_hash",
+            manifest.get("critical_code_manifest_hash"),
+            bundled_authority.get("critical_code_manifest_hash"),
+        ),
     )
     for field, left, right in matching:
         if not left or left != right:
@@ -1337,6 +1345,7 @@ def mark_target_disabled(
         target = current["target_machine"]
         commit = current["expected_git_commit"]
         runtime_hash = current["runtime_manifest_hash"]
+        critical_code_hash = str(current.get("critical_code_manifest_hash") or "").strip()
         authorized = current["authorized_machine"]
     except AuthorityError:
         identity = machine or current_machine()
@@ -1349,6 +1358,10 @@ def mark_target_disabled(
         target = identity
         commit = str((metadata or {}).get("expected_git_commit") or git(repo, "rev-parse", "HEAD"))
         runtime_hash = str((metadata or {}).get("runtime_manifest_hash") or "import-not-verified")
+        critical_code_hash = str(
+            (metadata or {}).get("critical_code_manifest_hash")
+            or critical_code_manifest_hash(repo)
+        )
         authorized = identity
     write_authority(
         repo,
@@ -1361,6 +1374,7 @@ def mark_target_disabled(
             "created_utc": utc_now(),
             "expected_git_commit": commit,
             "runtime_manifest_hash": runtime_hash,
+            **({"critical_code_manifest_hash": critical_code_hash} if critical_code_hash else {}),
             "status": status,
         },
     )
@@ -2533,7 +2547,10 @@ def _normal_queue_progress_match(
     dispatch_queue_key = queue_path.stem.removeprefix("recipients_")
     result["dispatch_queue_key"] = dispatch_queue_key
 
-    if not dispatch_queue_key.startswith("sendgrid_"):
+    if (
+        not dispatch_queue_key.startswith("sendgrid_")
+        and dispatch_queue_key != "private_jc"
+    ):
         result["failed_predicates"].append(
             "normal_progress_dispatch_queue_key_valid"
         )
@@ -3740,6 +3757,8 @@ def preflight_queue_safety(
             "safe": False,
             "profile": profile,
             "verified_emergency_queue_progress": False,
+            "verified_normal_queue_progress": False,
+            "verified_queue_progress": False,
             "failed_predicates": ["active_profile_report_present"],
             "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
         }
@@ -3749,17 +3768,31 @@ def preflight_queue_safety(
             "safe": False,
             "profile": profile,
             "verified_emergency_queue_progress": False,
+            "verified_normal_queue_progress": False,
+            "verified_queue_progress": False,
             "failed_predicates": ["profile_preview_report_present"],
             "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
         }
+    unsafe_reasons = list(safety.get("unsafe_reasons") or [])
+    ignored_other_profile_preview_staleness = bool(
+        preview.get("safe")
+        and unsafe_reasons == ["active profile preview is stale or invalid"]
+    )
     return {
-        "safe": bool(safety.get("safe")),
+        "safe": bool(safety.get("safe")) or ignored_other_profile_preview_staleness,
         "profile": profile,
         "verified_emergency_queue_progress": bool(
             preview.get("verified_emergency_queue_progress")
         ),
+        "verified_normal_queue_progress": bool(
+            preview.get("verified_normal_queue_progress")
+        ),
+        "verified_queue_progress": bool(preview.get("verified_queue_progress"))
+        or bool(preview.get("verified_emergency_queue_progress"))
+        or bool(preview.get("verified_normal_queue_progress")),
         "failed_predicates": list(preview.get("failed_predicates") or []),
-        "unsafe_reasons": list(safety.get("unsafe_reasons") or []),
+        "unsafe_reasons": unsafe_reasons,
+        "ignored_other_profile_preview_staleness": ignored_other_profile_preview_staleness,
     }
 
 
@@ -4824,6 +4857,9 @@ def activate_import(
         "created_utc": created_utc or utc_now(),
         "expected_git_commit": expected_git_commit
         or bundled_authority["expected_git_commit"],
+        # Seal authority to the code that will actually execute on this target,
+        # not merely to the source machine's handoff-time hash.
+        "critical_code_manifest_hash": critical_code_manifest_hash(repo),
         "status": ACTIVE_STATUS,
     }
     # Advancing the floor first can only leave the target disabled if the final
@@ -5037,6 +5073,7 @@ def initialize_authority(
         "created_utc": utc_now(),
         "expected_git_commit": git(repo, "rev-parse", "HEAD"),
         "runtime_manifest_hash": "bootstrap-no-runtime-bundle",
+        "critical_code_manifest_hash": critical_code_manifest_hash(repo),
         "status": ACTIVE_STATUS,
     }
     write_authority(repo, payload)

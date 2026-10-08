@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from zoneinfo import ZoneInfo
 
+from durable_io import secure_private_file
 from recipient_file_lock import lock_files
 
 
@@ -589,6 +590,7 @@ def load_events_jsonl(path: Path) -> List[Dict[str, str]]:
 def _connect_webhook_dedupe_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
+    secure_private_file(path, strict=True)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS webhook_event_dedupe (
@@ -601,10 +603,29 @@ def _connect_webhook_dedupe_db(path: Path) -> sqlite3.Connection:
             first_received_utc TEXT NOT NULL,
             last_received_utc TEXT NOT NULL,
             expires_at_utc TEXT NOT NULL,
-            duplicate_hits INTEGER NOT NULL DEFAULT 0
+            duplicate_hits INTEGER NOT NULL DEFAULT 0,
+            processing_state TEXT NOT NULL DEFAULT 'applied',
+            applied_at_utc TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            event_logged INTEGER NOT NULL DEFAULT 1,
+            processing_attempts INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(webhook_event_dedupe)").fetchall()
+    }
+    migrations = {
+        "processing_state": "TEXT NOT NULL DEFAULT 'applied'",
+        "applied_at_utc": "TEXT NOT NULL DEFAULT ''",
+        "last_error": "TEXT NOT NULL DEFAULT ''",
+        "event_logged": "INTEGER NOT NULL DEFAULT 1",
+        "processing_attempts": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, ddl in migrations.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE webhook_event_dedupe ADD COLUMN {column} {ddl}")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS webhook_duplicate_hits (
@@ -616,6 +637,9 @@ def _connect_webhook_dedupe_db(path: Path) -> sqlite3.Connection:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_webhook_event_dedupe_expires_at ON webhook_event_dedupe(expires_at_utc)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_webhook_event_dedupe_state ON webhook_event_dedupe(processing_state)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_webhook_duplicate_hits_seen_at ON webhook_duplicate_hits(seen_at_utc)"
@@ -643,8 +667,12 @@ def dedupe_webhook_events(
     reference = reference_utc or now_utc()
     expires_at = iso_utc(reference + timedelta(days=max(1, ttl_days)))
     received_events = list(events)
-    unique_events: List[Dict[str, str]] = []
+    work_events: List[Dict[str, str]] = []
+    new_events: List[Dict[str, str]] = []
+    retry_events: List[Dict[str, str]] = []
+    events_needing_log: List[Dict[str, str]] = []
     duplicates = 0
+    seen_in_request: Set[str] = set()
 
     with _connect_webhook_dedupe_db(path) as conn:
         _prune_webhook_dedupe_store(conn, reference, ttl_days=ttl_days)
@@ -652,6 +680,22 @@ def dedupe_webhook_events(
             dedupe_key = (event.get("dedupe_key") or "").strip() or compute_webhook_dedupe_key(event)
             event["dedupe_key"] = dedupe_key
             received_at = (event.get("received_at_utc") or "").strip() or iso_utc(reference)
+            if dedupe_key in seen_in_request:
+                duplicates += 1
+                conn.execute(
+                    """
+                    UPDATE webhook_event_dedupe
+                    SET last_received_utc = ?, duplicate_hits = duplicate_hits + 1, expires_at_utc = ?
+                    WHERE dedupe_key = ?
+                    """,
+                    (received_at, expires_at, dedupe_key),
+                )
+                conn.execute(
+                    "INSERT INTO webhook_duplicate_hits (dedupe_key, seen_at_utc) VALUES (?, ?)",
+                    (dedupe_key, received_at),
+                )
+                continue
+            seen_in_request.add(dedupe_key)
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO webhook_event_dedupe (
@@ -663,8 +707,13 @@ def dedupe_webhook_events(
                     processed_at_utc,
                     first_received_utc,
                     last_received_utc,
-                    expires_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    expires_at_utc,
+                    processing_state,
+                    applied_at_utc,
+                    last_error,
+                    event_logged,
+                    processing_attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', '', 0, 1)
                 """,
                 (
                     dedupe_key,
@@ -679,29 +728,132 @@ def dedupe_webhook_events(
                 ),
             )
             if cursor.rowcount:
-                unique_events.append(event)
+                work_events.append(event)
+                new_events.append(event)
+                events_needing_log.append(event)
                 continue
 
-            duplicates += 1
+            existing = conn.execute(
+                """
+                SELECT processing_state, event_logged
+                FROM webhook_event_dedupe
+                WHERE dedupe_key = ?
+                """,
+                (dedupe_key,),
+            ).fetchone()
+            state = str((existing[0] if existing else "") or "").strip().lower()
+            event_logged = bool(int((existing[1] if existing else 0) or 0))
+            if state == "applied":
+                duplicates += 1
+                conn.execute(
+                    """
+                    UPDATE webhook_event_dedupe
+                    SET last_received_utc = ?, duplicate_hits = duplicate_hits + 1, expires_at_utc = ?
+                    WHERE dedupe_key = ?
+                    """,
+                    (received_at, expires_at, dedupe_key),
+                )
+                conn.execute(
+                    "INSERT INTO webhook_duplicate_hits (dedupe_key, seen_at_utc) VALUES (?, ?)",
+                    (dedupe_key, received_at),
+                )
+                continue
+
+            retry_events.append(event)
+            work_events.append(event)
+            if not event_logged:
+                events_needing_log.append(event)
             conn.execute(
                 """
                 UPDATE webhook_event_dedupe
-                SET last_received_utc = ?, duplicate_hits = duplicate_hits + 1, expires_at_utc = ?
+                SET
+                    last_received_utc = ?,
+                    expires_at_utc = ?,
+                    processing_state = 'pending',
+                    processing_attempts = processing_attempts + 1
                 WHERE dedupe_key = ?
                 """,
                 (received_at, expires_at, dedupe_key),
             )
-            conn.execute(
-                "INSERT INTO webhook_duplicate_hits (dedupe_key, seen_at_utc) VALUES (?, ?)",
-                (dedupe_key, received_at),
-            )
 
     return {
-        "unique_events": unique_events,
+        "unique_events": work_events,
+        "new_events": new_events,
+        "retry_events": retry_events,
+        "events_needing_log": events_needing_log,
         "received": len(received_events),
-        "stored": len(unique_events),
+        "stored": len(new_events),
+        "retries": len(retry_events),
         "duplicates": duplicates,
     }
+
+
+def _webhook_event_keys(events: Iterable[Dict[str, str]]) -> List[str]:
+    return [
+        str(event.get("dedupe_key") or "").strip()
+        for event in events
+        if str(event.get("dedupe_key") or "").strip()
+    ]
+
+
+def mark_webhook_events_logged(
+    events: Iterable[Dict[str, str]],
+    path: Path,
+    reference_utc: Optional[datetime] = None,
+) -> None:
+    keys = _webhook_event_keys(events)
+    if not keys:
+        return
+    received_at = iso_utc(reference_utc or now_utc())
+    with _connect_webhook_dedupe_db(path) as conn:
+        conn.executemany(
+            """
+            UPDATE webhook_event_dedupe
+            SET event_logged = 1, last_received_utc = ?
+            WHERE dedupe_key = ?
+            """,
+            [(received_at, key) for key in keys],
+        )
+
+
+def mark_webhook_events_applied(
+    events: Iterable[Dict[str, str]],
+    path: Path,
+    reference_utc: Optional[datetime] = None,
+) -> None:
+    keys = _webhook_event_keys(events)
+    if not keys:
+        return
+    applied_at = iso_utc(reference_utc or now_utc())
+    with _connect_webhook_dedupe_db(path) as conn:
+        conn.executemany(
+            """
+            UPDATE webhook_event_dedupe
+            SET processing_state = 'applied', applied_at_utc = ?, last_error = ''
+            WHERE dedupe_key = ?
+            """,
+            [(applied_at, key) for key in keys],
+        )
+
+
+def mark_webhook_events_failed(
+    events: Iterable[Dict[str, str]],
+    path: Path,
+    error: str,
+) -> None:
+    keys = _webhook_event_keys(events)
+    if not keys:
+        return
+    message = str(error or "webhook processing failed")[:2000]
+    with _connect_webhook_dedupe_db(path) as conn:
+        conn.executemany(
+            """
+            UPDATE webhook_event_dedupe
+            SET processing_state = 'failed', last_error = ?
+            WHERE dedupe_key = ?
+            """,
+            [(message, key) for key in keys],
+        )
 
 
 def load_webhook_dedupe_stats(

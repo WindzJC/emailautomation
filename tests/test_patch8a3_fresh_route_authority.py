@@ -122,8 +122,9 @@ def test_dashboard_and_frontend_contract_is_explicit() -> None:
     app = Path("web_dashboard/app.js").read_text(encoding="utf-8")
     assert 'fresh_cold_route: str = ""' in dash
     assert '"fresh_cold_route": str(fresh_cold_route or "").strip()' in dash
-    assert 'fresh_cold_route=requested_fresh_cold_route' in dash
-    assert 'data-fresh-cold-route' in app
+    assert 'Fresh Cold route must be sendgrid, private_jc, or both.' in dash
+    assert 'Fresh Cold route is missing or mismatched. Re-run Preview Dispatch.' in dash
+    assert 'data-fresh-cold-route aria-label="Fresh Cold Route"' in app
     assert 'value="sendgrid"' in app
     assert 'value="private_jc"' in app
     assert 'value="both"' in app

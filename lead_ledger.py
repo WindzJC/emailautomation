@@ -13,7 +13,7 @@ from leads_workflow import iso_utc
 from sendgrid_hygiene import norm_email
 
 
-LEAD_LEDGER_SCHEMA_VERSION = 5
+LEAD_LEDGER_SCHEMA_VERSION = 6
 LEAD_LEDGER_DB_PATH = settings.LEAD_LEDGER_DB_PATH
 
 LEAD_LEDGER_GLOBAL_BLOCK_PREDICATE_SQL = """
@@ -458,6 +458,22 @@ def ensure_lead_ledger_schema(conn: sqlite3.Connection) -> None:
                     ON lead_ledger(current_status, score DESC, updated_at DESC, lead_id DESC)
                     """
                 )
+        if current_version < 6:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS lead_outcome_event_dedupe (
+                    dedupe_key TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL DEFAULT '',
+                    provider_message_id TEXT NOT NULL DEFAULT '',
+                    email TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    applied_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_lead_outcome_event_status ON lead_outcome_event_dedupe(status)"
+            )
         conn.execute(f"PRAGMA user_version = {LEAD_LEDGER_SCHEMA_VERSION}")
 
 
@@ -1534,6 +1550,7 @@ def ingest_send_outcome_events(
         "matched_events": 0,
         "unmatched_events": 0,
         "ignored_events": 0,
+        "duplicate_events": 0,
         "dispatch_rows_updated": 0,
         "lead_rows_updated": 0,
         "suppressed_events": 0,
@@ -1544,24 +1561,69 @@ def ingest_send_outcome_events(
 
     conn = connect_lead_ledger(db_path)
     try:
-        for event in received:
-            result = record_dispatch_outcome(conn, event)
-            status = _strip(result.get("status"))
-            if status:
-                outcome_counts = dict(summary["outcome_counts"])
-                outcome_counts[status] = int(outcome_counts.get(status, 0) or 0) + 1
-                summary["outcome_counts"] = outcome_counts
-            if result.get("ignored"):
-                summary["ignored_events"] += 1
-                continue
-            if result.get("matched"):
-                summary["matched_events"] += 1
-                summary["dispatch_rows_updated"] += 1
-                summary["lead_rows_updated"] += 1
-                if result.get("auto_suppressed"):
-                    summary["suppressed_events"] += 1
-            else:
-                summary["unmatched_events"] += 1
+        with conn:
+            for event in received:
+                dedupe_key = _strip(event.get("dedupe_key"))
+                dedupe_inserted = False
+                if dedupe_key:
+                    cursor = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO lead_outcome_event_dedupe (
+                            dedupe_key,
+                            event_id,
+                            provider_message_id,
+                            email,
+                            status,
+                            applied_at_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            dedupe_key,
+                            _strip(event.get("event_id")),
+                            canonical_provider_message_id(
+                                event.get("message_id") or event.get("provider_message_id")
+                            ),
+                            norm_email(_strip(event.get("email"))),
+                            _strip(event.get("status") or event.get("event")),
+                            _strip(
+                                event.get("received_at_utc")
+                                or event.get("processed_at_utc")
+                            )
+                            or iso_utc(),
+                        ),
+                    )
+                    dedupe_inserted = bool(cursor.rowcount)
+                    if not dedupe_inserted:
+                        summary["duplicate_events"] += 1
+                        summary["ignored_events"] += 1
+                        continue
+
+                result = record_dispatch_outcome(
+                    conn,
+                    event,
+                    manage_transaction=False,
+                )
+                status = _strip(result.get("status"))
+                if status:
+                    outcome_counts = dict(summary["outcome_counts"])
+                    outcome_counts[status] = int(outcome_counts.get(status, 0) or 0) + 1
+                    summary["outcome_counts"] = outcome_counts
+                if result.get("ignored"):
+                    summary["ignored_events"] += 1
+                    continue
+                if result.get("matched"):
+                    summary["matched_events"] += 1
+                    summary["dispatch_rows_updated"] += 1
+                    summary["lead_rows_updated"] += 1
+                    if result.get("auto_suppressed"):
+                        summary["suppressed_events"] += 1
+                else:
+                    summary["unmatched_events"] += 1
+                    if dedupe_inserted and dedupe_key:
+                        conn.execute(
+                            "DELETE FROM lead_outcome_event_dedupe WHERE dedupe_key = ?",
+                            (dedupe_key,),
+                        )
     finally:
         conn.close()
     return summary

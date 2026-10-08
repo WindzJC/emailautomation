@@ -179,10 +179,32 @@ class WebDashboardAppTests(unittest.TestCase):
         hydration_start = source.index("async function hydrateImportantLeadCheckJobOnLoad()")
         hydration_end = source.index("function stopImportantLeadVerifyJobPolling()", hydration_start)
         hydration = source[hydration_start:hydration_end]
-        self.assertIn('if (String(err || "").includes("not found"))', hydration)
-        self.assertIn("clearSavedImportantLeadCheckJobId(savedJobId)", hydration)
+        self.assertIn('fetchJson("/api/leads/check-important/active")', hydration)
+        self.assertIn("data.status?.active_important_check_jobs", hydration)
+        self.assertIn("lastImportantLeadCheckJob = null", hydration)
+        self.assertIn('clearSavedImportantLeadCheckJobId("", uploadType)', hydration)
         self.assertIn("importantLeadCheckJobPollId !== savedJobId", hydration)
-        self.assertIn("void pollImportantLeadCheckJob(savedJobId, selectedLeadUploadType())", hydration)
+        self.assertIn("void pollImportantLeadCheckJob(savedJobId, uploadType)", hydration)
+        active_lookup = hydration.index('fetchJson("/api/leads/check-important/active")')
+        saved_lookup = hydration.index("/api/leads/check-important/job/${encodeURIComponent(savedJobId)}")
+        self.assertLess(active_lookup, saved_lookup)
+
+    def test_fresh_cold_route_defaults_to_sendgrid_on_dashboard_load(self) -> None:
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('const DEFAULT_FRESH_COLD_ROUTE = "sendgrid"', source)
+        self.assertIn("selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE", source)
+        self.assertNotIn("readSavedFreshColdRoute()", source)
+        self.assertNotIn("localStorage.setItem(FRESH_COLD_ROUTE_STORAGE_KEY, route)", source)
+        self.assertIn("saveFreshColdRoute(nextRoute)", source)
+        self.assertIn('<option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — Split</option>', source)
+        bootstrap_start = source.index("async function bootstrapAuthenticatedDashboard()")
+        bootstrap_end = source.index("async function bootstrapDashboard()", bootstrap_start)
+        bootstrap = source[bootstrap_start:bootstrap_end]
+        self.assertIn("resetFreshColdRouteForPageLoad();", bootstrap)
+        self.assertLess(
+            bootstrap.index("resetFreshColdRouteForPageLoad();"),
+            bootstrap.index("if (isLeadsTabVisible())"),
+        )
 
     def test_preview_subordinate_state_and_recovery_binding_survive_refresh(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")

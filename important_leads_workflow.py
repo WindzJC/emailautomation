@@ -22,6 +22,16 @@ from typing import Callable, Dict, Iterable, List, Sequence
 
 import settings
 import runtime_control
+from dispatch_transaction_guard import (
+    active_dispatch_transaction,
+    assert_no_incomplete_dispatch_transaction,
+    begin_dispatch_transaction,
+    create_recovery_file_backups,
+    journal_path as dispatch_transaction_journal_path,
+    mark_dispatch_transaction_terminal,
+    update_dispatch_transaction,
+)
+from durable_io import durable_replace
 from email_validator import EmailNotValidError, EmailSyntaxError, EmailUndeliverableError, validate_email
 from lead_ledger import connect_lead_ledger, deterministic_lead_id, dispatch_history_state, load_lead_by_id, record_dispatch_event, source_row_hash, upsert_lead
 from leads_workflow import iso_utc, load_state, save_state, timestamp_slug, write_json_atomic
@@ -780,8 +790,7 @@ def _write_csv_atomic(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict
         writer = csv.DictWriter(handle, fieldnames=list(fieldnames), extrasaction="ignore")
         writer.writeheader()
         writer.writerows(row_list)
-    tmp_path.replace(path)
-    settings.secure_private_file(path)
+    durable_replace(tmp_path, path, mode=settings.PRIVATE_FILE_MODE)
 
 
 def _stage_csv_payload(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, str]]) -> Path:
@@ -4572,6 +4581,8 @@ def confirm_dispatch_preview(
     rollback_dirs: List[Path] = []
     temporary_paths: List[Path] = []
     temporary_dirs: List[Path] = []
+    dispatch_journal = dispatch_transaction_journal_path(report_dir)
+    assert_no_incomplete_dispatch_transaction(dispatch_journal)
     with ExitStack() as lock_stack:
         try:
             return _confirm_dispatch_preview_impl(
@@ -4591,11 +4602,17 @@ def confirm_dispatch_preview(
                 _temporary_paths=temporary_paths,
                 _temporary_dirs=temporary_dirs,
             )
-        except Exception:
+        except Exception as exc:
             for directory in reversed(rollback_dirs):
                 if directory.exists():
                     shutil.rmtree(directory)
             _restore_file_snapshots(snapshots)
+            if active_dispatch_transaction(dispatch_journal):
+                mark_dispatch_transaction_terminal(
+                    "rolled_back",
+                    path=dispatch_journal,
+                    error=str(exc),
+                )
             raise
         finally:
             for path in temporary_paths:
@@ -4753,6 +4770,8 @@ def _confirm_dispatch_preview_impl(
         raise RuntimeError(f"Refusing to confirm dispatch: planned queue safety is unsafe ({reasons}).")
 
     run_id = f"dispatch_run_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    transaction_id = f"dispatch_txn_{timestamp_slug()}_{uuid.uuid4().hex[:8]}"
+    dispatch_journal = dispatch_transaction_journal_path(report_dir)
     started_at_utc = iso_utc()
     backup_dir = backup_root / f"dispatch_{timestamp_slug()}"
     if backup_dir.exists():
@@ -4771,6 +4790,48 @@ def _confirm_dispatch_preview_impl(
         _snapshot_file(path, _snapshots)
     _rollback_dirs.append(backup_dir)
     _copy_queue_backups(queue_paths, backup_dir)
+
+    ledger_path_text = str(effective_preview.get("lead_ledger_db_path") or "").strip()
+    ledger_path = _lead_ledger_db_path(Path(ledger_path_text) if ledger_path_text else None)
+    preview_path = _dispatch_preview_path(preview_id, preview_dir)
+    active_manifest_target = active_campaign_manifest_path(report_dir)
+    history_path = report_dir / DISPATCH_RUN_HISTORY_PATH.name
+    report_path = report_dir / f"important_leads_dispatch_{timestamp_slug()}.json"
+    confirmed_summary_path = _unique_dispatch_archive_path(
+        report_dir / "dispatch_confirmed",
+        "dispatch_confirmed",
+    )
+    assigned_preview_archive_path: Path | None = None
+    if not str(preview.get("assigned_preview_archive_path") or "").strip():
+        assigned_preview_archive_path = _unique_dispatch_archive_path(
+            report_dir / "dispatch_previews",
+            "dispatch_preview",
+        )
+    recovery_paths = [
+        ledger_path,
+        active_manifest_target,
+        history_path,
+        settings.LEADS_STATE_PATH,
+        preview_path,
+        report_path,
+        confirmed_summary_path,
+        *[Path(item) for item in cleanup_paths.values()],
+    ]
+    if assigned_preview_archive_path is not None:
+        recovery_paths.append(assigned_preview_archive_path)
+    recovery_files = create_recovery_file_backups(recovery_paths, backup_dir)
+
+    begin_dispatch_transaction(
+        transaction_id=transaction_id,
+        preview_id=preview_id,
+        run_id=run_id,
+        backup_dir=backup_dir,
+        queue_paths=queue_paths,
+        campaign_type=campaign_type,
+        recovery_files=recovery_files,
+        path=dispatch_journal,
+    )
+    transaction_replaced_paths: List[str] = []
     final_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
     if _fault_injector:
         _fault_injector("before_first_replacement")
@@ -4779,15 +4840,25 @@ def _confirm_dispatch_preview_impl(
         start=1,
     ):
         final_rows_by_path[path] = list(effective_plan_rows_by_queue.get(key) or [])
-        staged_path.replace(path)
-        settings.secure_private_file(path)
+        durable_replace(staged_path, path, mode=settings.PRIVATE_FILE_MODE)
+        transaction_replaced_paths.append(str(path))
+        update_dispatch_transaction(
+            status="replacing",
+            phase=f"queue_replacement_{position}",
+            path=dispatch_journal,
+            replaced_paths=transaction_replaced_paths,
+        )
         if _fault_injector:
             _fault_injector(f"queue_replacement_{position}")
+    update_dispatch_transaction(
+        status="committing",
+        phase="queues_replaced",
+        path=dispatch_journal,
+        replaced_paths=transaction_replaced_paths,
+    )
     if _fault_injector:
         _fault_injector("after_sixth_replacement" if len(queue_paths) == 6 else "after_all_replacements")
 
-    ledger_path_text = str(effective_preview.get("lead_ledger_db_path") or "").strip()
-    ledger_path = _lead_ledger_db_path(Path(ledger_path_text) if ledger_path_text else None)
     for path in (
         ledger_path,
         Path(f"{ledger_path}-journal"),
@@ -4799,6 +4870,12 @@ def _confirm_dispatch_preview_impl(
         effective_preview,
         run_id=run_id,
         dispatched_at=started_at_utc,
+    )
+    update_dispatch_transaction(
+        status="committing",
+        phase="ledger_recorded",
+        path=dispatch_journal,
+        replaced_paths=transaction_replaced_paths,
     )
     if _fault_injector:
         _fault_injector("ledger_recording")
@@ -4953,7 +5030,6 @@ def _confirm_dispatch_preview_impl(
         if _normalize_dispatch_source_mode(preview.get("dispatch_source_mode")) == DISPATCH_SOURCE_TRIAGED_KEEP
         else Path(str(preview.get("dispatch_source_path") or manifest_checked_path))
     )
-    active_manifest_target = active_campaign_manifest_path(report_dir)
     _snapshot_file(active_manifest_target, _snapshots)
     active_manifest_path = write_active_campaign_manifest(
         checked_path=manifest_checked_path,
@@ -4986,7 +5062,8 @@ def _confirm_dispatch_preview_impl(
             else "Dispatch confirmed."
         )
     if not str(report.get("assigned_preview_archive_path") or "").strip():
-        assigned_preview_archive_path = _unique_dispatch_archive_path(report_dir / "dispatch_previews", "dispatch_preview")
+        if assigned_preview_archive_path is None:
+            raise RuntimeError("Dispatch preview archive path was not prepared before transaction start.")
         _snapshot_file(assigned_preview_archive_path, _snapshots)
         assigned_preview_archive_path = _archive_assigned_dispatch_preview(
             preview,
@@ -5001,7 +5078,6 @@ def _confirm_dispatch_preview_impl(
     report["sg3_added"] = int(report.get("assigned_sg3") or 0)
     report["sg4_added"] = int(report.get("assigned_sg4") or 0)
     report["sg5_added"] = int(report.get("assigned_sg5") or 0)
-    confirmed_summary_path = _unique_dispatch_archive_path(report_dir / "dispatch_confirmed", "dispatch_confirmed")
     _snapshot_file(confirmed_summary_path, _snapshots)
     confirmed_summary_path = _archive_confirmed_dispatch_summary(
         report,
@@ -5011,14 +5087,12 @@ def _confirm_dispatch_preview_impl(
     report["confirmed_summary_path"] = str(confirmed_summary_path)
     report["confirmed_summary_archive_path"] = str(confirmed_summary_path)
 
-    report_path = report_dir / f"important_leads_dispatch_{timestamp_slug()}.json"
     _snapshot_file(report_path, _snapshots)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_payload = dict(report)
     report_payload["report_path"] = str(report_path)
-    report_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_json_atomic(report_path, report_payload)
     report["report_path"] = str(report_path)
-    history_path = report_dir / DISPATCH_RUN_HISTORY_PATH.name
     _snapshot_file(history_path, _snapshots)
     _append_dispatch_run_history(report, history_path=history_path)
     if _fault_injector:
@@ -5027,7 +5101,6 @@ def _confirm_dispatch_preview_impl(
         _snapshot_file(settings.LEADS_STATE_PATH, _snapshots)
         save_state(**{MASTER_DISPATCH_STATE_KEY: report})
 
-    preview_path = _dispatch_preview_path(preview_id, preview_dir)
     _snapshot_file(preview_path, _snapshots)
     preview["status"] = "confirmed"
     preview["confirmed_at_utc"] = report["completed_at_utc"]
@@ -5035,6 +5108,10 @@ def _confirm_dispatch_preview_impl(
     _save_dispatch_preview(preview, preview_dir)
     if _fault_injector:
         _fault_injector("final_confirmation_state")
+    mark_dispatch_transaction_terminal(
+        "committed",
+        path=dispatch_journal,
+    )
     return report
 
 
@@ -5454,9 +5531,26 @@ def _active_sender_states() -> Dict[str, str]:
 
 def _copy_queue_backups(paths: Sequence[Path], backup_dir: Path) -> None:
     backup_dir.mkdir(parents=True, exist_ok=True)
+    settings.secure_private_dir(backup_dir)
     for path in paths:
-        if path.exists():
-            shutil.copy2(path, backup_dir / path.name)
+        if not path.exists():
+            continue
+        destination = backup_dir / path.name
+        with path.open("rb") as source, tempfile.NamedTemporaryFile(
+            "wb",
+            dir=backup_dir,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            shutil.copyfileobj(source, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            durable_replace(temporary, destination, mode=settings.PRIVATE_FILE_MODE)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def dispatch_master_leads(

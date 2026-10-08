@@ -93,14 +93,14 @@ export function SenderStartControls({
         const data = await response.json().catch(() => ({}));
         if (cancelled) return;
         if (!response.ok || data.ok === false || !data.job) {
-          setMessage(data.message || `Start Ready status failed (${response.status}). Do not retry Start; inspect job and runtime state.`);
+          setMessage(data.message || `Start All status failed (${response.status}). Do not retry Start; inspect job and runtime state.`);
           setPhase("status_error");
           return;
         }
         const job = data.job;
         setPayload(job);
         const status = String(job.status || "").toUpperCase();
-        setMessage(job.message || "Start Ready Senders is running.");
+        setMessage(job.message || "Start All Senders is running.");
         if (START_READY_TERMINAL_STATES.has(status)) {
           setPhase("terminal");
           onDashboardRefresh();
@@ -109,7 +109,7 @@ export function SenderStartControls({
         pollTimerRef.current = window.setTimeout(poll, pollIntervalMs);
       } catch (error) {
         if (cancelled) return;
-        setMessage(`Start Ready status is unavailable: ${error}. Do not retry Start; inspect job and runtime state.`);
+        setMessage(`Start All status is unavailable: ${error}. Do not retry Start; inspect job and runtime state.`);
         setPhase("status_error");
       }
     };
@@ -148,7 +148,7 @@ export function SenderStartControls({
       const response = await fetchImpl("/api/start-ready");
       const data = await response.json().catch(() => ({}));
       if (response.status === 409) {
-        beginPollingActiveJob(data, "A Start Ready job is already active. No new Start request was submitted.");
+        beginPollingActiveJob(data, "A Start All job is already active. No new Start request was submitted.");
         return;
       }
       if (!response.ok || data.ok === false) {
@@ -164,10 +164,10 @@ export function SenderStartControls({
         setPhase("empty");
         return;
       }
-      setMessage(data.message || "Review the authoritative plan, then confirm the single Start Ready transaction.");
+      setMessage(data.message || "Review the authoritative plan, then confirm the single Start All transaction.");
       setPhase("confirm");
     } catch (error) {
-      setMessage(`Unable to load Start Ready readiness: ${error}`);
+      setMessage(`Unable to load Start All readiness: ${error}`);
       setPhase("error");
     } finally {
       planInFlightRef.current = false;
@@ -179,21 +179,21 @@ export function SenderStartControls({
     postInFlightRef.current = true;
     postAttemptedRef.current = true;
     setPhase("posting");
-    setMessage("Submitting one Start Ready transaction...");
+    setMessage("Submitting one Start All transaction...");
     let response;
     let data;
     try {
       response = await fetchImpl("/api/start-ready", { method: "POST" });
       data = await response.json().catch(() => ({}));
     } catch (error) {
-      setMessage(`Start request outcome is unknown: ${error}. Do not retry. Inspect the Start Ready job and sender runtime state.`);
+      setMessage(`Start request outcome is unknown: ${error}. Do not retry. Inspect the Start All job and sender runtime state.`);
       setPhase("ambiguous");
       postInFlightRef.current = false;
       return;
     }
     postInFlightRef.current = false;
     if (response.status === 409) {
-      beginPollingActiveJob(data, "A Start Ready job is already active. The Start request will not be retried.");
+      beginPollingActiveJob(data, "A Start All job is already active. The Start request will not be retried.");
       return;
     }
     if (response.status !== 202 || !response.ok || data.ok === false || !data.job?.job_id) {
@@ -204,14 +204,14 @@ export function SenderStartControls({
     }
     setPayload(data.job);
     setJobId(String(data.job.job_id));
-    setMessage(data.job.message || "Start Ready job accepted.");
+    setMessage(data.job.message || "Start All job accepted.");
     setPhase("polling");
   };
 
   const cancelConfirmation = () => {
     if (phase !== "confirm" || postInFlightRef.current) return;
     setPhase("idle");
-    setMessage("Start Ready Senders cancelled. No Start request was submitted.");
+    setMessage("Start All Senders cancelled. No Start request was submitted.");
   };
 
   const readyCount = Array.isArray(payload?.ready_profiles)
@@ -223,16 +223,16 @@ export function SenderStartControls({
     : phase === "confirm"
       ? `Confirm Start ${readyCount} Senders`
       : phase === "posting"
-        ? "Submitting Start Ready..."
+        ? "Submitting Start All..."
         : phase === "polling"
-          ? "Start Ready in progress..."
+          ? "Start All in progress..."
           : phase === "ambiguous"
             ? "Start outcome unknown"
             : phase === "conflict"
-              ? "Start Ready already active"
+              ? "Start All already active"
               : phase === "status_error"
-                ? "Inspect active Start Ready job"
-                : "Start Ready Senders";
+                ? "Inspect active Start All job"
+                : "Start All Senders";
   const items = startReadyItems(payload || {});
 
   return (
@@ -242,6 +242,7 @@ export function SenderStartControls({
         className="btn btn-primary"
         type="button"
         disabled={disabled}
+        title="Review and start every eligible production sender. Unsafe, empty, and already-running lanes are skipped."
         onClick={phase === "confirm" ? confirmStart : loadPlan}
       >
         {primaryLabel}
@@ -259,7 +260,7 @@ export function SenderStartControls({
       {(payload || message) ? (
         <section id="react-start-ready-status" className="start-ready-status react-start-ready-status" aria-live="polite">
           <div className="start-ready-head">
-            <strong>{phase === "confirm" ? "Start Ready Senders review" : "Start Ready Senders"}</strong>
+            <strong>{phase === "confirm" ? "Start All Senders review" : "Start All Senders"}</strong>
             {message ? <span>{message}</span> : null}
           </div>
           {items.length ? (
@@ -305,6 +306,7 @@ export function CommandBar({ html }) {
         </div>
         <span className="react-section-state">Secondary controls</span>
       </div>
+      <SenderStartControls />
       {controls}
     </section>
   );
