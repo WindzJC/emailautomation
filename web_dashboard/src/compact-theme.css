@@ -1,0 +1,165 @@
+/*
+ * Astra compact theme (2026-10-08).
+ * Final presentation layer: loaded after tailwind.css from main.jsx.
+ * Styling only. No selectors here change behaviour; remove the import in
+ * main.jsx to return to the previous look.
+ */
+:root{--ax-bg:#0d1014;--ax-side:#11151b;--ax-surface:#12161c;--ax-raised:#161b22;--ax-line:#222933;--ax-line-soft:#1b2129;--ax-text:#e7ebf1;--ax-dim:#b4bdca;--ax-muted:#9ba6b5;--ax-blue:#7fb2ff;--ax-amber:#f0b45a;
+--ui-canvas:var(--ax-bg);--ui-sidebar:var(--ax-side);--ui-surface:var(--ax-surface);--ui-raised:var(--ax-raised);--ui-soft:var(--ax-surface);--ui-line:var(--ax-line);--ui-line-strong:#2e3744;--ui-text:var(--ax-text);--ui-muted:var(--ax-muted);--ui-blue:var(--ax-blue);--ui-amber:var(--ax-amber);
+--astra-canvas:var(--ax-bg);--astra-sidebar:var(--ax-side);--astra-surface:var(--ax-surface);--astra-surface-raised:var(--ax-raised);--astra-surface-soft:var(--ax-surface);--astra-border:var(--ax-line);--astra-border-strong:#2e3744;--astra-text:var(--ax-text);--astra-muted:var(--ax-muted);--astra-blue:var(--ax-blue);}
+
+/* ---- Shell ---- */
+html body{font-family:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.4;background:var(--ax-bg);color:var(--ax-text)}
+html body .react-dashboard.page{background:var(--ax-bg)}
+html body .react-app-shell.app-shell{grid-template-columns:184px minmax(0,1fr)!important;gap:0!important}
+html body .app-rail.react-sidebar{width:auto!important;min-width:0!important;max-width:none!important;overflow:hidden!important;padding:18px 12px!important;gap:18px!important;background:var(--ax-side)!important;border:0!important;border-right:1px solid var(--ax-line)!important;border-radius:0!important;box-shadow:none!important}
+html body .react-sidebar-brand{display:flex!important;align-items:baseline;gap:8px;padding:0 10px!important;min-height:0!important;border:0!important;margin:0!important}
+html body .react-brand-mark{font-size:18px!important;font-weight:600!important;letter-spacing:-.01em!important}
+html body .react-sidebar-brand .app-rail-top .eyebrow{display:none!important}
+html body .react-sidebar-brand .app-rail-title{font-size:12px!important;font-weight:400!important;color:var(--ax-muted)!important;line-height:1.2!important;white-space:nowrap!important}
+html body .react-sidebar-nav .app-rail-tabs{display:flex!important;flex-direction:column!important;gap:2px!important;padding:0!important;border:0!important;background:none!important}
+html body .react-sidebar-nav .tab-btn{width:100%!important;min-height:40px!important;padding:0 10px!important;border:0!important;border-radius:6px!important;background:transparent!important;color:var(--ax-dim)!important;font-size:14px!important;font-weight:400!important;text-align:left!important;justify-content:flex-start!important;box-shadow:none!important}
+html body .react-sidebar-nav .tab-btn.is-active{background:#1c232d!important;color:#fff!important;font-weight:500!important}
+html body .react-main.app-main{padding:18px 24px 28px!important}
+html body .react-workspace{gap:14px!important}
+html body .react-page-heading{align-items:center!important;min-height:0!important;padding:0!important;margin:0!important;border:0!important}
+html body .react-page-heading>div{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px}
+html body .react-page-heading .react-kicker{display:none!important}
+html body .react-page-heading h2{font-size:22px!important;font-weight:600!important;letter-spacing:-.01em!important;line-height:1.2!important;margin:0!important}
+html body .react-page-heading p{margin:0!important;color:var(--ax-dim)!important;font-size:14px!important}
+html body .react-status-pill{font-size:12px!important;padding:2px 10px!important;border-color:var(--ax-line)!important;background:transparent!important;color:var(--ax-muted)!important}
+html body .react-workspace .eyebrow,html body .react-workspace .react-section-label{font-size:11px!important;letter-spacing:.05em!important;color:var(--ax-muted)!important;margin:0!important}
+html body .react-workspace .panel.panel-shell,html body .react-workspace .react-environment-banner,html body .react-workspace .react-validation-tools{border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body .react-workspace .btn{border-radius:6px!important}
+html body .react-workspace .btn-primary:not(:disabled){background:var(--ax-blue)!important;border-color:var(--ax-blue)!important;color:#0a1220!important}
+
+/* ---- Overview: summary strip ---- */
+html body #overview-view #summary-grid.summary-grid{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))!important;gap:1px!important;background:var(--ax-line)!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;overflow:hidden!important;padding:0!important}
+html body #overview-view #summary-grid .summary-card{display:flex!important;align-items:baseline!important;justify-content:space-between!important;gap:10px!important;min-height:0!important;padding:10px 14px!important;border:0!important;border-radius:0!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body #overview-view #summary-grid .summary-card.summary-card-private_jc,html body #overview-view #summary-grid .summary-card[hidden],html body #overview-view #summary-grid .summary-card.hidden{display:none!important}
+html body #overview-view #summary-grid .summary-card::before,html body #overview-view #summary-grid .summary-card::after{display:none!important}
+html body #overview-view #summary-grid .summary-head{display:block!important;margin:0!important;padding:0!important;min-height:0!important;border:0!important}
+html body #overview-view #summary-grid .summary-spark{display:none!important}
+html body #overview-view #summary-grid .summary-label{font-size:13px!important;font-weight:400!important;text-transform:none!important;letter-spacing:0!important;color:var(--ax-muted)!important}
+html body #overview-view #summary-grid .fleet-module-body{display:flex!important;flex-direction:row-reverse!important;align-items:baseline!important;gap:10px!important;margin:0!important;padding:0!important;min-width:0}
+html body #overview-view #summary-grid .summary-value{font-size:16px!important;font-weight:600!important;line-height:1.3!important;white-space:nowrap;font-variant-numeric:tabular-nums}
+html body #overview-view #summary-grid .summary-note{font-size:12px!important;color:var(--ax-muted)!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0!important}
+html body #overview-view #summary-grid .summary-card-warn{background:#1f1a10!important}
+html body #overview-view #summary-grid .summary-card-warn .summary-label,html body #overview-view #summary-grid .summary-card-warn .summary-value{color:#f6d9a3!important}
+
+/* ---- Overview: controls and run progress row ---- */
+html body #overview-view .react-overview-live-grid{display:flex!important;flex-wrap:wrap!important;align-items:stretch!important;gap:14px!important;min-height:0!important}
+html body #overview-view .react-senders-progress{flex:999 1 420px!important;min-width:0!important;order:1}
+html body #overview-view .react-command-bar{flex:1 1 520px!important;order:2;display:flex!important;flex-wrap:nowrap!important;align-items:center!important;justify-content:flex-end!important;gap:8px!important;min-height:0!important;padding:0!important;border:0!important;background:none!important;box-shadow:none!important}
+html body #overview-view .react-command-bar .react-start-ready-control,html body #overview-view .react-command-bar .workspace-status-row,html body #overview-view .react-command-bar .workspace-header,html body #overview-view .react-command-bar .workspace-controls,html body #overview-view .react-command-bar .toolbar-actions{display:contents!important}
+html body #overview-view .react-command-bar .btn{min-height:40px!important;padding:0 14px!important;border-radius:6px!important;font-size:14px!important;order:1;flex:0 0 auto;white-space:nowrap}
+html body #overview-view .react-command-bar #start-ready-btn{order:3;background:var(--ax-blue)!important;color:#0a1220!important;border-color:var(--ax-blue)!important;font-weight:600!important}
+html body #overview-view .react-command-bar #start-ready-btn:disabled{background:transparent!important;color:#8a95a5!important;border-color:#2e3744!important}
+html body #overview-view .react-command-bar .manual-start-warning{order:0!important;flex:1 1 auto!important;min-width:0;margin:0!important;font-size:12px!important;line-height:1.35!important;color:var(--ax-muted)!important;text-align:right}
+html body #overview-view .react-senders-progress .ops-progress-strip{min-height:0!important;height:100%;padding:8px 14px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important;display:flex!important;align-items:center}
+html body #overview-view .ops-progress-summary-head{width:100%;align-items:center!important;gap:16px!important}
+html body #overview-view .ops-progress-summary-title{display:none!important}
+html body #overview-view .ops-progress-summary{flex:1 1 auto;min-width:0;display:flex!important;flex-wrap:wrap!important;gap:4px 28px!important}
+html body #overview-view .ops-progress-summary-item{width:auto!important;min-width:0!important;flex:0 1 auto!important;padding:0!important;border:0!important}
+html body #overview-view .ops-progress-summary-item strong{font-size:11px!important;color:var(--ax-muted)!important;font-weight:500!important}
+html body #overview-view .ops-progress-summary-item span{font-size:13px!important;color:var(--ax-text)!important}
+html body #overview-view .ops-progress-summary-action{white-space:nowrap;flex:0 0 auto;color:var(--ax-blue)!important}
+
+/* ---- Overview: senders table ---- */
+html body #overview-view .react-sender-console{gap:0!important}
+html body #overview-view #senders-table-panel{border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important;overflow:hidden}
+html body #overview-view #senders-table-panel .sender-status-head{display:none!important}
+html body #overview-view .sender-status-table{font-size:14px!important;font-variant-numeric:tabular-nums}
+html body #overview-view .sender-status-table th{height:30px!important;padding:0 14px!important;font-size:11px!important;font-weight:500!important;letter-spacing:.05em!important;text-transform:uppercase!important;color:var(--ax-muted)!important;background:transparent!important;border-bottom:1px solid var(--ax-line)!important}
+html body #overview-view .sender-status-table td{height:40px!important;padding:4px 14px!important;border-bottom:1px solid var(--ax-line-soft)!important;background:transparent!important;font-size:14px!important;vertical-align:middle!important}
+html body #overview-view .sender-status-table tbody tr{box-shadow:none!important;border:0!important}
+html body #overview-view .sender-status-table tbody tr:last-child td{border-bottom:0!important}
+html body #overview-view .sender-status-table tbody tr.is-selected td{background:var(--ax-raised)!important}
+html body #overview-view .sender-status-table tbody tr.is-selected td:first-child{box-shadow:inset 2px 0 0 var(--ax-blue)!important}
+html body #overview-view .sender-status-name-btn{font-size:14px!important;font-weight:500!important;color:var(--ax-text)!important}
+html body #overview-view .sender-status-profile-meta{font-size:12px!important;color:var(--ax-muted)!important}
+html body #overview-view .sender-status-pill{padding:0!important;border:0!important;background:none!important;min-height:0!important;font-size:14px!important;font-weight:400!important;letter-spacing:0!important;text-transform:none!important;color:var(--ax-dim)!important;display:inline-flex;align-items:center;gap:7px}
+html body #overview-view .sender-status-pill::before{content:"";width:7px;height:7px;border-radius:50%;box-sizing:border-box;border:1.5px solid #8a95a5;background:transparent;flex:none}
+html body #overview-view .sender-status-pill-good::before{border-color:#6fd0a8;background:#6fd0a8}
+html body #overview-view .sender-status-pill-warn::before,html body #overview-view .sender-status-pill-warning::before{border-color:var(--ax-amber);background:var(--ax-amber)}
+html body #overview-view .sender-status-pill-bad::before,html body #overview-view .sender-status-pill-danger::before{border-color:#ef8995;background:#ef8995}
+html body #overview-view .sender-status-pill-bad,html body #overview-view .sender-status-pill-danger{color:#f3b3bb!important}
+html body #overview-view .sender-status-pill-warn,html body #overview-view .sender-status-pill-warning{color:#f6d9a3!important}
+html body #overview-view .sender-status-activity{font-size:13px!important;color:var(--ax-dim)!important}
+/* Hide the Action column only while every row's action cell is the empty dash. */
+html body #overview-view .sender-status-table:not(:has(td:last-child > :not(.sender-status-action-empty))) :is(th,td):last-child{display:none!important}
+
+/* ---- Overview: profile detail ---- */
+html body #overview-view .react-supporting-panels{min-height:0!important}
+html body #overview-view #detail-panel{padding:14px!important}
+html body #overview-view #detail-panel .panel-header{padding:0 0 10px!important;margin:0!important;min-height:0!important;align-items:center!important}
+html body #overview-view #detail-panel .panel-header h2{font-size:15px!important;font-weight:600!important}
+html body #overview-view #detail-panel .detail-switcher .btn,html body #overview-view #detail-panel .detail-switcher select{min-height:36px!important;height:36px!important}
+html body #overview-view .detail-card{padding:14px!important;border-radius:8px!important;border:1px solid var(--ax-line)!important;background:var(--ax-bg)!important;box-shadow:none!important;gap:12px!important}
+html body #overview-view .detail-command-bar{padding:0!important;margin:0!important;min-height:0!important;border:0!important;align-items:center!important}
+html body #overview-view .detail-head h3{font-size:18px!important;font-weight:600!important;line-height:1.2!important;display:inline}
+html body #overview-view .detail-head>div{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+html body #overview-view .detail-subline{margin:0!important}
+html body #overview-view .detail-command-actions{padding:0!important;border:0!important;background:none!important;display:flex!important;flex-direction:row!important;align-items:center!important;gap:12px!important;min-width:0!important}
+html body #overview-view .detail-command-actions .btn{min-height:36px!important}
+html body #overview-view .detail-section{padding:12px!important;margin:0!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important}
+html body #overview-view .detail-message-readiness-slot,html body #overview-view .message-readiness{padding:0!important;border:0!important;background:none!important;margin:0!important}
+html body #overview-view .message-readiness{display:grid!important;grid-template-columns:1fr auto;gap:10px 12px!important;align-items:center}
+html body #overview-view .message-readiness-head{grid-column:1;display:flex!important;justify-content:flex-start!important;gap:10px!important;font-size:13px!important}
+html body #overview-view .message-readiness-actions{grid-column:2;grid-row:1;margin:0!important}
+html body #overview-view .message-readiness-grid{grid-column:1/-1;display:grid!important;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))!important;gap:1px!important;background:var(--ax-line)!important;border:1px solid var(--ax-line)!important;border-radius:6px!important;overflow:hidden}
+html body #overview-view .message-readiness-item{display:flex!important;flex-direction:row!important;align-items:baseline!important;justify-content:space-between!important;gap:8px!important;min-height:0!important;padding:6px 10px!important;border:0!important;border-radius:0!important;background:var(--ax-surface)!important}
+html body #overview-view .message-readiness-item>*{font-size:12px!important;letter-spacing:0!important;text-transform:none!important;margin:0!important}
+html body #overview-view .message-readiness-item>:first-child{color:var(--ax-muted)!important;font-weight:400!important}
+html body #overview-view .message-readiness-item>:last-child{color:var(--ax-text)!important;font-weight:500!important;text-align:right}
+html body #overview-view .detail-core-item{padding:6px 10px!important;min-height:0!important}
+html body #overview-view .detail-compact-row{padding:4px 0!important;min-height:0!important}
+html body #overview-view .detail-advanced-disclosure{padding:0 12px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;min-height:0!important}
+
+/* ---- Campaigns ---- */
+html body #leads-view .leads-workflow-nav{display:flex!important;gap:4px!important;padding:0!important;min-height:0!important;border:0!important;border-bottom:1px solid var(--ax-line)!important;border-radius:0!important;background:none!important}
+html body #leads-view .leads-workflow-nav a{min-height:38px!important;padding:0 14px!important;display:inline-flex!important;align-items:center;border:0!important;border-bottom:2px solid transparent!important;border-radius:0!important;background:none!important;color:var(--ax-dim)!important;font-size:14px!important;font-weight:400!important;box-shadow:none!important}
+html body #leads-view .leads-workflow-nav a.is-active{border-bottom-color:var(--ax-blue)!important;color:#fff!important;font-weight:500!important}
+html body #leads-view .react-current-staged-legend{padding:8px 14px!important;min-height:0!important;gap:8px 24px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body #leads-view .react-current-staged-legend>div{padding:0!important;border:0!important;display:flex!important;flex-wrap:wrap;align-items:baseline;gap:2px 10px!important;min-height:0!important}
+html body #leads-view .react-current-staged-legend strong{font-size:13px!important;font-weight:500!important}
+html body #leads-view .react-current-staged-legend span{font-size:12px!important;color:var(--ax-muted)!important}
+html body #leads-view .react-lead-canvas{gap:14px!important;padding:0!important;border:0!important;background:none!important}
+html body #leads-view .react-stepper-shell{padding:10px 14px!important;min-height:0!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body #leads-view .leads-workflow-tracker{padding:0!important;gap:6px!important;border:0!important;background:none!important}
+html body #leads-view .workflow-tracker-row{min-height:0!important;gap:8px!important}
+html body #leads-view .workflow-track-step{min-height:0!important;padding:6px 10px!important}
+html body #leads-view .leads-workflow-status-banner{padding:0!important;gap:8px!important;min-height:0!important;border:0!important;background:none!important}
+html body #leads-view .current-live-dispatch-card{padding:8px 14px!important;min-height:0!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body #leads-view .operator-step{padding:12px 14px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important;gap:10px!important}
+html body #leads-view .operator-step-heading h3{font-size:15px!important;font-weight:600!important}
+html body #leads-view .leads-control-bar,html body #leads-view .leads-command-section{padding:0!important;border:0!important;background:none!important;box-shadow:none!important}
+html body #leads-view .react-lead-workspace{gap:14px!important}
+html body #leads-view .react-command-rail-shell{padding:12px 14px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important}
+html body #leads-view .leads-command-column-right{gap:12px!important;padding:0!important;border:0!important;background:none!important}
+
+/* ---- Diagnostics ---- */
+html body #diagnostics-view .workspace-metric-block,html body #diagnostics-view .alert-group,html body #diagnostics-view .alerts-progress-item{border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-bg)!important;box-shadow:none!important}
+html body #diagnostics-view .alert-group-warning{background:#1f1a10!important;border-color:#5a4520!important}
+html body #diagnostics-view .controlled-send-test-card{padding:12px 14px!important}
+
+/* ---- History ---- */
+html body #history-view .campaign-history-panel{padding:14px!important}
+html body #history-view .campaign-history-panel .panel-header{padding:0 0 8px!important;margin:0!important;min-height:0!important}
+html body #history-view .campaign-history-panel .panel-header h2{font-size:15px!important;font-weight:600!important}
+html body #history-view .campaign-history-table{border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-bg)!important}
+html body #history-view .campaign-history-table table{font-variant-numeric:tabular-nums}
+html body #history-view .campaign-history-table th{height:30px!important;padding:0 12px!important;font-size:11px!important;font-weight:500!important;letter-spacing:.05em!important;text-transform:uppercase!important;color:var(--ax-muted)!important;background:var(--ax-surface)!important;border-bottom:1px solid var(--ax-line)!important}
+html body #history-view .campaign-history-table td{height:34px!important;padding:3px 12px!important;font-size:13px!important;border-bottom:1px solid var(--ax-line-soft)!important}
+html body #history-view .history-status-pill{padding:0!important;border:0!important;background:none!important;font-size:13px!important;font-weight:400!important;letter-spacing:0!important;text-transform:none!important;color:var(--ax-muted)!important}
+/* The row marker pseudo-element was laid out as an extra first cell, which
+   pushed every data column one place right of its header. Draw the marker
+   on the first cell instead. */
+html body #history-view .campaign-history-table tbody tr::before{content:none!important;display:none!important}
+html body #history-view .campaign-history-table tbody tr.history-row-warn td:first-child{box-shadow:inset 2px 0 0 var(--ax-amber)}
+html body #history-view .campaign-history-table tbody tr.history-row-bad td:first-child{box-shadow:inset 2px 0 0 #ef8995}
+
+/* ---- Spacing and alignment fixes ---- */
+html body .react-workspace > * + *{margin-top:14px!important}
+html body #overview-view .react-command-bar section.workspace-controls.toolbar{display:contents!important}
+html body #overview-view .sender-status-table td.sender-status-activity{display:table-cell!important}

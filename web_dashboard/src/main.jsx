@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import parse from "html-react-parser";
 import "./tailwind.css";
+import "./compact-theme.css";
 
 function LegacyNode({ html }) {
   return parse(html);
