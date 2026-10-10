@@ -2477,7 +2477,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["undeliverable_removed"], 1)
             self.assertEqual(report["reason_counts"]["UNDELIVERABLE_DOMAIN"], 1)
 
-    def test_fresh_cold_globally_blocks_prior_success_and_active_queues(self) -> None:
+    def test_fresh_cold_blocks_prior_success_and_active_queues_per_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -2595,27 +2595,33 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 for row in planned[f"sendgrid_{index}"]
             ]
 
-            self.assertEqual({"fresh-both@example.com"}, jc_emails)
+            # Each channel is blocked only by its own history and its own queue.
+            self.assertEqual(
+                {"fresh-both@example.com", "sg-sent@example.com", "queued-sg@example.com"},
+                jc_emails,
+            )
 
             self.assertEqual(
                 len(all_sg_emails),
                 len(set(all_sg_emails)),
             )
-            self.assertEqual(set(), set(all_sg_emails))
+            self.assertEqual(
+                {"fresh-both@example.com", "astra-sent@example.com", "queued-astra@example.com"},
+                set(all_sg_emails),
+            )
 
-            self.assertTrue(
-                jc_emails.isdisjoint(all_sg_emails)
-            )
-            self.assertNotIn(
+            # A lead new to both channels is planned once for each.
+            self.assertEqual({"fresh-both@example.com"}, jc_emails & set(all_sg_emails))
+            self.assertEqual(0, report["duplicate_planned_email_count"])
+            self.assertEqual(0, report["planned_authoritative_sent_overlap_count"])
+            for blocked_everywhere in (
+                "both-sent@example.com",
                 "both-queued@example.com",
-                jc_emails | set(all_sg_emails),
-            )
-            self.assertNotIn(
                 "suppressed@example.com",
-                jc_emails | set(all_sg_emails),
-            )
-            self.assertEqual(3, report["exclusion_reason_counts"]["already_sent"])
-            self.assertEqual(3, report["exclusion_reason_counts"]["already_queued"])
+            ):
+                self.assertNotIn(blocked_everywhere, jc_emails | set(all_sg_emails))
+            self.assertEqual(1, report["exclusion_reason_counts"]["already_sent"])
+            self.assertEqual(1, report["exclusion_reason_counts"]["already_queued"])
             self.assertEqual(
                 queue_bytes_before,
                 {path: path.read_bytes() for path in (jc_queue, *sg_queues)},
@@ -2692,7 +2698,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     all_rows.extend(list(csv.DictReader(handle)))
             self.assertEqual({row["Email"] for row in all_rows}, {"triaged1@example.com", "triaged2@example.com"})
-            self.assertEqual(len(all_rows), len({row["Email"].lower() for row in all_rows}))
+            # Default "both" route: every fresh lead is queued once per channel.
+            sendgrid_rows = all_rows[len(rows):]
+            self.assertEqual(["triaged1@example.com", "triaged2@example.com"], sorted(row["Email"] for row in rows))
+            self.assertEqual(
+                ["triaged1@example.com", "triaged2@example.com"],
+                sorted(row["Email"] for row in sendgrid_rows),
+            )
 
     def test_dispatch_master_leads_triaged_keep_blocks_missing_selected_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2802,8 +2814,9 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(report["dispatch_source_row_count"], 4)
             self.assertEqual(report["dispatch_eligible_row_count"], 2)
             self.assertTrue(report["verification_required"])
-            self.assertEqual(report["added_astra"], 1)
-            self.assertEqual(report["added_sendgrid"], 1)
+            # Default "both" route: both fresh leads go to each channel.
+            self.assertEqual(report["added_astra"], 2)
+            self.assertEqual(report["added_sendgrid"], 2)
             with jc_queue.open(newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
             all_rows = list(rows)
@@ -2811,7 +2824,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 with path.open(newline="", encoding="utf-8-sig") as handle:
                     all_rows.extend(list(csv.DictReader(handle)))
             self.assertEqual({row["Email"] for row in all_rows}, {"verified1@example.com", "verified2@example.com"})
-            self.assertEqual(len(all_rows), len({row["Email"].lower() for row in all_rows}))
+            sendgrid_rows = all_rows[len(rows):]
+            self.assertEqual(["verified1@example.com", "verified2@example.com"], sorted(row["Email"] for row in rows))
+            self.assertEqual(
+                ["verified1@example.com", "verified2@example.com"],
+                sorted(row["Email"] for row in sendgrid_rows),
+            )
 
     def test_dispatch_master_leads_verified_mode_blocks_without_keep_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3025,23 +3043,28 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(5, preview["source_row_count"])
             self.assertEqual(5, preview["total_source_rows"])
             self.assertEqual(5, preview["eligible_rows"])
-            self.assertEqual(1, preview["skipped_already_sent"])
-            self.assertEqual(1, preview["skipped_already_queued"])
+            # Private JC already sent to one lead and has another queued. Those
+            # only close the Private JC channel, so SendGrid still takes both
+            # and no lead is skipped outright for history or queue membership.
+            self.assertEqual(0, preview["skipped_already_sent"])
+            self.assertEqual(0, preview["skipped_already_queued"])
+            self.assertEqual(1, preview["skipped_astra_already_sent"])
+            self.assertEqual(1, preview["skipped_astra_already_queued"])
             self.assertEqual(1, preview["skipped_suppressed"])
             self.assertEqual(1, preview["skipped_invalid_malformed"])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
             self.assertEqual(
-                {"sendgrid_1": 0, "sendgrid_2": 0, "sendgrid_3": 0, "sendgrid_4": 0, "sendgrid_5": 0},
+                {"sendgrid_1": 1, "sendgrid_2": 1, "sendgrid_3": 1, "sendgrid_4": 0, "sendgrid_5": 0},
                 preview["rows_to_add_sendgrid_shards"],
             )
             self.assertEqual("cold", preview["campaign_type"])
             self.assertEqual("triaged_keep", preview["dispatch_source_mode"])
             self.assertIs(True, preview["dispatch_source_exists"])
             self.assertEqual(1, preview["private_jc_planned_count"])
-            self.assertEqual(0, preview["sendgrid_planned_count"])
-            self.assertEqual(1, preview["total_planned_unique_count"])
+            self.assertEqual(3, preview["sendgrid_planned_count"])
+            self.assertEqual(3, preview["total_planned_unique_count"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
-            self.assertEqual(1, preview["total_rows_that_would_be_written"])
+            self.assertEqual(4, preview["total_rows_that_would_be_written"])
             self.assertEqual(preview["skipped_rows"], sum(preview["exclusion_reason_counts"].values()))
             preview_path = preview_dir / f"{preview['preview_id']}.json"
             self.assertTrue(preview_path.exists())
@@ -3188,19 +3211,28 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("", archived_preview["sendgrid_zero_reason"])
             self.assertEqual(preview["rows_to_add_sendgrid"], archived_preview["rows_to_add_sendgrid"])
 
-            planned_email_routes: dict[str, str] = {}
+            # A lead is planned at most once per channel family.
+            planned_family_emails: set[tuple[str, str]] = set()
             for route, planned_rows in preview["plan_rows_by_queue"].items():
+                family = "private_jc" if route == "private_jc" else "sendgrid"
                 for row in planned_rows:
-                    email = row["Email"].lower()
-                    self.assertNotIn(email, planned_email_routes)
-                    planned_email_routes[email] = route
-            self.assertEqual(preview["total_planned_unique_count"], len(planned_email_routes))
+                    family_email = (family, row["Email"].lower())
+                    self.assertNotIn(family_email, planned_family_emails)
+                    planned_family_emails.add(family_email)
+            self.assertEqual(
+                preview["total_planned_unique_count"],
+                len({email for _family, email in planned_family_emails}),
+            )
+            # Default "both" route: all six fresh leads go to each channel.
+            self.assertEqual(6, preview["rows_to_add_private_jc"])
+            self.assertEqual(6, preview["rows_to_add_sendgrid"])
+            self.assertEqual(6, preview["total_planned_unique_count"])
             self.assertEqual(queue_before, {path: path.read_text(encoding="utf-8") for path in [jc_queue, *sg_queues]})
             self.assertEqual([], read_csv_rows(jc_queue))
             for path in sg_queues:
                 self.assertEqual([], read_csv_rows(path))
 
-    def test_active_sendgrid_queue_membership_blocks_all_fresh_cold_routes(self) -> None:
+    def test_active_sendgrid_queue_membership_blocks_only_the_sendgrid_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3243,10 +3275,110 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=preview_dir,
             )
 
+            # SendGrid queue membership closes SendGrid only; Private JC is open.
             self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(0, preview["rows_to_add_private_jc"])
+            self.assertEqual(len(rows), preview["rows_to_add_private_jc"])
             self.assertEqual(0, preview["duplicate_planned_email_count"])
-            self.assertEqual(len(rows), preview["exclusion_reason_counts"]["already_queued"])
+            self.assertEqual(len(rows), preview["skipped_sendgrid_already_queued"])
+            self.assertEqual(0, preview["exclusion_reason_counts"].get("already_queued", 0))
+
+            sendgrid_only = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                campaign_type="cold",
+                fresh_cold_route="sendgrid",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=preview_dir,
+            )
+            self.assertEqual(0, sendgrid_only["rows_to_add_sendgrid"])
+            self.assertEqual(0, sendgrid_only["rows_to_add_private_jc"])
+            self.assertEqual(len(rows), sendgrid_only["exclusion_reason_counts"]["already_queued"])
+
+    def test_confirm_dispatch_queues_private_jc_for_leads_sendgrid_already_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            master_path = tmp / "leads.csv"
+            triaged_keep_path = tmp / "leads_triaged_keep.csv"
+            preview_dir = tmp / "previews"
+            report_dir = tmp / "reports"
+            backup_root = tmp / "backups"
+            ledger_db_path = tmp / "lead_ledger.sqlite3"
+            jc_queue = tmp / "recipients_private_jc.csv"
+            sg_queues = [tmp / f"recipients_sendgrid_{idx}.csv" for idx in range(1, 6)]
+            logs = [tmp / "private_jc_log.csv"] + [tmp / f"sendgrid_{idx}_log.csv" for idx in range(1, 6)]
+            rejected_path = tmp / "leads_rejected.csv"
+            triaged_reject_path = tmp / "leads_triaged_reject.csv"
+            triaged_quarantine_path = tmp / "leads_triaged_quarantine.csv"
+            rows = [
+                {"FullName": "SendGrid Sent", "FirstName": "Sent", "Email": "sg-sent@example.com", "Status": "KEEP"},
+                {"FullName": "Fresh Person", "FirstName": "Fresh", "Email": "fresh@example.com", "Status": "KEEP"},
+            ]
+            write_csv(
+                master_path,
+                ["FullName", "FirstName", "Email"],
+                [{key: row[key] for key in ["FullName", "FirstName", "Email"]} for row in rows],
+            )
+            write_csv(rejected_path, ["FullName", "FirstName", "Email", "reject_code"], [])
+            write_csv(triaged_keep_path, ["FullName", "FirstName", "Email", "Status"], rows)
+            write_csv(triaged_reject_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(triaged_quarantine_path, ["FullName", "FirstName", "Email", "Status"], [])
+            write_csv(jc_queue, ["Email", "FirstName"], [])
+            for path in sg_queues:
+                write_csv(path, ["Email", "FirstName"], [])
+            for path in logs:
+                write_csv(path, ["Email", "Status"], [])
+            write_csv(logs[1], ["Email", "Status"], [{"Email": "sg-sent@example.com", "Status": "SENT"}])
+
+            preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                preview_dir=preview_dir,
+            )
+            self.assertEqual("block_per_channel", preview["prior_success_policy"])
+            self.assertEqual(2, preview["rows_to_add_private_jc"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+
+            report = confirm_dispatch_preview(
+                preview["preview_id"],
+                require_stopped=False,
+                backup_root=backup_root,
+                report_dir=report_dir,
+                persist_state=False,
+                preview_dir=preview_dir,
+            )
+
+            # Confirm re-checks each queue against its own channel's history,
+            # so the lead SendGrid already sent to stays in the Private JC
+            # queue and never enters a SendGrid queue.
+            self.assertEqual("completed", report["status"])
+            self.assertEqual(2, report["rows_written_private_jc"])
+            self.assertEqual(
+                ["fresh@example.com", "sg-sent@example.com"],
+                sorted(row["Email"] for row in read_csv_rows(jc_queue)),
+            )
+            self.assertEqual(
+                ["fresh@example.com"],
+                [row["Email"] for path in sg_queues for row in read_csv_rows(path)],
+            )
 
     def test_confirm_dispatch_preview_writes_exact_previewed_rows_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3360,35 +3492,39 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual("Fast Triage Keep", history[0]["source_label"])
             self.assertEqual("completed", history[0]["status"])
             self.assertTrue(Path(report["report_path"]).exists())
-            self.assertEqual(3, report["dispatch_history_rows_created"])
+            # Default "both" route: each of the three leads is dispatched once
+            # to Private JC and once to SendGrid, so the ledger records two
+            # dispatch events per lead.
+            self.assertEqual(3, preview["rows_to_add_private_jc"])
+            self.assertEqual(3, preview["rows_to_add_sendgrid"])
+            self.assertEqual(6, report["dispatch_history_rows_created"])
 
             conn = lead_ledger.connect_lead_ledger(ledger_db_path)
             try:
                 alpha_id = lead_ledger.deterministic_lead_id("alpha@example.com")
                 beta_id = lead_ledger.deterministic_lead_id("beta@example.com")
                 gamma_id = lead_ledger.deterministic_lead_id("gamma@example.com")
-                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, alpha_id)))
-                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, beta_id)))
-                self.assertEqual(1, len(lead_ledger.load_dispatch_events(conn, gamma_id)))
+                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, alpha_id)))
+                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, beta_id)))
+                self.assertEqual(2, len(lead_ledger.load_dispatch_events(conn, gamma_id)))
                 alpha = lead_ledger.load_lead_by_id(conn, alpha_id)
-                self.assertEqual(1, alpha["dispatch_count"])
+                self.assertEqual(2, alpha["dispatch_count"])
                 self.assertTrue(alpha["last_dispatch_at"])
-                expected_alpha_profile = next(
+                expected_alpha_profiles = {
                     key
                     for key, rows in preview["plan_rows_by_queue"].items()
                     if any(
                         row["Email"] == "alpha@example.com"
                         for row in rows
                     )
-                )
-                self.assertEqual(
-                    expected_alpha_profile,
-                    alpha["last_profile"],
-                )
+                }
+                self.assertEqual(2, len(expected_alpha_profiles))
+                self.assertIn("private_jc", expected_alpha_profiles)
+                self.assertIn(alpha["last_profile"], expected_alpha_profiles)
             finally:
                 conn.close()
 
-    def test_fresh_cold_campaign_blocks_successful_sendgrid_history_globally(self) -> None:
+    def test_fresh_cold_campaign_blocks_successful_sendgrid_history_on_the_sendgrid_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -3454,11 +3590,37 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 ],
             )
 
+            # SendGrid already sent to both leads. Private JC has not, so the
+            # default "both" route still plans them for Private JC only.
+            both_route_preview = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=rejected_path,
+                dispatch_source_mode="triaged_keep",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=ledger_db_path,
+                preview_dir=preview_dir,
+            )
+            self.assertEqual(0, both_route_preview["rows_to_add_sendgrid"])
+            self.assertEqual(2, both_route_preview["rows_to_add_private_jc"])
+            self.assertEqual(2, both_route_preview["skipped_sendgrid_already_sent"])
+            self.assertEqual({}, both_route_preview["exclusion_reason_counts"])
+            self.assertEqual(0, both_route_preview["planned_authoritative_sent_overlap_count"])
+            self.assertEqual(2, both_route_preview["already_sent_other_family_allowed"])
+
+            # On the SendGrid-only route the same leads are fully blocked.
             preview = preview_dispatch_master_leads(
                 master_path=master_path,
                 triaged_keep_path=triaged_keep_path,
                 rejected_path=rejected_path,
                 dispatch_source_mode="triaged_keep",
+                fresh_cold_route="sendgrid",
                 jc_queue_path=jc_queue,
                 sendgrid_queue_paths=sg_queues,
                 jc_log_path=logs[0],
@@ -4221,8 +4383,13 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 history = json.loads(history_path.read_text(encoding="utf-8"))
                 self.assertEqual(1, sum(item.get("run_id") == report["run_id"] for item in history))
                 all_rows = [row for path in queue_paths for row in read_csv_rows(path)]
-                all_emails = [row["Email"] for row in all_rows]
-                self.assertEqual(len(all_emails), len(set(all_emails)))
+                # A lead may appear once in the Private JC queue and once
+                # across the SendGrid queues, never twice within a channel.
+                jc_emails = [row["Email"] for row in read_csv_rows(queue_paths[0])]
+                sendgrid_emails = [row["Email"] for path in queue_paths[1:] for row in read_csv_rows(path)]
+                self.assertEqual(len(jc_emails), len(set(jc_emails)))
+                self.assertEqual(len(sendgrid_emails), len(set(sendgrid_emails)))
+                self.assertEqual(set(jc_emails), set(sendgrid_emails))
                 self.assertIn("A title with\nan intact second line", {row["BookTitle"] for row in all_rows})
                 self.assertEqual(
                     preview["queue_headers"],
@@ -4333,7 +4500,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing dispatch source mode"):
                 confirm_dispatch_preview(preview_id, require_stopped=False, preview_dir=preview_dir)
 
-    def test_confirm_dispatch_preview_rejects_duplicate_email_across_planned_queues(self) -> None:
+    def test_confirm_dispatch_preview_rejects_duplicate_email_within_one_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -4368,7 +4535,12 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             )
             preview_path = preview_dir / f"{preview['preview_id']}.json"
             stored_preview = json.loads(preview_path.read_text(encoding="utf-8"))
-            stored_preview["plan_rows_by_queue"]["sendgrid_1"] = [dict(stored_preview["plan_rows_by_queue"]["private_jc"][0])]
+            # The default "both" route already plans the lead once for Private
+            # JC and once for SendGrid, which is allowed. A second SendGrid
+            # queue carrying the same lead is a duplicate within one channel.
+            self.assertEqual(1, len(stored_preview["plan_rows_by_queue"]["private_jc"]))
+            self.assertEqual(1, len(stored_preview["plan_rows_by_queue"]["sendgrid_1"]))
+            stored_preview["plan_rows_by_queue"]["sendgrid_2"] = [dict(stored_preview["plan_rows_by_queue"]["private_jc"][0])]
             preview_path.write_text(json.dumps(stored_preview, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
             with self.assertRaisesRegex(RuntimeError, "duplicate planned recipients"):
@@ -4424,6 +4596,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
         dispatch_cap: str,
         contacted_count: int = 0,
         preview_name: str = "previews",
+        fresh_cold_route: str | None = None,
     ) -> dict[str, object]:
         master_path = tmp / "leads.csv"
         triaged_keep_path = tmp / "leads_triaged_keep.csv"
@@ -4473,6 +4646,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             rejected_path=tmp / "leads_rejected.csv",
             dispatch_source_mode="triaged_keep",
             dispatch_cap=dispatch_cap,
+            fresh_cold_route=fresh_cold_route,
             jc_queue_path=jc_queue,
             sendgrid_queue_paths=sg_queues,
             jc_log_path=logs[0],
@@ -4500,12 +4674,44 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_name="previews_all",
             )
 
+            # The cap counts leads. On the default "both" route each capped
+            # lead is written once per channel.
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(100, capped["selected_rows"])
-            self.assertEqual(100, capped["total_rows_that_would_be_written"])
+            self.assertEqual(100, capped["total_planned_unique_count"])
+            self.assertEqual(100, capped["rows_to_add_private_jc"])
+            self.assertEqual(100, capped["rows_to_add_sendgrid"])
+            self.assertEqual(200, capped["total_rows_that_would_be_written"])
             self.assertEqual("all", all_rows["dispatch_cap"])
             self.assertEqual(150, all_rows["selected_rows"])
-            self.assertEqual(150, all_rows["total_rows_that_would_be_written"])
+            self.assertEqual(150, all_rows["total_planned_unique_count"])
+            self.assertEqual(300, all_rows["total_rows_that_would_be_written"])
+
+    def test_fresh_cold_cap_counts_leads_when_one_channel_is_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            # SendGrid already contacted the first 90 leads. They stay open
+            # for Private JC, so they count toward the cap of 100 leads.
+            capped = self._preview_dispatch_cap_fixture(
+                tmp,
+                row_count=150,
+                contacted_count=90,
+                dispatch_cap="100",
+            )
+
+            self.assertEqual("100", capped["dispatch_cap"])
+            self.assertEqual(100, capped["selected_rows"])
+            self.assertEqual(0, capped["skipped_already_contacted"])
+            self.assertEqual(90, capped["skipped_sendgrid_already_sent"])
+            self.assertEqual(100, capped["rows_to_add_private_jc"])
+            self.assertEqual(10, capped["rows_to_add_sendgrid"])
+            self.assertEqual(100, capped["total_planned_unique_count"])
+            self.assertEqual(2, capped["assigned_sg1"])
+            self.assertEqual(2, capped["assigned_sg2"])
+            self.assertEqual(2, capped["assigned_sg3"])
+            self.assertEqual(2, capped["assigned_sg4"])
+            self.assertEqual(2, capped["assigned_sg5"])
 
     def test_fresh_cold_cap_excludes_history_before_routing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4516,18 +4722,19 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 row_count=150,
                 contacted_count=90,
                 dispatch_cap="100",
+                fresh_cold_route="sendgrid",
             )
 
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(150, capped["selected_rows"])
             self.assertEqual(90, capped["skipped_already_contacted"])
-            self.assertEqual(30, capped["rows_to_add_private_jc"])
-            self.assertEqual(30, capped["rows_to_add_sendgrid"])
-            self.assertEqual(6, capped["assigned_sg1"])
-            self.assertEqual(6, capped["assigned_sg2"])
-            self.assertEqual(6, capped["assigned_sg3"])
-            self.assertEqual(6, capped["assigned_sg4"])
-            self.assertEqual(6, capped["assigned_sg5"])
+            self.assertEqual(0, capped["rows_to_add_private_jc"])
+            self.assertEqual(60, capped["rows_to_add_sendgrid"])
+            self.assertEqual(12, capped["assigned_sg1"])
+            self.assertEqual(12, capped["assigned_sg2"])
+            self.assertEqual(12, capped["assigned_sg3"])
+            self.assertEqual(12, capped["assigned_sg4"])
+            self.assertEqual(12, capped["assigned_sg5"])
 
     def test_fresh_cold_cap_scans_past_blocked_history_to_fill_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4538,18 +4745,19 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 row_count=220,
                 contacted_count=90,
                 dispatch_cap="100",
+                fresh_cold_route="sendgrid",
             )
 
             self.assertEqual("100", capped["dispatch_cap"])
             self.assertEqual(190, capped["selected_rows"])
             self.assertEqual(90, capped["skipped_already_contacted"])
-            self.assertEqual(50, capped["rows_to_add_sendgrid"])
-            self.assertEqual(50, capped["rows_to_add_private_jc"])
-            self.assertEqual(10, capped["assigned_sg1"])
-            self.assertEqual(10, capped["assigned_sg2"])
-            self.assertEqual(10, capped["assigned_sg3"])
-            self.assertEqual(10, capped["assigned_sg4"])
-            self.assertEqual(10, capped["assigned_sg5"])
+            self.assertEqual(100, capped["rows_to_add_sendgrid"])
+            self.assertEqual(0, capped["rows_to_add_private_jc"])
+            self.assertEqual(20, capped["assigned_sg1"])
+            self.assertEqual(20, capped["assigned_sg2"])
+            self.assertEqual(20, capped["assigned_sg3"])
+            self.assertEqual(20, capped["assigned_sg4"])
+            self.assertEqual(20, capped["assigned_sg5"])
 
     def test_preview_dispatch_master_leads_missing_source_fails_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4643,7 +4851,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(str(verified_path), strict_preview["source_file_path"])
             self.assertNotEqual(triaged_preview["preview_id"], strict_preview["preview_id"])
 
-    def test_fresh_cold_blocks_astra_contact_instead_of_cross_lane_reroute(self) -> None:
+    def test_fresh_cold_private_jc_contact_closes_only_private_jc(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -4700,16 +4908,22 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=tmp / "previews",
             )
 
-            self.assertEqual(1, preview["skipped_already_contacted"])
+            # A prior Private JC contact closes Private JC for that lead only.
+            # SendGrid has never contacted it, so SendGrid still takes it.
+            self.assertEqual(0, preview["skipped_already_contacted"])
+            self.assertEqual(1, preview["skipped_astra_already_sent"])
+            self.assertEqual(["fresh@example.com"], [row["Email"] for row in preview["plan_rows_by_queue"]["private_jc"]])
             self.assertEqual(1, preview["rows_to_add_private_jc"])
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(1, preview["exclusion_reason_counts"]["already_contacted"])
+            self.assertEqual(2, preview["rows_to_add_sendgrid"])
+            self.assertEqual({}, preview["exclusion_reason_counts"])
 
     def test_preview_dispatch_scopes_ledger_contact_history_by_lane(self) -> None:
         scenarios = [
-            ("private_jc", "private_jc", "delivered", 0, 0, 1, {"already_contacted": 1}),
-            ("private_jc_warm", "private_jc_warm", "delivered", 0, 0, 1, {"already_contacted": 1}),
-            ("sendgrid_jordan", "sendgrid_2", "delivered", 0, 0, 1, {"already_contacted": 1}),
+            # A successful contact closes only the channel that made it. A bad
+            # outcome on either channel still blocks the lead everywhere.
+            ("private_jc", "private_jc", "delivered", 0, 1, 0, {}),
+            ("private_jc_warm", "private_jc_warm", "delivered", 0, 1, 0, {}),
+            ("sendgrid_jordan", "sendgrid_2", "delivered", 1, 0, 0, {}),
             ("private_jc", "private_jc", "complaint", 0, 0, 0, {"bad_contact_history": 1}),
         ]
         for profile, queue_target, status, expected_jc, expected_sg, expected_contacted, expected_reasons in scenarios:
@@ -4819,7 +5033,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             self.assertEqual(0, preview["skipped_already_contacted"])
             self.assertEqual({}, preview["exclusion_reason_counts"])
 
-    def test_warm_private_queue_blocks_all_fresh_cold_routes(self) -> None:
+    def test_warm_private_queue_blocks_only_the_private_jc_channel(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             master_path = tmp / "leads.csv"
@@ -4852,9 +5066,32 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 preview_dir=tmp / "previews",
             )
 
+            # The warm queue belongs to the Private JC channel, so it closes
+            # Private JC for this lead and leaves SendGrid open.
             self.assertEqual(0, preview["rows_to_add_private_jc"])
-            self.assertEqual(0, preview["rows_to_add_sendgrid"])
-            self.assertEqual(1, preview["skipped_already_queued"])
+            self.assertEqual(1, preview["rows_to_add_sendgrid"])
+            self.assertEqual(1, preview["skipped_astra_already_queued"])
+            self.assertEqual(0, preview["skipped_already_queued"])
+
+            private_only = preview_dispatch_master_leads(
+                master_path=master_path,
+                triaged_keep_path=triaged_keep_path,
+                rejected_path=tmp / "leads_rejected.csv",
+                dispatch_source_mode="triaged_keep",
+                fresh_cold_route="private_jc",
+                jc_queue_path=jc_queue,
+                sendgrid_queue_paths=sg_queues,
+                jc_log_path=logs[0],
+                sendgrid_log_paths=logs[1:],
+                sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
+                suppressed_path=tmp / "suppressed.csv",
+                unsubscribed_path=tmp / "unsubscribed.csv",
+                lead_ledger_db_path=tmp / "lead_ledger.sqlite3",
+                preview_dir=tmp / "previews",
+            )
+            self.assertEqual(0, private_only["rows_to_add_private_jc"])
+            self.assertEqual(0, private_only["rows_to_add_sendgrid"])
+            self.assertEqual(1, private_only["skipped_already_queued"])
 
     def test_preview_dispatch_ignores_queued_staged_history_for_fresh_cold(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4921,7 +5158,11 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             ]
             self.assertEqual(0, preview["skipped_already_contacted"])
             self.assertEqual(0, preview["skipped_already_sent"])
-            self.assertCountEqual(["queued@example.com", "fresh@example.com"], planned_emails)
+            # Default "both" route: both leads are planned once per channel.
+            self.assertCountEqual(
+                ["queued@example.com", "fresh@example.com"] * 2,
+                planned_emails,
+            )
             self.assertEqual(
                 1,
                 preview["history_source_category_counts"]["skipped_from_non_authoritative_history_ignored"],
@@ -4983,6 +5224,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 sendgrid_queue_paths=sg_queues,
                 jc_log_path=jc_log,
                 sendgrid_log_paths=[*sg_logs, domain_log],
+                fresh_cold_route="sendgrid",
                 sendgrid_suppressions_path=tmp / "sendgrid_suppressions.csv",
                 suppressed_path=tmp / "suppressed.csv",
                 unsubscribed_path=tmp / "unsubscribed.csv",
@@ -5026,8 +5268,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
     def test_fresh_cold_preview_contract_allows_large_already_sent_exclusion_when_overlap_zero(self) -> None:
         preview = {
             "campaign_type": "cold",
-            "history_policy_version": 2,
-            "prior_success_policy": "block_global",
+            "history_policy_version": 3,
+            "prior_success_policy": "block_per_channel",
             "dispatch_source_mode": "triaged_keep",
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
             "preview_id": "preview_safe",
@@ -5118,20 +5360,23 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
                 set(first["plan_rows_by_queue"]),
             )
             self.assertNotIn("sendgrid_controlled_test", first["plan_rows_by_queue"])
+            # Default "both" route: all six leads go to SendGrid (round-robin
+            # across the five enabled profiles) and all six go to Private JC.
             self.assertEqual(
                 {
-                    "sendgrid_alison": 1,
+                    "sendgrid_alison": 2,
                     "sendgrid_annette": 1,
                     "sendgrid_fiorela": 1,
-                    "sendgrid_jodi": 0,
-                    "sendgrid_jordan": 0,
+                    "sendgrid_jodi": 1,
+                    "sendgrid_jordan": 1,
                 },
                 first["sendgrid_profile_planned_counts"],
             )
             self.assertEqual(
-                3,
+                6,
                 sum(first["sendgrid_profile_planned_counts"].values()),
             )
+            self.assertEqual(6, len(first["plan_rows_by_queue"]["private_jc"]))
             first_routes = {
                 key: [row["Email"] for row in planned_rows]
                 for key, planned_rows in first["plan_rows_by_queue"].items()
@@ -5335,7 +5580,7 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
             "planned_authoritative_sent_overlap_count": 0,
             "plan_rows_by_queue": {"private_jc": [planned_row("fresh@example.com")]},
         }
-        with self.assertRaisesRegex(RuntimeError, "current global prior-success policy"):
+        with self.assertRaisesRegex(RuntimeError, "current per-channel prior-success policy"):
             _validate_dispatch_preview_contract(preview)
 
     def test_recontact_preview_contract_allows_sent_log_overlap(self) -> None:
@@ -5461,8 +5706,8 @@ class ImportantLeadsWorkflowTests(unittest.TestCase):
     def test_fresh_cold_preview_contract_blocks_skipped_math_mismatch(self) -> None:
         preview = {
             "campaign_type": "cold",
-            "history_policy_version": 2,
-            "prior_success_policy": "block_global",
+            "history_policy_version": 3,
+            "prior_success_policy": "block_per_channel",
             "dispatch_source_mode": "triaged_keep",
             "dispatch_source_path": "/tmp/leads_triaged_keep.csv",
             "preview_id": "preview_bad_math",

@@ -196,7 +196,7 @@ class WebDashboardAppTests(unittest.TestCase):
         self.assertNotIn("readSavedFreshColdRoute()", source)
         self.assertNotIn("localStorage.setItem(FRESH_COLD_ROUTE_STORAGE_KEY, route)", source)
         self.assertIn("saveFreshColdRoute(nextRoute)", source)
-        self.assertIn('<option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — Split</option>', source)
+        self.assertIn('<option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — JC and SendGrid</option>', source)
         bootstrap_start = source.index("async function bootstrapAuthenticatedDashboard()")
         bootstrap_end = source.index("async function bootstrapDashboard()", bootstrap_start)
         bootstrap = source[bootstrap_start:bootstrap_end]

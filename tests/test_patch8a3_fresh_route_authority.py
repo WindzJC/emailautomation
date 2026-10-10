@@ -83,7 +83,7 @@ def _preview(tmp_path: Path, route: str, count: int = 4) -> dict[str, object]:
     [
         ("sendgrid", 0, 4),
         ("private_jc", 4, 0),
-        ("both", 2, 2),
+        ("both", 4, 4),
     ],
 )
 def test_fresh_cold_route_controls_destination_family(

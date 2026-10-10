@@ -2140,14 +2140,14 @@ function resetFreshColdRouteForPageLoad() {
 }
 
 // Fresh Cold route is page-session state only.
-// Every full dashboard load starts at SendGrid Cold. Any route change invalidates
+// Every full dashboard load starts at Both. Any route change invalidates
 // the current Preview and requires a new Preview before Confirm can unlock.
 selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE;
 
 function freshColdRouteLabel(value = selectedFreshColdRoute) {
   const route = normalizeFreshColdRoute(value);
   if (route === "private_jc") return "Private JC Cold";
-  if (route === "both") return "Both — Split";
+  if (route === "both") return "Both — JC and SendGrid";
   return "SendGrid Cold";
 }
 
@@ -3507,7 +3507,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const sentHistoryPolicyViolation = summary.sentLogOverlap > 0 && !priorSuccessIsInformational;
   const historyPolicyAmbiguous = Boolean(preview)
     && !priorSuccessIsInformational
-    && (Number(preview.history_policy_version || 0) !== 2 || String(preview.prior_success_policy || "") !== "block_global");
+    && (Number(preview.history_policy_version || 0) !== 3 || String(preview.prior_success_policy || "") !== "block_per_channel");
   const malformedPreview = Boolean(preview) && (
     !String(preview.campaign_type || "").trim()
     || !String(preview.dispatch_source_mode || "").trim()
@@ -3573,7 +3573,7 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
                       : missingRequiredDispatchFields
                         ? "Preview has planned rows missing required dispatch fields."
                         : historyPolicyAmbiguous
-                          ? "Fresh Cold preview does not establish the current global prior-success policy."
+                          ? "Fresh Cold preview does not establish the current per-channel prior-success policy."
                         : queueSafetyBlockedByPreview
                           ? (hasQueueSafety ? "Preview queue safety is unsafe." : "Preview queue safety is unknown.")
                           : sourceBlockReason || String(dispatchSource.dispatch_block_reason || "Selected source is blocked.");
@@ -3678,7 +3678,7 @@ function renderDispatchModeCards(preview = null) {
           <select data-fresh-cold-route aria-label="Fresh Cold Route">
             <option value="sendgrid" ${selectedFreshColdRoute === "sendgrid" ? "selected" : ""}>SendGrid Cold</option>
             <option value="private_jc" ${selectedFreshColdRoute === "private_jc" ? "selected" : ""}>Private JC Cold</option>
-            <option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — Split</option>
+            <option value="both" ${selectedFreshColdRoute === "both" ? "selected" : ""}>Both — JC and SendGrid</option>
           </select>
           <small>${escapeHtml(freshColdRouteLabel())} selected · changing route requires a new Preview Dispatch.</small>
         </label>` : ""}

@@ -132,8 +132,10 @@ GLOBAL_BAD_CONTACT_HISTORY_STATUSES = {
     "unsubscribed",
 }
 
-DISPATCH_HISTORY_POLICY_VERSION = 2
-FRESH_COLD_PRIOR_SUCCESS_POLICY = "block_global"
+DISPATCH_HISTORY_POLICY_VERSION = 3
+# Fresh Cold contacts a lead at most once per channel family: SendGrid may
+# send once and Private JC may send once, independently of each other.
+FRESH_COLD_PRIOR_SUCCESS_POLICY = "block_per_channel"
 RECONTACT_PRIOR_SUCCESS_POLICY = "allow_informational"
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -3174,7 +3176,7 @@ def _validate_dispatch_preview_contract(preview: Dict[str, object]) -> None:
     if campaign_type == CAMPAIGN_TYPE_COLD:
         if int(preview.get("history_policy_version") or 0) != DISPATCH_HISTORY_POLICY_VERSION:
             raise RuntimeError(
-                "Fresh Cold dispatch preview does not establish the current global prior-success policy. "
+                "Fresh Cold dispatch preview does not establish the current per-channel prior-success policy. "
                 "Re-run Preview Dispatch."
             )
         if str(preview.get("prior_success_policy") or "") != FRESH_COLD_PRIOR_SUCCESS_POLICY:
@@ -3446,6 +3448,9 @@ def _planned_queue_row_summary(plan_rows_by_queue: Dict[str, object]) -> Dict[st
     sendgrid_count = 0
     total_rows = 0
     email_counts: Counter[str] = Counter()
+    # A lead may be planned once for Private JC and once for SendGrid. A
+    # duplicate is the same address twice within one channel family.
+    family_email_counts: Counter[tuple[str, str]] = Counter()
     for key, rows in (plan_rows_by_queue.items() if isinstance(plan_rows_by_queue, dict) else []):
         if not isinstance(rows, list):
             rows = []
@@ -3455,13 +3460,15 @@ def _planned_queue_row_summary(plan_rows_by_queue: Dict[str, object]) -> Dict[st
             private_count += row_count
         elif key.startswith("sendgrid_"):
             sendgrid_count += row_count
+        family = "private_jc" if key == "private_jc" else "sendgrid"
         for row in rows:
             if not isinstance(row, dict):
                 continue
             email = norm_email(row.get("Email", ""))
             if email:
                 email_counts[email] += 1
-    duplicate_email_count = sum(1 for count in email_counts.values() if count > 1)
+                family_email_counts[(family, email)] += 1
+    duplicate_email_count = sum(1 for count in family_email_counts.values() if count > 1)
     return {
         "private_jc_planned_count": private_count,
         "sendgrid_planned_count": sendgrid_count,
@@ -3692,6 +3699,9 @@ def _build_dispatch_plan(
             jc_path.with_name("recipients_private_jc_warm.csv"),
             *sendgrid_paths,
         ]
+    # The first two safety paths are always the Private JC cold and warm
+    # queues; every other safety path belongs to the SendGrid family.
+    jc_family_queue_paths = set(safety_queue_paths[:2])
     safety_queue_paths = list(dict.fromkeys(safety_queue_paths))
     log_paths = [jc_log, *sg_logs]
     ledger_conn = connect_lead_ledger(_lead_ledger_db_path(lead_ledger_db_path))
@@ -3700,7 +3710,8 @@ def _build_dispatch_plan(
         source_mode = _normalize_dispatch_source_mode(dispatch_source_mode)
         normalized_campaign_type = normalize_campaign_type(campaign_type)
         # Recontact treats successful delivery as informational history. Fresh
-        # Cold blocks it globally before routing. Queue and campaign
+        # Cold blocks it per channel (JC and SendGrid each track their own
+        # prior sends) before routing. Queue and campaign
         # idempotency remain fail-closed for both modes.
         allow_previously_sent = is_recontact_cold_campaign(normalized_campaign_type)
         source_started = time.monotonic()
@@ -3776,6 +3787,14 @@ def _build_dispatch_plan(
         sendgrid_sent = _sent_email_set(authoritative_sg_logs)
         bad_event_emails = load_bad_sendgrid_event_emails(sendgrid_events_path) | load_done_statuses_from_logs(authoritative_log_paths, {"INVALID"})
         global_queue_block_emails = _existing_queue_email_set(queue_rows_by_path)
+        jc_queue_block_emails = _existing_queue_email_set(
+            {path: rows for path, rows in queue_rows_by_path.items() if path in jc_family_queue_paths}
+        )
+        sendgrid_queue_block_emails = _existing_queue_email_set(
+            {path: rows for path, rows in queue_rows_by_path.items() if path not in jc_family_queue_paths}
+        )
+        # Fresh Cold applies queue and prior-success blocks per channel family.
+        per_channel_cold = normalized_campaign_type == CAMPAIGN_TYPE_COLD
         performance_timings["send_history_bad_event_loading"] = round(time.monotonic() - history_load_started, 6)
         source_email_by_lead_id: Dict[str, str] = {}
         source_emails: set[str] = set()
@@ -3828,6 +3847,7 @@ def _build_dispatch_plan(
         already_contacted_allowed = 0
         added_astra = 0
         added_sendgrid = 0
+        planned_lead_count = 0
         skipped_astra_already_sent = 0
         skipped_astra_already_queued = 0
         skipped_sendgrid_already_sent = 0
@@ -3847,7 +3867,9 @@ def _build_dispatch_plan(
         emit_progress("classification", source_row_count=len(source_rows))
         classification_started = time.monotonic()
         for row in source_rows:
-            if normalized_cap != DISPATCH_CAP_ALL and (added_astra + added_sendgrid) >= selected_limit:
+            # The cap counts leads, not queue rows: a lead queued for both
+            # channels still uses one unit of the cap.
+            if normalized_cap != DISPATCH_CAP_ALL and planned_lead_count >= selected_limit:
                 break
             selected_rows_scanned += 1
             email = norm_email(row.get("Email", ""))
@@ -3875,7 +3897,7 @@ def _build_dispatch_plan(
                 exclusion_reason_counts["bad_sendgrid_event"] += 1
                 continue
 
-            if email in global_queue_block_emails:
+            if not per_channel_cold and email in global_queue_block_emails:
                 skipped_astra_already_queued += 1
                 skipped_sendgrid_already_queued += 1
                 exclusion_reason_counts["already_queued"] += 1
@@ -3887,7 +3909,40 @@ def _build_dispatch_plan(
                 if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
                     already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 continue
-            if not allow_previously_sent and email in successful_send_emails:
+            # Per-channel Fresh Cold: a channel is closed for this lead when
+            # that channel already sent to it, already recorded a successful
+            # contact, or already has it queued. The other channel is unaffected.
+            jc_channel_open = True
+            sendgrid_channel_open = True
+            if per_channel_cold:
+                wants_jc = selected_fresh_cold_route in {"private_jc", "both"}
+                wants_sendgrid = selected_fresh_cold_route in {"sendgrid", "both"}
+                jc_history_closed = email in jc_sent or lead_id in astra_lane_contacted_lead_ids
+                sendgrid_history_closed = email in sendgrid_sent or lead_id in sendgrid_contacted_lead_ids
+                jc_queue_closed = email in jc_queue_block_emails
+                sendgrid_queue_closed = email in sendgrid_queue_block_emails
+                jc_channel_open = wants_jc and not jc_history_closed and not jc_queue_closed
+                sendgrid_channel_open = wants_sendgrid and not sendgrid_history_closed and not sendgrid_queue_closed
+                if wants_jc and jc_history_closed:
+                    skipped_astra_already_sent += 1
+                elif wants_jc and jc_queue_closed:
+                    skipped_astra_already_queued += 1
+                if wants_sendgrid and sendgrid_history_closed:
+                    skipped_sendgrid_already_sent += 1
+                elif wants_sendgrid and sendgrid_queue_closed:
+                    skipped_sendgrid_already_queued += 1
+                if not jc_channel_open and not sendgrid_channel_open:
+                    history_closed = (wants_jc and jc_history_closed) or (wants_sendgrid and sendgrid_history_closed)
+                    if history_closed:
+                        sent_log_closed = (wants_jc and email in jc_sent) or (wants_sendgrid and email in sendgrid_sent)
+                        already_contacted_skipped += 1
+                        exclusion_reason_counts["already_sent" if sent_log_closed else "already_contacted"] += 1
+                        if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
+                            already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
+                    else:
+                        exclusion_reason_counts["already_queued"] += 1
+                    continue
+            elif not allow_previously_sent and email in successful_send_emails:
                 skipped_astra_already_sent += 1
                 skipped_sendgrid_already_sent += 1
                 already_contacted_skipped += 1
@@ -3895,7 +3950,7 @@ def _build_dispatch_plan(
                 if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
                     already_contacted_evidence.append(_dispatch_history_evidence_for_lead(ledger_conn, lead_id, email))
                 continue
-            if not allow_previously_sent and lead_id in successful_contact_lead_ids:
+            if not per_channel_cold and not allow_previously_sent and lead_id in successful_contact_lead_ids:
                 already_contacted_skipped += 1
                 exclusion_reason_counts["already_contacted"] += 1
                 if len(already_contacted_evidence) < DISPATCH_PREVIEW_ROWS:
@@ -3934,6 +3989,7 @@ def _build_dispatch_plan(
                     other_family_sent_history_allowed += 1
                 added_astra_rows.append(normalized)
                 global_queue_block_emails.add(email)
+                jc_queue_block_emails.add(email)
                 added_astra += 1
                 plan_dispatch_events_by_queue["private_jc"].append(
                     {
@@ -3957,6 +4013,7 @@ def _build_dispatch_plan(
                 sg_assign_cursor += 1
                 added_sendgrid_rows_by_index[bucket_index].append(normalized)
                 global_queue_block_emails.add(email)
+                sendgrid_queue_block_emails.add(email)
                 added_sendgrid += 1
                 queue_key = sendgrid_queue_keys[bucket_index]
                 plan_dispatch_events_by_queue[queue_key].append(
@@ -3979,18 +4036,13 @@ def _build_dispatch_plan(
                 elif selected_route == "sendgrid":
                     added_to_sendgrid = add_to_sendgrid()
             elif normalized_campaign_type == CAMPAIGN_TYPE_COLD:
-                if selected_fresh_cold_route == "private_jc":
+                # Each requested channel that is still open for this lead
+                # receives it. With the "both" route a lead new to both
+                # channels is queued once for Private JC and once for SendGrid.
+                if jc_channel_open:
                     added_to_astra = add_to_astra()
-                elif selected_fresh_cold_route == "sendgrid":
+                if sendgrid_channel_open:
                     added_to_sendgrid = add_to_sendgrid()
-                elif prefer_sendgrid:
-                    added_to_sendgrid = add_to_sendgrid()
-                    if not added_to_sendgrid:
-                        added_to_astra = add_to_astra()
-                else:
-                    added_to_astra = add_to_astra()
-                    if not added_to_astra:
-                        added_to_sendgrid = add_to_sendgrid()
             elif prefer_sendgrid:
                 added_to_sendgrid = add_to_sendgrid()
                 if not added_to_sendgrid:
@@ -4000,6 +4052,8 @@ def _build_dispatch_plan(
                 if not added_to_astra:
                     added_to_sendgrid = add_to_sendgrid()
 
+            if added_to_astra or added_to_sendgrid:
+                planned_lead_count += 1
             if added_to_astra and added_to_sendgrid:
                 outcome_counts["added_astra_and_sendgrid"] += 1
             elif added_to_astra:
@@ -4062,11 +4116,16 @@ def _build_dispatch_plan(
         }
         planned_summary = _planned_queue_row_summary(plan_rows_by_queue)
         planned_authoritative_sent_overlap: set[str] = set()
-        for queue_rows in plan_rows_by_queue.values():
+        for queue_key, queue_rows in plan_rows_by_queue.items():
+            if per_channel_cold:
+                # Only a channel's own send history counts as an overlap.
+                family_sent = jc_sent if queue_key == "private_jc" else sendgrid_sent
+            else:
+                family_sent = jc_sent | sendgrid_sent
             planned_authoritative_sent_overlap |= {
                 norm_email(row.get("Email", ""))
                 for row in queue_rows
-                if isinstance(row, dict) and norm_email(row.get("Email", "")) in (jc_sent | sendgrid_sent)
+                if isinstance(row, dict) and norm_email(row.get("Email", "")) in family_sent
             }
         planned_authoritative_sent_overlap_count = len(planned_authoritative_sent_overlap)
         sendgrid_profile_planned_counts = {
@@ -4519,7 +4578,12 @@ def _confirm_plan_rows_by_queue(
     queue_headers: Sequence[str],
     sendgrid_sent_emails: set[str],
     allow_sendgrid_already_sent: bool = False,
+    private_sent_emails: set[str] | None = None,
 ) -> tuple[Dict[str, List[Dict[str, str]]], Dict[str, int]]:
+    # When ``private_sent_emails`` is given, the Private JC queue is checked
+    # against Private JC history only and SendGrid queues against
+    # ``sendgrid_sent_emails`` only (per-channel Fresh Cold). Otherwise every
+    # queue is checked against ``sendgrid_sent_emails``.
     filtered: Dict[str, List[Dict[str, str]]] = {}
     removed: Dict[str, int] = {}
     for key in plan_rows_by_queue:
@@ -4530,7 +4594,11 @@ def _confirm_plan_rows_by_queue(
                 continue
             normalized = {str(header): _strip_cell(row.get(str(header), "")) for header in queue_headers}
             email = norm_email(normalized.get("Email", ""))
-            if email and email in sendgrid_sent_emails and not allow_sendgrid_already_sent:
+            if private_sent_emails is not None and key == "private_jc":
+                family_sent_emails = private_sent_emails
+            else:
+                family_sent_emails = sendgrid_sent_emails
+            if email and email in family_sent_emails and not allow_sendgrid_already_sent:
                 removed_count += 1
                 continue
             rows.append(normalized)
@@ -4692,11 +4760,27 @@ def _confirm_dispatch_preview_impl(
     is_recontact_campaign = is_recontact_cold_campaign(campaign_type)
     allow_previously_sent = is_recontact_campaign
     recontact_recency = preview.get("recontact_recency") if isinstance(preview.get("recontact_recency"), dict) else {}
+    # Fresh Cold re-checks each queue against its own channel's history only.
+    per_channel_cold = campaign_type == CAMPAIGN_TYPE_COLD
+    sendgrid_log_path_keys = {str(Path(path).resolve(strict=False)) for path in sendgrid_log_paths}
+    sendgrid_family_sent_emails = _sent_email_set(
+        [path for path in authoritative_log_paths if str(path.resolve(strict=False)) in sendgrid_log_path_keys]
+    )
+    private_family_sent_emails = _sent_email_set(
+        [path for path in authoritative_log_paths if str(path.resolve(strict=False)) not in sendgrid_log_path_keys]
+    )
+
+    def _confirm_family_sent_emails(queue_key: str) -> set[str]:
+        if not per_channel_cold:
+            return authoritative_sent_emails
+        return private_family_sent_emails if queue_key == "private_jc" else sendgrid_family_sent_emails
+
     effective_plan_rows_by_queue, confirm_filtered_sendgrid_already_sent = _confirm_plan_rows_by_queue(
         plan_rows_by_queue=plan_rows_by_queue,
         queue_headers=queue_headers,
-        sendgrid_sent_emails=authoritative_sent_emails,
+        sendgrid_sent_emails=sendgrid_family_sent_emails if per_channel_cold else authoritative_sent_emails,
         allow_sendgrid_already_sent=allow_previously_sent,
+        private_sent_emails=private_family_sent_emails if per_channel_cold else None,
     )
     confirm_idempotency_removed = 0
     for key, rows in effective_plan_rows_by_queue.items():
@@ -4719,7 +4803,7 @@ def _confirm_dispatch_preview_impl(
                 email = norm_email(event.get("email", ""))
                 if email in idempotency_protected:
                     continue
-                if email and email in authoritative_sent_emails and not allow_previously_sent:
+                if email and email in _confirm_family_sent_emails(key) and not allow_previously_sent:
                     continue
                 events.append(dict(event))
             effective_dispatch_events_by_queue[key] = events
