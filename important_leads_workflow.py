@@ -4611,14 +4611,23 @@ def _confirm_plan_rows_by_queue(
 
 def assert_dispatch_destination_queues_empty(
     queue_paths: Sequence[Path],
+    planned_counts: Sequence[int] | None = None,
 ) -> Dict[Path, List[Dict[str, str]]]:
-    """Fail closed if a cold-dispatch destination queue still has recipients."""
+    """Fail closed if a cold-dispatch destination queue still has recipients.
+
+    When ``planned_counts`` is given (one count per queue path), a queue the
+    dispatch plans zero rows for is not a destination: its pending recipients
+    are left untouched and do not block the dispatch.
+    """
     existing_rows_by_path: Dict[Path, List[Dict[str, str]]] = {}
     nonempty: List[str] = []
+    counts = list(planned_counts) if planned_counts is not None else None
 
-    for path in queue_paths:
+    for index, path in enumerate(queue_paths):
         _headers, rows = _read_queue_rows(path)
         existing_rows_by_path[path] = rows
+        if counts is not None and index < len(counts) and int(counts[index] or 0) == 0:
+            continue
         if rows:
             nonempty.append(f"{path.name}={len(rows)}")
 
@@ -4864,7 +4873,17 @@ def _confirm_dispatch_preview_impl(
     active_states = _active_sender_states() if require_stopped else {}
     if active_states:
         raise RuntimeError(f"Stop all senders before dispatching leads. Active: {', '.join(sorted(active_states))}")
-    existing_rows_by_path = assert_dispatch_destination_queues_empty(queue_paths)
+    existing_rows_by_path = assert_dispatch_destination_queues_empty(
+        queue_paths,
+        [len(effective_plan_rows_by_queue.get(key) or []) for key in queue_keys],
+    )
+    # Queues this dispatch plans nothing for keep their pending recipients:
+    # they are not rewritten at all.
+    preserved_queue_paths = {
+        path
+        for key, path in zip(queue_keys, queue_paths)
+        if not (effective_plan_rows_by_queue.get(key) or []) and existing_rows_by_path.get(path)
+    }
     staged_queue_paths: List[Path] = []
     for key, path in zip(queue_keys, queue_paths):
         staged_path = _stage_csv_payload(path, queue_headers, effective_plan_rows_by_queue.get(key) or [])
@@ -4923,9 +4942,12 @@ def _confirm_dispatch_preview_impl(
         zip(queue_keys, queue_paths, staged_queue_paths),
         start=1,
     ):
-        final_rows_by_path[path] = list(effective_plan_rows_by_queue.get(key) or [])
-        durable_replace(staged_path, path, mode=settings.PRIVATE_FILE_MODE)
-        transaction_replaced_paths.append(str(path))
+        if path in preserved_queue_paths:
+            final_rows_by_path[path] = list(existing_rows_by_path.get(path) or [])
+        else:
+            final_rows_by_path[path] = list(effective_plan_rows_by_queue.get(key) or [])
+            durable_replace(staged_path, path, mode=settings.PRIVATE_FILE_MODE)
+            transaction_replaced_paths.append(str(path))
         update_dispatch_transaction(
             status="replacing",
             phase=f"queue_replacement_{position}",

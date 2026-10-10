@@ -9415,7 +9415,13 @@ def _dispatch_confirm_response(payload: ImportantLeadDispatchPayload | None = No
             )
 
         try:
-            assert_dispatch_destination_queues_empty(queue_paths)
+            _raw_plan_rows = preview.get("plan_rows_by_queue")
+            _planned_counts = (
+                [len(_raw_plan_rows.get(key) or []) for key in queue_keys]
+                if isinstance(_raw_plan_rows, dict)
+                else None
+            )
+            assert_dispatch_destination_queues_empty(queue_paths, _planned_counts)
         except RuntimeError as exc:
             return JSONResponse(
                 {

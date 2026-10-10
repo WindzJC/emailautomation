@@ -290,8 +290,10 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
             # Simulate unfinished work appearing after Preview but before
             # Confirm. The authoritative under-lock guard must refuse to
             # replace any destination queue.
+            # queues[1] is a queue this dispatch writes to; queues the plan
+            # leaves untouched are allowed to keep pending recipients.
             write_queue(
-                queues[3],
+                queues[1],
                 [("unfinished@example.com", "Unfinished")],
             )
 

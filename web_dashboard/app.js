@@ -3501,7 +3501,16 @@ function dispatchConfirmSafetyState(dispatchSource = {}, preview = null) {
   const activeCheck = isActiveImportantLeadCheckJob(currentImportantCheckJob());
   const sourceBlocked = Boolean(dispatchSource.dispatch_block_reason);
   const sourceBlockReason = dispatchPreviewBlockReason(dispatchSource);
-  const liveQueuesNotEmpty = liveRecipientQueueTotal() > 0;
+  // Only queues this preview actually writes to must be empty. A JC-only
+  // dispatch leaves pending SendGrid recipients untouched, and vice versa.
+  const plannedJcRows = Number(preview?.rows_to_add_private_jc ?? preview?.private_jc_planned_count ?? 0);
+  const plannedSendgridRows = Number(preview?.rows_to_add_sendgrid ?? 0);
+  const liveQueuesNotEmpty = preview
+    ? (
+      (plannedJcRows > 0 && Number(lastLeadsStatus?.jc_queue?.count || 0) > 0)
+      || (plannedSendgridRows > 0 && liveSendGridQueueTotal() > 0)
+    )
+    : liveRecipientQueueTotal() > 0;
   const priorSuccessIsInformational = String(preview?.prior_success_policy || "") === "allow_informational"
     || String(preview?.campaign_type || selectedImportantDispatchCampaignType()) === "recontact_cold";
   const sentHistoryPolicyViolation = summary.sentLogOverlap > 0 && !priorSuccessIsInformational;
