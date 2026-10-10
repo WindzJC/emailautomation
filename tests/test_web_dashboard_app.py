@@ -191,7 +191,7 @@ class WebDashboardAppTests(unittest.TestCase):
 
     def test_fresh_cold_route_defaults_to_sendgrid_on_dashboard_load(self) -> None:
         source = APP_JS.read_text(encoding="utf-8")
-        self.assertIn('const DEFAULT_FRESH_COLD_ROUTE = "sendgrid"', source)
+        self.assertIn('const DEFAULT_FRESH_COLD_ROUTE = "both"', source)
         self.assertIn("selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE", source)
         self.assertNotIn("readSavedFreshColdRoute()", source)
         self.assertNotIn("localStorage.setItem(FRESH_COLD_ROUTE_STORAGE_KEY, route)", source)

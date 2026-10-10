@@ -2118,7 +2118,7 @@ function normalizeDispatchPlanPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
 }
 
-const DEFAULT_FRESH_COLD_ROUTE = "sendgrid";
+const DEFAULT_FRESH_COLD_ROUTE = "both";
 let selectedFreshColdRoute = DEFAULT_FRESH_COLD_ROUTE;
 let selectedRecontactRoute = "sendgrid";
 const invalidatedFreshColdPreviewIds = new Set();

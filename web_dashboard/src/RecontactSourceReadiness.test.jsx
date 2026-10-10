@@ -263,7 +263,7 @@ function currentFreshPreview(status, overrides = {}) {
     preview_id: "fresh-preview-current",
     status: "previewed",
     campaign_type: "cold",
-    fresh_cold_route: "sendgrid",
+    fresh_cold_route: "both",
     dispatch_source_mode: "triaged_keep",
     dispatch_source_path: status.dispatch_source_options.triaged_keep.dispatch_source_path,
     dispatch_source_exists: true,
@@ -860,12 +860,12 @@ describe("source-scoped Recontact readiness", () => {
     expect(rail).toHaveTextContent("Checked 2026-08-27 17:05:00 PDT");
     expect(rail).toHaveTextContent("Campaign Configured");
     expect(rail).toHaveTextContent("Campaign: Fresh Cold Keep");
-    expect(rail).toHaveTextContent("Route: SendGrid Cold");
+    expect(rail).toHaveTextContent("Route: Both");
     expect(rail).toHaveTextContent("Preview Action required");
     expect(rail).toHaveTextContent("Confirm Locked");
     const route = document.querySelector("[data-fresh-cold-route]");
     expect(route).not.toBeDisabled();
-    expect(route).toHaveValue("sendgrid");
+    expect(route).toHaveValue("both");
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
@@ -919,7 +919,7 @@ describe("source-scoped Recontact readiness", () => {
     expect(previewPosts(boot.fetchMock)).toHaveLength(1);
     const [, request] = previewPosts(boot.fetchMock)[0];
     const payload = JSON.parse(request.body);
-    expect(payload.fresh_cold_route).toBe("sendgrid");
+    expect(payload.fresh_cold_route).toBe("both");
     expect(payload.preview_recovery_binding).toEqual(recoveryBinding);
     expect(payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("1789080427555309480");
     expect(typeof payload.preview_recovery_binding.artifacts.input.mtime_ns).toBe("string");
@@ -1072,7 +1072,7 @@ describe("source-scoped Recontact readiness", () => {
     expect(dispatchMutationPosts(boot.fetchMock)).toHaveLength(0);
   });
 
-  it("does not treat a persisted Both preview as current after SendGrid-default page load", async () => {
+  it("does not treat a persisted SendGrid preview as current after Both-default page load", async () => {
     const status = leadsStatus({ checkState: "success" });
     status.latest_master_check = {
       generated_at_utc: "2026-08-28T00:05:00Z",
@@ -1082,14 +1082,14 @@ describe("source-scoped Recontact readiness", () => {
       rejected_rows: 5,
     };
     status.latest_lead_triage = { generated_at_utc: "2026-08-28T00:06:00Z", keep_count: 20 };
-    status.latest_auto_dispatch_preview = currentFreshPreview(status, { fresh_cold_route: "both" });
+    status.latest_auto_dispatch_preview = currentFreshPreview(status, { fresh_cold_route: "sendgrid" });
     status.latest_auto_dispatch_preview_current = true;
 
     const boot = await bootController(status);
     root = boot.root;
 
     const route = document.querySelector("[data-fresh-cold-route]");
-    expect(route).toHaveValue("sendgrid");
+    expect(route).toHaveValue("both");
     expect(confirmButton()).toBeDisabled();
     expect(document.getElementById("leads-workflow-task-list")).toHaveTextContent("Preview Re-preview required");
     expect(document.getElementById("leads-workflow-status-banner")).toHaveTextContent("Next Preview Dispatch");
@@ -1115,7 +1115,7 @@ describe("source-scoped Recontact readiness", () => {
 
     const route = document.querySelector("[data-fresh-cold-route]");
     expect(route).not.toBeDisabled();
-    expect(route).toHaveValue("sendgrid");
+    expect(route).toHaveValue("both");
     fireEvent.change(route, { target: { value: "private_jc" } });
 
     const rail = document.getElementById("leads-workflow-task-list");
