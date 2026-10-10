@@ -215,8 +215,8 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
             unsubscribed = root / "unsubscribed.csv"
 
             master_path.write_text(
-                "FullName,FirstName,Email\n"
-                "Alpha Person,Alpha,alpha@example.com\n",
+                "FullName,FirstName,Email,AuthorEmail,AuthorName,BookTitle\n"
+                "Alpha Person,Alpha,alpha@example.com,alpha@example.com,Alpha Person,Alpha Book\n",
                 encoding="utf-8",
             )
             rejected_path.write_text(
@@ -224,8 +224,8 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
                 encoding="utf-8",
             )
             triaged_keep_path.write_text(
-                "FullName,FirstName,Email,Status\n"
-                "Alpha Person,Alpha,alpha@example.com,KEEP\n",
+                "FullName,FirstName,Email,AuthorEmail,AuthorName,BookTitle,Status\n"
+                "Alpha Person,Alpha,alpha@example.com,alpha@example.com,Alpha Person,Alpha Book,KEEP\n",
                 encoding="utf-8",
             )
 
@@ -292,8 +292,16 @@ class DispatchConfirmQueueGuardTests(unittest.TestCase):
             # replace any destination queue.
             # queues[1] is a queue this dispatch writes to; queues the plan
             # leaves untouched are allowed to keep pending recipients.
+            planned_sizes = [
+                len(rows or [])
+                for rows in preview["plan_rows_by_queue"].values()
+            ]
+            self.assertGreater(sum(planned_sizes), 0, planned_sizes)
+            destination_index = next(
+                index for index, size in enumerate(planned_sizes) if size
+            )
             write_queue(
-                queues[1],
+                queues[destination_index],
                 [("unfinished@example.com", "Unfinished")],
             )
 
