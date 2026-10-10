@@ -163,3 +163,17 @@ html body #history-view .campaign-history-table tbody tr.history-row-bad td:firs
 html body .react-workspace > * + *{margin-top:14px!important}
 html body #overview-view .react-command-bar section.workspace-controls.toolbar{display:contents!important}
 html body #overview-view .sender-status-table td.sender-status-activity{display:table-cell!important}
+
+/* ---- Start All / Stop All progress panel ----
+   The panel used to be squeezed into the single-line button row, where it
+   overlapped the summary and crushed the "Live sender action" note. Give it
+   a full-width row of its own under the buttons. */
+html body #overview-view .react-command-bar{flex-wrap:wrap!important}
+html body #overview-view .react-command-bar:has(.start-ready-head){flex:1 1 100%!important}
+html body #overview-view .react-command-bar :has(> .start-ready-head):not(.hidden){order:10!important;flex:1 1 100%!important;width:100%!important;min-width:0!important;max-width:none!important;position:static!important;margin:0!important;padding:10px 14px!important;border:1px solid var(--ax-line)!important;border-radius:8px!important;background:var(--ax-surface)!important;box-shadow:none!important;box-sizing:border-box}
+html body #overview-view .react-command-bar .start-ready-head{display:flex!important;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 16px;font-size:13px!important}
+html body #overview-view .react-command-bar .start-ready-head span{color:var(--ax-muted)!important}
+html body #overview-view .react-command-bar .start-ready-list{display:grid!important;grid-template-columns:repeat(auto-fill,minmax(250px,1fr))!important;gap:6px!important;margin:8px 0 0!important;padding:0!important;list-style:none!important}
+html body #overview-view .react-command-bar .start-ready-item{display:flex!important;flex-wrap:wrap;align-items:baseline;gap:2px 8px!important;margin:0!important;padding:6px 10px!important;border:1px solid var(--ax-line-soft)!important;border-radius:6px!important;background:var(--ax-bg)!important;font-size:12px!important;min-width:0}
+html body #overview-view .react-command-bar .start-ready-item > span:last-child{flex:1 1 100%;color:var(--ax-muted)!important;overflow-wrap:anywhere}
+html body #overview-view .react-command-bar .manual-start-warning{min-width:220px}

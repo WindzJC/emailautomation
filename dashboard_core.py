@@ -281,7 +281,8 @@ class ProfileSnapshot:
     last_sent_timestamp_utc: str = ""
     sendgrid_hourly_cap_waiting: bool = False
     sendgrid_hourly_cap_remaining_seconds: int = 0
-
+    # Every SENT row in this sender's log, all time.
+    total_sent: int = 0
 
 @dataclass(frozen=True)
 class SendAttempt:
@@ -2320,6 +2321,7 @@ def _compute_profile_log_metrics(
     always_send_email: str,
 ) -> Dict[str, object]:
     sent_today = 0
+    total_sent = 0
     errors_today = 0
     skipped_today = 0
     run_sent = 0
@@ -2349,6 +2351,8 @@ def _compute_profile_log_metrics(
         email = display_email.lower()
         info = (row.get("Info") or "").strip()
         parsed_rows.append((ts, status, email, display_email, info))
+        if status == "SENT":
+            total_sent += 1
 
         if ts and start <= ts < end:
             if status == "SENT":
@@ -2396,6 +2400,7 @@ def _compute_profile_log_metrics(
 
     return {
         "sent_today": sent_today,
+        "total_sent": total_sent,
         "errors_today": errors_today,
         "skipped_today": skipped_today,
         "run_sent": run_sent,
@@ -2592,6 +2597,7 @@ def load_profile_snapshot(
         run_errors=run_errors,
         run_skipped=run_skipped,
         sent_today=sent_today,
+        total_sent=int(log_metrics.get("total_sent", 0) or 0),
         errors_today=errors_today,
         skipped_today=skipped_today,
         last_status=last_status,
@@ -3904,6 +3910,21 @@ def _active_campaign_preview_payload() -> Dict[str, object]:
             payload = _read_dashboard_json(path)
             if payload:
                 return payload
+    # Previews created from an uploaded check live inside that check's run
+    # folder; without this lookup a partly-sent Private JC queue can never be
+    # matched to its confirmed plan and is reported as "Sync Required".
+    try:
+        run_matches = sorted(
+            (ROOT / "_important" / "runs").glob(f"*/dispatch_previews/{preview_id}.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        run_matches = []
+    for path in run_matches:
+        payload = _read_dashboard_json(path)
+        if payload:
+            return payload
     return {}
 
 
@@ -5217,6 +5238,11 @@ def build_dashboard_snapshot(
             # fallback and does not mutate the canonical `run_sent` field.
             if webhook_stale and accepted_recent > display_val:
                 display_val = accepted_recent
+            # The Sent column shows what the sender log actually contains:
+            # every SENT row, all time. The anchored run counter stays
+            # available as `run_sent` for run caps.
+            if str(profile.get("name") or "") != "private_jc_warm":
+                display_val = int(profile.get("total_sent", 0) or 0)
             profile["run_sent_display"] = display_val
         except Exception:
             # best-effort fallback to canonical run_sent
