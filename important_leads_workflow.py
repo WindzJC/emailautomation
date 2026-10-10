@@ -5208,6 +5208,16 @@ def _confirm_dispatch_preview_impl(
         save_state(**{MASTER_DISPATCH_STATE_KEY: report})
 
     _snapshot_file(preview_path, _snapshots)
+    # Queues this dispatch left untouched still hold recipients from an earlier
+    # dispatch. Record them so queue-safety checks treat them as expected
+    # rather than as unknown extras that block the sender.
+    carried_over_rows_by_queue = {
+        key: [dict(row) for row in (existing_rows_by_path.get(path) or [])]
+        for key, path in zip(queue_keys, queue_paths)
+        if path in preserved_queue_paths
+    }
+    if carried_over_rows_by_queue:
+        preview["carried_over_rows_by_queue"] = carried_over_rows_by_queue
     preview["status"] = "confirmed"
     preview["confirmed_at_utc"] = report["completed_at_utc"]
     preview["confirmed_run_id"] = run_id

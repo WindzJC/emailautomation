@@ -3946,6 +3946,18 @@ def _planned_preview_email_set(preview: Dict[str, object], provider: str) -> set
         fallback = preview.get(fallback_key) if fallback_key else None
         if isinstance(fallback, list):
             rows.extend(row for row in fallback if isinstance(row, dict))
+    # Recipients left pending in queues the confirmed dispatch did not write
+    # to are expected too (recorded at confirm time).
+    carried_over = preview.get("carried_over_rows_by_queue")
+    if isinstance(carried_over, dict):
+        for key, value in carried_over.items():
+            queue_name = str(key or "")
+            if normalized == "sendgrid" and not queue_name.startswith("sendgrid_"):
+                continue
+            if normalized == "private_jc" and queue_name != "private_jc":
+                continue
+            if isinstance(value, list):
+                rows.extend(row for row in value if isinstance(row, dict))
     if not rows and preview:
         return set()
     if not preview:
